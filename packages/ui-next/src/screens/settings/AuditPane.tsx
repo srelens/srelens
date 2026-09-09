@@ -251,10 +251,10 @@ export function AuditPane() {
         <Button
           variant="secondary"
           size="sm"
-          disabled={loading || issuesLoading}
+          disabled={(loading || issuesLoading) && error === null && issuesError === null}
           onClick={() => setNonce((n) => n + 1)}
         >
-          {loading || issuesLoading ? "Reading…" : "Refresh"}
+          {(loading || issuesLoading) && error === null && issuesError === null ? "Reading…" : "Refresh"}
         </Button>
       </div>
       {issuesError !== null && <FailureAlert tone="sev" title="Prompt file diagnostics could not be read" error={issuesError} />}

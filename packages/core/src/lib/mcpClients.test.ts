@@ -54,9 +54,19 @@ describe("mcpClientConfig", () => {
 
   it("uses PowerShell quoting for shell-active Windows executable paths", () => {
     const command = String.raw`C:\Apps\$(whoami)\O'Brien\srelens.exe`;
-    const snippet = mcpClientConfig("claude-code", "stdio", { command, platform: "windows" }).snippet;
+    const config = mcpClientConfig("claude-code", "stdio", { command, platform: "windows" });
+    const snippet = config.snippet;
+    expect(snippet).toMatch(/^& \{ claude mcp add/);
     expect(snippet).toContain(String.raw`-- 'C:\Apps\$(whoami)\O''Brien\srelens.exe' --mcp-stdio`);
     expect(snippet).not.toContain(String.raw`-- "C:\Apps`);
+    expect(config.hint).toMatch(/PowerShell/i);
+  });
+
+  it("labels ordinary Windows paths as PowerShell-only instead of emitting cmd syntax", () => {
+    const command = String.raw`C:\Program Files\srelens\srelens.exe`;
+    const config = mcpClientConfig("claude-code", "stdio", { command, platform: "windows" });
+    expect(config.snippet).toBe(String.raw`& { claude mcp add srelens -- 'C:\Program Files\srelens\srelens.exe' --mcp-stdio }`);
+    expect(config.hint).toMatch(/PowerShell/i);
   });
 
   it("emits a url entry with a bearer header for JSON tools over http", () => {

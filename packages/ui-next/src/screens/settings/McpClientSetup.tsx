@@ -43,7 +43,13 @@ export function McpClientSetup({ url, token, statusLoading = false, tokenLoading
   async function install() {
     setBusy(true); setInstallError(null); setInstalledAt("");
     try { setInstalledAt(await installSrelensCli()); setNonce(n => n + 1); }
-    catch (error) { setInstallError(error); }
+    catch (error) {
+      // Installation can remove an existing target before replacement. Do
+      // not keep presenting the pre-install status after a mutating failure.
+      setCli(null);
+      setInstallError(error);
+      setNonce(n => n + 1);
+    }
     finally { setBusy(false); }
   }
   const command = cli?.installed && cli.path ? cli.path : undefined;

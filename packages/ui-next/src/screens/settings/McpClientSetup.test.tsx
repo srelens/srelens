@@ -60,6 +60,18 @@ it("reports installation failure and allows retry", async () => {
   await user.click(screen.getByRole("button", { name: "Install srelens CLI" }));
   expect(core.installSrelensCli).toHaveBeenCalledTimes(2);
 });
+it("rechecks CLI status after a failed reinstall invalidates the old target", async () => {
+  core.srelensCliStatus
+    .mockResolvedValueOnce({ installed: true, path: "/home/user/.local/bin/srelens", links_to: null, on_path: true })
+    .mockResolvedValueOnce({ installed: false, path: "/home/user/.local/bin/srelens", links_to: null, on_path: false });
+  core.installSrelensCli.mockRejectedValueOnce(new Error("link failed"));
+  const user = userEvent.setup(); render(<McpClientSetup url={URL} token={TOKEN} />);
+  await user.click(await screen.findByRole("button", { name: "Reinstall srelens CLI" }));
+  expect(await screen.findByRole("button", { name: "Install srelens CLI" })).toBeTruthy();
+  expect(core.srelensCliStatus).toHaveBeenCalledTimes(2);
+  expect((screen.getByRole("button", { name: "Copy configuration" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByRole("alert").textContent).toMatch(/link failed/i);
+});
 it("does not offer installation after CLI status could not be read", async () => {
   core.srelensCliStatus.mockRejectedValue(new Error("status unavailable"));
   render(<McpClientSetup url={URL} token={TOKEN} />);

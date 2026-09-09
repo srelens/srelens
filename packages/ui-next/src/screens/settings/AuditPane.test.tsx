@@ -207,4 +207,17 @@ describe("AuditPane", () => {
     expect(screen.queryByText("/prompts/broken.md")).toBeNull();
   });
 
+  it("keeps refresh available when one diagnostics read fails and its sibling is stuck", async () => {
+    core.readPromptIssues.mockRejectedValue(new Error("prompt unavailable"));
+    core.auditTail.mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup(); render(<AuditPane />);
+
+    expect((await screen.findByRole("alert")).textContent).toMatch(/prompt unavailable/i);
+    const refresh = screen.getByRole("button", { name: "Refresh" });
+    expect((refresh as HTMLButtonElement).disabled).toBe(false);
+    await user.click(refresh);
+    expect(core.readPromptIssues).toHaveBeenCalledTimes(2);
+    expect(core.auditTail).toHaveBeenCalledTimes(2);
+  });
+
 });

@@ -72,11 +72,16 @@ export function mcpClientConfig(
   const hint = MCP_TOOLS.find((t) => t.id === tool)?.hint ?? "";
 
   if (tool === "claude-code") {
-    const snippet =
+    const invocation =
       transport === "stdio"
         ? `claude mcp add srelens -- ${shellCommand} --mcp-stdio`
         : `claude mcp add --transport http srelens ${url} --header "Authorization: ${authValue}"`;
-    return { format: "shell", snippet, hint };
+    const windowsStdio = transport === "stdio" && opts.platform === "windows";
+    return {
+      format: "shell",
+      snippet: windowsStdio ? `& { ${invocation} }` : invocation,
+      hint: windowsStdio ? "Run the PowerShell command in PowerShell." : hint,
+    };
   }
 
   if (tool === "codex") {
