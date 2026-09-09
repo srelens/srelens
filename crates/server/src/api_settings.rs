@@ -1,9 +1,6 @@
-//! Per-user settings API: `GET`/`PUT`/`DELETE /api/settings/:key`. Backs
-//! saved port-forwards (and future per-user preferences) on the web; the
-//! desktop app persists the equivalent state in its durable settings file
-//! (`crates/registry/src/settings.rs`) instead. Web preferences OTHER than
-//! these rows stay in the browser's `localStorage`, so they are scoped to a
-//! browser profile rather than to an account.
+//! Per-user settings API: GET /api/settings loads the account's preferences;
+//! GET/PUT/DELETE /api/settings/:key read and update individual values.
+//! Desktop uses its durable settings file; web uses these SQLite rows.
 //!
 //! Values are opaque JSON, stored and returned verbatim in `value_json` —
 //! this route never inspects the shape, it just round-trips whatever the
@@ -27,6 +24,25 @@ fn validate_key(key: &str) -> Result<(), &'static str> {
         return Err("key must not be empty");
     }
     Ok(())
+}
+
+/// Load the signed-in account's settings before the frontend initializes its mirror.
+pub async fn list(
+    State(state): State<AppState>,
+    Extension(user): Extension<UserCtx>,
+) -> Response {
+    let rows = match state.db.list_settings(user.user_id).await {
+        Ok(rows) => rows,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let mut values = serde_json::Map::new();
+    for (key, raw) in rows {
+        match serde_json::from_str::<Value>(&raw) {
+            Ok(value) => { values.insert(key, value); }
+            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "stored setting is not valid JSON"),
+        }
+    }
+    Json(json!({ "values": values })).into_response()
 }
 
 /// GET /api/settings/:key → `{"value": <json | null>}`. The stored
@@ -183,6 +199,7 @@ mod tests {
     async fn settings_routes_require_auth() {
         let state = state().await;
         for (method, uri) in [
+            ("GET", "/api/settings"),
             ("GET", "/api/settings/theme"),
             ("PUT", "/api/settings/theme"),
             ("DELETE", "/api/settings/theme"),
@@ -190,6 +207,19 @@ mod tests {
             let (status, _) = send(&state, method, uri, None, None).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn lists_only_the_signed_in_users_settings() {
+        let state = state().await;
+        let cookie = login(&state).await;
+        let other = state.db.upsert_user("i", "other", "", "", 1).await.unwrap();
+        state.db.set_setting(other.id, "private", "42").await.unwrap();
+        send(&state, "PUT", "/api/settings/srelens.design", Some(&cookie), Some(json!("next"))).await;
+        send(&state, "PUT", "/api/settings/srelens.uiScale", Some(&cookie), Some(json!(120))).await;
+        let (status, body) = send(&state, "GET", "/api/settings", Some(&cookie), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!({"values": {"srelens.design": "next", "srelens.uiScale": 120}}));
     }
 
     #[tokio::test]
