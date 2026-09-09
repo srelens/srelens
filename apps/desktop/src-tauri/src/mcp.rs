@@ -508,12 +508,12 @@ fn cli_source_executable() -> Result<std::path::PathBuf, String> {
 pub fn srelens_cli_status() -> Result<CliStatus, String> {
     #[cfg(windows)]
     {
-        let path = std::env::current_exe().ok();
+        let path = std::env::current_exe().map_err(|e| e.to_string())?;
         return Ok(CliStatus {
-            installed: path.as_ref().is_some_and(|p| usable_cli_path(p, p)),
-            path: path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+            installed: usable_cli_path(&path, &path),
+            path: path.to_string_lossy().to_string(),
             links_to: None,
-            on_path: path.as_ref().and_then(|p| p.parent()).is_some_and(dir_on_path),
+            on_path: path.parent().is_some_and(dir_on_path),
         });
     }
     #[cfg(not(windows))]
