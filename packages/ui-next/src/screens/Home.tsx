@@ -47,9 +47,9 @@ export function Home() {
       <div className="home-page min-h-0 flex-1">
         <div className="home-intro">
           <div>
-            <span className="home-eyebrow">Explore · Observe · Troubleshoot</span>
-            <h2>Your Kubernetes workspace</h2>
-            <p>Open a cluster to see its health, explore resources, and investigate what needs attention.</p>
+            <span className="home-eyebrow">Workspace</span>
+            <h2>Clusters</h2>
+            <p>Choose a cluster to open its overview.</p>
           </div>
           <Button variant="primary" onClick={() => openTab("/connect")}>
             <NavIcon icon={Icons.add} /> Connect a cluster
@@ -74,11 +74,10 @@ export function Home() {
             )}
           </section>
           <aside className="home-start" aria-label="Workspace tools">
-            <h2 className="home-section-heading">Make yourself at home</h2>
-            <HomeAction title="Manage connections" description="Review contexts, connection status, and kubeconfig sources." icon={Icons.cluster} route="/connections" />
-            <HomeAction title="Settings" description="Personalise your workspace, context names, and appearance." icon={Icons.settings} route="/settings" />
-            <HomeAction title="Release notes" description="See what’s new in srelens." icon={Icons.events} route="/notes" />
-            <p className="px-5 py-5 text-xs leading-relaxed text-muted">Each cluster opens on its overview. Home is always here when you need a place to start.</p>
+            <h2 className="home-section-heading">Quick links</h2>
+            <HomeAction title="Manage connections" icon={Icons.cluster} route="/connections" />
+            <HomeAction title="Settings" icon={Icons.settings} route="/settings" />
+            <HomeAction title="Release notes" icon={Icons.events} route="/notes" />
           </aside>
         </div>
       </div>
@@ -108,10 +107,10 @@ function ClusterRow({ context, link }: { context: ClusterContext; link?: ReturnT
   </li>;
 }
 
-function HomeAction({ title, description, icon, route }: { title: string; description: string; icon: typeof Icons.settings; route: string }) {
+function HomeAction({ title, icon, route }: { title: string; icon: typeof Icons.settings; route: string }) {
   return <button type="button" className="home-action" aria-label={title} onClick={() => openTab(route)}>
     <NavIcon icon={icon} />
-    <span className="min-w-0 text-left"><span className="block font-medium">{title}</span><span className="mt-1 block text-xs leading-relaxed text-muted">{description}</span></span>
+    <span className="min-w-0 truncate text-left font-medium">{title}</span>
     <span aria-hidden className="text-muted">→</span>
   </button>;
 }

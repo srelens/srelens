@@ -29,7 +29,7 @@ describe("Home", () => {
     setContexts([]);
     render(<Home />);
     expect(screen.getByRole("heading", { name: "Home", level: 1 })).toBeTruthy();
-    expect(screen.getByText("Your Kubernetes workspace")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Clusters", level: 2 })).toBeTruthy();
     expect(screen.getByText("No clusters configured")).toBeTruthy();
     expect(screen.queryByText(/not in the new design/)).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Connect a cluster" }));
