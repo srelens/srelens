@@ -48,7 +48,10 @@ function mcpServersJson(entry: Record<string, unknown>): string {
 }
 
 function quoteShellCommand(command: string, platform: "unix" | "windows"): string {
-  if (/^[A-Za-z0-9_./:\\-]+$/.test(command)) return command;
+  const safeUnquoted = platform === "windows"
+    ? /^[A-Za-z0-9_./:\\-]+$/
+    : /^[A-Za-z0-9_./:-]+$/;
+  if (safeUnquoted.test(command)) return command;
   return platform === "windows"
     ? `'${command.replace(/'/g, "''")}'`
     : `'${command.split("'").join("'\\''")}'`;

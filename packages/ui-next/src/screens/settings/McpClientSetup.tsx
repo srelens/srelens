@@ -84,6 +84,12 @@ export function McpClientSetup({ url, token, statusLoading = false, tokenLoading
         <Field label="Transport"><Select value={transport} onValueChange={value => setTransport(value as McpTransport)} options={[{ value: "stdio", label: "stdio" }, { value: "http", label: "HTTP" }]} /></Field>
       </div>
       <p className="mt-2 text-[0.75rem] text-muted">{preview.hint}</p>
+      {transport !== "http" && (statusError !== undefined || tokenError !== undefined) && <div className="mt-2 space-y-2">
+        {statusError !== undefined && <><FailureAlert tone="sev" title="The MCP server status could not be read" error={statusError} />
+          {onRetryStatus && <Button variant="ghost" onClick={onRetryStatus}>Retry server status</Button>}</>}
+        {tokenError !== undefined && <><FailureAlert tone="sev" title="The MCP bearer token could not be read" error={tokenError} />
+          {onRetryToken && <Button variant="ghost" onClick={onRetryToken}>Retry bearer token</Button>}</>}
+      </div>}
       {transport === "http" && (statusError !== undefined || tokenError !== undefined) ? <div className="mt-2 space-y-2">
           {statusError !== undefined && <><FailureAlert tone="sev" title="The MCP server status could not be read" error={statusError} />
             {onRetryStatus && <Button variant="ghost" onClick={onRetryStatus}>Retry server status</Button>}</>}

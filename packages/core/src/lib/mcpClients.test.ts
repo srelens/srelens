@@ -57,6 +57,12 @@ describe("mcpClientConfig", () => {
       .toContain("-- '/home/user!/srelens' --mcp-stdio");
   });
 
+  it("quotes literal backslashes in Unix executable paths", () => {
+    const command = String.raw`/home/alice\ops/.local/bin/srelens`;
+    expect(mcpClientConfig("claude-code", "stdio", { command, platform: "unix" }).snippet)
+      .toContain(String.raw`-- '/home/alice\ops/.local/bin/srelens' --mcp-stdio`);
+  });
+
   it("uses PowerShell quoting for shell-active Windows executable paths", () => {
     const command = String.raw`C:\Apps\$(whoami)\O'Brien\srelens.exe`;
     const config = mcpClientConfig("claude-code", "stdio", { command, platform: "windows" });

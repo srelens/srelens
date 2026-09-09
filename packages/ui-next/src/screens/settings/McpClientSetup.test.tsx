@@ -102,6 +102,19 @@ it("reports failed HTTP prerequisites and retries them instead of claiming the s
   await user.click(screen.getByRole("button", { name: "Retry bearer token" }));
   expect(retryStatus).toHaveBeenCalledOnce(); expect(retryToken).toHaveBeenCalledOnce();
 });
+it("exposes server read retries while stdio remains selected", async () => {
+  const retryStatus = vi.fn(); const retryToken = vi.fn();
+  const user = userEvent.setup();
+  render(<McpClientSetup url={null} token={null} statusError={new Error("status denied")} tokenError={new Error("token denied")}
+    onRetryStatus={retryStatus} onRetryToken={retryToken} />);
+
+  expect((screen.getByLabelText("Transport") as HTMLSelectElement).value).toBe("stdio");
+  expect(screen.getByText(/status denied/)).toBeTruthy();
+  expect(screen.getByText(/token denied/)).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "Retry server status" }));
+  await user.click(screen.getByRole("button", { name: "Retry bearer token" }));
+  expect(retryStatus).toHaveBeenCalledOnce(); expect(retryToken).toHaveBeenCalledOnce();
+});
 it("shows a failed prerequisite while the sibling read is still loading", async () => {
   const retryStatus = vi.fn(); const retryToken = vi.fn();
   const user = userEvent.setup();
