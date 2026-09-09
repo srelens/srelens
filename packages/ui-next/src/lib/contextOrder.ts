@@ -31,3 +31,11 @@ export function moveContextBy(contexts: readonly ContextIdentity[], name: string
   if (delta === -1) moveContext(ordered, name, target.name);
   else moveContext(ordered, target.name, name);
 }
+/** A confirmed deletion is different from an offline context: forget its saved slot. */
+export function removeContextFromOrder(stableId: string): void {
+  const previous = loadContextOrder();
+  const next = previous.filter(id => id !== stableId);
+  if (next.length === previous.length) return;
+  saveContextOrder(next);
+  listeners.forEach(listener => listener());
+}

@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, expect, it } from "vitest";
 import { loadContextOrder, saveContextOrder } from "@srelens/core";
-import { moveContext, useOrderedContexts } from "./contextOrder";
+import { moveContext, removeContextFromOrder, useOrderedContexts } from "./contextOrder";
 beforeEach(() => localStorage.clear());
 it("uses classic's saved order and persists a move while keeping unlisted contexts", () => {
   saveContextOrder(["staging", "prod", "offline"]);
@@ -27,4 +27,9 @@ it("persists a legacy name-keyed order as stable IDs when contexts become known"
   renderHook(() => useOrderedContexts(contexts));
 
   expect(loadContextOrder()).toEqual(["staging-id", "prod-id"]);
+});
+it("forgets a confirmed deletion while retaining offline contexts", () => {
+  saveContextOrder(["staging-id", "prod-id", "offline-id"]);
+  removeContextFromOrder("prod-id");
+  expect(loadContextOrder()).toEqual(["staging-id", "offline-id"]);
 });

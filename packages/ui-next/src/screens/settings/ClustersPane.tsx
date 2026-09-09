@@ -3,7 +3,7 @@ import { GripVertical } from "lucide-react";
 import { deleteContext, describeError, isTauri, listContexts, type ClusterContext } from "@srelens/core";
 import { Button, ConfirmDialog, CustomizeMark, Field, Mark, TextInput } from "@srelens/ui-kit";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
-import { moveContext, moveContextBy, useOrderedContexts } from "../../lib/contextOrder";
+import { moveContext, moveContextBy, removeContextFromOrder, useOrderedContexts } from "../../lib/contextOrder";
 import { getMark, resetMark, setMark, useEditableMark, useMark } from "../../lib/marks";
 import { PALETTE, SYMBOLS, symbolFor } from "../../lib/markSymbols";
 import { openTab } from "../../lib/tabsStore";
@@ -85,7 +85,15 @@ export function ClustersPane() {
   async function reload() {
     setBusy(true);
     try {
-      const outcome = await listContexts(getKubeconfigFiles());
+      const before = getContexts();
+      const files = getKubeconfigFiles();
+      const outcome = await listContexts(files);
+      const currentFiles = getKubeconfigFiles();
+      if (
+        getContexts() !== before ||
+        currentFiles.length !== files.length ||
+        currentFiles.some((file, index) => file !== files[index])
+      ) return;
       setContexts(outcome.contexts ?? getContexts(), outcome.error ?? "");
     } finally { setBusy(false); }
   }
@@ -96,7 +104,8 @@ export function ClustersPane() {
       const result = await deleteContext(pending.name);
       if (!result.success) throw new Error("The context was not removed.");
       resetMark(pending.stableId);
-      const remaining = contexts.filter(c => c.stableId !== pending.stableId);
+      removeContextFromOrder(pending.stableId);
+      const remaining = getContexts().filter(c => c.stableId !== pending.stableId);
       setContexts(remaining);
       setPending(null);
       const outcome = await listContexts(getKubeconfigFiles());

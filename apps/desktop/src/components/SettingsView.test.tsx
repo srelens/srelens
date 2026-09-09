@@ -13,6 +13,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
+  document.documentElement.style.removeProperty("--mark-teal");
 });
 
 const fileMocks = vi.hoisted(() => ({
@@ -105,6 +106,31 @@ describe("SettingsView", () => {
     expect(onContextProfilesChange).toHaveBeenCalledWith({
       "prod-eu": { logo: "custom", logoUrl: "https://example.com/logo.png" },
     });
+  });
+
+  it("recognizes a shared palette token in classic color controls", async () => {
+    document.documentElement.style.setProperty("--mark-teal", "#55c9bd");
+    render(
+      <SettingsView
+        theme={{ name: "slate", mode: "dark" }}
+        onThemeNameChange={() => {}}
+        onThemeModeChange={() => {}}
+        defaultNamespace=""
+        onDefaultNamespaceChange={() => {}}
+        layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}}
+        contextProfiles={{ "prod-eu": { color: "var(--mark-teal)" } }}
+        onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]}
+        onKubeconfigFilesChange={() => {}}
+        contextOrder={[]}
+        onContextOrderChange={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Contexts/ }));
+    await userEvent.click(screen.getByRole("tab", { name: "Appearance" }));
+    expect(screen.getByRole("button", { name: "Set prod-eu color to var(--mark-teal)" }).className).toContain("is-active");
+    expect((screen.getByLabelText("Custom color for prod-eu") as HTMLInputElement).value).toBe("#55c9bd");
   });
 
   it("moves contexts in the persisted order", async () => {

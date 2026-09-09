@@ -59,7 +59,11 @@ it("keeps identity and shows the reason when removal fails", async () => {
   expect(loadContextProfiles()["prod-id"].displayName).toBe("Production Europe");
 });
 it("retains the remaining contexts when relisting after removal fails", async () => {
-  backend.deleteContext.mockResolvedValue({ success: true });
+  const added = { ...contexts[1], name: "new-context", stableId: "new-id" };
+  backend.deleteContext.mockImplementation(async () => {
+    setContexts([...contexts, added]);
+    return { success: true };
+  });
   backend.listContexts.mockResolvedValue({ error: "kubeconfig became unreadable" });
   setState(defaultState(contexts));
   setContexts(contexts, "previous listing failed");
@@ -69,8 +73,10 @@ it("retains the remaining contexts when relisting after removal fails", async ()
   await user.click(within(screen.getByRole("dialog")).getByRole("button", {name: "Remove context"}));
 
   expect(await screen.findByRole("button", {name: "Edit staging"})).toBeTruthy();
+  expect(screen.getByRole("button", {name: "Edit new-context"})).toBeTruthy();
   expect(screen.queryByRole("button", {name: "Edit Production Europe"})).toBeNull();
   expect(activeCluster()).toBe("staging-id");
+  expect(loadContextOrder()).toEqual(["staging-id"]);
   expect(screen.getByRole("alert").textContent).toMatch(/kubeconfig became unreadable/);
   await user.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByRole("button", {name: "Edit staging"})).toBeTruthy();
@@ -86,7 +92,7 @@ it("filters by saved short name and distinguishes list failure from an empty lis
   const added = { ...contexts[1], name: "new-context", stableId: "new-id" };
   backend.listContexts.mockImplementation(async () => {
     setContexts([...contexts, added]);
-    return { error: "retry also failed" };
+    return { contexts };
   });
   render(<ClustersPane />);
   expect(screen.getByRole("alert").textContent).toMatch(/permission denied/);

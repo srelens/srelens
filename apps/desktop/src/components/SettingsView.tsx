@@ -133,7 +133,18 @@ const SETTINGS_SECTIONS: Array<{
   { id: "updates", label: "Updates", description: "App version and updates", icon: Download },
 ];
 
-const CONTEXT_COLORS = ["#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#16a34a", "#0891b2", "#475569"];
+const CONTEXT_COLORS = ["red", "orange", "amber", "green", "teal", "blue", "indigo", "purple", "pink", "slate", "ink"]
+  .map(name => `var(--mark-${name})`);
+
+function colorInputValue(color?: string): string {
+  if (/^#[0-9a-f]{6}$/i.test(color ?? "")) return color!;
+  const token = color?.match(/^var\((--mark-[a-z]+)\)$/)?.[1];
+  if (token && typeof getComputedStyle === "function") {
+    const resolved = getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+    if (/^#[0-9a-f]{6}$/i.test(resolved)) return resolved;
+  }
+  return "#3b82f6";
+}
 
 export function SettingsView({
   theme,
@@ -1023,7 +1034,7 @@ export function SettingsView({
                             <label>
                               <input
                                 type="color"
-                                value={selectedProfile.color ?? "#3b82f6"}
+                                value={colorInputValue(selectedProfile.color)}
                                 onChange={(event) => updateContext(selectedContext.name, { color: event.target.value })}
                                 aria-label={`Custom color for ${selectedContext.name}`}
                               />
