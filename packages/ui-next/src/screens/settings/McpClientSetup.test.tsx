@@ -90,6 +90,22 @@ it("reports failed HTTP prerequisites and retries them instead of claiming the s
   await user.click(screen.getByRole("button", { name: "Retry bearer token" }));
   expect(retryStatus).toHaveBeenCalledOnce(); expect(retryToken).toHaveBeenCalledOnce();
 });
+it("shows a failed prerequisite while the sibling read is still loading", async () => {
+  const retryStatus = vi.fn(); const retryToken = vi.fn();
+  const user = userEvent.setup();
+  const view = render(<McpClientSetup url={null} token={null} statusError={new Error("status denied")} tokenLoading
+    onRetryStatus={retryStatus} />);
+  await user.selectOptions(screen.getByLabelText("Transport"), "http");
+  expect(screen.getByText(/status denied/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Retry server status" })).toBeTruthy();
+  expect(screen.getByRole("status").textContent).toMatch(/Checking/);
+
+  view.rerender(<McpClientSetup url={null} token={null} tokenError={new Error("token denied")} statusLoading
+    onRetryToken={retryToken} />);
+  expect(screen.getByText(/token denied/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Retry bearer token" })).toBeTruthy();
+  expect(screen.getByRole("status").textContent).toMatch(/Checking/);
+});
 it("reveals the usable HTTP configuration when clipboard copying fails", async () => {
   vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("clipboard denied"));
   const user = userEvent.setup(); render(<McpClientSetup url={URL} token={TOKEN} />);

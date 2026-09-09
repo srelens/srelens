@@ -48,8 +48,9 @@ export function McpClientSetup({ url, token, statusLoading = false, tokenLoading
   }
   const command = cli?.installed && cli.path ? cli.path : undefined;
   const ready = transport === "stdio" ? (!loading && readError === null && !!command) : (!statusLoading && !tokenLoading && statusError === undefined && tokenError === undefined && !!url && !!token);
-  const config = mcpClientConfig(tool, transport, { url: url ?? undefined, token, command });
-  const preview = mcpClientConfig(tool, transport, { url: url ?? undefined, token: token && !revealed ? "<hidden token>" : token, command });
+  const platform = windows ? "windows" : "unix";
+  const config = mcpClientConfig(tool, transport, { url: url ?? undefined, token, command, platform });
+  const preview = mcpClientConfig(tool, transport, { url: url ?? undefined, token: token && !revealed ? "<hidden token>" : token, command, platform });
   async function copy() {
     if (!ready) return;
     try { await navigator.clipboard.writeText(config.snippet); setCopyState("copied"); }
@@ -77,13 +78,14 @@ export function McpClientSetup({ url, token, statusLoading = false, tokenLoading
         <Field label="Transport"><Select value={transport} onValueChange={value => setTransport(value as McpTransport)} options={[{ value: "stdio", label: "stdio" }, { value: "http", label: "HTTP" }]} /></Field>
       </div>
       <p className="mt-2 text-[0.75rem] text-muted">{preview.hint}</p>
-      {transport === "http" && (statusLoading || tokenLoading) ? <p role="status" className="mt-2 text-[0.75rem] text-muted">Checking the MCP server address and bearer token…</p> :
-        transport === "http" && (statusError !== undefined || tokenError !== undefined) ? <div className="mt-2 space-y-2">
+      {transport === "http" && (statusError !== undefined || tokenError !== undefined) ? <div className="mt-2 space-y-2">
           {statusError !== undefined && <><FailureAlert tone="sev" title="The MCP server status could not be read" error={statusError} />
             {onRetryStatus && <Button variant="ghost" onClick={onRetryStatus}>Retry server status</Button>}</>}
           {tokenError !== undefined && <><FailureAlert tone="sev" title="The MCP bearer token could not be read" error={tokenError} />
             {onRetryToken && <Button variant="ghost" onClick={onRetryToken}>Retry bearer token</Button>}</>}
-        </div> : transport === "http" && !ready ? <p className="mt-2 text-[0.75rem] text-muted">Start the MCP server to obtain its address and bearer token.</p> :
+          {(statusLoading || tokenLoading) && <p role="status" className="text-[0.75rem] text-muted">Checking the remaining MCP server details…</p>}
+        </div> : transport === "http" && (statusLoading || tokenLoading) ? <p role="status" className="mt-2 text-[0.75rem] text-muted">Checking the MCP server address and bearer token…</p> :
+        transport === "http" && !ready ? <p className="mt-2 text-[0.75rem] text-muted">Start the MCP server to obtain its address and bearer token.</p> :
         transport === "stdio" && !ready ? <p className="mt-2 text-[0.75rem] text-muted">{windows ? "The desktop executable path is required before a Windows stdio configuration can be generated." : "Install the srelens CLI before generating a stdio configuration."}</p> :
         <pre data-testid="mcp-client-config" className="scroll mt-2 whitespace-pre border-y border-rule py-2 text-[0.75rem]"><code>{preview.snippet}</code></pre>}
       <div className="mt-2 flex flex-wrap items-center gap-2">

@@ -52,6 +52,13 @@ describe("mcpClientConfig", () => {
     expect(snippet).toContain("\\`whoami\\`");
   });
 
+  it("uses PowerShell quoting for shell-active Windows executable paths", () => {
+    const command = String.raw`C:\Apps\$(whoami)\O'Brien\srelens.exe`;
+    const snippet = mcpClientConfig("claude-code", "stdio", { command, platform: "windows" }).snippet;
+    expect(snippet).toContain(String.raw`-- 'C:\Apps\$(whoami)\O''Brien\srelens.exe' --mcp-stdio`);
+    expect(snippet).not.toContain(String.raw`-- "C:\Apps`);
+  });
+
   it("emits a url entry with a bearer header for JSON tools over http", () => {
     const c = mcpClientConfig("cursor", "http", {
       url: "http://127.0.0.1:9000/mcp",

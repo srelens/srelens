@@ -47,6 +47,13 @@ function mcpServersJson(entry: Record<string, unknown>): string {
   return JSON.stringify({ mcpServers: { srelens: entry } }, null, 2);
 }
 
+function quoteShellCommand(command: string, platform: "unix" | "windows"): string {
+  if (/^[A-Za-z0-9_./:\\-]+$/.test(command)) return command;
+  return platform === "windows"
+    ? `'${command.replace(/'/g, "''")}'`
+    : `"${command.replace(/[\\"$`]/g, "\\$&")}"`;
+}
+
 /**
  * Config for connecting `tool` to srelens over `transport`. `opts.token` is
  * the current MCP bearer token (or `null`/absent if none has been generated
@@ -56,11 +63,11 @@ function mcpServersJson(entry: Record<string, unknown>): string {
 export function mcpClientConfig(
   tool: McpTool,
   transport: McpTransport,
-  opts: { url?: string; token?: string | null; command?: string },
+  opts: { url?: string; token?: string | null; command?: string; platform?: "unix" | "windows" },
 ): McpClientConfig {
   const url = opts.url || DEFAULT_URL;
   const command = opts.command || "srelens";
-  const shellCommand = /^[A-Za-z0-9_./:\\-]+$/.test(command) ? command : `"${command.replace(/[\\"$`]/g, "\\$&")}"`;
+  const shellCommand = quoteShellCommand(command, opts.platform ?? "unix");
   const authValue = transport === "http" ? (opts.token ? `Bearer ${opts.token}` : NO_TOKEN_PLACEHOLDER) : "";
   const hint = MCP_TOOLS.find((t) => t.id === tool)?.hint ?? "";
 
