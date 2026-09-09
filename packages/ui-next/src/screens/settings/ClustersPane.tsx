@@ -86,7 +86,7 @@ export function ClustersPane() {
     setBusy(true);
     try {
       const outcome = await listContexts(getKubeconfigFiles());
-      setContexts(outcome.contexts ?? [], outcome.error ?? "");
+      setContexts(outcome.contexts ?? contexts, outcome.error ?? "");
     } finally { setBusy(false); }
   }
   async function remove() {

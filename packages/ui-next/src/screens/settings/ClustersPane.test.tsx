@@ -67,6 +67,9 @@ it("retains the remaining contexts when relisting after removal fails", async ()
   expect(await screen.findByRole("button", {name: "Edit staging"})).toBeTruthy();
   expect(screen.queryByRole("button", {name: "Edit Production Europe"})).toBeNull();
   expect(screen.getByRole("alert").textContent).toMatch(/kubeconfig became unreadable/);
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByRole("button", {name: "Edit staging"})).toBeTruthy();
+  expect(screen.queryByRole("button", {name: "Edit Production Europe"})).toBeNull();
 });
 it("filters by saved short name and distinguishes list failure from an empty list", async () => {
   const user = userEvent.setup();
