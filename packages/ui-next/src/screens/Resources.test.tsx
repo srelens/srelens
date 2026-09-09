@@ -748,7 +748,7 @@ describe("Resources", () => {
     // The alert's dismiss action is the recovery: back to "all namespaces",
     // written through the same store a manual clear would use.
     await userEvent.click(screen.getByRole("button", { name: "Show all namespaces" }));
-    await waitFor(() => expect(getView().namespaces.prod).toBeUndefined());
+    await waitFor(() => expect(getView().namespaces.prod).toEqual([]));
   });
 
   it("does not warn about a selection that is merely empty of this kind right now", async () => {

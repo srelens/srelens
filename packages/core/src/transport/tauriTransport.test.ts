@@ -14,7 +14,7 @@ vi.mock("../lib/clusterLogin", async (importOriginal) => ({
 }));
 
 describe("tauriTransport.invokeCapability", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => { vi.clearAllMocks(); vi.restoreAllMocks(); });
 
   it("prompts cluster sign-in and rethrows a stable sentinel when the rejection carries the marker", async () => {
     vi.mocked(invoke).mockRejectedValue("NEEDS_CLUSTER_LOGIN:k:ctx");

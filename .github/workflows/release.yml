@@ -980,8 +980,8 @@ jobs:
   #   dev           -> the permanent `dev-channel` pre-release, giving dev builds
   #                    a stable manifest URL for this build's assets.
   updater-manifest:
-    needs: [version, build]
-    if: ${{ always() && needs.build.result == 'success' && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
+    needs: [version, build, release-notes]
+    if: ${{ always() && needs.build.result == 'success' && (github.ref_name == 'main' || needs.release-notes.result == 'success') && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -1004,6 +1004,12 @@ jobs:
           if ! ls sigs/*.sig >/dev/null 2>&1; then
             echo "No .sig files on $REL_TAG — updater signing key not configured yet; skipping manifest."
             exit 0
+          fi
+          # Dev notes are published by release-notes, not the version job.
+          # Read them only after that job completes so the manifest cannot race it.
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            NOTES="$(gh release view "$REL_TAG" --repo "$REPO" --json body --jq '.body')"
+            export NOTES
           fi
           node .github/scripts/compose-latest.cjs
           if [ "${{ github.ref_name }}" = "main" ]; then

@@ -180,19 +180,20 @@ impl ResourceKind {
     }
 
     pub fn is_namespaced(&self) -> bool {
-        !matches!(
-            self,
+        match self {
+            Self::CustomResource(crd) => crd.namespaced,
             Self::Nodes
-                | Self::Namespaces
-                | Self::PersistentVolumes
-                | Self::StorageClasses
-                | Self::ClusterRoles
-                | Self::ClusterRoleBindings
-                | Self::CustomResourceDefinitions
-                | Self::Overview
-                | Self::Toolbox
-                | Self::Assistant
-        )
+            | Self::Namespaces
+            | Self::PersistentVolumes
+            | Self::StorageClasses
+            | Self::ClusterRoles
+            | Self::ClusterRoleBindings
+            | Self::CustomResourceDefinitions
+            | Self::Overview
+            | Self::Toolbox
+            | Self::Assistant => false,
+            _ => true,
+        }
     }
 }
 

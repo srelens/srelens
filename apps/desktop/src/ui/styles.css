@@ -1,6 +1,17 @@
 /* Design-system stylesheet. Imported once via the `ui` barrel. */
 
 :root {
+  --mark-red: #f2776c;
+  --mark-orange: #f0955e;
+  --mark-amber: #dda446;
+  --mark-green: #55cd97;
+  --mark-teal: #55c9bd;
+  --mark-blue: #7aa9ea;
+  --mark-indigo: #8f80ff;
+  --mark-purple: #c08ae8;
+  --mark-pink: #ef7fa4;
+  --mark-slate: #a5a0b3;
+  --mark-ink: #e7e5ed;
   /* srelens dark palette. */
   --fl-color-bg: #1e2124;          /* main content background */
   --fl-color-surface: #262b2f;     /* content surfaces, drawer, panels */
@@ -47,6 +58,17 @@
 
 /* Light mode baseline — individual named themes can override these values. */
 [data-theme-mode="light"] {
+  --mark-red: #b4342a;
+  --mark-orange: #b0530f;
+  --mark-amber: #a2670f;
+  --mark-green: #1f7a52;
+  --mark-teal: #0f6f6a;
+  --mark-blue: #2a5fa8;
+  --mark-indigo: #4b3bd6;
+  --mark-purple: #6d2fb0;
+  --mark-pink: #ad2456;
+  --mark-slate: #5c586a;
+  --mark-ink: #141219;
   --fl-color-bg: #f3f5f7;
   --fl-color-surface: #ffffff;
   --fl-color-surface-alt: #e9ecef;

@@ -56,6 +56,49 @@ describe("desktop settings storage", () => {
     expect(localStorage.getItem("unrelated")).toBe("keep me");
   });
 
+  it("migrates new-design context marks before switching to the file store", async () => {
+    const marks = { prod: { color: "var(--mark-teal)", icon: "server" } };
+    localStorage.setItem("srelens.next.marks", JSON.stringify(marks));
+    invokeCapability
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        localStorageMigrated: false,
+        values: {},
+      })
+      .mockResolvedValueOnce({ saved: true });
+
+    const { initializeSettingsStorage, settingsStorage } = await import("./settingsStorage");
+    await initializeSettingsStorage();
+
+    expect(invokeCapability).toHaveBeenNthCalledWith(2, "settings.set", {
+      values: { "srelens.next.marks": marks },
+      localStorageMigrated: true,
+    });
+    expect(settingsStorage.getItem("srelens.next.marks")).toBe(JSON.stringify(marks));
+    expect(localStorage.getItem("srelens.next.marks")).toBeNull();
+  });
+
+  it("runs the saved-marks follow-up after the original migration already completed", async () => {
+    const marks = { prod: { color: "var(--mark-teal)", icon: "server" } };
+    localStorage.setItem("srelens.next.marks", JSON.stringify(marks));
+    invokeCapability
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        localStorageMigrated: true,
+        values: { "srelens.uiScale": 130 },
+      })
+      .mockResolvedValueOnce({ saved: true });
+
+    const { initializeSettingsStorage, settingsStorage } = await import("./settingsStorage");
+    await initializeSettingsStorage();
+
+    expect(invokeCapability).toHaveBeenNthCalledWith(2, "settings.set", {
+      values: { "srelens.next.marks": marks },
+    });
+    expect(settingsStorage.getItem("srelens.next.marks")).toBe(JSON.stringify(marks));
+    expect(localStorage.getItem("srelens.next.marks")).toBeNull();
+  });
+
   it("uses the file as source of truth after migration", async () => {
     localStorage.setItem("srelens.uiScale", "90");
     invokeCapability.mockResolvedValueOnce({

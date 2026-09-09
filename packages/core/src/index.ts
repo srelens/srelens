@@ -92,6 +92,7 @@ export * from "./lib/toolbox";
 export * from "./lib/uiScale";
 export * from "./lib/updateNotifier";
 export * from "./lib/updater";
+export * from "./lib/updateNotes";
 export * from "./lib/watch";
 export * from "./lib/webClusters";
 export * from "./lib/webKubeconfigs";
@@ -100,3 +101,5 @@ export * from "./lib/workloads";
 
 // Disambiguates the star exports above; see the note in the header.
 export type { ToolStatus } from "./lib/chat";
+
+export * from "./lib/contextAppearance";

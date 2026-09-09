@@ -17,7 +17,7 @@ import { contextLabelFor } from "../lib/agentSuggestions";
 import { setContexts, setKubeconfigFiles, useContexts, useContextsError } from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
-import { loadMarks } from "../lib/marks";
+import { getMark, loadMarks, useMark } from "../lib/marks";
 import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
@@ -134,6 +134,7 @@ export function Window({
   const desktop = useMemo(() => isTauri(), []);
   const { setOpen, setScope } = useConsole();
   const { tabs, activeId, workspace } = useTabs();
+  useMark("", "");
   const activeIdCluster = useActiveCluster();
   const activeCtx = contexts.find((c) => c.stableId === activeIdCluster) ?? null;
   // The console dock's own scope label — `Window`'s job because it is the one
@@ -537,7 +538,10 @@ export function Window({
       <div data-slot="screen-column" className="flex min-h-0 min-w-0 flex-1 flex-col">
         {active && (
           <TabStrip
-            tabs={tabs}
+            tabs={tabs.map(tab => {
+              const context = contexts.find(c => c.name === tab.sub);
+              return context ? { ...tab, sub: getMark(context.stableId, context.name).name } : tab;
+            })}
             activeId={activeId}
             onSelect={activateTab}
             onClose={closeTab}

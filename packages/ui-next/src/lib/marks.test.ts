@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { defaultMark, getMark, setMark, resetMark, loadMarks, useMark, MARKS_KEY } from "./marks";
+import { defaultMark, getMark, setMark, resetMark, loadMarks, rememberContextMarks, useMark, MARKS_KEY } from "./marks";
 
 function fakeStorage() {
   const m = new Map<string, string>();
@@ -10,13 +10,13 @@ describe("marks", () => {
   it("derives initials", () => {
     expect(defaultMark("prod-eu").short).toBe("PE");
     expect(defaultMark("staging").short).toBe("ST");
-    expect(defaultMark("a-b-c-d").short).toBe("AB");
+    expect(defaultMark("a-b-c-d").short).toBe("ABC");
   });
   it("persists a set mark and reads it back after a reload", () => {
     const s = fakeStorage();
     loadMarks(s);
     setMark("prod", { ...defaultMark("prod-eu"), color: "var(--ok)" }, s);
-    expect(JSON.parse(s.m.get(MARKS_KEY)!).prod.color).toBe("var(--ok)");
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!).prod.color).toBe("var(--ok)");
     loadMarks(fakeStorage()); // forget
     loadMarks(s);
     expect(getMark("prod", "prod-eu").color).toBe("var(--ok)");
@@ -88,7 +88,7 @@ describe("marks the shell reads", () => {
     for (const raw of ["[]", "null", "7", "{oops", '{"prod":3}']) {
       s.m.set(MARKS_KEY, raw);
       loadMarks(s);
-      expect(getMark("prod", "prod-eu").color).toBe("var(--mark-indigo)");
+      expect(getMark("prod", "prod-eu").color).toBe(defaultMark("prod-eu").color);
     }
   });
 
@@ -97,10 +97,147 @@ describe("marks the shell reads", () => {
     const s = fakeStorage();
     loadMarks(s);
     const { result } = renderHook(() => useMark("prod", "prod-eu"));
-    expect(result.current.color).toBe("var(--mark-indigo)");
+    expect(result.current.color).toBe(defaultMark("prod-eu").color);
     act(() => setMark("prod", { ...defaultMark("prod-eu"), color: "var(--ok)" }, s));
     expect(result.current.color).toBe("var(--ok)");
     act(() => resetMark("prod", s));
-    expect(result.current.color).toBe("var(--mark-indigo)");
+    expect(result.current.color).toBe(defaultMark("prod-eu").color);
   });
+});
+
+describe("classic context identity parity", () => {
+  it("uses the saved classic profile, including an image and short name", () => {
+    const s = fakeStorage();
+    s.m.set("srelens.contextProfiles", JSON.stringify({ prod: { displayName: "Production Europe", shortName: "PEU", color: "#123456", logo: "custom", logoUrl: "https://example.test/logo.png" } }));
+    s.m.set(MARKS_KEY, JSON.stringify({ id: defaultMark("Old name") }));
+    loadMarks(s);
+    expect(getMark("id", "prod")).toMatchObject({ name: "Production Europe", short: "PEU", color: "#123456", mark: "image", imageSrc: "https://example.test/logo.png" });
+  });
+  it("keeps the legacy logo choices instead of substituting a fallback glyph", () => {
+    const s = fakeStorage();
+    s.m.set("srelens.contextProfiles", JSON.stringify(Object.fromEntries(["cluster", "cloud", "shield", "database", "globe"].map(logo => [logo, { logo, shortName: "C" }]))));
+    loadMarks(s);
+    for (const logo of ["cluster", "cloud", "shield", "database", "globe"]) {
+      expect(getMark(logo, logo)).toMatchObject({ mark: "icon", icon: logo });
+    }
+  });
+  it("writes edits back to the shared classic profile and resets both designs", () => {
+    const s = fakeStorage(); loadMarks(s); getMark("id", "prod");
+    setMark("id", { ...defaultMark("prod"), name: "Production", short: "PRD", color: "#abcdef", mark: "icon", icon: "cloud" }, s);
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!).id).toMatchObject({ displayName: "Production", shortName: "PRD", color: "#abcdef", logo: "cloud" });
+    resetMark("id", s);
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!).id).toBeUndefined();
+    expect(getMark("id", "prod")).toEqual(defaultMark("prod"));
+  });
+  it("keeps palette tokens and does not pin derived labels during appearance-only edits", () => {
+    const s = fakeStorage();
+    loadMarks(s);
+    const original = getMark("id", "prod");
+    setMark("id", { ...original, color: "var(--mark-teal)" }, s);
+
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!).id).toMatchObject({ color: "var(--mark-teal)" });
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!).id).not.toHaveProperty("displayName");
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!).id).not.toHaveProperty("shortName");
+    loadMarks(s);
+    expect(getMark("id", "renamed-prod")).toMatchObject({
+      name: "renamed-prod",
+      short: defaultMark("renamed-prod").short,
+      color: "var(--mark-teal)",
+    });
+  });
+  it("merges a legacy new-design mark into an existing classic profile", () => {
+    const s = fakeStorage();
+    s.m.set("srelens.contextProfiles", JSON.stringify({ id: { displayName: "Production" } }));
+    s.m.set(MARKS_KEY, JSON.stringify({ id: { ...defaultMark("prod"), color: "var(--mark-teal)", mark: "icon", icon: "server", withText: true } }));
+    loadMarks(s);
+
+    rememberContextMarks([{ name: "prod", stableId: "id" } as import("@srelens/core").ClusterContext], s);
+
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!).id).toMatchObject({
+      displayName: "Production",
+      color: "var(--mark-teal)",
+      logo: "cluster",
+      markIcon: "server",
+      showShortName: true,
+    });
+    expect(JSON.parse(s.m.get(MARKS_KEY)!)).not.toHaveProperty("id");
+  });
+  it("does not pin labels generated before a duplicate context gained a prefix", () => {
+    const s = fakeStorage();
+    s.m.set(MARKS_KEY, JSON.stringify({ id: { ...defaultMark("prod"), color: "var(--mark-teal)" } }));
+    loadMarks(s);
+
+    rememberContextMarks([{ name: "file/prod", stableId: "id" } as import("@srelens/core").ClusterContext], s);
+
+    const profile = JSON.parse(s.m.get("srelens.contextProfiles")!).id;
+    expect(profile).not.toHaveProperty("displayName");
+    expect(profile).not.toHaveProperty("shortName");
+    loadMarks(s);
+    expect(getMark("id", "file/prod")).toMatchObject({
+      name: "file/prod",
+      short: defaultMark("file/prod").short,
+      color: "var(--mark-teal)",
+    });
+  });
+  it("does not reassign a persistently ambiguous legacy profile after a duplicate disappears", () => {
+    const s = fakeStorage();
+    s.m.set("srelens.contextProfiles", JSON.stringify({ prod: { displayName: "Original production" } }));
+    loadMarks(s);
+    rememberContextMarks([
+      { name: "file-a/prod", stableId: "id-a" },
+      { name: "file-b/prod", stableId: "id-b" },
+    ] as import("@srelens/core").ClusterContext[], s);
+
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!)).toHaveProperty("prod");
+    expect(JSON.parse(s.m.get("srelens.next.ambiguousContextProfiles")!)).toContain("prod");
+
+    // A later launch sees only the survivor. Disappearance is not evidence
+    // that the unresolved profile belonged to it.
+    loadMarks(s);
+    rememberContextMarks([
+      { name: "prod", stableId: "id-b" },
+    ] as import("@srelens/core").ClusterContext[], s);
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!)).toHaveProperty("prod");
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!)).not.toHaveProperty("id-b");
+    expect(getMark("id-b", "prod").name).toBe("prod");
+  });
+  it("uses the same generated initials as classic for long context names", () => {
+    expect(defaultMark("dev-lon-nrtc-6bcb8b63").short).toBe("DLN");
+  });
+  it("uses classic's context initials when its saved short name is blank", () => {
+    const s = fakeStorage();
+    s.m.set("srelens.contextProfiles", JSON.stringify({
+      prod: { displayName: "Production Europe", shortName: "", logo: "initials" },
+      long: { shortName: "", logo: "initials" },
+    }));
+    loadMarks(s);
+
+    expect(getMark("prod", "prod").short).toBe("PR");
+    expect(getMark("long", "a-b-c").short).toBe("ABC");
+  });
+});
+
+it("honours a profile reset in classic after importing it by stable ID", async () => {
+  const { rememberContextMarks } = await import("./marks");
+  const s = fakeStorage();
+  s.m.set("srelens.contextProfiles", JSON.stringify({ prod: { displayName: "Production", shortName: "P" } }));
+  loadMarks(s);
+  rememberContextMarks([{ name: "prod", stableId: "id" } as import("@srelens/core").ClusterContext], s);
+  s.m.set("srelens.contextProfiles", "{}");
+  loadMarks(s);
+  expect(getMark("id", "prod")).toEqual(defaultMark("prod"));
+});
+
+it("reads classic profiles stored by stable ID, including after a context rename", () => {
+  const s = fakeStorage();
+  s.m.set("srelens.contextProfiles", JSON.stringify({ "stable-id": { displayName: "Production", shortName: "PRD", logo: "cloud" } }));
+  loadMarks(s);
+  expect(getMark("stable-id", "config/prod")).toMatchObject({ name: "Production", short: "PRD", icon: "cloud" });
+});
+
+it.each(["", "   ", "  Production Europe  "])("matches classic display labels for %j", displayName => {
+  const s = fakeStorage();
+  s.m.set("srelens.contextProfiles", JSON.stringify({ id: { displayName } }));
+  loadMarks(s);
+  expect(getMark("id", "prod").name).toBe(displayName.trim() || "prod");
 });

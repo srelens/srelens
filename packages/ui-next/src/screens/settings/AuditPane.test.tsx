@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 
 const core = vi.hoisted(() => ({
   auditTail: vi.fn(),
+  readPromptIssues: vi.fn(),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
@@ -42,6 +43,7 @@ describe("AuditPane", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     core.auditTail.mockResolvedValue([DENIED, ALLOWED]);
+    core.readPromptIssues.mockResolvedValue([]);
   });
 
   it("says how much of the trail it is showing", async () => {
@@ -193,4 +195,29 @@ describe("AuditPane", () => {
     expect(headers).toContain("Transport");
     expect(headers).not.toContain("Client");
   });
+  it("shows prompt file diagnostics and refreshes them independently of the audit result", async () => {
+    core.readPromptIssues.mockResolvedValue([{ file: "/prompts/broken.md", problem: "Invalid frontmatter" }]);
+    core.auditTail.mockRejectedValue(new Error("audit unavailable"));
+    const user = userEvent.setup(); render(<AuditPane />);
+    expect(await screen.findByText("/prompts/broken.md")).toBeTruthy();
+    expect(screen.getByText(/Invalid frontmatter/)).toBeTruthy();
+    core.readPromptIssues.mockResolvedValue([]);
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await screen.findByRole("button", { name: "Refresh" });
+    expect(screen.queryByText("/prompts/broken.md")).toBeNull();
+  });
+
+  it("keeps refresh available when one diagnostics read fails and its sibling is stuck", async () => {
+    core.readPromptIssues.mockRejectedValue(new Error("prompt unavailable"));
+    core.auditTail.mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup(); render(<AuditPane />);
+
+    expect((await screen.findByRole("alert")).textContent).toMatch(/prompt unavailable/i);
+    const refresh = screen.getByRole("button", { name: "Refresh" });
+    expect((refresh as HTMLButtonElement).disabled).toBe(false);
+    await user.click(refresh);
+    expect(core.readPromptIssues).toHaveBeenCalledTimes(2);
+    expect(core.auditTail).toHaveBeenCalledTimes(2);
+  });
+
 });

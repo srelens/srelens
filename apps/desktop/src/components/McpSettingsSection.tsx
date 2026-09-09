@@ -44,6 +44,8 @@ export function McpSettingsSection() {
   const [runningUrl, setRunningUrl] = useState<string | null>(null);
   const [serverError, setServerError] = useState("");
   const [cli, setCli] = useState<CliStatus | null>(null);
+  const [cliLoading, setCliLoading] = useState(true);
+  const [cliError, setCliError] = useState("");
   const [cliMessage, setCliMessage] = useState("");
   const [tool, setTool] = useState<McpTool>("claude-code");
   const [transport, setTransport] = useState<McpTransport>("stdio");
@@ -64,6 +66,20 @@ export function McpSettingsSection() {
   // reflected without restarting srelens, and without a second Refresh
   // button next to the one that already exists.
   const [promptIssuesNonce, setPromptIssuesNonce] = useState(0);
+  const windows = /win/i.test(navigator.platform ?? "");
+
+  async function refreshCli() {
+    setCliLoading(true);
+    setCliError("");
+    try {
+      setCli(await srelensCliStatus());
+    } catch (error) {
+      setCli(null);
+      setCliError(String(error));
+    } finally {
+      setCliLoading(false);
+    }
+  }
 
   async function refreshToken() {
     try {
@@ -77,7 +93,7 @@ export function McpSettingsSection() {
 
   useEffect(() => {
     void mcpHttpStatus().then(setRunningUrl).catch(() => {});
-    void srelensCliStatus().then(setCli).catch(() => {});
+    void refreshCli();
     void refreshToken();
   }, []);
 
@@ -130,7 +146,9 @@ export function McpSettingsSection() {
       setCli(await srelensCliStatus());
       notify.success("srelens CLI installed");
     } catch (e) {
+      setCli(null);
       setCliMessage(String(e));
+      await refreshCli();
     }
   }
 
@@ -172,7 +190,9 @@ export function McpSettingsSection() {
   }
 
   const url = runningUrl ?? `http://127.0.0.1:${settings.port}/mcp`;
-  const config = mcpClientConfig(tool, transport, { url, token });
+  const command = cli?.installed && cli.path ? cli.path : undefined;
+  const config = mcpClientConfig(tool, transport, { url, token, command, platform: windows ? "windows" : "unix" });
+  const configReady = transport === "http" || (!cliLoading && !cliError && !!command);
 
   return (
     <div className="flex flex-col gap-6">
@@ -223,21 +243,26 @@ export function McpSettingsSection() {
       <section className="flex flex-col gap-2">
         <h4 className="text-sm font-medium">srelens CLI</h4>
         <p className="text-sm text-muted-foreground">
-          Installs a <code className="fl-mono">srelens</code> command on your PATH so MCP clients can
-          spawn <code className="fl-mono">srelens --mcp-stdio</code>.
+          {windows ? "Windows MCP clients start the installed desktop executable directly." : <>
+            Installs a <code className="fl-mono">srelens</code> command on your PATH so MCP clients can
+            spawn <code className="fl-mono">srelens --mcp-stdio</code>.
+          </>}
         </p>
         <div className="flex flex-wrap items-center gap-3">
-          <Button onClick={() => void installCli()}>
+          {!windows && !cliError && <Button disabled={cliLoading} onClick={() => void installCli()}>
             <Download data-icon="inline-start" />
             {cli?.installed ? "Reinstall srelens CLI" : "Install srelens CLI"}
-          </Button>
+          </Button>}
+          {cliLoading && <span role="status" className="text-sm text-muted-foreground">Checking CLI installation…</span>}
           {cli?.installed && (
             <span className="text-sm text-muted-foreground">
-              Installed at <code className="fl-mono">{cli.path}</code>
+              {windows ? "Using" : "Installed at"} <code className="fl-mono">{cli.path}</code>
             </span>
           )}
+          {cliError && <><p role="alert" className="text-sm text-destructive">Could not check CLI installation: {cliError}</p>
+            <Button variant="ghost" size="sm" onClick={() => void refreshCli()}>Retry CLI status</Button></>}
         </div>
-        {cli?.installed && !cli.on_path && (
+        {!windows && cli?.installed && !cli.on_path && (
           <p className="text-sm text-amber-600 dark:text-amber-500">
             Its directory isn't on your PATH yet — add it (e.g.{" "}
             <code className="fl-mono">export PATH="$HOME/.local/bin:$PATH"</code>) so clients can find{" "}
@@ -375,6 +400,7 @@ export function McpSettingsSection() {
             size="sm"
             className="absolute right-2 top-2"
             onClick={() => void copy(config.snippet)}
+            disabled={!configReady}
             aria-label="Copy config"
           >
             <Copy data-icon="inline-start" />
