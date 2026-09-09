@@ -1,3 +1,4 @@
+import { useMark } from "../lib/marks";
 import { useSyncExternalStore } from "react";
 import {
   getForwards,
@@ -124,6 +125,7 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   //
   // Derived here, in the component body, and never inside a snapshot getter —
   // see the note above about identity and "Maximum update depth exceeded".
+  const mark = useMark(ctx?.stableId ?? "", ctx?.name ?? "");
   const clusterOps = ctx ? helmOps.filter((o) => o.context === ctx.name) : [];
   // In flight means `running` and nothing else. A `done` operation has stopped
   // changing the cluster and a `failed` one has stopped trying; both stay
@@ -136,7 +138,7 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   const segments: StatusSegment[] = [
     {
       id: "ctx",
-      label: ctx?.name ?? "No cluster",
+      label: ctx ? mark.name : "No cluster",
       dot: true,
       tone: LINK_TONE[state],
       // Pressable only when there is a cluster to open. A "No cluster" button

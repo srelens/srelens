@@ -101,3 +101,5 @@ export * from "./lib/workloads";
 
 // Disambiguates the star exports above; see the note in the header.
 export type { ToolStatus } from "./lib/chat";
+
+export * from "./lib/contextAppearance";

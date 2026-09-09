@@ -433,7 +433,7 @@ describe("Window marks", () => {
     listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("dev")] });
     await booted();
     act(() => setMark("dev", { ...defaultMark("dev"), color: "var(--warn)" }));
-    const stored = JSON.parse(localStorage.getItem(MARKS_KEY)!);
+    const stored = JSON.parse(localStorage.getItem("srelens.contextProfiles")!);
     expect(stored.prod.color).toBe("var(--ok)");
     expect(stored.dev.color).toBe("var(--warn)");
   });
@@ -1438,4 +1438,14 @@ describe("Window, and the MCP server the reader left enabled", () => {
     await waitFor(() => expect(startMcpHttp).toHaveBeenCalled());
     expect(screen.getByRole("tablist")).toBeTruthy();
   });
+});
+
+it("shows saved display names on tabs while retaining the real context for operations", async () => {
+  localStorage.setItem("srelens.contextProfiles", JSON.stringify({ prod: { displayName: "Production Europe", shortName: "PE" } }));
+  await booted();
+  act(() => store.openTab("/k/pods", { clusterName: "prod" }));
+  expect(screen.getByRole("tab", { name: /Pods · Production Europe/ })).toBeDefined();
+  expect(store.currentWorkspace().tabs.find(tab => tab.route === "/k/pods")?.sub).toBe("prod");
+  act(() => setMark("prod", { ...defaultMark("prod"), name: "Production East" }));
+  expect(screen.getByRole("tab", { name: /Pods · Production East/ })).toBeDefined();
 });

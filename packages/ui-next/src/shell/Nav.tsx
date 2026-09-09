@@ -1,3 +1,4 @@
+import { symbolFor } from "../lib/markSymbols";
 import { useEffect, useMemo, useState } from "react";
 import { listCrds, type ClusterContext, type CrdRef } from "@srelens/core";
 import { Mark, ResourceTree, Sidebar, StatusPill, type ResourceNode, type StatusKind } from "@srelens/ui-kit";
@@ -157,10 +158,10 @@ export function Nav({ contexts }: NavProps) {
               size="sm"
               decorative
               withBadge={mark.withText}
-              icon={mark.mark === "icon" && mark.icon ? glyph(mark.icon) : undefined}
+              icon={mark.mark === "icon" && mark.icon ? symbolFor(mark.icon) : undefined}
               imageSrc={mark.mark === "image" ? mark.imageSrc : undefined}
             />
-            <span className="min-w-0 flex-1 truncate text-[0.8125rem] font-medium">{ctx.name}</span>
+            <span className="min-w-0 flex-1 truncate text-[0.8125rem] font-medium">{mark.name}</span>
             <StatusPill status={link.word} kind={link.kind} />
           </div>
         )
