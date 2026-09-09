@@ -132,7 +132,7 @@ export function Window({
   // uiScale doc), so a zoom chord here has to fall through to it untouched.
   const desktop = useMemo(() => isTauri(), []);
   const { setOpen, setScope } = useConsole();
-  const { tabs, activeId } = useTabs();
+  const { tabs, activeId, workspace } = useTabs();
   useMark("", "");
   const activeIdCluster = useActiveCluster();
   const activeCtx = contexts.find((c) => c.stableId === activeIdCluster) ?? null;
@@ -534,7 +534,10 @@ export function Window({
           />
         )}
         <div className="relative min-h-0 flex-1">
-          {tabs.map((tab) => (
+          {tabs.map((tab) => {
+            const context = tab.sub === undefined ? undefined : contexts.find((c) => c.name === tab.sub);
+            const pausedContext = context && workspace.pausedClusters?.includes(context.stableId) ? context : undefined;
+            return (
             <TabSurface key={tab.id} visible={tab.id === activeId}>
               {/* A placeholder tab without a cluster of its own still leaves
                   via the cluster this window is looking at — that is the
@@ -542,6 +545,7 @@ export function Window({
               <Body
                 route={tab.route}
                 clusterName={tab.sub ?? activeCtx?.name}
+                pausedContext={pausedContext}
                 ported={ported}
                 onOpenInClassic={onOpenInClassic}
                 onOpenGallery={onOpenGallery}
@@ -554,7 +558,8 @@ export function Window({
                 onLocked={lockWorkspace}
               />
             </TabSurface>
-          ))}
+            );
+          })}
         </div>
         {/* Not on `/agent`: that screen mounts the dock at the foot of its own
             main column, so its rail is a full-height sibling and uses the

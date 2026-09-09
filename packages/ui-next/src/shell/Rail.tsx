@@ -98,6 +98,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
     const mark = getMark(id, ctx.name);
     const info = infos[id];
     const link = links[id];
+    const paused = workspace.pausedClusters?.includes(id) === true;
     items.push({
       id,
       name: mark.name,
@@ -131,7 +132,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
       // is not offered here because there is nowhere in a 46px strip to offer
       // it from; the overview's Fleet row for the same cluster has it.
       unavailable:
-        workspace.pausedClusters?.includes(id)
+        paused
           ? "Paused"
           : link?.state === "error"
           ? link.error
@@ -140,7 +141,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
           : link?.state === "disconnected"
             ? "Disconnected"
             : undefined,
-      markers: link?.state === "connecting" ? [{ label: "Connecting", tone: "info" }] : [],
+      markers: !paused && link?.state === "connecting" ? [{ label: "Connecting", tone: "info" }] : [],
       color: mark.color,
     });
   }

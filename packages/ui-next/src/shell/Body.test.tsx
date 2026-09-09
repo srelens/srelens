@@ -90,4 +90,18 @@ describe("Body", () => {
     await userEvent.click(screen.getByRole("button", { name: "seal from the screen" }));
     expect(onLocked).toHaveBeenCalledTimes(1);
   });
+
+  it("does not mount a pinned screen while its cluster is paused", () => {
+    render(
+      <Body
+        route="/applog"
+        ported={[]}
+        onOpenInClassic={() => {}}
+        onLocked={() => {}}
+        pausedContext={{ name: "prod-eu", stableId: "prod", cluster: "prod", server: "", isCurrent: false, sourceFile: "", authKind: "token" }}
+      />,
+    );
+    expect(screen.getByText("prod-eu is paused")).toBeDefined();
+    expect(screen.queryByText("screen for /applog")).toBeNull();
+  });
 });

@@ -109,7 +109,14 @@ export function useInfos(): Record<string, ClusterInfo> {
  * {@link resetProbes} clears this along with the answers, so a test that leaves
  * a read hanging does not leave the next one joined to it.
  */
-const reading = new Map<string, Promise<void>>();
+interface Reading {
+  promise: Promise<void>;
+  /** The workspace whose pause decision the result must still satisfy. */
+  workspaceId: string;
+  generation: number;
+}
+
+const reading = new Map<string, Reading>();
 const pauseGenerations = new Map<string, number>();
 
 function pauseKey(workspaceId: string, clusterId: string) {
@@ -159,7 +166,14 @@ export function probeCluster(
   if (isClusterPaused(ctx.stableId, workspaceId)) return Promise.resolve();
   const generation = pauseGenerations.get(pauseKey(workspaceId, ctx.stableId)) ?? 0;
   const running = reading.get(ctx.stableId);
-  if (running && !options.fresh) return running;
+  // A pause invalidates only its own workspace's observation. Another
+  // workspace may still use a simultaneous connection, but it must not join a
+  // read whose owner has since invalidated it: that read will deliberately
+  // discard its result, leaving the joining workspace stuck on Connecting.
+  const runningIsValid = running &&
+    !isClusterPaused(ctx.stableId, running.workspaceId) &&
+    running.generation === (pauseGenerations.get(pauseKey(running.workspaceId, ctx.stableId)) ?? 0);
+  if (runningIsValid && !options.fresh) return running.promise;
   const run = read(ctx, connect, now, workspaceId, generation).finally(() => {
     // **By identity, not by key.** A read that {@link resetProbes} forgot
     // still lands, and deleting by key alone would clear whatever is under
@@ -167,9 +181,9 @@ export function probeCluster(
     // guard and the next caller starts a third concurrent read of one cluster,
     // the exact case this map exists to prevent. Only the entry this read
     // installed is its to remove.
-    if (reading.get(ctx.stableId) === run) reading.delete(ctx.stableId);
+    if (reading.get(ctx.stableId)?.promise === run) reading.delete(ctx.stableId);
   });
-  reading.set(ctx.stableId, run);
+  reading.set(ctx.stableId, { promise: run, workspaceId, generation });
   return run;
 }
 

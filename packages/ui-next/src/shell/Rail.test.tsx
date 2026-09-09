@@ -181,6 +181,15 @@ describe("Rail", () => {
     expect(within(menu).getByRole("menuitem", { name: "Reconnect" })).toBeDefined();
   });
 
+  it("does not describe a paused cluster as connecting", async () => {
+    setLink("prod-eu", "connecting");
+    setup();
+    const menu = await openMenu("prod-eu", "prod-eu, Connecting");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Disconnect" }));
+    expect(screen.getByRole("button", { name: "prod-eu, Paused" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: /Connecting/ })).toBeNull();
+  });
+
   it("removes the cluster from the workspace", async () => {
     setup();
     await pick("prod-eu", "Remove from workspace");
