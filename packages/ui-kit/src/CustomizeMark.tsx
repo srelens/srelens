@@ -74,6 +74,8 @@ export interface CustomizeMarkProps {
   onReset?: () => void;
   /** How large an image the app is willing to keep. */
   maxImageBytes?: number;
+  /** Infinity allows a full context display name without truncating saved text. */
+  maxNameLength?: number;
   className?: string;
 }
 
@@ -125,6 +127,7 @@ export function CustomizeMark({
   icons = [],
   onReset,
   maxImageBytes = DEFAULT_MAX_IMAGE_BYTES,
+  maxNameLength = MAX_NAME,
   className,
 }: CustomizeMarkProps) {
   const id = useId();
@@ -214,7 +217,7 @@ export function CustomizeMark({
             invalid={nameError !== undefined}
             // Capped here rather than through `maxLength`, which a paste walks
             // straight past.
-            onValueChange={(next) => set({ name: next.slice(0, MAX_NAME) })}
+            onValueChange={(next) => set({ name: next.slice(0, maxNameLength) })}
           />
         </Field>
         <Field label="Short text" hint={`Max ${MAX_SHORT}.`}>

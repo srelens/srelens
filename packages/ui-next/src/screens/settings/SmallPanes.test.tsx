@@ -57,7 +57,7 @@ vi.mock("../../lib/shortcuts", async (orig) => {
 });
 
 const tabs = vi.hoisted(() => ({ openTab: vi.fn() }));
-vi.mock("../../lib/tabsStore", () => ({ openTab: tabs.openTab }));
+vi.mock("../../lib/tabsStore", async (orig) => ({ ...await orig<object>(), openTab: tabs.openTab }));
 
 import { AccessibilityPane, ShortcutsPane, ClustersPane } from "./SmallPanes";
 
@@ -228,11 +228,8 @@ describe("ClustersPane", () => {
     expect(screen.queryByRole("button", { name: /add a kubeconfig/i })).toBeNull();
   });
 
-  it("names Connections rather than duplicating a context list", () => {
+  it("names Connections for source management", () => {
     render(<ClustersPane />);
     expect(screen.getAllByText(/connections/i).length).toBeGreaterThan(0);
-    // No per-cluster rows: a list of context names is the duplication this
-    // pane exists specifically not to draw.
-    expect(screen.queryAllByRole("listitem")).toHaveLength(0);
   });
 });

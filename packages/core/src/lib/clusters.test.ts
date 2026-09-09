@@ -123,3 +123,8 @@ describe("clusterFacts", () => {
     expect(facts.error).toContain("ipc unavailable");
   });
 });
+
+it("preserves partial inventory errors alongside the contexts that were readable", async () => {
+  const response = { contexts: [{ name: "prod" }], error: "Could not read kubeconfig: /bad.yaml" };
+  expect(await listContexts([], vi.fn().mockResolvedValue(response))).toEqual(response);
+});

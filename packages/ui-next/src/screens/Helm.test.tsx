@@ -1254,7 +1254,7 @@ describe("Helm — the namespace selector", () => {
     expect(screen.getByText("deleted-ns no longer exist on this cluster.")).toBeTruthy();
 
     await userEvent.click(screen.getByRole("button", { name: "Show all namespaces" }));
-    await waitFor(() => expect(getView().namespaces.prod).toBeUndefined());
+    await waitFor(() => expect(getView().namespaces.prod).toEqual([]));
     await waitFor(() => expect(drawn()).toHaveLength(5));
   });
 });

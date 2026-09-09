@@ -1,3 +1,4 @@
+import { useMark } from "../../lib/marks";
 import { podCount, scaledStatus, type ClusterContext, type PodCount } from "@srelens/core";
 import { KV, Spinner, statusTone, toneColor } from "@srelens/ui-kit";
 import { FailureWord } from "../../lib/errorCopy";
@@ -110,7 +111,8 @@ async function count(context: string): Promise<PodCount> {
 function FleetRow({ context }: { context: ClusterContext }) {
   const counts = useResource(() => count(context.name), [context.name]);
 
-  return <KV k={context.name} v={<Reading name={context.name} counts={counts} />} />;
+  const mark = useMark(context.stableId, context.name);
+  return <KV k={mark.name} v={<Reading name={context.name} counts={counts} />} />;
 }
 
 function Reading({
