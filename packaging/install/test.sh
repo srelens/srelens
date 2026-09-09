@@ -475,6 +475,20 @@ if [ "$made_user" = "tester" ]; then
     out="$(install_into "$home")" && rc=0 || rc=$?
     check "an ordinary home installs" "Installed: $home/.local/bin/srelens-tui" "$out" "$rc" 0
 
+    # A relative HOME makes a relative fallback, and the walk up to its
+    # nearest existing ancestor has nowhere to stop: `${x%/*}` of a name
+    # with no slash is the name itself. Refused before the walk. Under
+    # `timeout` where there is one, so a regression fails rather than hangs.
+    hold=""
+    command -v timeout >/dev/null 2>&1 && hold="timeout 60"
+    out="$(su tester -c "cd '$work' && HOME=relative-home $hold sh '$script' --version '$version'" 2>&1)" && rc=0 || rc=$?
+    check "a relative HOME is refused rather than walked forever" "is not an absolute path" "$out" "$rc" 1
+    if [ -e "$work/relative-home" ]; then
+        no "the relative fallback was created"
+    else
+        ok "and nothing was created under the working directory"
+    fi
+
     # An unpredictable staging name does not survive a directory other users
     # can unlink from: they can take the staged file away and leave a symlink,
     # or replace the finished binary before it is run. Only the directory's
@@ -516,6 +530,13 @@ if [ "$made_user" = "tester" ]; then
     new_home "$home"
     out="$(install_into "$home")" && rc=0 || rc=$?
     check "a sticky world-writable ANCESTOR is still fine" "Installed:" "$out" "$rc" 0
+    # Including when the home under it does not exist yet, so the sticky
+    # directory is the nearest EXISTING component of the fallback: it is
+    # judged as the parent it is, not by the destination's stricter rule.
+    home="$sticky_parent/new-home"
+    rm -rf "$home"
+    out="$(install_into "$home")" && rc=0 || rc=$?
+    check "a fallback created beneath a sticky ancestor is still fine" "Installed: $home/.local/bin/srelens-tui" "$out" "$rc" 0
 
     # A directory belonging to somebody else: they can arrange the swap at
     # leisure and get a file written by the installing account out of it.
@@ -556,6 +577,23 @@ if [ "$made_user" = "tester" ]; then
             no "it installed under the replaceable ancestor anyway"
         else
             ok "nothing was installed under the replaceable ancestor"
+        fi
+        # And when the fallback directory does not exist yet, under an
+        # ancestor that is writable but somebody else's: the refusal has to
+        # come BEFORE `mkdir -p`, or the install leaves a fresh .local/bin
+        # behind while reporting that it refused the destination.
+        home="$work/homes/foreign-parent-fresh"
+        rm -rf "$home"
+        mkdir -p "$home/.local"
+        chown tester "$home" 2>/dev/null || true
+        chown "$other_user" "$home/.local" 2>/dev/null || true
+        chmod 0777 "$home/.local"
+        out="$(install_into "$home")" && rc=0 || rc=$?
+        check "a fallback under a foreign ancestor is refused before it is created" "safely" "$out" "$rc" 1
+        if [ -e "$home/.local/bin" ]; then
+            no "the refused fallback directory was created anyway"
+        else
+            ok "and no directory was created under the foreign ancestor"
         fi
     else
         echo "  skip  no second account: cannot test foreign ownership"

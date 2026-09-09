@@ -426,7 +426,43 @@ verify_checksum() {
 # repointed the moment after it is approved, and the install lands wherever
 # it now says. Everything downstream uses what this sets.
 prepare_install_dir() {
-    dir="$1"
+    want="$1"
+    # What already EXISTS of the path is judged before anything is added to
+    # it. `mkdir -p` first and the walk afterwards meant a refused fallback
+    # still left its mark: `sudo` carrying a non-root HOME into a run whose
+    # /usr/local/bin had been rejected would create root-owned .local/bin
+    # directories under that home and only then refuse the foreign-owned
+    # ancestor -- a persistent change from an install that reports having
+    # installed nothing. So: the nearest existing ancestor and everything
+    # above it first; the caller walks the full path, new components
+    # included, once it exists. assert_safe_dir reuses `dir`, hence `want`.
+    #
+    # Absolute, or nothing. The fallback is built from HOME, which the
+    # caller sets, and a relative HOME would make this a walk of names
+    # relative to wherever the script happens to be run from -- and a walk
+    # with nowhere to stop: `${x%/*}` of a name with no slash in it is the
+    # name itself.
+    case "$want" in
+        /*) ;;
+        *) die "$want is not an absolute path (HOME=${HOME:-unset}), so there is nowhere definite to install to. Set HOME to an absolute directory and run this again." ;;
+    esac
+    existing="$want"
+    while [ ! -d "$existing" ] && [ "$existing" != "/" ]; do
+        parent="${existing%/*}"
+        [ -n "$parent" ] || parent="/"
+        # Belt to the case above's braces: a step that removes nothing
+        # would loop forever, so it stops the install instead.
+        [ "$parent" != "$existing" ] ||
+            die "cannot find an existing ancestor of $want"
+        existing="$parent"
+    done
+    # As a PARENT, which is what it is: the destination will be created
+    # beneath it. Judged by the destination's stricter rule, a sticky /tmp
+    # under a HOME that does not exist yet would be refused -- the very
+    # thing the sticky exemption exists to allow. The destination itself
+    # gets its own rule from the caller's walk once it exists.
+    assert_safe_dir "$existing" parent
+    dir="$want"
     mkdir -p "$dir" 2>/dev/null ||
         die "cannot create $dir"
     [ -w "$dir" ] ||
@@ -454,8 +490,13 @@ prepare_install_dir() {
 #     cannot be established from a shell -- see the note at that check.
 #
 # The same rule srelens-tui's own `update` applies to the binary it replaces.
+#
+# The last component is the destination unless the caller says `parent`:
+# prepare_install_dir walks the nearest EXISTING ancestor before creating
+# anything beneath it, and that ancestor is a parent, sticky /tmp included.
 assert_safe_dir() {
     dir="$1"
+    last_role="${2:-destination}"
 
     # Resolve first. `ls -ld` on a symlink describes the LINK -- mode
     # `lrwxrwxrwx`, owned by whoever made it -- which says nothing about where
@@ -478,9 +519,10 @@ assert_safe_dir() {
         esac
         prefix="$prefix/$name"
         # The last component is where the binary lands, and it is held to a
-        # stricter rule than the ones above it.
+        # stricter rule than the ones above it -- unless the caller said it
+        # is a parent too.
         if [ -z "$rest" ]; then
-            assert_component "$prefix" destination
+            assert_component "$prefix" "$last_role"
         else
             assert_component "$prefix" parent
         fi
