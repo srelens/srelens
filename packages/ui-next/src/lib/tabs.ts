@@ -159,7 +159,7 @@ export function reconcile(state: TabsState, contexts: ClusterContext[]): TabsSta
 
     let tabs = next.tabs;
     if (tabs.length === 0) tabs = [homeTab()];
-    if (activeChanged && active) {
+    if (active) {
       const clusterName = contextNames.get(active);
       if (clusterName) {
         const relabelled = tabs.map((tab) =>

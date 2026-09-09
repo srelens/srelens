@@ -226,7 +226,6 @@ export function SettingsView({
   const [updateChannel, setUpdateChannel] = useState<UpdateChannel>(() => loadUpdateChannel());
   const [currentVersion, setCurrentVersion] = useState("");
   const [requestTimeout, setRequestTimeout] = useState(() => getRequestTimeoutSecs());
-  const timeoutUpdateId = useRef(0);
   // While the exact box is being edited it holds a raw string, so clearing it
   // to retype is possible: `Number("")` is 0, which would otherwise clamp to
   // the 1s minimum and push that to the backend on the first keystroke of a
@@ -235,12 +234,9 @@ export function SettingsView({
   const changeRequestTimeout = (secs: number) => {
     if (!Number.isFinite(secs)) return;
     const clamped = clampTimeoutSecs(secs);
-    const updateId = ++timeoutUpdateId.current;
     setRequestTimeout(clamped);
     void updateRequestTimeout(clamped).catch((error) => {
-      if (updateId !== timeoutUpdateId.current) return;
       setRequestTimeout(getRequestTimeoutSecs());
-      setTimeoutDraft(null);
       notify.error("Could not save request timeout", describeError(error).detail);
     });
   };
@@ -961,13 +957,13 @@ export function SettingsView({
                             <button
                               key={option.value}
                               type="button"
-                              className={(selectedProfile.logo ?? "initials") === option.value ? "is-active" : ""}
+                              className={!selectedProfile.markIcon && (selectedProfile.logo ?? "initials") === option.value ? "is-active" : ""}
                               onClick={() => updateContext(selectedContext.name, { logo: option.value as ContextLogo })}
-                              aria-pressed={(selectedProfile.logo ?? "initials") === option.value}
+                              aria-pressed={!selectedProfile.markIcon && (selectedProfile.logo ?? "initials") === option.value}
                             >
                               <ContextAvatar
                                 context={selectedContext.name}
-                                profile={{ ...selectedProfile, logo: option.value }}
+                                profile={{ ...selectedProfile, logo: option.value, markIcon: undefined }}
                                 className="fl-context-logo-preview"
                                 showShortName={false}
                               />

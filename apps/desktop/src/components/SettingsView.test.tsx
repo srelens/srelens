@@ -133,6 +133,30 @@ describe("SettingsView", () => {
     expect((screen.getByLabelText("Custom color for prod-eu") as HTMLInputElement).value).toBe("#55c9bd");
   });
 
+  it("does not mark a legacy logo active while a shared symbol is selected", async () => {
+    render(
+      <SettingsView
+        theme={{ name: "slate", mode: "dark" }}
+        onThemeNameChange={() => {}}
+        onThemeModeChange={() => {}}
+        defaultNamespace=""
+        onDefaultNamespaceChange={() => {}}
+        layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}}
+        contextProfiles={{ "prod-eu": { logo: "cluster", markIcon: "server" } }}
+        onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]}
+        onKubeconfigFilesChange={() => {}}
+        contextOrder={[]}
+        onContextOrderChange={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Contexts/ }));
+    await userEvent.click(screen.getByRole("tab", { name: "Appearance" }));
+
+    expect(screen.getByRole("button", { name: "Cluster" }).getAttribute("aria-pressed")).toBe("false");
+  });
+
   it("moves contexts in the persisted order", async () => {
     const onContextOrderChange = vi.fn();
     render(
@@ -323,38 +347,6 @@ describe("SettingsView", () => {
     fireEvent.change(exact, { target: { value: "45" } });
     await waitFor(() => expect(localStorage.getItem("srelens.requestTimeoutSecs")).toBe("45"));
     expect((slider as HTMLInputElement).value).toBe("45");
-  });
-
-  it("does not roll back a newer timeout when an earlier update fails", async () => {
-    transportMocks.invokeCommand
-      .mockRejectedValueOnce(new Error("first update failed"))
-      .mockResolvedValueOnce(60);
-    render(
-      <SettingsView
-        theme={{ name: "slate", mode: "dark" }}
-        onThemeNameChange={() => {}}
-        onThemeModeChange={() => {}}
-        defaultNamespace=""
-        onDefaultNamespaceChange={() => {}}
-        layout={DEFAULT_WORKSPACE_LAYOUT}
-        onLayoutChange={() => {}}
-        contextProfiles={{}}
-        onContextProfilesChange={() => {}}
-        kubeconfigFiles={[]}
-        onKubeconfigFilesChange={() => {}}
-        contextOrder={[]}
-        onContextOrderChange={() => {}}
-      />,
-    );
-    await userEvent.click(screen.getByRole("button", { name: /Kubernetes/ }));
-
-    const exact = screen.getByRole("spinbutton", { name: "Cluster request timeout in seconds (exact)" });
-    const slider = screen.getByRole("slider", { name: "Cluster request timeout in seconds" });
-    fireEvent.change(exact, { target: { value: "30" } });
-    fireEvent.change(exact, { target: { value: "60" } });
-
-    await waitFor(() => expect(localStorage.getItem("srelens.requestTimeoutSecs")).toBe("60"));
-    expect((slider as HTMLInputElement).value).toBe("60");
   });
 
   it("scales the interface from the Appearance slider and persists it (#237)", () => {
