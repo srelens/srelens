@@ -182,6 +182,17 @@ describe("classic context identity parity", () => {
   it("uses the same generated initials as classic for long context names", () => {
     expect(defaultMark("dev-lon-nrtc-6bcb8b63").short).toBe("DLN");
   });
+  it("uses classic's context initials when its saved short name is blank", () => {
+    const s = fakeStorage();
+    s.m.set("srelens.contextProfiles", JSON.stringify({
+      prod: { displayName: "Production Europe", shortName: "", logo: "initials" },
+      long: { shortName: "", logo: "initials" },
+    }));
+    loadMarks(s);
+
+    expect(getMark("prod", "prod").short).toBe("PR");
+    expect(getMark("long", "a-b-c").short).toBe("ABC");
+  });
 });
 
 it("honours a profile reset in classic after importing it by stable ID", async () => {

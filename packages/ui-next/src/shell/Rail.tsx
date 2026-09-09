@@ -94,7 +94,10 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
     if (stale) setEditing(null);
   }, [stale]);
 
-  const ordered = useOrderedContexts(workspace.clusters.flatMap(id => byId.get(id) ? [byId.get(id)!] : []));
+  const ordered = useOrderedContexts(
+    workspace.clusters.flatMap(id => byId.get(id) ? [byId.get(id)!] : []),
+    contexts,
+  );
   const items: ClusterRailItem[] = [];
   for (const ctx of ordered) {
     const id = ctx.stableId;

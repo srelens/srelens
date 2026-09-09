@@ -28,6 +28,17 @@ it("persists a legacy name-keyed order as stable IDs when contexts become known"
 
   expect(loadContextOrder()).toEqual(["staging-id", "prod-id"]);
 });
+it("does not resolve an ambiguous legacy order from a workspace subset", () => {
+  saveContextOrder(["prod"]);
+  const all = [
+    { name: "file-a/prod", stableId: "a-id" },
+    { name: "file-b/prod", stableId: "b-id" },
+  ];
+
+  renderHook(() => useOrderedContexts([all[0]], all));
+
+  expect(loadContextOrder()).toEqual(["prod"]);
+});
 it("forgets a confirmed deletion while retaining offline contexts", () => {
   saveContextOrder(["staging-id", "prod-id", "offline-id"]);
   removeContextFromOrder("prod-id");

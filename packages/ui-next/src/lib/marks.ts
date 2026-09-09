@@ -167,7 +167,9 @@ function readMark(stableId: string, name: string, editing: boolean): MarkAppeara
   const cached = snapshots.get(key);
   if (cached) return cached;
   const saved = withProfile(stableId, name, marks[stableId] ?? defaultMark(name));
-  const mark = editing ? saved : { ...saved, name: saved.name.trim() || name };
+  const mark = editing
+    ? saved
+    : { ...saved, name: saved.name.trim() || name, short: saved.short.trim() ? saved.short : initials(name) };
   snapshots.set(key, mark);
   return mark;
 }

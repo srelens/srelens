@@ -3,9 +3,12 @@ import { loadContextOrder, orderContexts, saveContextOrder, migrateOrder, projec
 const listeners = new Set<() => void>();
 const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const read = () => JSON.stringify(loadContextOrder());
-export function useOrderedContexts<T extends ContextIdentity>(contexts: readonly T[]): T[] {
+export function useOrderedContexts<T extends ContextIdentity>(
+  contexts: readonly T[],
+  migrationContexts: readonly ContextIdentity[] = contexts,
+): T[] {
   const order = useSyncExternalStore(subscribe, read, read);
-  const migration = useMemo(() => migrateOrder(JSON.parse(order), contexts), [contexts, order]);
+  const migration = useMemo(() => migrateOrder(JSON.parse(order), migrationContexts), [migrationContexts, order]);
   useEffect(() => {
     if (migration.changed) saveContextOrder(migration.migrated);
   }, [migration]);
