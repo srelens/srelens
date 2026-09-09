@@ -5,7 +5,7 @@ import type { ClusterContext, CrdRef } from "@srelens/core";
 import { Nav } from "./Nav";
 import { currentWorkspace, openTab, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
-import { resetView, setLink } from "../lib/workspace";
+import { loadExpanded, resetView, setLink } from "../lib/workspace";
 
 // The CRD list is the one thing here that talks to a cluster. Mocked at the
 // module boundary — partially, so `RESOURCE_LABELS` and the rest of core stay
@@ -39,6 +39,7 @@ const CERTS: CrdRef = {
 
 beforeEach(() => {
   setState(defaultState([PROD]));
+  localStorage.clear();
   resetView();
   vi.clearAllMocks();
   listCrds.mockResolvedValue({ crds: [] });
@@ -53,6 +54,9 @@ describe("Nav", () => {
     // opposite of what a tab strip is for.
     render(<Nav contexts={[PROD]} />);
 
+    for (const group of ["Workloads", "Network", "Cluster"]) {
+      await userEvent.click(screen.getByRole("treeitem", { name: group }));
+    }
     for (const kind of ["Pods", "Deployments", "Services", "Nodes"]) {
       await userEvent.click(await screen.findByRole("treeitem", { name: kind }));
     }
@@ -67,6 +71,7 @@ describe("Nav", () => {
   it("lists a built-in kind and opens it in a tab of its own", async () => {
     render(<Nav contexts={[PROD]} />);
 
+    await userEvent.click(screen.getByRole("treeitem", { name: "Workloads" }));
     await userEvent.click(await screen.findByRole("treeitem", { name: "Pods" }));
 
     const tab = tabFor("/k/pods");
@@ -100,6 +105,7 @@ describe("Nav", () => {
   it("opens an app screen from the Investigate group", async () => {
     render(<Nav contexts={[PROD]} />);
 
+    await userEvent.click(screen.getByRole("treeitem", { name: "Investigate" }));
     await userEvent.click(await screen.findByRole("treeitem", { name: "Incidents" }));
 
     expect(tabFor("/incidents")?.preview).toBeFalsy();
@@ -117,6 +123,7 @@ describe("Nav", () => {
     openTab("/k/deployments", { clusterName: PROD.name });
     render(<Nav contexts={[PROD]} />);
 
+    await userEvent.click(screen.getByRole("treeitem", { name: "Workloads" }));
     const row = await screen.findByRole("treeitem", { name: "Deployments" });
     expect(row.getAttribute("aria-selected")).toBe("true");
     expect((await screen.findByRole("treeitem", { name: "Pods" })).getAttribute("aria-selected")).toBe("false");
@@ -133,7 +140,7 @@ describe("Nav", () => {
 
   it("filters the tree by the sidebar's search box", async () => {
     render(<Nav contexts={[PROD]} />);
-    await screen.findByRole("treeitem", { name: "Pods" });
+    await screen.findByRole("treeitem", { name: "Workloads" });
 
     await userEvent.type(screen.getByRole("searchbox", { name: "Filter resources" }), "secre");
 
@@ -147,6 +154,7 @@ describe("Nav", () => {
 
     // The built-ins are not RBAC-gated the way CRD discovery is: an ordinary
     // user who cannot list CRDs must still get Pods and the rest of the tree.
+    await userEvent.click(screen.getByRole("treeitem", { name: "Workloads" }));
     expect(await screen.findByRole("treeitem", { name: "Pods" })).toBeTruthy();
 
     await userEvent.click(await screen.findByRole("treeitem", { name: "Custom resources" }));
@@ -162,7 +170,7 @@ describe("Nav", () => {
   it("asks the new cluster for its CRDs when the cluster changes", async () => {
     const other = ctx("staging");
     const { rerender } = render(<Nav contexts={[PROD, other]} />);
-    await screen.findByRole("treeitem", { name: "Pods" });
+    await screen.findByRole("treeitem", { name: "Workloads" });
 
     setState(defaultState([other]));
     rerender(<Nav contexts={[PROD, other]} />);
@@ -170,21 +178,49 @@ describe("Nav", () => {
     await vi.waitFor(() => expect(listCrds).toHaveBeenCalledWith("staging"));
   });
 
-  it("stays folded shut across a remount once the user has closed every group", async () => {
-    const { unmount } = render(<Nav contexts={[PROD]} />);
-    await screen.findByRole("treeitem", { name: "Pods" });
-
-    for (const label of ["Cluster", "Workloads", "Config", "Network", "Storage", "Access control", "Investigate"]) {
-      await userEvent.click(screen.getByRole("treeitem", { name: label }));
-    }
-    expect(screen.queryByRole("treeitem", { name: "Pods" })).toBeNull();
-
-    unmount();
+  it("starts every group collapsed for a cluster without saved preferences", () => {
     render(<Nav contexts={[PROD]} />);
-
-    // A remount must not read "every group closed" as "nothing has been
-    // seeded yet" and reopen all six — that is the state the user just put
-    // the sidebar in on purpose.
+    const groups = screen.getAllByRole("treeitem").filter((row) => row.hasAttribute("aria-expanded"));
+    expect(groups.length).toBeGreaterThan(0);
+    for (const row of groups) expect(row.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("treeitem", { name: "Pods" })).toBeNull();
+  });
+
+  it("restores each cluster's groups after switching, renaming, and restarting", async () => {
+    const other = { ...ctx("prod-eu"), stableId: "another-context" };
+    const first = render(<Nav contexts={[PROD, other]} />);
+    await userEvent.click(screen.getByRole("treeitem", { name: "Workloads" }));
+    expect(screen.getByRole("treeitem", { name: "Pods" })).toBeTruthy();
+
+    setState(defaultState([other]));
+    first.rerender(<Nav contexts={[PROD, other]} />);
+    expect(screen.queryByRole("treeitem", { name: "Pods" })).toBeNull();
+    await userEvent.click(screen.getByRole("treeitem", { name: "Network" }));
+    first.unmount();
+
+    resetView();
+    loadExpanded();
+    const renamed = { ...PROD, name: "renamed-prod" };
+    setState(defaultState([renamed]));
+    const restarted = render(<Nav contexts={[renamed, other]} />);
+    expect(screen.getByRole("treeitem", { name: "Pods" })).toBeTruthy();
+    expect(screen.queryByRole("treeitem", { name: "Services" })).toBeNull();
+
+    setState(defaultState([other]));
+    restarted.rerender(<Nav contexts={[renamed, other]} />);
+    expect(screen.queryByRole("treeitem", { name: "Pods" })).toBeNull();
+    expect(screen.getByRole("treeitem", { name: "Services" })).toBeTruthy();
+  });
+
+  it("keeps every group shut after closing the last one and restarting", async () => {
+    const { unmount } = render(<Nav contexts={[PROD]} />);
+    await userEvent.click(screen.getByRole("treeitem", { name: "Workloads" }));
+    await userEvent.click(screen.getByRole("treeitem", { name: "Workloads" }));
+    unmount();
+    resetView();
+    loadExpanded();
+    render(<Nav contexts={[PROD]} />);
+    expect(screen.queryByRole("treeitem", { name: "Pods" })).toBeNull();
+    expect(screen.getByRole("treeitem", { name: "Workloads" }).getAttribute("aria-expanded")).toBe("false");
   });
 });

@@ -205,6 +205,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Linux dependencies
         run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in ci.yml's backend job: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -439,6 +444,11 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in ci.yml's backend job: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -676,6 +686,11 @@ jobs:
       - name: Install musl tooling
         if: ${{ endsWith(matrix.target, '-musl') }}
         run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in ci.yml's backend job: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
@@ -1290,7 +1305,13 @@ jobs:
   # archives are attached.
   homebrew:
     needs: [version, tui-publish, publish-release]
-    if: ${{ github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
+    # `!cancelled()` first, and it is load-bearing. Without a status function
+    # GitHub applies an implicit `success()`, which is false whenever ANY job in
+    # the transitive `needs` chain was skipped -- and release-notes, upstream of
+    # updater-manifest and publish-release, is skipped on main by design. v0.11.0
+    # published and neither the tap nor AUR heard about it. The conditions that
+    # follow are the ones that actually decide.
+    if: ${{ !cancelled() && github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/homebrew-publish.yml
@@ -1302,7 +1323,13 @@ jobs:
     # Also needs publish-release: updpkgsums fetches the release assets over
     # plain HTTPS, which only works once the release is out of draft.
     needs: [version, build, publish-release]
-    if: ${{ github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
+    # `!cancelled()` first, and it is load-bearing. Without a status function
+    # GitHub applies an implicit `success()`, which is false whenever ANY job in
+    # the transitive `needs` chain was skipped -- and release-notes, upstream of
+    # updater-manifest and publish-release, is skipped on main by design. v0.11.0
+    # published and neither the tap nor AUR heard about it. The conditions that
+    # follow are the ones that actually decide.
+    if: ${{ !cancelled() && github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
     # The called workflow declares `contents: read` for itself; the AUR push
     # authenticates with its own SSH deploy key, not GITHUB_TOKEN. Repeated
     # here because a reusable workflow cannot be granted more than its caller

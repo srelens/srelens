@@ -1,5 +1,5 @@
 // Small synchronous persisted-settings helpers. Desktop reads from an
-// in-memory mirror of settings.json; web mode falls back to localStorage.
+// in-memory mirror of backend settings (desktop file or per-user web database).
 
 import { settingsStorage } from "./settingsStorage";
 

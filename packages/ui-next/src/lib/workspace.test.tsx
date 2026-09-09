@@ -17,7 +17,7 @@ beforeEach(() => { settingsStorage.removeItem("srelens.defaultNamespace"); ws.re
 
 describe("workspace view", () => {
   it("starts with no links and nothing expanded", () => {
-    expect(ws.getView()).toEqual({ links: {}, expanded: [], namespaces: {} });
+    expect(ws.getView()).toEqual({ links: {}, expanded: {}, namespaces: {} });
   });
 
   it("tells the hook when a link changes", () => {
@@ -42,16 +42,16 @@ describe("workspace view", () => {
   });
 
   it("toggles expansion", () => {
-    ws.toggleExpanded("workloads");
-    expect(ws.getView().expanded).toEqual(["workloads"]);
-    ws.toggleExpanded("workloads");
-    expect(ws.getView().expanded).toEqual([]);
+    ws.toggleExpanded("prod", "workloads");
+    expect(ws.getView().expanded.prod).toEqual(["workloads"]);
+    ws.toggleExpanded("prod", "workloads");
+    expect(ws.getView().expanded.prod).toEqual([]);
   });
 
   it("replaces expansion wholesale when told", () => {
-    ws.toggleExpanded("a");
-    ws.setExpanded(["b", "c"]);
-    expect(ws.getView().expanded).toEqual(["b", "c"]);
+    ws.toggleExpanded("prod", "a");
+    ws.setExpanded("prod", ["b", "c"]);
+    expect(ws.getView().expanded.prod).toEqual(["b", "c"]);
   });
 
   it("does not notify for a no-op", () => {
@@ -66,13 +66,13 @@ describe("workspace view", () => {
   });
 
   it("does not notify when setExpanded is handed the same list again", () => {
-    ws.setExpanded(["a", "b"]);
+    ws.setExpanded("prod", ["a", "b"]);
     let n = 0;
     const off = ws.subscribe(() => n++);
-    ws.setExpanded(["a", "b"]);
-    ws.setExpanded([...ws.getView().expanded]);
+    ws.setExpanded("prod", ["a", "b"]);
+    ws.setExpanded("prod", [...ws.getView().expanded.prod]);
     expect(n).toBe(0);
-    ws.setExpanded(["b", "a"]);
+    ws.setExpanded("prod", ["b", "a"]);
     expect(n).toBe(1);
     off();
   });
@@ -181,11 +181,11 @@ describe("persisted namespace selection", () => {
 
   it("loading namespaces leaves links and expanded exactly as they were", () => {
     ws.setLink("prod", "connected");
-    ws.toggleExpanded("workloads");
+    ws.toggleExpanded("prod", "workloads");
     const s = fakeStorage();
     ws.loadNamespaces(s);
     expect(ws.getView().links.prod).toEqual({ state: "connected" });
-    expect(ws.getView().expanded).toEqual(["workloads"]);
+    expect(ws.getView().expanded.prod).toEqual(["workloads"]);
   });
 
   it("reads a document that is not valid JSON, or not a map, as nothing stored", () => {
@@ -226,4 +226,41 @@ it("uses the default only for clusters without a choice, and preserves explicit 
   expect(result.current).toEqual([]);
   const other = renderHook(() => ws.useNamespaces("unseen"));
   expect(other.result.current).toEqual(["other"]);
+});
+
+describe("persisted sidebar groups", () => {
+  it("saves through the settings adapter and restores independent cluster choices", () => {
+    const s = fakeStorage();
+    const save = vi.spyOn(settingsStorage, "setItem").mockImplementation(s.setItem);
+    ws.toggleExpanded("stable-prod", "workloads");
+    ws.toggleExpanded("stable-stage", "network");
+    expect(save).toHaveBeenLastCalledWith(ws.EXPANDED_KEY, JSON.stringify({
+      "stable-prod": ["workloads"], "stable-stage": ["network"],
+    }));
+    ws.resetView();
+    ws.loadExpanded(s);
+    expect(ws.getView().expanded).toEqual({ "stable-prod": ["workloads"], "stable-stage": ["network"] });
+    save.mockRestore();
+  });
+
+  it("drops malformed entries without losing other clusters or live connection state", () => {
+    const s = fakeStorage();
+    s.setItem(ws.EXPANDED_KEY, JSON.stringify({ good: ["workloads"], bad: true, mixed: [3], closed: [] }));
+    ws.setLink("good", "connected");
+    ws.loadExpanded(s);
+    expect(ws.getView().expanded).toEqual({ good: ["workloads"], closed: [] });
+    expect(ws.getView().links.good.state).toBe("connected");
+    s.setItem(ws.EXPANDED_KEY, "invalid json");
+    ws.loadExpanded(s);
+    expect(ws.getView().expanded).toEqual({});
+  });
+
+  it("still allows navigation when storage is unavailable", () => {
+    const bad = { getItem: () => { throw Error("offline"); }, setItem: () => { throw Error("offline"); }, removeItem: () => {} };
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(() => ws.loadExpanded(bad)).not.toThrow();
+    expect(() => ws.toggleExpanded("prod", "workloads", bad)).not.toThrow();
+    expect(ws.getView().expanded.prod).toEqual(["workloads"]);
+    error.mockRestore();
+  });
 });

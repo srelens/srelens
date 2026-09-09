@@ -101,6 +101,7 @@ pub struct AssistantViewState {
     pub context_name: String,
     pub messages: Vec<ChatMessage>,
     pub input: String,
+    pub input_cursor: Option<usize>,
     pub is_busy: bool,
     pub busy_status: String,
     pub busy_start: Option<std::time::Instant>,
@@ -155,6 +156,7 @@ impl AssistantViewState {
                 token_usage: None,
             }],
             input: String::new(),
+            input_cursor: None,
             is_busy: false,
             busy_status: String::new(),
             busy_start: None,
@@ -215,9 +217,147 @@ impl AssistantViewState {
         }
         let chosen = self.slash_suggestions[self.slash_suggestion_idx];
         self.input = format!("/{} ", chosen.command);
+        self.input_cursor = None;
         self.slash_suggestions.clear();
         self.slash_suggestion_idx = 0;
         true
+    }
+
+    pub fn cursor_pos(&self) -> usize {
+        let len = self.input.chars().count();
+        match self.input_cursor {
+            Some(pos) => pos.min(len),
+            None => len,
+        }
+    }
+
+    pub fn move_cursor_left(&mut self) {
+        let pos = self.cursor_pos();
+        if pos > 0 {
+            self.input_cursor = Some(pos - 1);
+        } else {
+            self.input_cursor = Some(0);
+        }
+    }
+
+    pub fn move_cursor_right(&mut self) {
+        let pos = self.cursor_pos();
+        let len = self.input.chars().count();
+        if pos < len {
+            self.input_cursor = Some(pos + 1);
+        } else {
+            self.input_cursor = Some(len);
+        }
+    }
+
+    pub fn move_cursor_word_left(&mut self) {
+        let pos = self.cursor_pos();
+        if pos == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = pos;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        self.input_cursor = Some(i);
+    }
+
+    pub fn move_cursor_word_right(&mut self) {
+        let pos = self.cursor_pos();
+        let chars: Vec<char> = self.input.chars().collect();
+        let len = chars.len();
+        if pos >= len {
+            return;
+        }
+        let mut i = pos;
+        while i < len && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i < len && chars[i].is_whitespace() {
+            i += 1;
+        }
+        self.input_cursor = Some(i);
+    }
+
+    pub fn move_cursor_home(&mut self) {
+        self.input_cursor = Some(0);
+    }
+
+    pub fn move_cursor_end(&mut self) {
+        self.input_cursor = None;
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        let pos = self.cursor_pos();
+        let mut chars: Vec<char> = self.input.chars().collect();
+        chars.insert(pos, c);
+        self.input = chars.into_iter().collect();
+        self.input_cursor = Some(pos + 1);
+        self.update_slash_suggestions();
+    }
+
+    pub fn insert_str(&mut self, s: &str) {
+        let pos = self.cursor_pos();
+        let mut chars: Vec<char> = self.input.chars().collect();
+        let added_len = s.chars().count();
+        for (i, c) in s.chars().enumerate() {
+            chars.insert(pos + i, c);
+        }
+        self.input = chars.into_iter().collect();
+        self.input_cursor = Some(pos + added_len);
+        self.update_slash_suggestions();
+    }
+
+    pub fn backspace(&mut self) {
+        let pos = self.cursor_pos();
+        if pos > 0 {
+            let mut chars: Vec<char> = self.input.chars().collect();
+            chars.remove(pos - 1);
+            self.input = chars.into_iter().collect();
+            self.input_cursor = Some(pos - 1);
+            self.update_slash_suggestions();
+        }
+    }
+
+    pub fn delete(&mut self) {
+        let pos = self.cursor_pos();
+        let mut chars: Vec<char> = self.input.chars().collect();
+        if pos < chars.len() {
+            chars.remove(pos);
+            self.input = chars.into_iter().collect();
+            self.input_cursor = Some(pos);
+            self.update_slash_suggestions();
+        }
+    }
+
+    pub fn delete_word_back(&mut self) {
+        let pos = self.cursor_pos();
+        if pos == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = pos;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        let mut new_chars = chars[..i].to_vec();
+        new_chars.extend_from_slice(&chars[pos..]);
+        self.input = new_chars.into_iter().collect();
+        self.input_cursor = Some(i);
+        self.update_slash_suggestions();
+    }
+
+    pub fn clear_input(&mut self) {
+        self.input.clear();
+        self.input_cursor = None;
+        self.update_slash_suggestions();
     }
 
     pub fn start_selection(&mut self, line: usize, col: usize) {
@@ -305,7 +445,17 @@ impl AssistantViewState {
 
     pub fn history_up(&mut self) {
         if self.prompt_history.is_empty() {
-            return;
+            for msg in &self.messages {
+                if msg.role == "user" {
+                    let trimmed = msg.content.trim();
+                    if !trimmed.is_empty() && self.prompt_history.last().map(|s| s.as_str()) != Some(trimmed) {
+                        self.prompt_history.push(trimmed.to_string());
+                    }
+                }
+            }
+            if self.prompt_history.is_empty() {
+                return;
+            }
         }
         match self.history_cursor {
             None => {
@@ -313,15 +463,18 @@ impl AssistantViewState {
                 let last_idx = self.prompt_history.len() - 1;
                 self.history_cursor = Some(last_idx);
                 self.input = self.prompt_history[last_idx].clone();
+                self.input_cursor = None;
             }
             Some(idx) => {
                 if idx > 0 {
                     let new_idx = idx - 1;
                     self.history_cursor = Some(new_idx);
                     self.input = self.prompt_history[new_idx].clone();
+                    self.input_cursor = None;
                 }
             }
         }
+        self.update_slash_suggestions();
     }
 
     pub fn history_down(&mut self) {
@@ -330,11 +483,14 @@ impl AssistantViewState {
                 let new_idx = idx + 1;
                 self.history_cursor = Some(new_idx);
                 self.input = self.prompt_history[new_idx].clone();
+                self.input_cursor = None;
             } else {
                 self.history_cursor = None;
                 self.input = self.history_draft.clone();
                 self.history_draft.clear();
+                self.input_cursor = None;
             }
+            self.update_slash_suggestions();
         }
     }
 
@@ -358,6 +514,7 @@ impl AssistantViewState {
             token_usage: None,
         });
         self.input.clear();
+        self.input_cursor = None;
         self.is_busy = true;
         self.busy_status = "Consulting AI provider & cluster state...".to_string();
         self.busy_start = Some(std::time::Instant::now());
@@ -479,6 +636,7 @@ impl AssistantViewState {
             token_usage: None,
         }];
         self.input.clear();
+        self.input_cursor = None;
         self.is_busy = false;
         self.busy_status.clear();
         self.busy_start = None;
@@ -790,7 +948,7 @@ pub fn render_assistant_view(
         format!("⚡ {} tokens, ", format_number(u.total_tokens))
     }).unwrap_or_default();
     let tools_hint = if state.expand_tools { "<Ctrl+t> Fold Tools" } else { "<Ctrl+t> Tools" };
-    let copy_hint = if state.selection.is_some() { "<c> Copy Selection" } else { "<c> Copy" };
+    let copy_hint = if state.selection.is_some() { "<Ctrl+c> Copy Selection" } else { "<Ctrl+c> Copy" };
     let cluster_tag = if !state.context_name.is_empty() {
         format!(" @{} ", state.context_name)
     } else {
@@ -815,13 +973,27 @@ pub fn render_assistant_view(
 
     // Calculate dynamic input box height based on wrapped lines
     let input_inner_width = (inner.width.saturating_sub(2).max(10)) as usize;
-    let input_full_text = format!("{}█", state.input);
+    let cursor_idx = state.cursor_pos();
+    let chars: Vec<char> = state.input.chars().collect();
+    let before: String = chars[..cursor_idx].iter().collect();
+    let after: String = chars[cursor_idx..].iter().collect();
+    let input_full_text = format!("{}█{}", before, after);
+
     let mut input_lines = 0;
     for raw_line in input_full_text.split('\n') {
         let line = Line::from(raw_line.to_string());
         input_lines += wrap_line(line, input_inner_width).len().max(1);
     }
     let input_lines = input_lines.max(1);
+
+    let before_with_cursor = format!("{}█", before);
+    let mut cursor_row = 0;
+    for raw_line in before_with_cursor.split('\n') {
+        let line = Line::from(raw_line.to_string());
+        cursor_row += wrap_line(line, input_inner_width).len().max(1);
+    }
+    let cursor_row = cursor_row.saturating_sub(1) as u16;
+
     let max_box_height = (inner.height / 3).clamp(3, 8);
     let input_box_height = ((input_lines as u16) + 2).min(max_box_height).max(3);
 
@@ -1078,14 +1250,18 @@ pub fn render_assistant_view(
     } else if !state.auto_scroll && effective_scroll < max_scroll {
         format!(" Ask Assistant (<End> Follow bottom, <PageUp>/<PageDown> Scroll) [Line {}/{}] ", effective_scroll + 1, total_lines)
     } else {
-        " Ask Assistant (Type '/' for SRE Playbooks, ↑/↓ History, <c> Copy, <Ctrl+s> Settings) ".to_string()
+        " Ask Assistant (Type '/' for SRE Playbooks, ↑/↓ History, <Ctrl+c> Copy, <Ctrl+s> Settings) ".to_string()
     };
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if !state.slash_suggestions.is_empty() { Theme::ACCENT } else { Theme::CYAN }))
         .title(input_title);
     let visible_input_rows = input_box_height.saturating_sub(2);
-    let scroll_y = (input_lines as u16).saturating_sub(visible_input_rows);
+    let scroll_y = if cursor_row >= visible_input_rows {
+        (cursor_row + 1).saturating_sub(visible_input_rows).min((input_lines as u16).saturating_sub(visible_input_rows))
+    } else {
+        0
+    };
 
     let input_widget = Paragraph::new(input_full_text)
         .block(input_block)
@@ -2225,5 +2401,104 @@ Done.";
         let input_box_height = ((input_lines as u16) + 2).min(max_box_height).max(3);
         assert!(input_box_height >= 5);
         assert!(input_box_height <= 8);
+    }
+
+    #[test]
+    fn test_assistant_cursor_navigation_and_editing() {
+        let mut state = AssistantViewState::new();
+        assert_eq!(state.cursor_pos(), 0);
+
+        // Typing characters
+        state.insert_char('h');
+        state.insert_char('i');
+        assert_eq!(state.input, "hi");
+        assert_eq!(state.cursor_pos(), 2);
+
+        // Left arrow
+        state.move_cursor_left();
+        assert_eq!(state.cursor_pos(), 1);
+
+        // Inserting character in between
+        state.insert_char('a');
+        assert_eq!(state.input, "hai");
+        assert_eq!(state.cursor_pos(), 2);
+
+        // Home
+        state.move_cursor_home();
+        assert_eq!(state.cursor_pos(), 0);
+
+        // Insert at beginning
+        state.insert_char('o');
+        assert_eq!(state.input, "ohai");
+        assert_eq!(state.cursor_pos(), 1);
+
+        // End
+        state.move_cursor_end();
+        assert_eq!(state.cursor_pos(), 4);
+
+        // Right arrow at end stays at end
+        state.move_cursor_right();
+        assert_eq!(state.cursor_pos(), 4);
+
+        // Backspace at end
+        state.backspace();
+        assert_eq!(state.input, "oha");
+        assert_eq!(state.cursor_pos(), 3);
+
+        // Left, then Delete (forward delete)
+        state.move_cursor_left(); // at pos 2 ('a')
+        assert_eq!(state.cursor_pos(), 2);
+        state.delete(); // deletes 'a'
+        assert_eq!(state.input, "oh");
+        assert_eq!(state.cursor_pos(), 2);
+
+        // Insert string
+        state.insert_str(" beautiful world");
+        assert_eq!(state.input, "oh beautiful world");
+
+        // Word navigation
+        state.move_cursor_word_left(); // moves before "world"
+        assert_eq!(state.cursor_pos(), 13);
+        state.move_cursor_word_left(); // moves before "beautiful"
+        assert_eq!(state.cursor_pos(), 3);
+        state.move_cursor_word_right(); // moves after "beautiful "
+        assert_eq!(state.cursor_pos(), 13);
+
+        // Delete word back
+        state.delete_word_back(); // deletes "beautiful "
+        assert_eq!(state.input, "oh world");
+        assert_eq!(state.cursor_pos(), 3);
+
+        // Clear input
+        state.clear_input();
+        assert_eq!(state.input, "");
+        assert_eq!(state.cursor_pos(), 0);
+    }
+
+    #[test]
+    fn test_assistant_history_seeding_from_messages() {
+        let mut state = AssistantViewState::new();
+        // Prompt history is empty, but messages has user messages with whitespace and duplicates
+        state.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: "  seeded query  ".to_string(),
+            timestamp: "12:00:00".to_string(),
+            tool_calls: Vec::new(),
+            token_usage: None,
+        });
+        state.messages.push(ChatMessage {
+            role: "user".to_string(),
+            content: "seeded query".to_string(),
+            timestamp: "12:00:05".to_string(),
+            tool_calls: Vec::new(),
+            token_usage: None,
+        });
+
+        // Pressing Up seeds prompt_history with trimmed content and deduplicates
+        state.history_up();
+        assert_eq!(state.prompt_history.len(), 1);
+        assert_eq!(state.prompt_history[0], "seeded query");
+        assert_eq!(state.input, "seeded query");
+        assert_eq!(state.cursor_pos(), 12);
     }
 }

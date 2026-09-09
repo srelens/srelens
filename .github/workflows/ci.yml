@@ -59,8 +59,8 @@ jobs:
         # they are measured across apps/desktop and packages/core together.
         # Running the packages individually would report green with no gate at all.
         run: pnpm test
-      - name: Updater manifest tests
-        run: node --test .github/scripts/compose-latest.test.cjs
+      - name: Release workflow tests
+        run: node --test .github/scripts/*.test.cjs
       - name: Performance-baseline script tests
         # The size classifier decides which artifacts are compared against
         # which (#31) — a wrong bucket silently publishes a bogus comparison.
@@ -75,6 +75,15 @@ jobs:
       # Tauri v2 system libraries needed to compile the desktop crate.
       - name: Install Linux dependencies
         run: |
+          # The runner image ships apt repos this build does not use --
+          # Chrome and Microsoft -- and `apt-get update` exits 100 when ANY
+          # configured source fails, which under `bash -e` takes the step
+          # with it. Google served a Packages.gz that did not match its own
+          # Release file for hours on 2026-09-09 and red-ed every job here,
+          # none of which wants a single package from it. Removing a source
+          # list uninstalls nothing, so the preinstalled Chrome stays put.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -167,6 +176,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Linux dependencies
         run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in the backend job above: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \

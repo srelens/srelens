@@ -260,6 +260,14 @@ impl Db {
         Ok(())
     }
 
+    pub async fn list_settings(&self, user_id: i64) -> Result<Vec<(String, String)>, String> {
+        sqlx::query_as("SELECT key, value_json FROM settings WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_all(self.pool())
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     pub async fn get_setting(&self, user_id: i64, key: &str) -> Result<Option<String>, String> {
         let row: Option<(String,)> =
             sqlx::query_as("SELECT value_json FROM settings WHERE user_id = ? AND key = ?")
