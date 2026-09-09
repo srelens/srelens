@@ -10,8 +10,9 @@ import {
   startMcpHttp,
   stopMcpHttp,
 } from "@srelens/core";
-import { Badge, Button, ConfirmDialog, Panel, SubHead } from "@srelens/ui-kit";
+import { Badge, Button, ConfirmDialog, Field, Panel, SubHead, TextInput } from "@srelens/ui-kit";
 import { FailureAlert } from "../../lib/errorCopy";
+import { McpClientSetup } from "./McpClientSetup";
 import { useMcpAutoStart } from "../../lib/mcpAutoStart";
 
 /**
@@ -151,14 +152,7 @@ import { useMcpAutoStart } from "../../lib/mcpAutoStart";
  * still loading or refused. A question is the last place to assert a fact from
  * nothing.
  *
- * **No port editor** (#374). Changing the port is a second, differently-shaped
- * job — validate, persist, and restart a listener that may be serving an agent
- * mid-call — and this pane has no control for it, so it makes no claim that it
- * has one. The persisted value is read and honoured; classic is where it is
- * still set.
- *
- * **`Clients` is not drawn** (#369): `mcpClientConfig` generates configuration
- * *for* a client to paste elsewhere; srelens does not track who connects.
+ * Port edits are applied explicitly, with confirmation before restarting a listener.
  */
 
 /**
@@ -248,11 +242,12 @@ export function McpServer() {
     null,
   );
 
-  /** Read ONCE, at mount: the port a start uses and a stopped server's address
-   *  is composed from. Not re-read per render — nothing in this tree writes it,
-   *  and a value that changed between the address on screen and the number
-   *  handed to `startMcpHttp` would be two different claims. */
-  const [port] = useState(() => loadMcpSettings().port);
+  const [port, setPort] = useState(() => loadMcpSettings().port);
+  const [portDraft, setPortDraft] = useState(() => String(port));
+  const [portQuestion, setPortQuestion] = useState<number | null>(null);
+  const [portError, setPortError] = useState<unknown>(null);
+  const nextPort = Number(portDraft);
+  const validPort = /^\d+$/.test(portDraft) && Number.isInteger(nextPort) && nextPort >= 1 && nextPort <= 65535;
 
   /** Bumped by anything that authoritatively establishes `statusRead` — the
    * fetch below starting, and the direct sets in `start()`, `stop()` and
@@ -349,6 +344,27 @@ export function McpServer() {
   function establishStatus(url: string | null) {
     statusSeq.current += 1;
     setStatusRead({ kind: "ready", value: url });
+  }
+
+  async function changePort(target: number) {
+    setBusy(true); setPortError(null);
+    // A restart may stop the existing listener before failing to bind.
+    // Invalidate earlier reads and re-read status if the restart fails.
+    statusSeq.current += 1;
+    try {
+      if (running) establishStatus(await startMcpHttp(target));
+      setPort(target); setPortDraft(String(target));
+      saveMcpSettings({ enabled: running, port: target });
+    } catch (error) {
+      setPortError(error);
+      try {
+        const live = await mcpHttpStatus();
+        establishStatus(live);
+        saveMcpSettings({ enabled: live !== null, port });
+      } catch (statusError) {
+        setStatusRead({ kind: "error", error: statusError });
+      }
+    } finally { setBusy(false); setPortQuestion(null); }
   }
 
   async function copyToken() {
@@ -454,6 +470,7 @@ export function McpServer() {
   }
 
   return (
+    <>
     <Panel
       title={
         <span className="flex flex-wrap items-center gap-2">
@@ -503,6 +520,18 @@ export function McpServer() {
           </div>
         </>
       )}
+
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <Field label="MCP server port" error={validPort ? undefined : "Choose a whole number from 1 to 65535."}>
+          <TextInput type="number" value={portDraft} onValueChange={setPortDraft} disabled={busy || shellStarting} invalid={!validPort} className="w-28" />
+        </Field>
+        <Button variant="secondary" disabled={!validPort || nextPort === port || busy || shellStarting || statusRead.kind !== "ready"}
+          onClick={() => running ? setPortQuestion(nextPort) : void changePort(nextPort)}>Save port</Button>
+      </div>
+      {portError !== null && <FailureAlert tone="sev" title="Could not change the MCP server port" error={portError} />}
+      {portQuestion !== null && <ConfirmDialog title="Change MCP server port?"
+        message={`Restart the MCP server on port ${portQuestion}? Active requests will be interrupted. Update your clients to use the new address.`}
+        confirmLabel="Change port and restart" busy={busy} onConfirm={() => void changePort(portQuestion)} onCancel={() => setPortQuestion(null)} />}
 
       {serverError !== null && (
         <FailureAlert
@@ -566,14 +595,6 @@ export function McpServer() {
         <FailureAlert tone="sev" title="The MCP server's token could not be updated" error={actionError} />
       )}
 
-      {/* #369: mcpClientConfig GENERATES config FOR a client to paste
-          elsewhere; srelens never learns who used it, so a `Clients` list
-          (§23 draws one) would be a claim this pane cannot back. */}
-      <p className="mt-3 text-[0.75rem] leading-relaxed text-muted">
-        srelens cannot say which clients are connected right now — it only generates configuration for a client to
-        paste elsewhere, and never learns who used it.
-      </p>
-
       {asking !== null && (
         <ConfirmDialog
           title={asking === "rotate" ? "Rotate the bearer token?" : "Revoke the bearer token?"}
@@ -592,5 +613,7 @@ export function McpServer() {
         />
       )}
     </Panel>
+    <McpClientSetup url={address} token={token} />
+    </>
   );
 }

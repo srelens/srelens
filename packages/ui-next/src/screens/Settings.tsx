@@ -157,7 +157,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
         // `AgentAccess` genuinely does stay: it calls `gatedCapabilityIds` and
         // `isTauri` and no backend command at all.
         return (
-          <div className="flex flex-col gap-4">
+          <div className="settings-agent flex flex-col">
             <AgentAccess />
             {desktop ? (
               <>
@@ -286,7 +286,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
           // The one Tab stop into the pane's own content, so a reader arrowing
           // to a section can Tab straight into it.
           tabIndex={0}
-          className={`scroll min-h-0 min-w-0 flex-1${active === "updates" || active === "clusters" ? "" : " p-3"}`}
+          className={`scroll min-h-0 min-w-0 flex-1${active === "updates" || active === "clusters" || active === "agent" ? "" : " p-3"}`}
         >
           {pane(active)}
           {desktop && updatesOpened && (
