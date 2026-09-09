@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { afterEach, describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
 
@@ -31,6 +31,9 @@ const { mcpSecurity } = vi.hoisted(() => ({
 vi.mock("@srelens/core/lib/mcpSecurity", () => mcpSecurity);
 
 import { McpSettingsSection } from "./McpSettingsSection";
+
+const PLATFORM = navigator.platform;
+afterEach(() => Object.defineProperty(navigator, "platform", { configurable: true, value: PLATFORM }));
 
 beforeEach(() => {
   localStorage.clear();
@@ -80,7 +83,9 @@ describe("McpSettingsSection", () => {
       on_path: true,
     });
     render(<McpSettingsSection />);
-    fireEvent.click(screen.getByRole("button", { name: /Install srelens CLI/ }));
+    const install = screen.getByRole("button", { name: /Install srelens CLI/ });
+    await waitFor(() => expect((install as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(install);
     await waitFor(() => expect(mcp.installSrelensCli).toHaveBeenCalled());
     // After install the button relabels to Reinstall and the path is shown.
     expect(await screen.findByRole("button", { name: /Reinstall srelens CLI/ })).toBeDefined();
@@ -96,6 +101,28 @@ describe("McpSettingsSection", () => {
     });
     render(<McpSettingsSection />);
     expect(await screen.findByText(/isn't on your PATH/)).toBeDefined();
+  });
+
+  it("uses the absolute executable on Windows and hides unsupported installation", async () => {
+    Object.defineProperty(navigator, "platform", { configurable: true, value: "Win32" });
+    const path = String.raw`C:\Program Files\srelens\srelens.exe`;
+    mcp.srelensCliStatus.mockResolvedValue({ installed: true, path, links_to: null, on_path: false });
+    render(<McpSettingsSection />);
+
+    expect(await screen.findByText(/Run the PowerShell command in PowerShell/)).toBeDefined();
+    expect(screen.getAllByText(new RegExp(path.replace(/[\\]/g, "\\\\")))).not.toHaveLength(0);
+    expect(screen.queryByRole("button", { name: /Install srelens CLI/ })).toBeNull();
+  });
+
+  it("shows a CLI status failure and allows retry instead of offering installation", async () => {
+    mcp.srelensCliStatus.mockRejectedValueOnce(new Error("status unavailable"));
+    render(<McpSettingsSection />);
+    expect((await screen.findByRole("alert")).textContent).toMatch(/status unavailable/i);
+    expect(screen.queryByRole("button", { name: "Install srelens CLI" })).toBeNull();
+
+    mcp.srelensCliStatus.mockResolvedValue({ installed: false, path: "/home/u/.local/bin/srelens", links_to: null, on_path: false });
+    fireEvent.click(screen.getByRole("button", { name: "Retry CLI status" }));
+    expect(await screen.findByRole("button", { name: "Install srelens CLI" })).toBeDefined();
   });
 
   it("shows the client config for the selected tool and transport", async () => {
