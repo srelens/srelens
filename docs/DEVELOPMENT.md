@@ -140,6 +140,23 @@ The frontend side is identical in both cases and lives in `@srelens/core` (`pack
 
 `packages/core/src/transport/` is the only frontend code that knows which host it is running in. `transport.ts` picks `tauriTransport` or `webTransport` at load time based on `isTauri()`, and re-exports one interface (`invokeCapability`, `invokeCommand`, `on`, `subscribe`, …). Everything else — stores, components, tests — depends only on that interface. This is what makes the UI testable in jsdom *and* what makes web mode possible at all, so keep `@tauri-apps/api` imports confined to `packages/core/src/transport/`.
 
+### Persisting application settings
+
+Use `settingsStorage` from `@srelens/core` for every persistent preference,
+including the selected design. Application bootstrap awaits
+`initializeSettingsStorage()` before choosing the design or mounting React.
+The adapter reads a synchronous in-memory mirror and writes to the desktop
+settings file or the signed-in web user's SQLite settings. Web bootstrap loads
+`GET /api/settings`; writes use the existing per-key settings endpoints.
+
+Do not add direct browser-storage writes for preferences. Legacy browser values
+are imported from an explicit allowlist, and removed only after backend writes
+succeed. Backend settings take precedence over stale local copies. A backend
+initialization failure leaves the app readable but does not redirect writes to
+local storage. Before reloading after a preference change, await
+`flushSettingsWrites({ throwOnError: true })` and keep the current screen if it
+fails. Temporary navigation handoffs and unsaved editor drafts are not settings.
+
 ### Running the MCP server
 
 ```sh

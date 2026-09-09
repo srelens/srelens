@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { settingsStorage } from "@srelens/core";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { DESIGN_KEY, PORTED_SCREENS, loadDesign, saveDesign } from "./design";
 
 beforeEach(() => localStorage.clear());
@@ -94,4 +95,12 @@ describe("the list of ported screens", () => {
       "Settings",
     ]);
   });
+});
+
+it("stores the design choice through the shared backend settings adapter", () => {
+  const write = vi.spyOn(settingsStorage, "setItem").mockImplementation(() => {});
+  expect(saveDesign("next")).toBe(true);
+  expect(write).toHaveBeenCalledWith(DESIGN_KEY, "next");
+  expect(localStorage.getItem(DESIGN_KEY)).toBeNull();
+  write.mockRestore();
 });

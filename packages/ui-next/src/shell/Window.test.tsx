@@ -183,7 +183,7 @@ import { ConsoleProvider, useConsole } from "../console";
 import { Window } from "./Window";
 import * as store from "../lib/tabsStore";
 import { resetProbes } from "../lib/probe";
-import { resetView } from "../lib/workspace";
+import { EXPANDED_KEY, resetView } from "../lib/workspace";
 import { defaultState, makeTab } from "../lib/tabs";
 import { defaultMark, getMark, setMark, MARKS_KEY } from "../lib/marks";
 import { contextFor, getContextsError, getContextsStatus, resetContexts } from "../lib/clusters";
@@ -295,6 +295,17 @@ describe("Window boot", () => {
     await booted();
     await waitFor(() => expect(connectCluster).toHaveBeenCalled());
     expect(store.activeRoute()).toBe("/settings");
+  });
+
+  it("loads the cluster's saved sidebar groups before navigation mounts", async () => {
+    localStorage.setItem(EXPANDED_KEY, JSON.stringify({ prod: ["network"], offline: ["workloads"] }));
+    await booted();
+    expect(screen.getByRole("treeitem", { name: "Services" })).toBeDefined();
+    expect(screen.queryByRole("treeitem", { name: "Pods" })).toBeNull();
+    await userEvent.click(screen.getByRole("treeitem", { name: "Workloads" }));
+    expect(JSON.parse(localStorage.getItem(EXPANDED_KEY)!)).toEqual({
+      prod: ["network", "workloads"], offline: ["workloads"],
+    });
   });
 
   it("builds a Default workspace from the contexts when nothing was saved", async () => {

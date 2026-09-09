@@ -21,7 +21,7 @@ import { getMark, loadMarks, useMark } from "../lib/marks";
 import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
-import { loadNamespaces } from "../lib/workspace";
+import { loadExpanded, loadNamespaces } from "../lib/workspace";
 import { defaultState, reconcile } from "../lib/tabs";
 import { flushSave, installFlushOnUnload, loadTabsState, scheduleSave } from "../lib/tabsPersist";
 import {
@@ -179,9 +179,9 @@ export function Window({
       // unfolded — and the first unfold then spreads over an empty record and
       // erases every other kind's, exactly as `loadMarks` above describes.
       loadSectionFolds();
-      // And the namespace selection each cluster was narrowed to — unlike
-      // `links`/`expanded` on the same store, this one is persisted, and
-      // unread it costs the reader their picker choice on every launch.
+      // Restore each cluster's sidebar groups and namespace selection before
+      // rendering navigation, so the first toggle preserves other clusters.
+      loadExpanded();
       loadNamespaces();
       // And the subjects a bare `/logs` offers as a way in. Unread, that
       // screen has nothing to offer on the first visit of every launch — and
