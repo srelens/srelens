@@ -22,6 +22,7 @@ const MIGRATION_KEYS = [
   "srelens.defaultNamespace",
   "srelens.workspaceLayout",
   "srelens.contextProfiles",
+  "srelens.next.marks",
   "srelens.kubeconfigFiles",
   "srelens.hiddenColumns",
   "srelens.contextOrder",
