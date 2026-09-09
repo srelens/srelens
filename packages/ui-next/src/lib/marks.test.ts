@@ -195,11 +195,11 @@ describe("classic context identity parity", () => {
     // that the unresolved profile belonged to it.
     loadMarks(s);
     rememberContextMarks([
-      { name: "file-b/prod", stableId: "id-b" },
+      { name: "prod", stableId: "id-b" },
     ] as import("@srelens/core").ClusterContext[], s);
     expect(JSON.parse(s.m.get("srelens.contextProfiles")!)).toHaveProperty("prod");
     expect(JSON.parse(s.m.get("srelens.contextProfiles")!)).not.toHaveProperty("id-b");
-    expect(getMark("id-b", "file-b/prod").name).toBe("file-b/prod");
+    expect(getMark("id-b", "prod").name).toBe("prod");
   });
   it("uses the same generated initials as classic for long context names", () => {
     expect(defaultMark("dev-lon-nrtc-6bcb8b63").short).toBe("DLN");
