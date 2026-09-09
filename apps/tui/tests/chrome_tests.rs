@@ -1142,13 +1142,13 @@ fn the_assistant_title_names_the_provider_model_and_key_hints() {
     let text = assistant_text(200, 30, &state);
     let settings = AiSettings::default();
     let model = settings.get_model(settings.default_provider);
-    assert!(text.contains(&format!(" SRElens AI Assistant[Anthropic (Claude) - {model}] [<c> Copy, <Ctrl+t> Tools, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ")), "{text}");
+    assert!(text.contains(&format!(" SRElens AI Assistant[Anthropic (Claude) - {model}] [<Ctrl+c> Copy, <Ctrl+t> Tools, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ")), "{text}");
     assert!(text.contains("SRElens [10:00:00]:"), "{text}");
     assert!(
         text.contains("Hello! I am your SRElens AI Assistant."),
         "{text}"
     );
-    assert!(text.contains(" Ask Assistant (Type '/' for SRE Playbooks, ↑/↓ History, <c> Copy, <Ctrl+s> Settings) "), "{text}");
+    assert!(text.contains(" Ask Assistant (Type '/' for SRE Playbooks, ↑/↓ History, <Ctrl+c> Copy, <Ctrl+s> Settings) "), "{text}");
 }
 
 #[test]
@@ -1178,7 +1178,7 @@ fn the_assistant_title_reflects_context_caveman_tokens_selection_and_folded_tool
         "{text}"
     );
     assert!(
-        text.contains("[⚡  1,234 tokens, <c> Copy Selection, <Ctrl+t> Fold Tools, <Ctrl+e> Save"),
+        text.contains("[⚡  1,234 tokens, <Ctrl+c> Copy Selection, <Ctrl+t> Fold Tools, <Ctrl+e> Save"),
         "{text}"
     );
 }
@@ -1611,7 +1611,7 @@ fn a_selection_spanning_rows_is_highlighted_and_extracted_from_the_rendered_rows
         Some("[10:00:00]:\nhello")
     );
     let text = assistant_text(160, 30, &state);
-    assert!(text.contains("<c> Copy Selection"), "{text}");
+    assert!(text.contains("<Ctrl+c> Copy Selection"), "{text}");
     assert!(
         text.contains("hello world"),
         "highlighting keeps the text intact: {text}"

@@ -2011,17 +2011,15 @@ async fn assistant_chords_clear_the_conversation_and_toggle_tool_chips() {
 }
 
 #[tokio::test]
-async fn ctrl_c_in_the_assistant_quits_instead_of_copying_the_last_answer() {
-    // `handle_key_event` treats Ctrl+C as the global quit before the assistant
-    // ever sees it, so the assistant's own Ctrl+C copy chord cannot fire.
+async fn ctrl_c_in_the_assistant_copies_the_last_answer() {
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.active_view = ActiveView::Assistant;
     app.assistant_state
         .add_assistant_message("the cluster is fine".into());
 
     app.handle_key_event(common::ctrl('c')).await;
-    assert!(!app.is_running, "Ctrl+C exits the TUI");
-    assert_eq!(toast(&app), "", "nothing is copied on the way out");
+    assert!(app.is_running, "Ctrl+C copies without exiting");
+    assert_eq!(toast(&app), "✓ Copied assistant answer to clipboard");
 }
 
 // ---------------------------------------------------------------------------

@@ -380,15 +380,9 @@ fn alt(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
 }
 
-/// Type into the assistant composer. A leading `c` on an empty input is the
-/// "copy the last answer" shortcut rather than a character, so the first
-/// character is seeded directly when it would be swallowed.
+/// Type into the assistant composer.
 async fn compose(app: &mut App, text: &str) {
-    for (i, c) in text.chars().enumerate() {
-        if i == 0 && c == 'c' && app.assistant_state.input.is_empty() {
-            app.assistant_state.input.push('c');
-            continue;
-        }
+    for c in text.chars() {
         app.handle_key_event(common::ch(c)).await;
     }
 }
@@ -1303,7 +1297,7 @@ async fn mouse_in_the_assistant_toggles_tool_chips_and_selects_text() {
         "assistant keeps its own selection"
     );
 
-    app.handle_key_event(common::ch('c')).await;
+    app.handle_key_event(common::ctrl('c')).await;
     assert_eq!(toast(&app), "✓ Copied selection to clipboard");
 
     // Re-select, then click outside the viewport to clear.
@@ -1840,18 +1834,38 @@ async fn assistant_editing_keys_shape_the_input_buffer() {
     app.handle_key_event(common::ch('c')).await;
     assert_eq!(app.assistant_state.input, "cc");
 
-    // 'c' on an empty input copies the last assistant answer.
+    // 'c' on an empty input types 'c' even when an assistant message exists (no accidental copy).
     app.assistant_state.input.clear();
     app.assistant_state
         .add_assistant_message("the answer".into());
     app.handle_key_event(common::ch('c')).await;
+    assert_eq!(app.assistant_state.input, "c");
+
+    // Ctrl+c copies the last assistant answer.
+    app.assistant_state.input.clear();
+    app.handle_key_event(common::ctrl('c')).await;
     assert_eq!(toast(&app), "✓ Copied assistant answer to clipboard");
     assert_eq!(app.assistant_state.input, "");
 
-    // ... but with text in the buffer it is still typing.
+    // Typing and cursor navigation (Left, Right, Home, End, Delete)
     common::type_str(&mut app, "ab").await;
     app.handle_key_event(common::ch('c')).await;
     assert_eq!(app.assistant_state.input, "abc");
+    // Left arrow moves cursor before 'c'
+    app.handle_key_event(common::key(KeyCode::Left)).await;
+    app.handle_key_event(common::ch('X')).await;
+    assert_eq!(app.assistant_state.input, "abXc");
+    // Home moves to start
+    app.handle_key_event(common::key(KeyCode::Home)).await;
+    app.handle_key_event(common::ch('Z')).await;
+    assert_eq!(app.assistant_state.input, "ZabXc");
+    // Delete removes 'a' (the character at cursor)
+    app.handle_key_event(common::key(KeyCode::Delete)).await;
+    assert_eq!(app.assistant_state.input, "ZbXc");
+    // End moves to end
+    app.handle_key_event(common::key(KeyCode::End)).await;
+    app.handle_key_event(common::ch('!')).await;
+    assert_eq!(app.assistant_state.input, "ZbXc!");
 
     // Ctrl+t toggles the tool chip expansion, Ctrl+l clears the conversation.
     let expanded = app.assistant_state.expand_tools;
