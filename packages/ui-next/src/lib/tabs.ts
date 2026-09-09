@@ -137,6 +137,7 @@ export function defaultState(contexts: ClusterContext[]): TabsState {
  */
 export function reconcile(state: TabsState, contexts: ClusterContext[]): TabsState {
   const known = new Set(contexts.map((c) => c.stableId));
+  const contextNames = new Map(contexts.map((c) => [c.stableId, c.name]));
   let changed = false;
 
   let workspaces = state.workspaces.map((w) => {
@@ -148,7 +149,8 @@ export function reconcile(state: TabsState, contexts: ClusterContext[]): TabsSta
     // and otherwise the first that remains takes over — including for a
     // workspace stored before the field existed, which has none at all.
     const active = w.activeCluster && clusters.includes(w.activeCluster) ? w.activeCluster : clusters[0];
-    if (active !== w.activeCluster) {
+    const activeChanged = active !== w.activeCluster;
+    if (activeChanged) {
       next = { ...next };
       if (active) next.activeCluster = active;
       else delete next.activeCluster;
@@ -156,6 +158,13 @@ export function reconcile(state: TabsState, contexts: ClusterContext[]): TabsSta
 
     let tabs = next.tabs;
     if (tabs.length === 0) tabs = [homeTab()];
+    if (activeChanged && active) {
+      const clusterName = contextNames.get(active);
+      if (clusterName) {
+        const relabelled = tabs.map((tab) => relabel(tab, clusterName));
+        if (relabelled.some((tab, index) => tab !== tabs[index])) tabs = relabelled;
+      }
+    }
     if (tabs !== next.tabs) next = { ...next, tabs };
 
     if (!tabs.some((t) => t.id === next.activeId)) next = { ...next, activeId: tabs[0].id };

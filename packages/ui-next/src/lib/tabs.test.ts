@@ -143,6 +143,17 @@ describe("reconcile", () => {
     expect(reconcile(s, []).workspaces[0].activeCluster).toBeUndefined();
   });
 
+  it("relabels cluster-scoped tabs when reconciliation picks a surviving context", () => {
+    const s = defaultState([ctx("a", "prod"), ctx("b", "staging")]);
+    s.workspaces[0].tabs = [makeTab("/k/pods", { clusterName: "prod" }), makeTab("/settings")];
+    s.workspaces[0].activeId = s.workspaces[0].tabs[0].id;
+
+    const out = reconcile(s, [ctx("b", "staging")]).workspaces[0];
+    expect(out.activeCluster).toBe("b");
+    expect(out.tabs[0].sub).toBe("staging");
+    expect(out.tabs[1].sub).toBeUndefined();
+  });
+
   it("adopts the first cluster for a workspace stored before there was an active one", () => {
     // Storage version 1 predates the field, so the documents on disk have no
     // `activeCluster`: boot has to fill it in or the rail comes up with

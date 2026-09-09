@@ -29,7 +29,7 @@ export const CONTEXT_LOGO_OPTIONS: Array<{ value: ContextLogo; label: string }> 
 function safeImageSource(value?: string): string | null {
   const source = value?.trim();
   if (!source) return null;
-  if (/^data:image\/(png|jpeg|webp|gif);base64,/i.test(source)) return source;
+  if (/^data:image\/(png|jpeg|webp|gif|svg\+xml);base64,/i.test(source)) return source;
   if (/^https?:\/\//i.test(source)) return source;
   return null;
 }
