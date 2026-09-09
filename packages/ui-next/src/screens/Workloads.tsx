@@ -48,13 +48,14 @@ import { withRowAffordances } from "../lib/kinds/rowAffordances";
 import type { ListRow } from "../lib/kinds/types";
 import { useResourceList, type ResourceList } from "../lib/resourceList";
 import { describe } from "../lib/routes";
-import { openTab } from "../lib/tabsStore";
+import { openTab, useTabs } from "../lib/tabsStore";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { useRowMenu } from "./ResourceMenu";
 import {
   NamespaceErrorAlert,
   NamespacePicker,
   NoClusterScreen,
+  PausedClusterScreen,
   StaleSelectionAlert,
   columnOptionsFor,
   emptyTableCopy,
@@ -241,10 +242,14 @@ const UNION_COLUMNS: Column<WorkloadRow>[] = [
  */
 export function Workloads({ route }: { route: string }) {
   const context = useActiveContext();
+  const { workspace } = useTabs();
   const title = describe(route, context?.name).title;
 
   if (!context) {
     return <NoClusterScreen title={title} noun="workloads" />;
+  }
+  if (workspace.pausedClusters?.includes(context.stableId)) {
+    return <PausedClusterScreen title={title} noun="workloads" context={context} />;
   }
 
   return <WorkloadList route={route} title={title} context={context} />;

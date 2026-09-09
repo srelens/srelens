@@ -33,7 +33,7 @@ import { rowKey, type KindDescriptor, type ListRow } from "../lib/kinds/types";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
 import { useResourceList } from "../lib/resourceList";
 import { describe, isBuiltInKind } from "../lib/routes";
-import { openTab } from "../lib/tabsStore";
+import { openTab, useTabs } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
@@ -46,6 +46,7 @@ import {
   NamespaceErrorAlert,
   NamespacePicker,
   NoClusterScreen,
+  PausedClusterScreen,
   StaleSelectionAlert,
   columnOptionsFor,
   defaultHiddenKeys,
@@ -79,6 +80,7 @@ const CRD_RAIL_WIDTH = 264;
  */
 export function Resources({ route }: { route: string }) {
   const context = useActiveContext();
+  const { workspace } = useTabs();
   const slug = route.slice("/k/".length);
   // The tab strip already knows what this route is called; asking `describe`
   // keeps the screen's title and the tab's title the same string.
@@ -86,6 +88,9 @@ export function Resources({ route }: { route: string }) {
 
   if (!context) {
     return <NoClusterScreen title={title} noun="resources" />;
+  }
+  if (workspace.pausedClusters?.includes(context.stableId)) {
+    return <PausedClusterScreen title={title} noun="resources" context={context} />;
   }
 
   return <KindList route={route} slug={slug} title={title} context={context} />;

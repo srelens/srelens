@@ -47,8 +47,6 @@ import {
   useTabs,
 } from "../lib/tabsStore";
 import { useConsole } from "../console";
-import { openCluster } from "../lib/openCluster";
-import { getInfo, probeCluster } from "../lib/probe";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
 import { Body } from "./Body";
@@ -102,13 +100,6 @@ export function Window({
   active = true,
 }: WindowProps) {
   const [booted, setBooted] = useState(false);
-  // A Home tab restored from disk is an explicit reader choice. Keep this
-  // separate from the tab shape: a fresh state has the same single `/` tab.
-  const restoredWorkspace = useRef(false);
-  const mounted = useRef(false);
-  const visible = useRef(active);
-  visible.current = active;
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   /**
    * The vault is usable, as `LockGate` reports it — classic's `vaultReady`, by
    * the same name and for the same one consumer. Flipped once per window; see
@@ -141,7 +132,7 @@ export function Window({
   // uiScale doc), so a zoom chord here has to fall through to it untouched.
   const desktop = useMemo(() => isTauri(), []);
   const { setOpen, setScope } = useConsole();
-  const { tabs, activeId, workspace } = useTabs();
+  const { tabs, activeId } = useTabs();
   useMark("", "");
   const activeIdCluster = useActiveCluster();
   const activeCtx = contexts.find((c) => c.stableId === activeIdCluster) ?? null;
@@ -221,7 +212,6 @@ export function Window({
         failure = outcome.error ?? "";
         listed = true;
         const saved = loadTabsState();
-        restoredWorkspace.current = saved !== null;
         if (saved && failure !== "") {
           // The list failed, not the clusters: reconciling against nothing would
           // strip every workspace's cluster ids and the next change would persist
@@ -266,39 +256,6 @@ export function Window({
     };
   }, [booted]);
 
-  // Every cluster you are looking at gets probed once, so the rail shows link
-  // state and the status bar shows a version without waiting to be asked. The
-  // effect runs per workspace rather than per render — switching away and back
-  // re-runs it, and the probe store's memory is what keeps it to once each.
-  const startupOverviewOffered = useRef(false);
-  const workspaceId = workspace.id;
-  const workspaceClusterIds = workspace.clusters.join("\u0000");
-  useEffect(() => {
-    if (!booted) return;
-    if (!active) return;
-    const byId = new Map(contexts.map((c) => [c.stableId, c]));
-    // Only the untouched initial Home is a default destination. A slow probe
-    // must never replace a restored tab or navigation performed while it waits.
-    if (!startupOverviewOffered.current) {
-      startupOverviewOffered.current = true;
-      const initialState = getState();
-      const initialWorkspace = currentWorkspace();
-      const ctx = byId.get(initialWorkspace.activeCluster ?? "");
-      if (!restoredWorkspace.current && ctx && initialWorkspace.tabs.length === 1 && initialWorkspace.tabs[0].route === "/") {
-        const ready = getInfo(ctx.stableId) ? Promise.resolve() : probeCluster(ctx);
-        void ready.then(() => {
-          if (mounted.current && visible.current && getState() === initialState && getInfo(ctx.stableId)?.reachable) openCluster(ctx);
-        });
-      }
-    }
-    for (const id of currentWorkspace().clusters) {
-      if (getInfo(id)) continue;
-      const ctx = byId.get(id);
-      if (ctx) void probeCluster(ctx);
-    }
-    // `contexts` rides along because a kubeconfig change replaces them; the
-    // workspace id is the trigger for the switch case.
-  }, [booted, contexts, workspaceId, workspaceClusterIds, active]);
 
   /**
    * Which accelerators survive a raised cover, and why one of them does.

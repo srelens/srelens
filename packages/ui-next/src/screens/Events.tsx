@@ -38,13 +38,14 @@ import {
 } from "../lib/kinds/events";
 import { useResourceList } from "../lib/resourceList";
 import { describe } from "../lib/routes";
-import { openTab } from "../lib/tabsStore";
+import { openTab, useTabs } from "../lib/tabsStore";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { ReasonRail } from "./events/ReasonRail";
 import {
   NamespaceErrorAlert,
   NamespacePicker,
   NoClusterScreen,
+  PausedClusterScreen,
   StaleSelectionAlert,
   columnOptionsFor,
   emptyTableCopy,
@@ -121,10 +122,14 @@ const GROUP_BY_CAUSE = "What do these warning events have in common?";
  */
 export function Events({ route }: { route: string }) {
   const context = useActiveContext();
+  const { workspace } = useTabs();
   const title = describe(route, context?.name).title;
 
   if (!context) {
     return <NoClusterScreen title={title} noun="events" />;
+  }
+  if (workspace.pausedClusters?.includes(context.stableId)) {
+    return <PausedClusterScreen title={title} noun="events" context={context} />;
   }
 
   return <EventList route={route} title={title} context={context} />;

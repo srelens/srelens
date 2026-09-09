@@ -227,7 +227,7 @@ export function Connections({ route }: { route: string }) {
   }
 
   /**
-   * Read every cluster on the current list, each on its own.
+   * Read every cluster only after the reader explicitly refreshes the list.
    *
    * **Nothing here is awaited in series and nothing gates the render.** The
    * table is drawn from `contexts` the moment they exist, with every row
@@ -243,6 +243,7 @@ export function Connections({ route }: { route: string }) {
   useEffect(() => {
     const force = forceNext.current;
     forceNext.current = false;
+    if (!force) return;
 
     async function read(context: ClusterContext) {
       const id = context.stableId;

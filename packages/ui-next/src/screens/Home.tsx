@@ -10,6 +10,7 @@ import { symbolFor } from "../lib/markSymbols";
 import { openCluster } from "../lib/openCluster";
 import { openTab } from "../lib/tabsStore";
 import { LINK_WORD, useWorkspaceView } from "../lib/workspace";
+import { useTabs } from "../lib/tabsStore";
 
 /** App-wide entry point. Contexts and connection status come from the shell's shared stores. */
 export function Home() {
@@ -20,6 +21,7 @@ export function Home() {
   // Like the rail, subscribe once so filtering follows saved display-name edits.
   useEditableMark("", "");
   const { links } = useWorkspaceView();
+  const { workspace } = useTabs();
   const [query, setQuery] = useState("");
   const [retrying, setRetrying] = useState(false);
   const mounted = useRef(false);
@@ -69,7 +71,7 @@ export function Home() {
               status === "loaded" && <EmptyState title="No clusters configured" hint="Add a kubeconfig or connect to a cluster to start exploring. Your saved connections will appear here." />
             ) : filtered.length === 0 ? <EmptyState title="No matching clusters" hint="Search by display name, context, or API server." action={<Button variant="secondary" size="sm" onClick={() => setQuery("")}>Clear search</Button>} /> : (
               <ul className="home-cluster-list scroll" aria-label="Saved clusters">
-                {filtered.map(ctx => <ClusterRow key={ctx.stableId} context={ctx} link={links[ctx.stableId]} />)}
+                {filtered.map(ctx => <ClusterRow key={ctx.stableId} context={ctx} link={links[ctx.stableId]} paused={workspace.pausedClusters?.includes(ctx.stableId) === true} />)}
               </ul>
             )}
           </section>
@@ -85,9 +87,9 @@ export function Home() {
   );
 }
 
-function ClusterRow({ context, link }: { context: ClusterContext; link?: ReturnType<typeof useWorkspaceView>["links"][string] }) {
+function ClusterRow({ context, link, paused }: { context: ClusterContext; link?: ReturnType<typeof useWorkspaceView>["links"][string]; paused: boolean }) {
   const mark = getMark(context.stableId, context.name);
-  const status = link ? LINK_WORD[link.state] : "Not checked";
+  const status = paused ? "Paused" : link ? LINK_WORD[link.state] : "Not checked";
   let secondary = context.name;
   if (mark.name === context.name) {
     try { secondary = new URL(context.server).host; }

@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { connectCluster, describeError, type ClusterContext, type ClusterInfo } from "@srelens/core";
 import { setLink } from "./workspace";
+import { isClusterPaused } from "./tabsStore";
 
 let infos: Record<string, ClusterInfo> = {};
 
@@ -137,6 +138,7 @@ export function probeCluster(
   connect: typeof connectCluster = connectCluster,
   now: () => number = Date.now,
 ): Promise<void> {
+  if (isClusterPaused(ctx.stableId)) return Promise.resolve();
   const running = reading.get(ctx.stableId);
   if (running) return running;
   const run = read(ctx, connect, now).finally(() => {
@@ -167,6 +169,9 @@ async function read(
     info = { context: ctx.name, reachable: false, error: String(e) };
   }
   const elapsedMs = now() - started;
+  // Disconnect may have been picked while the probe was in flight. Its result
+  // is an observation from before that choice, so never revive a paused row.
+  if (isClusterPaused(ctx.stableId)) return;
   infos = { ...infos, [ctx.stableId]: info };
   probes = { ...probes, [ctx.stableId]: deriveProbe(info, elapsedMs) };
   emit();

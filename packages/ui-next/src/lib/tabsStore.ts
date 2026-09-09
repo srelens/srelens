@@ -351,11 +351,26 @@ export function setWorkspaceClusters(id: string, clusters: string[]): void {
     // from the machine, not ones dropped from a workspace.
     const active = w.activeCluster && clusters.includes(w.activeCluster) ? w.activeCluster : clusters[0];
     if (same && active === w.activeCluster) return w;
-    const next: Workspace = { ...w, clusters: [...clusters] };
+    const next: Workspace = { ...w, clusters: [...clusters], pausedClusters: (w.pausedClusters ?? []).filter((cluster) => clusters.includes(cluster)) };
     if (active) next.activeCluster = active;
     else delete next.activeCluster;
     return next;
   });
+}
+
+/** A pause belongs to one workspace: another workspace may still use this cluster. */
+export function setClusterPaused(workspaceId: string, clusterId: string, paused: boolean): void {
+  patchWorkspace(workspaceId, (w) => {
+    if (!w.clusters.includes(clusterId)) return w;
+    const current = w.pausedClusters ?? [];
+    const next = paused ? (current.includes(clusterId) ? current : [...current, clusterId]) : current.filter((id) => id !== clusterId);
+    if (next.length === current.length && next.every((id, index) => id === current[index])) return w;
+    return { ...w, pausedClusters: next };
+  });
+}
+
+export function isClusterPaused(clusterId: string): boolean {
+  return (currentWorkspace().pausedClusters ?? []).includes(clusterId);
 }
 
 const EMPTY_VIEW: NonNullable<Tab["view"]> = {};
