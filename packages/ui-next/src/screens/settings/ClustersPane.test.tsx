@@ -1,17 +1,19 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { render, screen, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { loadContextProfiles, loadContextOrder, saveContextProfiles, saveContextOrder, type ClusterContext } from "@srelens/core";
+import { loadClusterNamespaces, loadContextProfiles, loadContextOrder, saveClusterNamespaces, saveContextProfiles, saveContextOrder, type ClusterContext } from "@srelens/core";
 import { setContexts } from "../../lib/clusters";
 import { loadMarks } from "../../lib/marks";
 import { ClustersPane } from "./ClustersPane";
 import { activeCluster, setState } from "../../lib/tabsStore";
 import { defaultState } from "../../lib/tabs";
+import { getView, loadNamespaces, setNamespaces } from "../../lib/workspace";
 const backend = vi.hoisted(() => ({ deleteContext: vi.fn(), listContexts: vi.fn(), isTauri: vi.fn(() => true) }));
 vi.mock("@srelens/core", async (original) => ({ ...await original<object>(), ...backend }));
 const contexts: ClusterContext[] = ["prod", "staging"].map(name => ({ name, stableId: name + "-id", cluster: name, server: "https://" + name, sourceFile: "/config", authKind: "token", isCurrent: false }));
 beforeEach(() => {
   localStorage.clear(); vi.clearAllMocks(); backend.isTauri.mockReturnValue(true);
+  loadNamespaces();
   saveContextProfiles({ "prod-id": { displayName: "Production Europe", shortName: "PE", logo: "cloud", color: "#123456" } });
   saveContextOrder(["staging-id", "prod-id"]); loadMarks(); setContexts(contexts);
 });
@@ -49,6 +51,20 @@ it("confirms removal and sends the raw context name to the backend", async () =>
   expect(await screen.findByRole("button", {name: "Edit staging"})).toBeTruthy();
   expect(screen.queryByRole("button", {name: "Edit Production Europe"})).toBeNull();
 });
+it("clears both namespace stores after confirmed removal", async () => {
+  backend.deleteContext.mockResolvedValue({ success: true });
+  backend.listContexts.mockResolvedValue({ contexts: [contexts[1]] });
+  saveClusterNamespaces({ "prod-id": "payments", "staging-id": "default" });
+  setNamespaces("prod-id", ["payments"]);
+  setNamespaces("staging-id", ["default"]);
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", {name: "Edit Production Europe"}));
+  await user.click(screen.getByRole("button", {name: "Remove context"}));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", {name: "Remove context"}));
+
+  expect(loadClusterNamespaces()).toEqual({ "staging-id": "default" });
+  expect(getView().namespaces).toEqual({ "staging-id": ["default"] });
+});
 it("keeps identity and shows the reason when removal fails", async () => {
   backend.deleteContext.mockRejectedValue(new Error("permission denied"));
   const user = userEvent.setup(); render(<ClustersPane />);
@@ -80,6 +96,21 @@ it("retains the remaining contexts when relisting after removal fails", async ()
   expect(screen.getByRole("alert").textContent).toMatch(/kubeconfig became unreadable/);
   await user.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByRole("button", {name: "Edit staging"})).toBeTruthy();
+  expect(screen.queryByRole("button", {name: "Edit Production Europe"})).toBeNull();
+});
+it("does not let a post-removal relist overwrite a concurrent context update", async () => {
+  const added = { ...contexts[1], name: "new-context", stableId: "new-id" };
+  backend.deleteContext.mockResolvedValue({ success: true });
+  backend.listContexts.mockImplementation(async () => {
+    setContexts([contexts[1], added]);
+    return { contexts: [contexts[1]] };
+  });
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", {name: "Edit Production Europe"}));
+  await user.click(screen.getByRole("button", {name: "Remove context"}));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", {name: "Remove context"}));
+
+  expect(await screen.findByRole("button", {name: "Edit new-context"})).toBeTruthy();
   expect(screen.queryByRole("button", {name: "Edit Production Europe"})).toBeNull();
 });
 it("filters by saved short name and distinguishes list failure from an empty list", async () => {

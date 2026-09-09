@@ -220,6 +220,15 @@ export function setNamespaces(clusterId: string, namespaces: string[], storage: 
   saveNamespaces(storage);
 }
 
+/** Forget a removed cluster's namespace without disturbing other clusters. */
+export function removeNamespaces(clusterId: string, storage: Storage = settingsStorage): void {
+  if (!(clusterId in view.namespaces)) return;
+  const namespaces = { ...view.namespaces };
+  delete namespaces[clusterId];
+  emit({ ...view, namespaces });
+  saveNamespaces(storage);
+}
+
 /** A stable empty selection, so an unset cluster's snapshot never changes identity. */
 const NO_NAMESPACES: string[] = [];
 function readDefaultSelection(): string[] {

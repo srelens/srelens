@@ -1,12 +1,13 @@
 import { useId, useRef, useState, type PointerEvent } from "react";
 import { GripVertical } from "lucide-react";
-import { deleteContext, describeError, isTauri, listContexts, type ClusterContext } from "@srelens/core";
+import { deleteContext, describeError, isTauri, listContexts, removeClusterNamespace, type ClusterContext } from "@srelens/core";
 import { Button, ConfirmDialog, CustomizeMark, Field, Mark, TextInput } from "@srelens/ui-kit";
 import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { moveContext, moveContextBy, removeContextFromOrder, useOrderedContexts } from "../../lib/contextOrder";
 import { getMark, resetMark, setMark, useEditableMark, useMark } from "../../lib/marks";
 import { PALETTE, SYMBOLS, symbolFor } from "../../lib/markSymbols";
 import { openTab } from "../../lib/tabsStore";
+import { removeNamespaces } from "../../lib/workspace";
 
 function ContextEditor({ context, onRemove }: { context: ClusterContext; onRemove: () => void }) {
   const mark = useEditableMark(context.stableId, context.name);
@@ -105,10 +106,20 @@ export function ClustersPane() {
       if (!result.success) throw new Error("The context was not removed.");
       resetMark(pending.stableId);
       removeContextFromOrder(pending.stableId);
+      removeClusterNamespace(pending.stableId);
+      removeNamespaces(pending.stableId);
       const remaining = getContexts().filter(c => c.stableId !== pending.stableId);
       setContexts(remaining);
       setPending(null);
-      const outcome = await listContexts(getKubeconfigFiles());
+      const before = getContexts();
+      const files = getKubeconfigFiles();
+      const outcome = await listContexts(files);
+      const currentFiles = getKubeconfigFiles();
+      if (
+        getContexts() !== before ||
+        currentFiles.length !== files.length ||
+        currentFiles.some((file, index) => file !== files[index])
+      ) return;
       setContexts(outcome.contexts ?? remaining, outcome.error ?? "");
     } catch (cause) { setError(describeError(cause).raw); setPending(null); }
     finally { setBusy(false); }

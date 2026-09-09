@@ -98,6 +98,14 @@ export function saveClusterNamespaces(map: Record<string, string>): void {
   }
 }
 
+/** Forget a removed cluster's namespace without disturbing other clusters. */
+export function removeClusterNamespace(clusterId: string): void {
+  const next = loadClusterNamespaces();
+  if (!(clusterId in next)) return;
+  delete next[clusterId];
+  saveClusterNamespaces(next);
+}
+
 /** Global fallback namespace for a cluster with no remembered selection ("" = all). */
 export function getDefaultNamespace(): string {
   try {

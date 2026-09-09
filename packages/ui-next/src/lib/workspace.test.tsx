@@ -151,6 +151,17 @@ describe("persisted namespace selection", () => {
     expect(stored.prod).toEqual([]);
   });
 
+  it("removes only the deleted cluster's persisted selection", () => {
+    const s = fakeStorage();
+    ws.setNamespaces("prod", ["default"], s);
+    ws.setNamespaces("dev", ["kube-system"], s);
+
+    ws.removeNamespaces("prod", s);
+
+    expect(ws.getView().namespaces).toEqual({ dev: ["kube-system"] });
+    expect(JSON.parse(s.m.get(ws.NAMESPACES_KEY) ?? "{}")).toEqual({ dev: ["kube-system"] });
+  });
+
   it("survives a storage that throws on both read and write, costing only the selection", () => {
     const bad = {
       getItem: () => {
