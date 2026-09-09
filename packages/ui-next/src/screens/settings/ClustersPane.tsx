@@ -96,10 +96,11 @@ export function ClustersPane() {
       const result = await deleteContext(pending.name);
       if (!result.success) throw new Error("The context was not removed.");
       resetMark(pending.stableId);
-      setContexts(contexts.filter(c => c.stableId !== pending.stableId), listingError);
+      const remaining = contexts.filter(c => c.stableId !== pending.stableId);
+      setContexts(remaining, listingError);
       setPending(null);
       const outcome = await listContexts(getKubeconfigFiles());
-      setContexts(outcome.contexts ?? [], outcome.error ?? "");
+      setContexts(outcome.contexts ?? remaining, outcome.error ?? "");
     } catch (cause) { setError(describeError(cause).raw); setPending(null); }
     finally { setBusy(false); }
   }

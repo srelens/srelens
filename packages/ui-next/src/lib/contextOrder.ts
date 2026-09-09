@@ -1,11 +1,15 @@
-import { useMemo, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { loadContextOrder, orderContexts, saveContextOrder, migrateOrder, projectOrderToNames, mergeOrderFromNames, type ContextIdentity } from "@srelens/core";
 const listeners = new Set<() => void>();
 const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
 const read = () => JSON.stringify(loadContextOrder());
 export function useOrderedContexts<T extends ContextIdentity>(contexts: readonly T[]): T[] {
   const order = useSyncExternalStore(subscribe, read, read);
-  return useMemo(() => orderContexts([...contexts], projectOrderToNames(migrateOrder(JSON.parse(order), contexts).migrated, contexts)), [contexts, order]);
+  const migration = useMemo(() => migrateOrder(JSON.parse(order), contexts), [contexts, order]);
+  useEffect(() => {
+    if (migration.changed) saveContextOrder(migration.migrated);
+  }, [migration]);
+  return useMemo(() => orderContexts([...contexts], projectOrderToNames(migration.migrated, contexts)), [contexts, migration]);
 }
 /** Move before the target; unlisted contexts keep their place in the shared preference. */
 export function moveContext(contexts: readonly ContextIdentity[], name: string, before: string | null): void {

@@ -83,14 +83,14 @@ function withProfile(stableId: string, name: string, base: MarkAppearance): Mark
   return mark;
 }
 
-function sharedProfile(mark: MarkAppearance): ContextProfile {
-  // Resolve theme tokens while the new design is mounted; classic uses the same colour.
-  let color = mark.color;
-  const token = /^var\((--[a-z-]+)\)$/.exec(color);
-  if (token && typeof document !== "undefined") color = getComputedStyle(document.documentElement).getPropertyValue(token[1]).trim() || color;
+function sharedProfile(stableId: string, mark: MarkAppearance): ContextProfile {
+  const contextName = contextNames.get(stableId) ?? mark.name;
+  const generatedShort = initials(contextName);
   const legacyIcon = mark.icon && LEGACY_ICONS.has(mark.icon) ? mark.icon as ContextProfile["logo"] : "cluster";
   return {
-    displayName: mark.name, shortName: mark.short, color,
+    displayName: mark.name === contextName ? undefined : mark.name,
+    shortName: mark.short === generatedShort ? undefined : mark.short,
+    color: mark.color,
     logo: mark.mark === "text" ? "initials" : mark.mark === "image" ? "custom" : legacyIcon,
     logoUrl: mark.imageSrc,
     markIcon: mark.mark === "icon" && !LEGACY_ICONS.has(mark.icon ?? "") ? mark.icon : undefined,
@@ -172,7 +172,7 @@ function readMark(stableId: string, name: string, editing: boolean): MarkAppeara
 
 /** Give a cluster this appearance, and keep it. */
 export function setMark(stableId: string, mark: MarkAppearance, storage: Storage = settingsStorage): void {
-  profiles = { ...profiles, [stableId]: { ...profiles[stableId], ...sharedProfile(mark) } };
+  profiles = { ...profiles, [stableId]: { ...profiles[stableId], ...sharedProfile(stableId, mark) } };
   // Canonical profiles are already keyed by stable ID. Remove the imported
   // copy so resetting in classic cannot resurrect an older new-design mark.
   const { [stableId]: _old, ...rest } = marks;
@@ -223,7 +223,7 @@ export function rememberContextMarks(contexts: readonly ClusterContext[], storag
     contextNames.set(context.stableId, context.name);
     const old = marks[context.stableId];
     if (!old) continue;
-    if (!profiles[context.stableId]) profiles = { ...profiles, [context.stableId]: sharedProfile(old) };
+    if (!profiles[context.stableId]) profiles = { ...profiles, [context.stableId]: sharedProfile(context.stableId, old) };
     const { [context.stableId]: _old, ...rest } = marks;
     marks = rest;
     changed = true;

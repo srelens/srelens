@@ -56,6 +56,18 @@ it("keeps identity and shows the reason when removal fails", async () => {
   expect((await screen.findByRole("alert")).textContent).toMatch(/permission denied/i);
   expect(loadContextProfiles()["prod-id"].displayName).toBe("Production Europe");
 });
+it("retains the remaining contexts when relisting after removal fails", async () => {
+  backend.deleteContext.mockResolvedValue({ success: true });
+  backend.listContexts.mockResolvedValue({ error: "kubeconfig became unreadable" });
+  const user = userEvent.setup(); render(<ClustersPane />);
+  await user.click(screen.getByRole("button", {name: "Edit Production Europe"}));
+  await user.click(screen.getByRole("button", {name: "Remove context"}));
+  await user.click(within(screen.getByRole("dialog")).getByRole("button", {name: "Remove context"}));
+
+  expect(await screen.findByRole("button", {name: "Edit staging"})).toBeTruthy();
+  expect(screen.queryByRole("button", {name: "Edit Production Europe"})).toBeNull();
+  expect(screen.getByRole("alert").textContent).toMatch(/kubeconfig became unreadable/);
+});
 it("filters by saved short name and distinguishes list failure from an empty list", async () => {
   const user = userEvent.setup();
   const view = render(<ClustersPane />);

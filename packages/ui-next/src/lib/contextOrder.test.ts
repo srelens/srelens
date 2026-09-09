@@ -20,3 +20,11 @@ it("reads classic's stable-ID order after kubeconfig names change", () => {
   act(() => moveContext(contexts, "config/prod", "config/staging"));
   expect(loadContextOrder()).toEqual(["prod-id", "staging-id"]);
 });
+it("persists a legacy name-keyed order as stable IDs when contexts become known", () => {
+  saveContextOrder(["staging", "prod"]);
+  const contexts = [{ name: "prod", stableId: "prod-id" }, { name: "staging", stableId: "staging-id" }];
+
+  renderHook(() => useOrderedContexts(contexts));
+
+  expect(loadContextOrder()).toEqual(["staging-id", "prod-id"]);
+});

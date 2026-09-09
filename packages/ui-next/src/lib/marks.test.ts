@@ -129,6 +129,22 @@ describe("classic context identity parity", () => {
     expect(JSON.parse(s.m.get("srelens.contextProfiles")!).id).toBeUndefined();
     expect(getMark("id", "prod")).toEqual(defaultMark("prod"));
   });
+  it("keeps palette tokens and does not pin derived labels during appearance-only edits", () => {
+    const s = fakeStorage();
+    loadMarks(s);
+    const original = getMark("id", "prod");
+    setMark("id", { ...original, color: "var(--mark-teal)" }, s);
+
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!).id).toMatchObject({ color: "var(--mark-teal)" });
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!).id).not.toHaveProperty("displayName");
+    expect(JSON.parse(s.m.get("srelens.contextProfiles")!).id).not.toHaveProperty("shortName");
+    loadMarks(s);
+    expect(getMark("id", "renamed-prod")).toMatchObject({
+      name: "renamed-prod",
+      short: defaultMark("renamed-prod").short,
+      color: "var(--mark-teal)",
+    });
+  });
   it("uses the same generated initials as classic for long context names", () => {
     expect(defaultMark("dev-lon-nrtc-6bcb8b63").short).toBe("DLN");
   });
