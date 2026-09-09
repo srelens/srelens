@@ -1184,14 +1184,43 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
         })
         .collect();
 
+    // Column widths come from the rows that are DRAWN, not from every row in
+    // the list, and they are bounded by the viewport.
+    //
+    // Both halves matter. Scanning every filtered row meant a 10,000-pod
+    // table did that many JSON lookups per column on every 250 ms redraw,
+    // idle or not. And sizing a column to the longest cell anywhere meant
+    // one Event message, CRD printer column or generated name -- even one
+    // that was off screen -- could take the whole width and squeeze every
+    // other column for every visible row.
+    //
+    // Machine text does not wrap, and it does not get to render a wall
+    // either: a cell longer than its column is clipped inside it and stays
+    // one row high. So a fixed column grows to fit what is on screen, but
+    // only into the slack the declared layout leaves -- the width left over
+    // once every column has what its ColumnDef asked for -- and never into
+    // its neighbours. Columns take that slack in order, so a table with two
+    // long cells still adds up. The columns declared flexible
+    // (`Constraint::Min`, which is NAME, IMAGE, MESSAGE and the like) keep
+    // that flexibility and share whatever remains, which is what they did
+    // before dynamic sizing.
+    let declared_total: usize = state
+        .columns
+        .iter()
+        .map(|col| match col.width {
+            Constraint::Length(n) | Constraint::Min(n) => usize::from(n),
+            _ => 0,
+        })
+        .sum::<usize>()
+        + state.columns.len().saturating_sub(1); // ratatui's default column_spacing
+    let mut slack = usize::from(inner.width).saturating_sub(declared_total);
     let widths: Vec<Constraint> = state
         .columns
         .iter()
         .map(|col| {
-            let max_item_len = state
-                .filtered_indices
-                .iter()
-                .map(|&idx| {
+            let max_item_len = (start_idx..end_idx)
+                .map(|display_idx| state.filtered_indices[display_idx])
+                .map(|idx| {
                     let item = &state.raw_items[idx];
                     let text = super::sanitize_span_text(&extract_field_str(item, col.key));
                     let is_marked = state.marked_indices.contains(&idx);
@@ -1227,8 +1256,22 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
                 .max()
                 .unwrap_or(0);
 
-            let dynamic_width = (max_item_len.max(col.name.len()) + 1) as u16;
-            Constraint::Length(dynamic_width)
+            let wanted = max_item_len.max(col.name.len()) + 1;
+            match col.width {
+                // A flexible column stays flexible: at least its declared
+                // minimum, and ratatui hands it a share of the remainder.
+                Constraint::Min(min) => Constraint::Min(min),
+                // A fixed column may grow to fit what is on screen -- so a
+                // `CrashLoopBackOff` is not clipped to `CrashLoopBack` -- as
+                // far as the slack allows, and never below what it declared.
+                Constraint::Length(declared) => {
+                    let declared = usize::from(declared);
+                    let grow = wanted.saturating_sub(declared).min(slack);
+                    slack -= grow;
+                    Constraint::Length((declared + grow) as u16)
+                }
+                other => other,
+            }
         })
         .collect();
     let table = Table::new(rows, widths).header(header);
