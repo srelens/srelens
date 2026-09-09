@@ -300,6 +300,7 @@ describe("Window boot", () => {
   it("loads the cluster's saved sidebar groups before navigation mounts", async () => {
     localStorage.setItem(EXPANDED_KEY, JSON.stringify({ prod: ["network"], offline: ["workloads"] }));
     await booted();
+    act(() => { store.openTab("/overview"); });
     expect(screen.getByRole("treeitem", { name: "Services" })).toBeDefined();
     expect(screen.queryByRole("treeitem", { name: "Pods" })).toBeNull();
     await userEvent.click(screen.getByRole("treeitem", { name: "Workloads" }));
