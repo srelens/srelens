@@ -13,6 +13,14 @@ it("loads missing notes from the exact release tag", async () => {
   expect(await loadUpdateNotes({ version: "0.10.1-159", notes: "" })).toContain("Fixed settings");
   expect(fetcher.mock.calls[0][0]).toBe("https://api.github.com/repos/srelens/srelens/releases/tags/srelens-v0.10.1-159");
 });
+it("loads notes when AbortSignal.timeout is unavailable", async () => {
+  const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ body: "Compatible notes" }) });
+  vi.stubGlobal("fetch", fetcher);
+  vi.stubGlobal("AbortSignal", {});
+
+  await expect(loadUpdateNotes({ version: "0.10.2", notes: "" })).resolves.toBe("Compatible notes");
+  expect(fetcher.mock.calls[0][1].signal).toBeInstanceOf(Object);
+});
 it("distinguishes a refused read from a release without notes", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 403 }));
   await expect(loadUpdateNotes({ version: "0.10.1", notes: "" })).rejects.toThrow("403");
