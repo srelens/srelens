@@ -145,13 +145,20 @@ describe("reconcile", () => {
 
   it("relabels cluster-scoped tabs when reconciliation picks a surviving context", () => {
     const s = defaultState([ctx("a", "prod"), ctx("b", "staging")]);
-    s.workspaces[0].tabs = [makeTab("/k/pods", { clusterName: "prod" }), makeTab("/settings")];
+    s.workspaces[0].tabs = [
+      makeTab("/k/pods", { clusterName: "prod" }),
+      makeTab("/settings"),
+      makeTab("/edit/prod/Pod/default/api", { clusterName: "prod" }),
+      makeTab("/new/prod", { clusterName: "prod" }),
+    ];
     s.workspaces[0].activeId = s.workspaces[0].tabs[0].id;
 
     const out = reconcile(s, [ctx("b", "staging")]).workspaces[0];
     expect(out.activeCluster).toBe("b");
     expect(out.tabs[0].sub).toBe("staging");
     expect(out.tabs[1].sub).toBeUndefined();
+    expect(out.tabs[2].sub).toBe("prod");
+    expect(out.tabs[3].sub).toBe("prod");
   });
 
   it("adopts the first cluster for a workspace stored before there was an active one", () => {

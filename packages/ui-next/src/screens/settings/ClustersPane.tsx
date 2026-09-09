@@ -2,7 +2,7 @@ import { useId, useRef, useState, type PointerEvent } from "react";
 import { GripVertical } from "lucide-react";
 import { deleteContext, describeError, isTauri, listContexts, type ClusterContext } from "@srelens/core";
 import { Button, ConfirmDialog, CustomizeMark, Field, Mark, TextInput } from "@srelens/ui-kit";
-import { getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
+import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../../lib/clusters";
 import { moveContext, moveContextBy, useOrderedContexts } from "../../lib/contextOrder";
 import { getMark, resetMark, setMark, useEditableMark, useMark } from "../../lib/marks";
 import { PALETTE, SYMBOLS, symbolFor } from "../../lib/markSymbols";
@@ -86,7 +86,7 @@ export function ClustersPane() {
     setBusy(true);
     try {
       const outcome = await listContexts(getKubeconfigFiles());
-      setContexts(outcome.contexts ?? contexts, outcome.error ?? "");
+      setContexts(outcome.contexts ?? getContexts(), outcome.error ?? "");
     } finally { setBusy(false); }
   }
   async function remove() {

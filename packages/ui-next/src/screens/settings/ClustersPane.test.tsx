@@ -83,12 +83,17 @@ it("filters by saved short name and distinguishes list failure from an empty lis
   expect(screen.getAllByRole("listitem")).toHaveLength(1);
   view.unmount();
   setContexts([], "kubeconfig permission denied");
-  backend.listContexts.mockResolvedValue({ contexts });
+  const added = { ...contexts[1], name: "new-context", stableId: "new-id" };
+  backend.listContexts.mockImplementation(async () => {
+    setContexts([...contexts, added]);
+    return { error: "retry also failed" };
+  });
   render(<ClustersPane />);
   expect(screen.getByRole("alert").textContent).toMatch(/permission denied/);
   expect(screen.queryByText(/No contexts configured/)).toBeNull();
   await user.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByRole("button", { name: "Edit staging" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Edit new-context" })).toBeTruthy();
 });
 
 it("reorders through the pointer drag handle and cancels without saving", async () => {

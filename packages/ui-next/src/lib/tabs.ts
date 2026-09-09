@@ -1,6 +1,7 @@
 import type { ClusterContext } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
 import { describe, type TabKind } from "./routes";
+import { parseEditRoute, parseNewRoute } from "./detailRoute";
 
 export interface Tab {
   id: string;
@@ -161,7 +162,10 @@ export function reconcile(state: TabsState, contexts: ClusterContext[]): TabsSta
     if (activeChanged && active) {
       const clusterName = contextNames.get(active);
       if (clusterName) {
-        const relabelled = tabs.map((tab) => relabel(tab, clusterName));
+        const relabelled = tabs.map((tab) =>
+          parseEditRoute(tab.route)?.cluster || parseNewRoute(tab.route)?.cluster
+            ? tab
+            : relabel(tab, clusterName));
         if (relabelled.some((tab, index) => tab !== tabs[index])) tabs = relabelled;
       }
     }
