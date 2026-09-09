@@ -538,6 +538,11 @@ pub fn srelens_cli_status() -> Result<CliStatus, String> {
     }
 }
 
+#[cfg(unix)]
+fn posix_shell_path(path: &std::path::Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
 /// Symlink the persistent executable to `~/.local/bin/srelens` so MCP clients
 /// can spawn `srelens --mcp-stdio`. AppImage builds use `$APPIMAGE`, not the
 /// temporary FUSE-mounted process path. Creates the directory if needed (no
@@ -560,10 +565,10 @@ pub fn install_srelens_cli() -> Result<String, String> {
         match std::os::unix::fs::symlink(&exe, &target) {
             Ok(()) => Ok(target.to_string_lossy().to_string()),
             Err(e) => Err(format!(
-                "Could not write {} ({e}). Run this in a terminal:\n  ln -sf \"{}\" \"{}\"",
+                "Could not write {} ({e}). Run this in a terminal:\n  ln -sf {} {}",
                 target.display(),
-                exe.display(),
-                target.display()
+                posix_shell_path(&exe),
+                posix_shell_path(&target)
             )),
         }
     }
@@ -577,6 +582,16 @@ pub fn install_srelens_cli() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_command_quotes_shell_active_paths() {
+        let path = std::path::Path::new("/tmp/Srelens $HOME O'Brien\\build");
+        assert_eq!(
+            posix_shell_path(path),
+            "'/tmp/Srelens $HOME O'\\''Brien\\build'"
+        );
+    }
 
     #[test]
     fn running_executable_is_a_usable_cli_path() {

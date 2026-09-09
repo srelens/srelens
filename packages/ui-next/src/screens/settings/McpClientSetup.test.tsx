@@ -85,9 +85,26 @@ it("generates Windows stdio config with the absolute desktop executable", async 
   core.srelensCliStatus.mockResolvedValue({ installed: true, path: executable, links_to: null, on_path: false });
   render(<McpClientSetup url={URL} token={TOKEN} />);
   expect(await screen.findAllByText(new RegExp(executable.replace(/[\\]/g, "\\\\")))).not.toHaveLength(0);
+  const reportedPath = screen.getAllByText(executable).find(element => element.tagName === "CODE")!;
+  expect(reportedPath.className).toMatch(/overflow-x-auto/);
+  expect(reportedPath.className).toMatch(/whitespace-nowrap/);
   await userEvent.selectOptions(screen.getByLabelText("MCP client"), "cursor");
   expect(JSON.parse(screen.getByTestId("mcp-client-config").textContent!).mcpServers.srelens.command).toBe(executable);
   expect(screen.queryByRole("button", { name: /Install srelens CLI/ })).toBeNull();
+});
+it("keeps the transient installed path on one horizontally scrollable line", async () => {
+  const executable = "/home/user/My CLI/srelens";
+  let finishStatus!: (value: object) => void;
+  core.installSrelensCli.mockResolvedValue(executable);
+  core.srelensCliStatus
+    .mockResolvedValueOnce({ installed: false, path: executable, links_to: null, on_path: false })
+    .mockImplementationOnce(() => new Promise(resolve => { finishStatus = resolve; }));
+  const user = userEvent.setup(); render(<McpClientSetup url={URL} token={TOKEN} />);
+  await user.click(await screen.findByRole("button", { name: "Install srelens CLI" }));
+  const path = await screen.findByText(executable);
+  expect(path.className).toMatch(/overflow-x-auto/);
+  expect(path.className).toMatch(/whitespace-nowrap/);
+  finishStatus({ installed: true, path: executable, links_to: executable, on_path: true });
 });
 it("reports failed HTTP prerequisites and retries them instead of claiming the server is stopped", async () => {
   const retryStatus = vi.fn(); const retryToken = vi.fn();

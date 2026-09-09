@@ -65,8 +65,8 @@ export function McpClientSetup({ url, token, statusLoading = false, tokenLoading
   return <>
     <Panel title="srelens CLI" description={windows ? "Windows MCP clients start the installed desktop executable directly." : "Install the srelens command so MCP clients can start a stdio connection."}>
       {loading ? <p role="status" className="text-[0.75rem] text-muted">Checking CLI installation…</p> :
-        cli && <p className="text-[0.75rem] text-muted">{windows ? (cli.path ? <>Using <code>{cli.path}</code></> : "The desktop executable could not be located.") :
-          cli.installed ? <>Installed at <code>{cli.path}</code></> : "The srelens CLI is not installed."}</p>}
+        cli && <p className="text-[0.75rem] text-muted">{windows ? (cli.path ? <>Using <code className="block max-w-full overflow-x-auto whitespace-nowrap font-mono">{cli.path}</code></> : "The desktop executable could not be located.") :
+          cli.installed ? <>Installed at <code className="block max-w-full overflow-x-auto whitespace-nowrap font-mono">{cli.path}</code></> : "The srelens CLI is not installed."}</p>}
       <div className="mt-2 flex flex-wrap gap-2">
         {!windows && <Button variant="secondary" disabled={loading || busy || readError !== null} onClick={() => void install()}>
           {busy ? "Installing…" : cli?.installed ? "Reinstall srelens CLI" : "Install srelens CLI"}
@@ -74,7 +74,7 @@ export function McpClientSetup({ url, token, statusLoading = false, tokenLoading
         {readError !== null && <Button variant="ghost" disabled={loading || busy} onClick={() => setNonce(n => n + 1)}>Retry status</Button>}
       </div>
       {!windows && cli?.installed && !cli.on_path && <p className="mt-2 text-[0.75rem] text-muted">Add <code>{cli.path.replace(/[/\\][^/\\]+$/, "")}</code> to PATH, then restart your MCP client.</p>}
-      {installedAt && !cli?.installed && <p role="status" className="mt-2 text-[0.75rem]">CLI installed at <code>{installedAt}</code>.</p>}
+      {installedAt && !cli?.installed && <p role="status" className="mt-2 text-[0.75rem]">CLI installed at <code className="block max-w-full overflow-x-auto whitespace-nowrap font-mono">{installedAt}</code>.</p>}
       {readError !== null && <FailureAlert tone="sev" title="Could not check the CLI installation" error={readError} />}
       {installError !== null && <FailureAlert tone="sev" title="Could not install the srelens CLI" error={installError} />}
     </Panel>
