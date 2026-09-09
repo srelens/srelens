@@ -80,16 +80,17 @@ export function Nav({ contexts }: NavProps) {
   const route = tabs.find((t) => t.id === activeId)?.route ?? "/";
 
   const name = ctx?.name;
+  const paused = ctx !== null && (workspace.pausedClusters ?? []).includes(ctx.stableId);
   const discovery = useResource<CrdRef[]>(
     async () => {
-      if (!name) return [];
+      if (!name || paused) return [];
       const out = await listCrds(name);
       // `listCrds` reports failure in the result rather than by rejecting, and
       // an empty tree is not the same news as "we were not allowed to look".
       if (out.error) throw new Error(out.error);
       return out.crds ?? [];
     },
-    [name],
+    [name, paused],
   );
   const crds = useMemo(() => discovery.data ?? [], [discovery.data]);
 
@@ -119,7 +120,7 @@ export function Nav({ contexts }: NavProps) {
   );
 
   const link = ctx
-    ? (workspace.pausedClusters?.includes(ctx.stableId) ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)
+    ? (paused ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)
     : UNKNOWN;
 
   const navigationWidth = useNavigationWidth();

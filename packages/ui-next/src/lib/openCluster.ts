@@ -11,8 +11,11 @@ export function pauseCluster(workspaceId: string, clusterId: string): void {
 /** Resume a paused cluster and begin its explicit reachability read. */
 export function reconnectCluster(context: ClusterContext): void {
   const workspace = currentWorkspace();
+  const wasPaused = workspace.pausedClusters?.includes(context.stableId) === true;
   setClusterPaused(workspace.id, context.stableId, false);
-  void probeCluster(context, undefined, undefined, { workspaceId: workspace.id, fresh: true });
+  // Opening a cluster that is already connected joins its reading; only a
+  // reconnect must bypass the observation invalidated by Disconnect.
+  void probeCluster(context, undefined, undefined, { workspaceId: workspace.id, fresh: wasPaused });
 }
 
 /**

@@ -261,6 +261,9 @@ export function Connections({ route }: { route: string }) {
        * left the facts unfetched whenever a read spanned two listings.
        */
       if (force || getProbe(id).state === "unread") await probeCluster(context);
+      // Disconnect can happen while the reachability read is out. Do not turn
+      // the reading it invalidated into a follow-up facts request.
+      if (isClusterPaused(id)) return;
       // Not reachable: `provider` and `region` come from the API server, so
       // asking buys a second timeout for a row that already says why it is
       // empty. A later reading that DOES answer comes back through here.
