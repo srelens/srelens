@@ -7,6 +7,8 @@
 import { invokeCommand } from "../transport/transport";
 import { clampTimeoutSecs, getRequestTimeoutSecs, setRequestTimeoutSecs } from "./settings";
 
+let updateQueue: Promise<void> = Promise.resolve();
+
 /** Push the persisted timeout to the backend. Call once on startup. */
 export async function applyPersistedTimeout(): Promise<number> {
   const secs = getRequestTimeoutSecs();
@@ -19,7 +21,12 @@ export async function applyPersistedTimeout(): Promise<number> {
 }
 
 /** Apply a timeout before persisting it, so a refusal cannot look like a saved change. */
-export async function updateRequestTimeout(secs: number): Promise<number> {
-  const applied = await invokeCommand<number>("set_request_timeout", { secs: clampTimeoutSecs(secs) });
-  return setRequestTimeoutSecs(applied);
+export function updateRequestTimeout(secs: number): Promise<number> {
+  const clamped = clampTimeoutSecs(secs);
+  const update = updateQueue.then(async () => {
+    const applied = await invokeCommand<number>("set_request_timeout", { secs: clamped });
+    return setRequestTimeoutSecs(applied);
+  });
+  updateQueue = update.then(() => undefined, () => undefined);
+  return update;
 }
