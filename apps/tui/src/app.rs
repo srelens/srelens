@@ -2393,25 +2393,27 @@ impl App {
                     ActiveView::Logs(logs) => self.filter_buffer = logs.search_query.clone(),
                     ActiveView::Top(top) => self.filter_buffer = top.filter.clone(),
                     ActiveView::Helm(helm) => self.filter_buffer = helm.filter_query.clone(),
-                    ActiveView::HelmDetail(detail) => self.filter_buffer = detail.filter_query.clone(),
+                    ActiveView::HelmDetail(detail) => self.filter_buffer = detail.search_query.clone(),
                     _ => {}
                 }
             }
-            // Next search match in text views (Describe, YAML, Logs)
-            KeyCode::Char('n') if matches!(self.active_view, ActiveView::Describe(_) | ActiveView::Yaml(_) | ActiveView::Logs(_)) => {
+            // Next search match in text views (Describe, YAML, Logs, HelmDetail)
+            KeyCode::Char('n') if matches!(self.active_view, ActiveView::Describe(_) | ActiveView::Yaml(_) | ActiveView::Logs(_) | ActiveView::HelmDetail(_)) => {
                 match &mut self.active_view {
                     ActiveView::Describe(desc) => desc.next_match(),
                     ActiveView::Yaml(yaml) => yaml.next_match(),
                     ActiveView::Logs(logs) => logs.next_match(),
+                    ActiveView::HelmDetail(detail) => detail.next_match(),
                     _ => {}
                 }
             }
-            // Previous search match in text views (Describe, YAML, Logs)
-            KeyCode::Char('N') if matches!(self.active_view, ActiveView::Describe(_) | ActiveView::Yaml(_) | ActiveView::Logs(_)) => {
+            // Previous search match in text views (Describe, YAML, Logs, HelmDetail)
+            KeyCode::Char('N') if matches!(self.active_view, ActiveView::Describe(_) | ActiveView::Yaml(_) | ActiveView::Logs(_) | ActiveView::HelmDetail(_)) => {
                 match &mut self.active_view {
                     ActiveView::Describe(desc) => desc.prev_match(),
                     ActiveView::Yaml(yaml) => yaml.prev_match(),
                     ActiveView::Logs(logs) => logs.prev_match(),
+                    ActiveView::HelmDetail(detail) => detail.prev_match(),
                     _ => {}
                 }
             }
@@ -4364,6 +4366,7 @@ impl App {
                     KeyCode::PageUp => detail.scroll_up(15),
                     KeyCode::PageDown => detail.scroll_down(15),
                     KeyCode::Char('g') => detail.scroll_to_top(),
+                    KeyCode::Char('G') => detail.scroll_to_bottom(),
                     KeyCode::Char('m') => {
                         if detail.active_tab == HelmDetailTab::ValuesDiff {
                             detail.toggle_diff_mode();
@@ -4890,7 +4893,7 @@ impl App {
                 }
             }
             ActiveView::HelmDetail(detail) => {
-                detail.filter_query = filter;
+                detail.set_search_query(&filter);
             }
             _ => {}
         }
@@ -4920,7 +4923,7 @@ impl App {
                 helm.filter_query.clear();
             }
             ActiveView::HelmDetail(detail) => {
-                detail.filter_query.clear();
+                detail.clear_search();
             }
             _ => {}
         }
@@ -7636,6 +7639,7 @@ impl App {
             ActiveView::Logs(logs) => (logs.search_matches.len(), logs.lines.len(), true),
             ActiveView::Helm(helm) => (helm.filtered_indices().len(), helm.releases.len(), false),
             ActiveView::Top(top) => (top.visible_count(), if top.active_tab == top_view::TopTab::Pods { top.pods.len() } else { top.nodes.len() }, false),
+            ActiveView::HelmDetail(detail) => (detail.search_matches.len(), detail.total_lines_for_active_tab(), true),
             _ => (0, 0, false),
         };
 
@@ -7999,6 +8003,9 @@ impl App {
             ][..]),
             ActiveView::HelmDetail(_) => Some(&[
                 ("<:>", "Cmd"),
+                ("</>", "Search"),
+                ("<n/N>", "Next/Prev"),
+                ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
             ActiveView::Settings(_) => Some(&[

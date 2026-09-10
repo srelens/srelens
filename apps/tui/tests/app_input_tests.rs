@@ -3095,3 +3095,79 @@ async fn non_pod_and_custom_resources_reject_pod_actions() {
     }
 }
 
+#[tokio::test]
+async fn helm_detail_manifest_search_and_navigation_input_flow() {
+    let (mut app, _rx) = common::app().await;
+    let mut detail_state = srelens_tui::views::HelmDetailViewState::new("my-release".into(), "default".into());
+    detail_state.set_detail(srelens_kube::helm::HelmReleaseDetail {
+        name: "my-release".into(),
+        namespace: "default".into(),
+        revision: 1,
+        status: "deployed".into(),
+        chart: "my-chart".into(),
+        chart_version: "1.0.0".into(),
+        app_version: "1.0.0".into(),
+        updated: "2026-09-10T12:00:00Z".into(),
+        values_yaml: "".into(),
+        chart_values_yaml: "".into(),
+        computed_values_yaml: "".into(),
+        manifest: "---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app-token\ndata:\n  github_token: Z2hw...\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\n".into(),
+        notes: "".into(),
+        history: vec![],
+    });
+    detail_state.set_tab(srelens_tui::views::HelmDetailTab::Manifest);
+    app.active_view = srelens_tui::app::ActiveView::HelmDetail(detail_state);
+
+    // 1. Press '/' to enter search mode
+    press(&mut app, ch('/')).await;
+    assert_eq!(app.input_mode, srelens_tui::ui::statusbar::InputMode::Filter);
+
+    // 2. Type "token"
+    for c in "token".chars() {
+        press(&mut app, ch(c)).await;
+    }
+    assert_eq!(app.filter_buffer, "token");
+    if let srelens_tui::app::ActiveView::HelmDetail(ref detail) = app.active_view {
+        assert_eq!(detail.search_query, "token");
+        assert_eq!(detail.search_matches.len(), 2);
+        assert_eq!(detail.current_match_idx, Some(0));
+        assert_eq!(detail.scroll_offset, detail.search_matches[0]);
+    } else {
+        panic!("expected HelmDetail view");
+    }
+
+    // 3. Press Enter to return to Normal mode with search query active
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.input_mode, srelens_tui::ui::statusbar::InputMode::Normal);
+    assert_eq!(app.filter_buffer, "token");
+
+    // 4. Press 'n' to go to next match
+    press(&mut app, ch('n')).await;
+    if let srelens_tui::app::ActiveView::HelmDetail(ref detail) = app.active_view {
+        assert_eq!(detail.current_match_idx, Some(1));
+        assert_eq!(detail.scroll_offset, detail.search_matches[1]);
+    } else {
+        panic!("expected HelmDetail view");
+    }
+
+    // 5. Press 'N' to go to previous match
+    press(&mut app, ch('N')).await;
+    if let srelens_tui::app::ActiveView::HelmDetail(ref detail) = app.active_view {
+        assert_eq!(detail.current_match_idx, Some(0));
+        assert_eq!(detail.scroll_offset, detail.search_matches[0]);
+    } else {
+        panic!("expected HelmDetail view");
+    }
+
+    // 6. Press Esc to clear filter
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(app.filter_buffer.is_empty());
+    if let srelens_tui::app::ActiveView::HelmDetail(ref detail) = app.active_view {
+        assert!(detail.search_query.is_empty());
+        assert!(detail.search_matches.is_empty());
+        assert!(detail.current_match_idx.is_none());
+    } else {
+        panic!("expected HelmDetail view");
+    }
+}
+

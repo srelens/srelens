@@ -76,40 +76,121 @@ pub fn sanitize_span_text(text: &str) -> String {
 use ratatui::style::Style;
 use ratatui::text::Span;
 
+/// Finds non-overlapping `(start_byte, end_byte)` slices in `text` that case-insensitively match `query`.
+/// Guarantees that every returned `start_byte` and `end_byte` lies on a valid UTF-8 character boundary
+/// of `text`, preventing panics even when case conversion changes character or byte length.
+fn find_case_insensitive_matches(text: &str, query: &str) -> Vec<(usize, usize)> {
+    if query.is_empty() || text.is_empty() {
+        return Vec::new();
+    }
+
+    // Fast path for ASCII strings
+    if text.is_ascii() && query.is_ascii() {
+        let text_lower = text.to_ascii_lowercase();
+        let query_lower = query.to_ascii_lowercase();
+        let q_len = query.len();
+        let mut matches = Vec::new();
+        let mut curr = 0;
+        while let Some(idx) = text_lower[curr..].find(&query_lower) {
+            let start = curr + idx;
+            let end = start + q_len;
+            matches.push((start, end));
+            curr = end;
+        }
+        return matches;
+    }
+
+    // Unicode-safe path: walk character boundaries of `text`
+    let query_lower_chars: Vec<char> = query.to_lowercase().chars().collect();
+    if query_lower_chars.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+    let char_indices: Vec<(usize, char)> = text.char_indices().collect();
+    let n_chars = char_indices.len();
+    let mut i = 0;
+
+    while i < n_chars {
+        let start_byte = char_indices[i].0;
+        let mut q_idx = 0;
+        let mut j = i;
+        let mut matched = false;
+        let mut end_byte = start_byte;
+
+        while j < n_chars && q_idx < query_lower_chars.len() {
+            let next_byte_pos = if j + 1 < n_chars {
+                char_indices[j + 1].0
+            } else {
+                text.len()
+            };
+
+            let mut ch_mismatch = false;
+            for lower_c in char_indices[j].1.to_lowercase() {
+                if q_idx < query_lower_chars.len() && query_lower_chars[q_idx] == lower_c {
+                    q_idx += 1;
+                } else {
+                    ch_mismatch = true;
+                    break;
+                }
+            }
+
+            if ch_mismatch {
+                break;
+            }
+
+            end_byte = next_byte_pos;
+            if q_idx == query_lower_chars.len() {
+                matched = true;
+                break;
+            }
+            j += 1;
+        }
+
+        if matched {
+            matches.push((start_byte, end_byte));
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    matches
+}
+
 /// Splits `text` into Spans, highlighting every case-insensitive occurrence of `query`
 /// with `match_style` while styling non-matching portions with `base_style`.
-pub fn highlight_text_matches<'a>(
-    text: &'a str,
+pub fn highlight_text_matches(
+    text: &str,
     query: &str,
     base_style: Style,
     match_style: Style,
-) -> Vec<Span<'a>> {
+) -> Vec<Span<'static>> {
     if query.is_empty() {
         return vec![Span::styled(text.to_string(), base_style)];
     }
-    let query_lower = query.to_lowercase();
-    let text_lower = text.to_lowercase();
+
+    let matches = find_case_insensitive_matches(text, query);
+    if matches.is_empty() {
+        return vec![Span::styled(text.to_string(), base_style)];
+    }
+
     let mut spans = Vec::new();
     let mut last_idx = 0;
 
-    for (match_start, _) in text_lower.match_indices(&query_lower) {
-        if match_start > last_idx {
-            spans.push(Span::styled(text[last_idx..match_start].to_string(), base_style));
+    for (start, end) in matches {
+        if start > last_idx {
+            spans.push(Span::styled(text[last_idx..start].to_string(), base_style));
         }
-        let match_end = (match_start + query.len()).min(text.len());
-        spans.push(Span::styled(text[match_start..match_end].to_string(), match_style));
-        last_idx = match_end;
+        spans.push(Span::styled(text[start..end].to_string(), match_style));
+        last_idx = end;
     }
 
     if last_idx < text.len() {
         spans.push(Span::styled(text[last_idx..].to_string(), base_style));
     }
 
-    if spans.is_empty() {
-        vec![Span::styled(text.to_string(), base_style)]
-    } else {
-        spans
-    }
+    spans
 }
 
 pub use assistant_view::{render_assistant_view, AssistantViewState};
