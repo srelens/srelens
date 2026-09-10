@@ -295,6 +295,20 @@ export function duplicateTab(id: string): void {
   });
 }
 
+/** Move a document without selecting it; array order is persisted as-is. */
+export function moveTab(id: string, toIndex: number): void {
+  if (!Number.isFinite(toIndex)) return;
+  patchCurrent(w => {
+    const from = w.tabs.findIndex(tab => tab.id === id);
+    const to = Math.max(0, Math.min(w.tabs.length - 1, Math.trunc(toIndex)));
+    if (from < 0 || from === to) return w;
+    const tabs = [...w.tabs];
+    const [tab] = tabs.splice(from, 1);
+    tabs.splice(to, 0, tab);
+    return { ...w, tabs };
+  });
+}
+
 export function togglePin(id: string): void {
   patchCurrent((w) => {
     if (!w.tabs.some((t) => t.id === id)) return w;

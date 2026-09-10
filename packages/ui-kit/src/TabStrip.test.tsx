@@ -428,3 +428,64 @@ describe("TabStrip with nothing open", () => {
     expect(tab("Pods").getAttribute("tabindex")).toBe("0");
   });
 });
+
+describe("tab navigation enhancements", () => {
+  it("shows full identity on keyboard focus and dismisses it with Escape", async () => {
+    setup({ tabs: [{ id: "one", title: "ConfigMaps", sub: "short", context: "long-cluster-context", detail: "ConfigMap · monitoring" }] });
+    await userEvent.tab();
+    expect((await screen.findByRole("tooltip")).textContent).toContain("long-cluster-context");
+    expect(screen.getByRole("tooltip").textContent).toContain("ConfigMap · monitoring");
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+  it("requests a keyboard reorder without activating a tab", () => {
+    const onMove = vi.fn(); const {onSelect}=setup({onMove});
+    fireEvent.keyDown(tab("checkout-api"),{key:"ArrowLeft",ctrlKey:true,shiftKey:true});
+    expect(onMove).toHaveBeenCalledWith("logs",0);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+  it("keeps edge controls visible and out of the tab order when nothing overflows", () => {
+    setup();
+    for(const label of ["Scroll tabs left","Scroll tabs right"]){
+      const button=screen.getByRole("button",{name:label});
+      expect(button).toHaveProperty("disabled",true);
+      expect(button.tabIndex).toBe(-1);
+    }
+  });
+  it("does not select or reorder a tab dropped back in its own position", () => {
+    const onMove=vi.fn();const {onSelect}=setup({onMove});
+    const node=tab("checkout-api");
+    fireEvent.dragStart(node,{dataTransfer:{setData:vi.fn()}});
+    fireEvent.dragOver(node,{clientX:0});
+    fireEvent.drop(node,{clientX:0});
+    fireEvent.dragEnd(node);
+    fireEvent.click(node);
+    expect(onMove).not.toHaveBeenCalled();expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
+it("announces a completed keyboard move and keeps focus and selection separate", async () => {
+  function Reorderable() {
+    const [tabs,setTabs]=useState(TABS);
+    return <TabStrip tabs={tabs} activeId="pods" onSelect={()=>{}} onMove={(id,to)=>setTabs(old=>{
+      const next=[...old]; const [moved]=next.splice(next.findIndex(t=>t.id===id),1);next.splice(to,0,moved);return next;
+    })}/>;
+  }
+  render(<Reorderable/>);
+  tab("checkout-api").focus();
+  fireEvent.keyDown(tab("checkout-api"),{key:"ArrowLeft",metaKey:true,shiftKey:true});
+  expect(screen.getAllByRole("tab")[0]).toBe(tab("checkout-api"));
+  expect(document.activeElement).toBe(tab("checkout-api"));
+  expect(tab("Pods").getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("status").textContent).toBe("checkout-api moved to position 1 of 3");
+});
+
+it("shows an insertion marker and requests a drop without selecting", () => {
+  const onMove=vi.fn();const {onSelect}=setup({onMove});
+  fireEvent.dragStart(tab("nginx-7d4b"),{dataTransfer:{setData:vi.fn()}});
+  fireEvent.dragOver(tab("Pods"),{clientX:0});
+  expect(tab("Pods").getAttribute("data-drop")).toBe("before");
+  fireEvent.drop(tab("Pods"),{clientX:0});
+  expect(onMove).toHaveBeenCalledWith("shell",0);
+  expect(onSelect).not.toHaveBeenCalled();
+});

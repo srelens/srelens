@@ -1215,6 +1215,8 @@
     scrollbar-width: none;
   }
   .tabstrip::-webkit-scrollbar { display: none; }
+  .tabstrip > [role="tablist"] { scrollbar-width: none; }
+  .tabstrip > [role="tablist"]::-webkit-scrollbar { display: none; }
   .tab {
     position: relative;
     display: flex;
@@ -1344,6 +1346,11 @@
     color: var(--ink-muted);
     border-left: 1px solid var(--rule);
   }
+  .tab-scroll:disabled { opacity: .3; cursor: default; pointer-events: none; }
+  .tab-tooltip { max-width: min(420px, calc(100vw - 32px)); white-space: normal; overflow-wrap: anywhere; line-height: 1.6; }
+  .tab[data-dragging="true"] { opacity: .55; }
+  .tab[data-drop="before"] { box-shadow: inset 2px 0 var(--accent); }
+  .tab[data-drop="after"] { box-shadow: inset -2px 0 var(--accent); }
   .tab-new:hover { background: var(--field); color: var(--ink); }
 
   .toolbar {

@@ -477,3 +477,11 @@ suite("ScreenComponent", () => {
 });
 
 it("registers the app landing page", () => { expect(screenFor("/")?.name).toBe("Home"); });
+
+it("describes resource identity for tab hints without guessing a namespace", async () => {
+  const {tabDetail}=await import("./routes");
+  expect(tabDetail("/edit/prod/ConfigMap/monitoring/config")).toBe("ConfigMap · monitoring");
+  expect(tabDetail("/k/Node/-/node-1")).toBe("Node · Cluster-scoped");
+  expect(tabDetail("/logs/Pod/default/app")).toBe("Pod · default");
+  expect(tabDetail("/overview")).toBeUndefined();
+});

@@ -636,3 +636,41 @@ describe("no-op actions do not notify", () => {
     expect(store.getState()).not.toBe(before);
   });
 });
+
+describe("moveTab", () => {
+  it("moves pinned tabs without changing selection or other workspace state", () => {
+    seed();
+    store.openTab("/overview");
+    store.openTab("/settings");
+    const before = store.currentWorkspace();
+    const home = before.tabs[0];
+    store.moveTab(home.id, 2);
+    const after = store.currentWorkspace();
+    expect(after.tabs.map(t => t.id)).toEqual([before.tabs[1].id, before.tabs[2].id, home.id]);
+    expect(after.activeId).toBe(before.activeId);
+    expect(after.tabs[2]).toEqual(home);
+    store.moveTab(home.id, 2);
+    expect(store.currentWorkspace()).toBe(after);
+    store.openTab("/notes");
+    expect(routes().at(-1)).toBe("/notes");
+  });
+  it("ignores unknown tabs and invalid indices, and clamps to the ends", () => {
+    seed(); store.openTab("/overview");
+    const before = store.currentWorkspace();
+    store.moveTab("missing", 1);
+    store.moveTab(before.tabs[0].id, NaN);
+    expect(store.currentWorkspace()).toBe(before);
+    store.moveTab(before.tabs[0].id, 99);
+    expect(store.currentWorkspace().tabs.at(-1)?.id).toBe(before.tabs[0].id);
+  });
+});
+
+it("round-trips the chosen document order through persisted state", async () => {
+  const {parseStoredState, STORAGE_VERSION}=await import("./tabsPersist");
+  seed(); store.openTab("/overview");store.openTab("/settings");
+  store.moveTab(active().id,0);
+  const state=store.getState();
+  const restored=parseStoredState(JSON.stringify({version:STORAGE_VERSION,...state}));
+  expect(restored?.workspaces[0].tabs.map(t=>t.id)).toEqual(state.workspaces[0].tabs.map(t=>t.id));
+  expect(restored?.workspaces[0].activeId).toBe(state.workspaces[0].activeId);
+});

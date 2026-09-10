@@ -25,7 +25,7 @@ import { loadExpanded, loadNamespaces } from "../lib/workspace";
 import { getInfo, probeCluster } from "../lib/probe";
 import { defaultState, reconcile } from "../lib/tabs";
 import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
-import { isClusterScopedRoute, keepsManagementWhenPaused } from "../lib/routes";
+import { isClusterScopedRoute, keepsManagementWhenPaused, tabDetail } from "../lib/routes";
 import { flushSave, installFlushOnUnload, loadTabsState, scheduleSave } from "../lib/tabsPersist";
 import {
   activateTab,
@@ -40,6 +40,7 @@ import {
   getState,
   newTab,
   openTab,
+  moveTab,
   reopenClosed,
   selectIndex,
   setState,
@@ -535,11 +536,16 @@ export function Window({
           <TabStrip
             tabs={tabs.map(tab => {
               const context = contexts.find(c => c.name === tab.sub);
-              return context ? { ...tab, sub: getMark(context.stableId, context.name).name } : tab;
+              return { ...tab,
+                sub: context ? getMark(context.stableId, context.name).name : tab.sub,
+                context: parseEditRoute(tab.route)?.cluster ?? parseNewRoute(tab.route)?.cluster ?? tab.sub,
+                detail: tabDetail(tab.route),
+              };
             })}
             activeId={activeId}
             onSelect={activateTab}
             onClose={closeTab}
+            onMove={moveTab}
             menuFor={menuFor}
             onNew={() => run({ type: "new-tab" })}
             newHint={hint("new-tab", apple)}
