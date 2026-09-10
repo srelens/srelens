@@ -5,7 +5,8 @@ This guide covers everything you need to build, test, and extend srelens.
 ## Prerequisites
 
 - **Rust** (stable) — install via [rustup](https://rustup.rs). The toolchain is pinned by `rust-toolchain.toml` (stable + `llvm-tools-preview` for coverage).
-- **Node.js 22+** and **pnpm 11+**. The exact version is pinned by `packageManager` in `package.json`, and pnpm switches to it on its own — don't install a different one alongside it.
+- **Node.js 26** is the development default; **Node.js 24 LTS** is also supported. Run `nvm install && nvm use` from the repository root. `.nvmrc` selects the default major for developers and CI/release workflows; `package.json` declares supported majors and `engineStrict` in `pnpm-workspace.yaml` rejects unsupported versions during installation. CI builds, typechecks, and tests both supported majors.
+- **pnpm 11+**. Its exact version is pinned by `packageManager` in `package.json`, and pnpm switches to it on its own — don't install a different one alongside it.
 - **Tauri v2 system dependencies** — see the [official prerequisites](https://v2.tauri.app/start/prerequisites/) (on macOS: Xcode command-line tools; on Linux: webkit2gtk and friends).
 - A kubeconfig with at least one reachable cluster ([kind](https://kind.sigs.k8s.io) or k3d works well for development).
 - **Docker** — only if you want to build or run the [web app](#web-mode) locally.
@@ -228,6 +229,17 @@ Test placement conventions:
 
 - Rust: unit tests in `#[cfg(test)]` modules next to the code.
 - TypeScript: `Foo.test.tsx` / `foo.test.ts` beside `Foo.tsx` / `foo.ts`. Component tests use Testing Library against the transport shim (mocked), not Tauri.
+
+### Node.js and browser storage in tests
+
+Node.js 25 and later expose their own Web Storage globals. They are not the
+per-window storage the frontend uses: without a storage file, Node 26's
+`localStorage` getter can throw. Every Vitest project uses `TEST_EXEC_ARGV`
+from `vitest.shared.ts` to disable Node Web Storage **in test workers only**,
+before jsdom initializes. Browser tests then use jsdom's isolated storage;
+Node-only tests have no browser storage. Do not supply a shared
+`--localstorage-file` to make tests pass. Application settings still persist
+through the backend `settingsStorage` adapter.
 
 ### Live-cluster tests
 
