@@ -96,6 +96,8 @@ pub struct App {
     pub assistant_states: HashMap<String, AssistantViewState>,
     pub pod_metrics_tick_counter: usize,
     pub node_metrics_tick_counter: usize,
+    pub helm_tick_counter: usize,
+    pub helm_refreshing: bool,
     pub node_metrics_history: HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
     pub pod_metrics_history: HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
     pub cluster_overview_data: Option<crate::views::overview_view::ClusterOverviewData>,
@@ -258,6 +260,8 @@ impl App {
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
+            helm_tick_counter: 0,
+            helm_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -345,6 +349,17 @@ impl App {
 
         if matches!(self.active_view, ActiveView::PortForwards(_)) {
             self.sync_port_forwards();
+        }
+
+        // Periodically refresh Helm releases every ~3.5 seconds (35 ticks at 100ms)
+        if matches!(self.active_view, ActiveView::Helm(_)) {
+            self.helm_tick_counter = self.helm_tick_counter.saturating_add(1);
+            if self.helm_tick_counter % 35 == 1 && !self.helm_refreshing {
+                self.refresh_helm_releases();
+            }
+        } else {
+            self.helm_tick_counter = 0;
+            self.helm_refreshing = false;
         }
     }
 
@@ -1251,6 +1266,10 @@ impl App {
             d.is_reachable = true;
             ov.set_data(d);
         }
+        if let ActiveView::Helm(helm) = &mut self.active_view {
+            helm.releases.clear();
+            helm.is_loading = true;
+        }
         self.set_toast(format!("Switched to context '{}'", self.active_context), Theme::status_ok());
         self.refresh_cluster_info();
         self.refresh_cluster_overview();
@@ -1316,6 +1335,7 @@ impl App {
         }
 
         if matches!(self.active_view, ActiveView::Helm(_)) {
+            self.helm_refreshing = false;
             self.refresh_helm_releases();
             return;
         }
@@ -3396,6 +3416,16 @@ impl App {
                                 is_destructive: true,
                             });
                         }
+                    }
+                    KeyCode::Char('R') => {
+                        self.helm_refreshing = false;
+                        self.refresh_helm_releases();
+                        self.set_toast("Refreshing Helm releases...".to_string(), Theme::status_ok());
+                    }
+                    KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.helm_refreshing = false;
+                        self.refresh_helm_releases();
+                        self.set_toast("Refreshing Helm releases...".to_string(), Theme::status_ok());
                     }
                     KeyCode::Char('r') => {
                         if let Some(rel) = sel_rel {
@@ -6260,8 +6290,14 @@ impl App {
     }
 
     pub fn refresh_helm_releases(&mut self) {
+        if self.helm_refreshing {
+            return;
+        }
+        self.helm_refreshing = true;
         if let ActiveView::Helm(helm) = &mut self.active_view {
-            helm.is_loading = true;
+            if helm.releases.is_empty() {
+                helm.is_loading = true;
+            }
             helm.error = None;
         }
         let ctx = self.active_context.clone();
@@ -6287,18 +6323,21 @@ impl App {
     pub fn handle_helm_releases_result(
         &mut self,
         context: &str,
-        _namespace: &str,
+        namespace: &str,
         result: Result<Vec<srelens_kube::helm::HelmReleaseSummary>, String>,
     ) {
+        self.helm_refreshing = false;
         if let ActiveView::Helm(helm) = &mut self.active_view {
-            if self.active_context == context {
+            if self.active_context == context && self.active_namespace == namespace {
                 match result {
                     Ok(summaries) => {
                         let items: Vec<HelmReleaseItem> = summaries.into_iter().map(Into::into).collect();
                         helm.set_releases(items);
                     }
                     Err(err) => {
-                        helm.set_error(err);
+                        if helm.releases.is_empty() {
+                            helm.set_error(err);
+                        }
                     }
                 }
             }
@@ -7991,6 +8030,7 @@ impl App {
                 ("<v>", "Values"),
                 ("<y>", "Manifest"),
                 ("<d>", "History"),
+                ("<R>", "Refresh"),
                 ("<r>", "Rollback"),
                 ("<^d>", "Uninstall"),
                 ("<c>", "CopyURL"),

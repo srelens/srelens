@@ -1165,6 +1165,28 @@ fn helm_view_set_releases_clamps_the_selection() {
 }
 
 #[test]
+fn helm_view_set_releases_preserves_selected_release_by_name() {
+    let mut state = HelmViewState::new();
+    state.set_releases(vec![
+        release("b", "deployed", 1),
+        release("c", "deployed", 1),
+    ]);
+    state.select_next();
+    assert_eq!(state.selected_release().unwrap().name, "c");
+    assert_eq!(state.selected_idx, 1);
+
+    // A new release "a" is installed and prepended:
+    state.set_releases(vec![
+        release("a", "deployed", 1),
+        release("b", "deployed", 1),
+        release("c", "deployed", 1),
+    ]);
+    // Selection stays locked to release "c" (now at index 2)!
+    assert_eq!(state.selected_release().unwrap().name, "c");
+    assert_eq!(state.selected_idx, 2);
+}
+
+#[test]
 fn helm_view_renders_the_empty_placeholder() {
     let mut state = HelmViewState::new();
     state.set_releases(vec![]);
