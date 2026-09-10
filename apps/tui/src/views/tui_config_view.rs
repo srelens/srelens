@@ -10,25 +10,38 @@ use crate::theme::Theme;
 use crate::tui_config::TuiConfig;
 use crate::ui::command_popup_rect;
 
-pub const SAMPLE_SUGGESTIONS: &[(&str, &[&str], &str)] = &[
-    ("pods", &["po"], "Pods in namespace or cluster-wide"),
-    ("deployments", &["deploy"], "Deployments controller"),
-    ("services", &["svc"], "Kubernetes Services"),
-    ("configmaps", &["cm"], "ConfigMaps key-value configurations"),
-    ("secrets", &["sec"], "Kubernetes Secrets (masked)"),
-    ("nodes", &["no"], "Cluster worker and control-plane nodes"),
-    ("events", &["ev"], "Recent cluster events and warnings"),
-    ("helm", &["releases"], "Helm release revisions and values"),
-    ("assistant", &["ai", "chat"], "SRElens AI Assistant Chat"),
-    ("config", &["tui"], "TUI Configuration & Popup Size"),
-    ("toolbox", &["tools"], "Diagnostics (kubectl, helm, krew)"),
-    ("overview", &[], "Cluster health and resource totals"),
-    ("quit", &["q", "exit"], "Quit SRElens"),
+pub const SAMPLE_SUGGESTIONS: &[(&str, &[&str], &str, &str, &str)] = &[
+    ("pods", &["po", "pod"], "Workload", "List, inspect, and tail Kubernetes pods across namespaces", ":pods [namespace]"),
+    ("deployments", &["deploy", "dp"], "Workload", "Manage, inspect, and scale deployment workloads", ":deployments [ns]"),
+    ("services", &["svc", "service"], "Network", "Service routing, cluster IPs, NodePorts and LoadBalancers", ":services [ns]"),
+    ("configmaps", &["cm"], "Config", "Key-value configuration maps and application data", ":configmaps [ns]"),
+    ("secrets", &["sec"], "Config", "Kubernetes secrets with masked base64 credentials", ":secrets [ns]"),
+    ("nodes", &["no", "node"], "Cluster", "Cluster worker and control-plane node hardware and health", ":nodes"),
+    ("events", &["ev", "event"], "Cluster", "Cluster-wide event stream, errors, warnings & scheduling", ":events [ns]"),
+    ("helm", &["releases"], "Helm", "Helm 3 release revisions, status, values and manifests", ":helm [ns]"),
+    ("workloads", &["wl"], "Workload", "Unified view of Pods, Deployments, STS & DS", ":workloads [ns]"),
+    ("statefulsets", &["sts"], "Workload", "Stateful set workloads and distributed replicas", ":statefulsets [ns]"),
+    ("daemonsets", &["ds"], "Workload", "Node-local daemonset agent workloads", ":daemonsets [ns]"),
+    ("jobs", &["job"], "Workload", "Batch job runs and execution completion status", ":jobs [ns]"),
+    ("cronjobs", &["cj"], "Workload", "Scheduled cron jobs and recurring execution history", ":cronjobs [ns]"),
+    ("ingresses", &["ing"], "Network", "HTTP/HTTPS ingress routing rules and TLS certs", ":ingresses [ns]"),
+    ("namespaces", &["ns"], "Cluster", "Cluster tenancy namespaces switcher and viewer", ":namespaces"),
+    ("persistentvolumes", &["pv"], "Storage", "Cluster-wide persistent storage volumes", ":persistentvolumes"),
+    ("persistentvolumeclaims", &["pvc"], "Storage", "Persistent storage volume claims by namespace", ":persistentvolumeclaims [ns]"),
+    ("storageclasses", &["sc"], "Storage", "Storage provisioners, volume plugins & reclaim policies", ":storageclasses"),
+    ("serviceaccounts", &["sa"], "Auth / RBAC", "Service account identities and RBAC token bindings", ":serviceaccounts [ns]"),
+    ("roles", &["role"], "Auth / RBAC", "Namespace-scoped RBAC roles and resource permissions", ":roles [ns]"),
+    ("top", &["toppods"], "Hotspots", "Top Hotspots ranking (Pods & Nodes by CPU/Memory)", ":top"),
+    ("assistant", &["ai", "chat"], "AI Assistant", "SRElens AI Assistant Chat for troubleshooting", ":assistant"),
+    ("config", &["tui"], "Configuration", "Configure command popup dimensions, visible rows & text size", ":config"),
+    ("toolbox", &["tools"], "Diagnostic", "Toolbox diagnostics (kubectl, helm, krew plugins)", ":toolbox"),
+    ("overview", &["info"], "Overview", "Cluster overview, health summary and node/pod capacity", ":overview"),
+    ("quit", &["q", "exit"], "System", "Quit SRElens TUI session", ":quit"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiConfigViewState {
-    pub selected_field: usize, // 0 = Width, 1 = Visible Rows
+    pub selected_field: usize, // 0 = Width, 1 = Visible Rows, 2 = Text Size / Density
 }
 
 impl Default for TuiConfigViewState {
@@ -43,12 +56,12 @@ impl TuiConfigViewState {
     }
 
     pub fn select_next_field(&mut self) {
-        self.selected_field = (self.selected_field + 1) % 2;
+        self.selected_field = (self.selected_field + 1) % 3;
     }
 
     pub fn select_prev_field(&mut self) {
         if self.selected_field == 0 {
-            self.selected_field = 1;
+            self.selected_field = 2;
         } else {
             self.selected_field -= 1;
         }
@@ -65,6 +78,9 @@ impl TuiConfigViewState {
                 let current = config.command_popup_max_visible as i32;
                 let next = (current + delta).clamp(3, 20) as usize;
                 config.command_popup_max_visible = next;
+            }
+            2 => {
+                config.command_popup_density = config.command_popup_density.toggle();
             }
             _ => {}
         }
@@ -101,9 +117,9 @@ pub fn render_tui_config_view(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Top description
+            Constraint::Length(2), // Top description
             Constraint::Min(10),   // Controls and Live Preview
-            Constraint::Length(2), // Bottom key hints
+            Constraint::Length(1), // Bottom key hints
         ])
         .split(inner);
 
@@ -112,7 +128,7 @@ pub fn render_tui_config_view(
         Line::from(vec![
             Span::styled("TUI Display & Layout Options: ", Theme::header_label()),
             Span::styled(
-                "Configure command menu dimensions and popup sizing.",
+                "Configure command popup dimensions, visible rows & text size.",
                 Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -133,7 +149,7 @@ pub fn render_tui_config_view(
     } else {
         let v_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(12), Constraint::Min(8)])
+            .constraints([Constraint::Length(16), Constraint::Min(8)])
             .split(chunks[1]);
         (v_chunks[0], v_chunks[1])
     };
@@ -142,8 +158,9 @@ pub fn render_tui_config_view(
     let control_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6), // Width card
-            Constraint::Length(6), // Visible rows card
+            Constraint::Length(5), // Width card
+            Constraint::Length(5), // Visible rows card
+            Constraint::Length(5), // Text size card
             Constraint::Min(0),
         ])
         .split(controls_area);
@@ -252,6 +269,72 @@ pub fn render_tui_config_view(
     ];
     f.render_widget(Paragraph::new(rows_lines), rows_inner);
 
+    // Setting 2: Command Popup Text Size / Density
+    let is_density_selected = state.selected_field == 2;
+    let density_border_color = if is_density_selected {
+        Theme::cyan()
+    } else {
+        Theme::border()
+    };
+    let density_title = if is_density_selected {
+        " ▶ Command Popup Text Size "
+    } else {
+        "   Command Popup Text Size "
+    };
+    let density_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(density_border_color))
+        .title(Span::styled(
+            density_title,
+            if is_density_selected {
+                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::fg())
+            },
+        ));
+    let density_inner = density_block.inner(control_chunks[2]);
+    f.render_widget(density_block, control_chunks[2]);
+
+    let is_large_cfg = config.command_popup_density.is_large();
+    let density_lines = vec![
+        Line::from(vec![
+            Span::styled("Size:  ", Style::default().fg(Theme::dim())),
+            if !is_large_cfg {
+                Span::styled(
+                    "[● Compact (1-line)] ",
+                    Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    " ○ Compact (1-line)  ",
+                    Style::default().fg(Theme::dim()),
+                )
+            },
+            if is_large_cfg {
+                Span::styled(
+                    "[● Large (2-line cards)]",
+                    Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    " ○ Large (2-line cards) ",
+                    Style::default().fg(Theme::dim()),
+                )
+            },
+        ]),
+        Line::from(vec![
+            Span::styled("Toggle: Use ", Style::default().fg(Theme::dim())),
+            Span::styled("Space", Style::default().fg(Theme::yellow())),
+            Span::styled(", ", Style::default().fg(Theme::dim())),
+            Span::styled("Enter", Style::default().fg(Theme::yellow())),
+            Span::styled(" or ", Style::default().fg(Theme::dim())),
+            Span::styled("h/l", Style::default().fg(Theme::yellow())),
+            Span::styled(" to switch", Style::default().fg(Theme::dim())),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(density_lines), density_inner);
+
     // 3. Live Preview of Command Popup
     let preview_block = Block::default()
         .borders(Borders::ALL)
@@ -286,6 +369,7 @@ pub fn render_tui_config_view(
             SAMPLE_SUGGESTIONS.len(),
             config.command_popup_max_width,
             config.command_popup_max_visible,
+            config.command_popup_density,
         );
 
         // Clamp popup vertically so it stays within preview_inner
@@ -303,41 +387,160 @@ pub fn render_tui_config_view(
 
         f.render_widget(Clear, popup_area);
 
-        let max_visible = config.command_popup_max_visible;
-        let visible_count = SAMPLE_SUGGESTIONS.len().min(max_visible);
+        let density = config.command_popup_density;
+        let is_large = density.is_large();
+        let inner_height = popup_area.height.saturating_sub(2);
+        let item_lines = density.item_height();
+        let max_fits = (inner_height / item_lines) as usize;
+        let visible_count = SAMPLE_SUGGESTIONS
+            .len()
+            .min(config.command_popup_max_visible)
+            .min(max_fits.max(1));
         let visible_slice = &SAMPLE_SUGGESTIONS[0..visible_count];
+        let popup_inner_w = popup_area.width.saturating_sub(2) as usize;
 
         let items: Vec<ListItem> = visible_slice
             .iter()
             .enumerate()
-            .map(|(i, (name, aliases, desc))| {
+            .map(|(i, (name, aliases, cat, desc, syntax))| {
                 let is_selected = i == 0;
                 let prefix = if is_selected { "▶ " } else { "  " };
-                let alias_str = if !aliases.is_empty() {
-                    format!(" ({})", aliases.join(", "))
+
+                if is_large {
+                    let alias_str = if !aliases.is_empty() {
+                        format!(" ({})", aliases.join(", "))
+                    } else {
+                        String::new()
+                    };
+                    let cat_badge = format!("[{}]", cat);
+                    let name_text = format!("{}{}{}", prefix, name.to_uppercase(), alias_str);
+
+                    let name_len = name_text.chars().count();
+                    let badge_len = cat_badge.chars().count();
+                    let spacer_len = popup_inner_w.saturating_sub(name_len + badge_len + 1).max(2);
+                    let spacer = " ".repeat(spacer_len);
+
+                    let line1 = Line::from(vec![
+                        Span::styled(
+                            name_text,
+                            if is_selected {
+                                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
+                            },
+                        ),
+                        Span::raw(spacer),
+                        Span::styled(
+                            cat_badge,
+                            if is_selected {
+                                Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Theme::dim())
+                            },
+                        ),
+                    ]);
+
+                    let mut line2_spans = vec![
+                        Span::raw("    "),
+                        Span::styled(
+                            *desc,
+                            if is_selected {
+                                Style::default().fg(Theme::fg())
+                            } else {
+                                Style::default().fg(Theme::dim())
+                            },
+                        ),
+                    ];
+
+                    if !syntax.is_empty() && popup_inner_w >= 65 {
+                        line2_spans.push(Span::styled("  •  ", Style::default().fg(Theme::dim())));
+                        line2_spans.push(Span::styled(
+                            *syntax,
+                            if is_selected {
+                                Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Theme::yellow())
+                            },
+                        ));
+                    }
+
+                    let line2 = Line::from(line2_spans);
+
+                    ListItem::new(vec![line1, line2]).style(if is_selected {
+                        Theme::selected_row()
+                    } else {
+                        Style::default()
+                    })
                 } else {
-                    String::new()
-                };
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("{}{}{:<18}", prefix, name, alias_str),
+                    let alias_str = if !aliases.is_empty() {
+                        format!(" ({})", aliases.join(", "))
+                    } else {
+                        String::new()
+                    };
+                    let name_col = format!("{}{}{}", prefix, name, alias_str);
+                    let pad_width = if popup_inner_w >= 90 { 26 } else { 20 };
+                    let padded_name = format!("{:<pad_width$}", name_col, pad_width = pad_width);
+
+                    let mut spans = vec![
+                        Span::styled(
+                            padded_name,
+                            if is_selected {
+                                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Theme::fg())
+                            },
+                        ),
+                    ];
+
+                    if popup_inner_w >= 70 {
+                        spans.push(Span::styled(
+                            format!("[{}] ", cat),
+                            if is_selected {
+                                Style::default().fg(Theme::accent())
+                            } else {
+                                Style::default().fg(Theme::dim())
+                            },
+                        ));
+                    }
+
+                    spans.push(Span::styled(
+                        format!(" {}", desc),
                         if is_selected {
-                            Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
-                        } else {
                             Style::default().fg(Theme::fg())
+                        } else {
+                            Style::default().fg(Theme::dim())
                         },
-                    ),
-                    Span::styled(format!("  {}", desc), Style::default().fg(Theme::dim())),
-                ]);
-                ListItem::new(line).style(if is_selected {
-                    Theme::selected_row()
-                } else {
-                    Style::default()
-                })
+                    ));
+
+                    if !syntax.is_empty() && popup_inner_w >= 95 {
+                        spans.push(Span::styled("  |  ", Style::default().fg(Theme::dim())));
+                        spans.push(Span::styled(
+                            *syntax,
+                            if is_selected {
+                                Style::default().fg(Theme::yellow())
+                            } else {
+                                Style::default().fg(Theme::dim())
+                            },
+                        ));
+                    }
+
+                    ListItem::new(Line::from(spans)).style(if is_selected {
+                        Theme::selected_row()
+                    } else {
+                        Style::default()
+                    })
+                }
             })
             .collect();
 
-        let title = if SAMPLE_SUGGESTIONS.len() > max_visible {
+        let title = if visible_count < config.command_popup_max_visible {
+            format!(
+                " Commands [1/{}] (window limited: {} of {}) ",
+                SAMPLE_SUGGESTIONS.len(),
+                visible_count,
+                config.command_popup_max_visible
+            )
+        } else if SAMPLE_SUGGESTIONS.len() > visible_count {
             format!(
                 " Commands [1/{}] (Tab: complete, Enter: run) ",
                 SAMPLE_SUGGESTIONS.len()
@@ -362,6 +565,8 @@ pub fn render_tui_config_view(
         Span::styled("Select  ", Style::default().fg(Theme::dim())),
         Span::styled("<h/l, ←/→, -/+> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
         Span::styled("Adjust  ", Style::default().fg(Theme::dim())),
+        Span::styled("<Space or Enter> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+        Span::styled("Toggle  ", Style::default().fg(Theme::dim())),
         Span::styled("<r> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
         Span::styled("Reset Defaults  ", Style::default().fg(Theme::dim())),
         Span::styled("<Esc or q> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),

@@ -23,6 +23,7 @@ use srelens_tui::ui::dialogs::{
 use srelens_tui::ui::header::{render_header, ContextChipInfo, HeaderProps};
 use srelens_tui::ui::help::{centered_rect, render_help_modal};
 use srelens_tui::ui::statusbar::{command_popup_rect, render_statusbar, InputMode, StatusBarProps};
+use srelens_tui::CommandPopupDensity;
 use srelens_tui::views::assistant_view::{
     format_message_content, format_message_content_with_width, parse_inline_markdown,
     render_assistant_view, render_markdown_table, wrap_line, AssistantViewState, ChatMessage,
@@ -118,6 +119,7 @@ fn status_props(mode: &InputMode) -> StatusBarProps<'_> {
         close_pf_rect: None,
         command_popup_max_width: None,
         command_popup_max_visible: None,
+        command_popup_density: None,
     }
 }
 
@@ -903,23 +905,27 @@ fn command_mode_pops_up_the_matching_commands_above_the_bar_and_arrows_the_selec
 #[test]
 fn command_popup_geometry_respects_max_width_and_visible_rows() {
     let bar_area = Rect::new(0, 22, 80, 2);
-    // 2 items, max_visible 6 -> 2 items + 2 borders = 4 height, width 80 - 4 = 76 min 65 = 65
-    let r1 = command_popup_rect(bar_area, 2, 65, 6);
+    // 2 items, max_visible 6, Compact (1 row/item) -> 2 items + 2 borders = 4 height, width 80 - 4 = 76 min 65 = 65
+    let r1 = command_popup_rect(bar_area, 2, 65, 6, CommandPopupDensity::Compact);
     assert_eq!(r1, Rect::new(2, 18, 65, 4));
 
-    // 10 items, max_visible 6 -> 6 items + 2 borders = 8 height
-    let r2 = command_popup_rect(bar_area, 10, 65, 6);
+    // 10 items, max_visible 6, Compact -> 6 items + 2 borders = 8 height
+    let r2 = command_popup_rect(bar_area, 10, 65, 6, CommandPopupDensity::Compact);
     assert_eq!(r2, Rect::new(2, 14, 65, 8));
 
     // Narrow terminal: 50 cols, max_width 65 -> clamped to 50 - 4 = 46
     let narrow_bar = Rect::new(0, 22, 50, 2);
-    let r3 = command_popup_rect(narrow_bar, 5, 65, 6);
+    let r3 = command_popup_rect(narrow_bar, 5, 65, 6, CommandPopupDensity::Compact);
     assert_eq!(r3, Rect::new(2, 15, 46, 7));
 
     // Wide terminal with custom config: 160 cols, 10 items, max_width 120, max_visible 10
     let wide_bar = Rect::new(0, 22, 160, 2);
-    let r4 = command_popup_rect(wide_bar, 10, 120, 10);
+    let r4 = command_popup_rect(wide_bar, 10, 120, 10, CommandPopupDensity::Compact);
     assert_eq!(r4, Rect::new(2, 10, 120, 12));
+
+    // Large density mode: 5 items, max_visible 6 -> 5 items * 2 rows = 10 rows + 2 borders = 12 height
+    let r5 = command_popup_rect(bar_area, 5, 65, 6, CommandPopupDensity::Large);
+    assert_eq!(r5, Rect::new(2, 10, 65, 12));
 }
 
 #[test]
@@ -933,6 +939,7 @@ fn command_popup_rendering_expands_to_configured_width_and_visible_rows() {
     props.suggestions = Some((&suggs, 0));
     props.command_popup_max_width = Some(110);
     props.command_popup_max_visible = Some(10);
+    props.command_popup_density = Some(CommandPopupDensity::Compact);
 
     let lines = common::render_lines(160, 24, |f| {
         render_statusbar(f, Rect::new(0, 22, 160, 2), props)
@@ -951,6 +958,40 @@ fn command_popup_rendering_expands_to_configured_width_and_visible_rows() {
     assert!(
         header_line.trim_end().len() >= 108,
         "popup border should extend to configured max width of 110, got line: {header_line}"
+    );
+}
+
+#[test]
+fn command_popup_rendering_large_density_mode() {
+    let suggs = command_suggestions("");
+    assert!(suggs.len() >= 5, "empty query matches all commands");
+
+    let mode = InputMode::Command;
+    let mut props = status_props(&mode);
+    props.command_input = "";
+    props.suggestions = Some((&suggs, 0));
+    props.command_popup_max_width = Some(90);
+    props.command_popup_max_visible = Some(4);
+    props.command_popup_density = Some(CommandPopupDensity::Large);
+
+    let lines = common::render_lines(120, 24, |f| {
+        render_statusbar(f, Rect::new(0, 22, 120, 2), props)
+    });
+
+    // With 4 visible items in Large mode: 4 * 2 = 8 rows + 2 borders = 10 rows tall.
+    // Base bar at y=22 -> popup top at y = 22 - 10 = 12.
+    let popup_title_row = lines
+        .iter()
+        .position(|l| l.contains("Commands [1/"))
+        .expect("popup title present");
+    assert_eq!(popup_title_row, 12, "top border of large popup is at y=12");
+
+    // Large mode renders bold uppercase command names
+    let content_lines = &lines[popup_title_row + 1..22];
+    let rendered_text = content_lines.join("\n");
+    assert!(
+        rendered_text.contains("THEMES") || rendered_text.contains("WORKLOADS") || rendered_text.contains("PODS"),
+        "large mode renders uppercase command names, got:\n{rendered_text}"
     );
 }
 

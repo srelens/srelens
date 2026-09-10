@@ -16,6 +16,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use srelens_kube::contexts::ContextDto;
 use srelens_tui::app::{ActiveView, App, SuspendAction};
 use srelens_tui::commands::{command_suggestions_with_crds, CrdMeta, PrinterColumn, ResourceKind};
+use srelens_tui::CommandPopupDensity;
 use srelens_tui::event::AppEvent;
 use srelens_tui::ui::{ContainerAction, InputMode, Modal};
 use srelens_tui::views::metrics_panel_view::MetricsTimeRange;
@@ -3335,6 +3336,10 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
 
 #[tokio::test]
 async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("tui.json");
+    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_path);
+
     let (tx, _rx) = unbounded_channel();
     let mut app = App::new(
         Some("test-ctx".into()),
@@ -3346,10 +3351,6 @@ async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
     )
     .await
     .expect("app");
-
-    let temp = tempfile::tempdir().unwrap();
-    let config_path = temp.path().join("tui.json");
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_path);
 
     // Initial state: pods table
     assert!(matches!(app.active_view, ActiveView::Table(_)));
@@ -3366,6 +3367,7 @@ async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
     // Initial config values
     assert_eq!(app.tui_config.command_popup_max_width, 65);
     assert_eq!(app.tui_config.command_popup_max_visible, 6);
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Compact);
 
     // Adjust width (+5 with 'l')
     press(&mut app, ch('l')).await;
@@ -3385,10 +3387,29 @@ async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
     press(&mut app, ch('+')).await;
     assert_eq!(app.tui_config.command_popup_max_visible, 7);
 
+    // Switch to text size/density field with 'j'
+    press(&mut app, ch('j')).await;
+    if let ActiveView::TuiConfig(ref s) = app.active_view {
+        assert_eq!(s.selected_field, 2);
+    }
+
+    // Toggle density to Large with 'l'
+    press(&mut app, ch('l')).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Large);
+
+    // Toggle back to Compact with Space
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Compact);
+
+    // Toggle to Large with Enter
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Large);
+
     // Reset defaults with 'r'
     press(&mut app, ch('r')).await;
     assert_eq!(app.tui_config.command_popup_max_width, 65);
     assert_eq!(app.tui_config.command_popup_max_visible, 6);
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Compact);
 
     // Press Esc pops back to table view
     press(&mut app, key(KeyCode::Esc)).await;

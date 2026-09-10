@@ -3892,6 +3892,9 @@ impl App {
                     KeyCode::Char('l') | KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => {
                         cfg_state.adjust_current(1, &mut self.tui_config);
                     }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        cfg_state.adjust_current(1, &mut self.tui_config);
+                    }
                     KeyCode::Char('[') | KeyCode::Char('{') => {
                         cfg_state.adjust_current(-5, &mut self.tui_config);
                     }
@@ -8137,6 +8140,7 @@ impl App {
                 close_pf_rect: Some(&self.close_pf_button_rect),
                 command_popup_max_width: Some(self.tui_config.command_popup_max_width),
                 command_popup_max_visible: Some(self.tui_config.command_popup_max_visible),
+                command_popup_density: Some(self.tui_config.command_popup_density),
             },
         );
 

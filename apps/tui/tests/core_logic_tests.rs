@@ -36,7 +36,7 @@ use srelens_tui::deep_link::DeepLink;
 use srelens_tui::event::{AppEvent, EventHandler};
 use srelens_tui::sink::TuiSink;
 use srelens_tui::theme::{status_style, Theme};
-use srelens_tui::tui_config::TuiConfig;
+use srelens_tui::tui_config::{CommandPopupDensity, TuiConfig};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -1672,7 +1672,7 @@ fn static_commands_convert_to_dynamic_definitions_verbatim() {
     let dynamic = DynamicCommandDef::from(pods);
     assert_eq!(dynamic.name, "pods");
     assert_eq!(dynamic.aliases, vec!["po".to_string(), "pod".to_string()]);
-    assert_eq!(dynamic.description, "Pods view");
+    assert_eq!(dynamic.description, pods.description);
     assert_eq!(dynamic.target, CommandTarget::Resource(ResourceKind::Pods));
 }
 
@@ -1965,6 +1965,7 @@ fn tui_config_file_paths_clamping_and_round_trip() {
     let cfg = TuiConfig {
         command_popup_max_width: 120,
         command_popup_max_visible: 12,
+        command_popup_density: CommandPopupDensity::Large,
     };
     cfg.save().expect("save succeeds");
     assert!(file.is_file());
@@ -1979,18 +1980,22 @@ fn tui_config_file_paths_clamping_and_round_trip() {
     let mut clamped = TuiConfig {
         command_popup_max_width: 500,
         command_popup_max_visible: 1,
+        command_popup_density: CommandPopupDensity::Compact,
     };
     clamped.clamp();
     assert_eq!(clamped.command_popup_max_width, 200);
     assert_eq!(clamped.command_popup_max_visible, 3);
+    assert_eq!(clamped.command_popup_density, CommandPopupDensity::Compact);
 
     let mut low = TuiConfig {
         command_popup_max_width: 10,
         command_popup_max_visible: 99,
+        command_popup_density: CommandPopupDensity::Large,
     };
     low.clamp();
     assert_eq!(low.command_popup_max_width, 40);
     assert_eq!(low.command_popup_max_visible, 20);
+    assert_eq!(low.command_popup_density, CommandPopupDensity::Large);
 
     // 5. Corrupt file gracefully falls back to default
     std::fs::write(&file, "{ corrupt json").unwrap();

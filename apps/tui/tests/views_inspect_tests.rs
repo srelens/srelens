@@ -26,7 +26,7 @@ use srelens_tui::views::overview_view::{
 use srelens_tui::views::settings_view::{render_settings_view, SettingField, SettingsViewState};
 use srelens_tui::views::tui_config_view::{render_tui_config_view, TuiConfigViewState};
 use srelens_tui::views::yaml_view::{render_yaml_view, YamlViewState};
-use srelens_tui::TuiConfig;
+use srelens_tui::{CommandPopupDensity, TuiConfig};
 
 /// Render one frame and hand back the raw buffer, for the few assertions that
 /// need a cell's style rather than its text.
@@ -2030,16 +2030,29 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     assert_eq!(state.selected_field, 1);
 
     state.select_next_field();
+    assert_eq!(state.selected_field, 2);
+
+    state.select_next_field();
     assert_eq!(state.selected_field, 0);
 
     state.select_prev_field();
-    assert_eq!(state.selected_field, 1);
+    assert_eq!(state.selected_field, 2);
 
     let mut config = TuiConfig::default();
     assert_eq!(config.command_popup_max_width, 65);
     assert_eq!(config.command_popup_max_visible, 6);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
 
-    // Selected field 1: Visible Rows (step 1, range 3..=20)
+    // Selected field 2: Text size / density toggle
+    state.adjust_current(1, &mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::Large);
+    state.adjust_current(1, &mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
+
+    // Switch to field 1: Visible Rows (step 1, range 3..=20)
+    state.select_prev_field();
+    assert_eq!(state.selected_field, 1);
+
     state.adjust_current(1, &mut config);
     assert_eq!(config.command_popup_max_visible, 7);
 
@@ -2066,6 +2079,7 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     state.reset_defaults(&mut config);
     assert_eq!(config.command_popup_max_width, 65);
     assert_eq!(config.command_popup_max_visible, 6);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
 }
 
 #[test]
@@ -2074,6 +2088,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
     let config = TuiConfig {
         command_popup_max_width: 80,
         command_popup_max_visible: 8,
+        command_popup_density: CommandPopupDensity::Compact,
     };
 
     // Wide render (120x30)
@@ -2085,6 +2100,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
     assert!(full.contains("TUI Configuration"), "has title");
     assert!(full.contains("Command Popup Max Width"), "has width setting card");
     assert!(full.contains("Command Popup Max Visible Rows"), "has rows setting card");
+    assert!(full.contains("Command Popup Text Size"), "has text size setting card");
     assert!(full.contains("80 cols"), "shows configured width");
     assert!(full.contains("8 rows"), "shows configured visible rows");
     assert!(full.contains("Live Preview: Command Popup"), "shows live preview title");
@@ -2098,5 +2114,6 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
     let narrow_full = narrow_lines.join("\n");
     assert!(narrow_full.contains("TUI Configuration"));
     assert!(narrow_full.contains("Command Popup Max Width"));
+    assert!(narrow_full.contains("Command Popup Text Size"));
 }
 

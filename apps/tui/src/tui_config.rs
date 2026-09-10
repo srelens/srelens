@@ -9,11 +9,40 @@ pub const DEFAULT_COMMAND_POPUP_MAX_VISIBLE: usize = 6;
 pub const MIN_COMMAND_POPUP_MAX_VISIBLE: usize = 3;
 pub const MAX_COMMAND_POPUP_MAX_VISIBLE: usize = 20;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandPopupDensity {
+    #[default]
+    Compact,
+    Large,
+}
+
+impl CommandPopupDensity {
+    pub fn is_large(&self) -> bool {
+        matches!(self, Self::Large)
+    }
+
+    pub fn item_height(&self) -> u16 {
+        match self {
+            Self::Compact => 1,
+            Self::Large => 2,
+        }
+    }
+
+    pub fn toggle(&self) -> Self {
+        match self {
+            Self::Compact => Self::Large,
+            Self::Large => Self::Compact,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TuiConfig {
     pub command_popup_max_width: u16,
     pub command_popup_max_visible: usize,
+    pub command_popup_density: CommandPopupDensity,
 }
 
 impl Default for TuiConfig {
@@ -21,6 +50,7 @@ impl Default for TuiConfig {
         Self {
             command_popup_max_width: DEFAULT_COMMAND_POPUP_MAX_WIDTH,
             command_popup_max_visible: DEFAULT_COMMAND_POPUP_MAX_VISIBLE,
+            command_popup_density: CommandPopupDensity::default(),
         }
     }
 }

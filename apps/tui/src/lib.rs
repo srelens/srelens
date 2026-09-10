@@ -18,4 +18,4 @@ pub use ai_config::{AiProvider, AiSettings};
 pub use ai_skills::SkillDef;
 pub use app::App;
 pub use deep_link::DeepLink;
-pub use tui_config::TuiConfig;
+pub use tui_config::{CommandPopupDensity, TuiConfig};
