@@ -111,9 +111,8 @@ export function useInfos(): Record<string, ClusterInfo> {
  */
 interface Reading {
   promise: Promise<void>;
-  /** The workspace whose pause decision the result must still satisfy. */
-  workspaceId: string;
-  generation: number;
+  /** Every workspace that is entitled to use this result. */
+  participants: Map<string, number>;
 }
 
 const reading = new Map<string, Reading>();
@@ -121,6 +120,11 @@ const pauseGenerations = new Map<string, number>();
 
 function pauseKey(workspaceId: string, clusterId: string) {
   return `${workspaceId}\u0000${clusterId}`;
+}
+
+function participantIsValid(clusterId: string, workspaceId: string, generation: number): boolean {
+  return !isClusterPaused(clusterId, workspaceId) &&
+    generation === (pauseGenerations.get(pauseKey(workspaceId, clusterId)) ?? 0);
 }
 
 /** Invalidate a workspace's in-flight reading when its reader disconnects. */
@@ -171,13 +175,17 @@ export function probeCluster(
   // read whose owner has since invalidated it: that read will deliberately
   // discard its result, leaving the joining workspace stuck on Connecting.
   const runningIsValid = running &&
-    !isClusterPaused(ctx.stableId, running.workspaceId) &&
-    running.generation === (pauseGenerations.get(pauseKey(running.workspaceId, ctx.stableId)) ?? 0);
+    [...running.participants].some(([id, participantGeneration]) =>
+      participantIsValid(ctx.stableId, id, participantGeneration));
   // A reconnect only needs a fresh read when the prior one was invalidated.
   // A valid read owned by another workspace is safe to share, and avoids two
   // accepted writes racing each other.
-  if (runningIsValid) return running.promise;
-  const run = read(ctx, connect, now, workspaceId, generation).finally(() => {
+  if (runningIsValid) {
+    running.participants.set(workspaceId, generation);
+    return running.promise;
+  }
+  const participants = new Map([[workspaceId, generation]]);
+  const run = read(ctx, connect, now, participants).finally(() => {
     // **By identity, not by key.** A read that {@link resetProbes} forgot
     // still lands, and deleting by key alone would clear whatever is under
     // that key by then — which is the CURRENT read. That silently reopens the
@@ -186,7 +194,7 @@ export function probeCluster(
     // installed is its to remove.
     if (reading.get(ctx.stableId)?.promise === run) reading.delete(ctx.stableId);
   });
-  reading.set(ctx.stableId, { promise: run, workspaceId, generation });
+  reading.set(ctx.stableId, { promise: run, participants });
   return run;
 }
 
@@ -195,8 +203,7 @@ async function read(
   ctx: ClusterContext,
   connect: typeof connectCluster,
   now: () => number,
-  workspaceId: string,
-  generation: number,
+  participants: ReadonlyMap<string, number>,
 ): Promise<void> {
   setLink(ctx.stableId, "connecting");
   const started = now();
@@ -209,10 +216,7 @@ async function read(
   const elapsedMs = now() - started;
   // Disconnect may have been picked while the probe was in flight. Its result
   // is an observation from before that choice, so never revive a paused row.
-  if (
-    isClusterPaused(ctx.stableId, workspaceId) ||
-    generation !== (pauseGenerations.get(pauseKey(workspaceId, ctx.stableId)) ?? 0)
-  ) return;
+  if (![...participants].some(([workspaceId, generation]) => participantIsValid(ctx.stableId, workspaceId, generation))) return;
   infos = { ...infos, [ctx.stableId]: info };
   probes = { ...probes, [ctx.stableId]: deriveProbe(info, elapsedMs) };
   emit();

@@ -230,7 +230,7 @@ suite("describe", () => {
 
 suite("isClusterScopedRoute", () => {
   it("distinguishes cluster-following routes from app screens", () => {
-    for (const route of ["/overview", "/helm", "/forwards", "/k/pods", "/k/Pod/default/web", "/edit/Pod/default/web"]) {
+    for (const route of ["/overview", "/helm", "/forwards", "/terminals", "/k/pods", "/k/Pod/default/web", "/edit/Pod/default/web"]) {
       expect(isClusterScopedRoute(route), route).toBe(true);
     }
     for (const route of ["/", "/settings", "/connections", "/notes"]) {

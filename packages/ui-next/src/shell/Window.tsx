@@ -540,7 +540,11 @@ export function Window({
             // `clusterName`. They follow the active cluster and need its pause
             // gate; app-level tabs never receive one just because it is active.
             const context = tab.sub === undefined
-              ? (isClusterScopedRoute(tab.route) ? activeCtx : undefined)
+              // These screens manage forwards and shells that already exist.
+              // They must stay available to stop or detach them while their
+              // cluster is paused; their creation controls have their own
+              // capability gates.
+              ? (isClusterScopedRoute(tab.route) && tab.route !== "/forwards" && tab.route !== "/terminals" ? activeCtx : undefined)
               : contexts.find((c) => c.name === tab.sub);
             const pausedContext = context && workspace.pausedClusters?.includes(context.stableId) ? context : undefined;
             return (
