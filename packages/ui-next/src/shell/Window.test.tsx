@@ -260,6 +260,28 @@ async function booted() {
 }
 
 describe("Window boot", () => {
+  it.each([false, true])("probes only an unpaused restored active resource tab (paused: %s)", async paused => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    const saved = defaultState([ctx("prod"), ctx("stage")]);
+    const tab = makeTab("/overview", { clusterName: "prod" });
+    saved.workspaces[0].tabs.push(tab);
+    saved.workspaces[0].activeId = tab.id;
+    saved.workspaces[0].pausedClusters = paused ? ["prod"] : [];
+    loadTabsState.mockReturnValue(saved);
+    await booted();
+    if (paused) expect(connectCluster).not.toHaveBeenCalled();
+    else {
+      await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("prod"));
+      expect(connectCluster).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("probes a cluster when its overview is opened directly", async () => {
+    await booted();
+    act(() => { store.openTab("/overview", { clusterName: "prod" }); });
+    await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("prod"));
+  });
+
   it("keeps the agent console mounted when its explicitly scoped cluster is paused", async () => {
     await booted();
     act(() => { store.openTab("/agent", { clusterName: "prod" }); });

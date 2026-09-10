@@ -22,6 +22,7 @@ import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
 import { loadExpanded, loadNamespaces } from "../lib/workspace";
+import { getInfo, probeCluster } from "../lib/probe";
 import { defaultState, reconcile } from "../lib/tabs";
 import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
 import { isClusterScopedRoute, keepsManagementWhenPaused } from "../lib/routes";
@@ -142,6 +143,16 @@ export function Window({
   // place that already knows both the active tab's route and the active
   // cluster's name; `Console` itself only reads `scope` back off the provider.
   const activeTabRoute = tabs.find((t) => t.id === activeId)?.route ?? "/";
+  const activeTab = tabs.find((t) => t.id === activeId);
+  const routeCluster = parseEditRoute(activeTabRoute)?.cluster ?? parseNewRoute(activeTabRoute)?.cluster ?? activeTab?.sub;
+  const probeContext = isClusterScopedRoute(activeTabRoute)
+    ? (routeCluster ? contexts.find(c => c.name === routeCluster) : activeCtx)
+    : undefined;
+  const probePaused = !!probeContext && !!workspace.pausedClusters?.includes(probeContext.stableId);
+  useEffect(() => {
+    if (!booted || !active || !probeContext || probePaused || getInfo(probeContext.stableId)) return;
+    void probeCluster(probeContext, undefined, undefined, { workspaceId: workspace.id });
+  }, [booted, active, probeContext, probePaused, workspace.id]);
   useEffect(() => {
     setScope(contextLabelFor(activeTabRoute, activeCtx?.name ?? ""));
   }, [activeTabRoute, activeCtx?.name, setScope]);

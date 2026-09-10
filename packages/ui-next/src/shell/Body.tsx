@@ -1,7 +1,9 @@
 import type { ClusterContext } from "@srelens/core";
+import { Activity } from "react";
 import { Button, EmptyState, Screen as AppScreen } from "@srelens/ui-kit";
 import { describe, screenFor } from "../lib/routes";
 import { reconnectCluster } from "../lib/openCluster";
+import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
 import { Placeholder, type PlaceholderProps } from "./Placeholder";
 
 export interface BodyProps extends PlaceholderProps {
@@ -26,9 +28,11 @@ export interface BodyProps extends PlaceholderProps {
  * in `screenFor`; this only asks.
  */
 export function Body({ onLocked, pausedContext, ...props }: BodyProps) {
+  const preserveDraft = !!parseEditRoute(props.route) || !!parseNewRoute(props.route) || props.route === "/new";
+  let pausedView = null;
   if (pausedContext) {
     const title = describe(props.route, pausedContext.name).title;
-    return (
+    pausedView = (
       <AppScreen title={title} eyebrow={pausedContext.name} fill>
         <EmptyState
           title={`${pausedContext.name} is paused`}
@@ -39,8 +43,9 @@ export function Body({ onLocked, pausedContext, ...props }: BodyProps) {
       </AppScreen>
     );
   }
+  if (pausedContext && !preserveDraft) return pausedView;
   const Screen = screenFor(props.route);
-  return Screen ? (
+  const content = Screen ? (
     <Screen
       route={props.route}
       // The same two the Placeholder beside it consumes, down the same path —
@@ -61,4 +66,10 @@ export function Body({ onLocked, pausedContext, ...props }: BodyProps) {
   ) : (
     <Placeholder {...props} />
   );
+  // Hidden Activity retains React state but cleans up effects and hides DOM.
+  // A paused editor therefore keeps its draft without keeping readers alive.
+  return preserveDraft ? <>
+    <Activity mode={pausedContext ? "hidden" : "visible"}>{content}</Activity>
+    {pausedView}
+  </> : content;
 }

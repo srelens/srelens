@@ -1,5 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
+import { useEffect, useState } from "react";
+
+const { reading, stopped } = vi.hoisted(() => ({ reading: vi.fn(), stopped: vi.fn() }));
 import userEvent from "@testing-library/user-event";
 
 // Type-only, so it is erased and cannot be hoisted above the mock below.
@@ -29,12 +32,30 @@ vi.mock("../lib/routes", async (importOriginal) => {
       </button>
     </>
   );
-  return { ...real, screenFor: (route: string) => (route === "/applog" ? Fake : null) };
+  const Editor = () => {
+    const [draft, setDraft] = useState("initial manifest");
+    useEffect(() => { reading(); return () => { stopped(); }; }, []);
+    return <textarea aria-label="Manifest" value={draft} onChange={e => setDraft(e.target.value)} />;
+  };
+  return { ...real, screenFor: (route: string) => (route === "/applog" ? Fake : route.startsWith("/edit/") || route.startsWith("/new/") ? Editor : null) };
 });
 
 import { Body } from "./Body";
 
 describe("Body", () => {
+  it.each(["/edit/prod-eu/ConfigMap/default/example", "/new/prod-eu"])("preserves the draft and suspends effects while paused: %s", route => {
+    reading.mockClear(); stopped.mockClear();
+    const props = { route, ported: [], onOpenInClassic: () => {}, onLocked: () => {} };
+    const { rerender } = render(<Body {...props} />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Manifest" }), { target: { value: "unsaved changes" } });
+    rerender(<Body {...props} pausedContext={{ name: "prod-eu", stableId: "prod", cluster: "prod", server: "", isCurrent: false, sourceFile: "", authKind: "token" }} />);
+    expect(screen.queryByRole("textbox", { name: "Manifest" })).toBeNull();
+    expect(stopped).toHaveBeenCalledTimes(1);
+    rerender(<Body {...props} />);
+    expect((screen.getByRole("textbox", { name: "Manifest" }) as HTMLTextAreaElement).value).toBe("unsaved changes");
+    expect(reading).toHaveBeenCalledTimes(2);
+  });
+
   it("renders the screen when one is registered for the route", () => {
     render(<Body route="/applog" ported={[]} onOpenInClassic={() => {}} onLocked={() => {}} />);
     expect(screen.getByText("screen for /applog")).toBeDefined();
