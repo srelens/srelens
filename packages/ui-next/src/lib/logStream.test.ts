@@ -66,6 +66,24 @@ beforeEach(() => {
 });
 
 describe("useLogStream", () => {
+  it("retains completed init logs without counting them as reconnecting or streaming", async () => {
+    const s = fakeStream();
+    const targets = fanOut(2);
+    const { result } = renderHook(() => useLogStream("kind-dev", "default", targets));
+    await s.connect();
+    act(() => {
+      s.line("web-1", "setup complete");
+      s.status("completed", "web-1");
+      s.status("live", "web-2");
+    });
+    await waitFor(() => expect(result.current.lines).toHaveLength(1));
+    expect(result.current.status).toBe("live");
+    expect(result.current.liveTargets).toBe(1);
+    expect(result.current.completedTargets).toBe(1);
+    expect(result.current.reconnectingTargets).toBe(0);
+    act(() => s.status("completed", "web-2"));
+    expect(result.current.status).toBe("completed");
+  });
   it("lands lines in order", async () => {
     const s = fakeStream();
     const { result } = renderHook(() => useLogStream("kind-dev", "default", [target]));
