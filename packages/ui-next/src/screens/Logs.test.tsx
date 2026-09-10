@@ -528,6 +528,23 @@ describe("Logs", () => {
     expect(rendered(region).map((r) => r.split("|")[3])).toEqual(["warn exporter queue is full"]);
   });
 
+  it("shows init-container lines and fetches that container's previous logs", async () => {
+    const init = { pod: "api-7", container: "migrate", label: "api-7/migrate" };
+    h.resolve.mockResolvedValue({
+      status: "resolved", targets: [...TARGETS, init], pods: PODS,
+      previous: [{ pod: "api-7", container: "migrate", exitCode: 1 }],
+    });
+    const region = await (draw(), body());
+    push(...LINES, { source: init.label, text: "2026-08-24T14:07:11Z error migration failed" });
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: /container/i }), "migrate");
+    expect(rendered(region).map((r) => r.split("|")[3])).toEqual(["error migration failed"]);
+    await userEvent.click(screen.getByRole("button", { name: /previous instance/i }));
+    await waitFor(() => expect(h.fetched).toHaveBeenCalledWith(
+      expect.any(String), expect.any(String), "api-7", undefined,
+      expect.objectContaining({ container: "migrate", previous: true }),
+    ));
+  });
+
   it("filters by container when the label names the pod alone", async () => {
     // The ORDINARY workload: a Deployment with three replicas of one
     // container. Every in-scope target shares that container name, so

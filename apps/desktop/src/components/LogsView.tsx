@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Clock, Download, DownloadCloud, History, Pause, Play, RefreshCw, WrapText } from "lucide-react";
 import { podLogs, podsForSelector } from "@srelens/core";
-import { getObject } from "@srelens/core";
+import { getObject, podContainerChoices } from "@srelens/core";
 import { startLogStream, type LogStream, type LogTarget, type LogStatus } from "@srelens/core";
 import { saveTextFile } from "@srelens/core";
 import { Spinner, Select, IconButton, TextInput, avatarColor } from "../ui";
@@ -198,7 +198,7 @@ export function LogsView({
           .filter((p) => p && !containersByPod[p])
           .map(async (p) => {
             const o = await getObject(context, "Pod", namespace, p);
-            const cs = ((o.object?.spec ?? {}) as { containers?: { name: string }[] }).containers ?? [];
+            const cs = podContainerChoices(o.object).filter((c) => c.kind !== "ephemeral");
             return [p, cs.map((c) => c.name)] as const;
           }),
       );
