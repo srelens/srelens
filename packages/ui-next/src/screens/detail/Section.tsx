@@ -60,6 +60,8 @@ export interface DetailSectionProps {
    * does — only the starting point differs.
    */
   defaultOpen?: boolean;
+  /** Let dense tables run to the pane edges while keeping the heading inset. */
+  padded?: boolean;
   children: ReactNode;
   className?: string;
 }
@@ -101,7 +103,7 @@ export interface DetailSectionProps {
  * read by it. A remembered "open" on `Secret`/`Annotations` therefore shows a
  * reader the words "Show 1 annotation" and nothing else. (#331)
  */
-export function Section({ title, id, defaultOpen = false, children, className }: DetailSectionProps) {
+export function Section({ title, id, defaultOpen = false, padded = true, children, className }: DetailSectionProps) {
   const kind = useContext(KindContext);
   // A heading that is not a plain string has no stable key to be remembered
   // under, and inventing one from a ReactNode is how a memory starts pointing
@@ -111,7 +113,7 @@ export function Section({ title, id, defaultOpen = false, children, className }:
 
   if (kind === null || sectionId === null) {
     return (
-      <KitSection title={title} className={className}>
+      <KitSection title={title} padded={padded} className={className}>
         {children}
       </KitSection>
     );
@@ -120,6 +122,7 @@ export function Section({ title, id, defaultOpen = false, children, className }:
   return (
     <KitSection
       title={title}
+      padded={padded}
       className={className}
       open={open}
       onToggle={(next) => setSectionOpen(kind, sectionId, next, { defaultOpen })}

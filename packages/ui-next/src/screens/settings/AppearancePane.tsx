@@ -139,7 +139,7 @@ export type { AccentId, DensityId, ThemeId };
  * Native webview zoom does not change a computed CSS pixel, so the effective
  * size on screen is the computed one scaled by the percentage.
  */
-function bodyPixels(percent: number): number {
+function bodyPixels(percent: number, nativeZoom = true): number {
   let base = 16;
   try {
     const computed = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
@@ -147,7 +147,7 @@ function bodyPixels(percent: number): number {
   } catch {
     // No stylesheet attached — a unit test, or a first paint.
   }
-  return Math.round(base * uiScaleFactor(percent));
+  return Math.round(base * (nativeZoom ? uiScaleFactor(percent) : percent / 100));
 }
 
 /** The current row height, when a stylesheet is attached to say. */
@@ -371,7 +371,7 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
           <p className="text-[0.75rem] leading-relaxed text-muted">
             Your browser&apos;s own zoom scales srelens here, so there is nothing for this pane to
             set — {chordHint("zoom-in", apple)} and {chordHint("zoom-out", apple)} work as they do on
-            any page. Currently {bodyPixels(UI_SCALE.DEFAULT)}px body text at the browser&apos;s
+            any page. Currently {bodyPixels(UI_SCALE.DEFAULT, false)}px body text at the browser&apos;s
             default zoom.
           </p>
         )}

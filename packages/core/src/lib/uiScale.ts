@@ -34,7 +34,13 @@ export function clampUiScale(value: unknown): number {
 export function getUiScale(): number {
   try {
     const raw = settingsStorage.getItem(UI_SCALE_KEY);
-    return raw === null ? UI_SCALE.DEFAULT : clampUiScale(Number(JSON.parse(raw)) * 100 / BASELINE_PERCENT);
+    if (raw === null) return UI_SCALE.DEFAULT;
+    const converted = Number(JSON.parse(raw)) * 100 / BASELINE_PERCENT;
+    // Legacy values were native percentages. Snap the converted value to the
+    // radio steps so an old 120% preference cannot leave the control between
+    // options (and shortcuts never start from an off-grid value).
+    const stepped = Math.round(converted / UI_SCALE.STEP) * UI_SCALE.STEP;
+    return clampUiScale(stepped);
   } catch {
     return UI_SCALE.DEFAULT;
   }

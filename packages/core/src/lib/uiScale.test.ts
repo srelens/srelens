@@ -45,6 +45,13 @@ describe("persistence", () => {
     expect(getUiScale()).toBe(100);
   });
 
+  it("snaps legacy native percentages to the supported display steps", () => {
+    settingsStorage.setItem("srelens.uiScale", "120");
+    expect(getUiScale()).toBe(110);
+    settingsStorage.setItem("srelens.uiScale", "130");
+    expect(getUiScale()).toBe(120);
+  });
+
   it("stores native percentages so reopening does not compound the baseline", () => {
     setUiScale(100);
     expect(settingsStorage.getItem("srelens.uiScale")).toBe("110");
