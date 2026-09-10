@@ -707,6 +707,11 @@ describe("Table", () => {
  * is a browser fact, measured in one (see the task report), and no assertion
  * here can stand in for it.
  */
+it("lets header cells own stickiness without a second sticky row-group", () => {
+  const { container } = render(<Table columns={[{ key: "name", header: "Name" }]} data={[{ name: "worker" }]} getRowKey={row => row.name} />);
+  expect(container.querySelector("thead")?.classList.contains("sticky")).toBe(false);
+});
+
 describe("Table sticky columns", () => {
   const cols: Column<{ name: string }>[] = [
     { key: "name", header: "Name" },

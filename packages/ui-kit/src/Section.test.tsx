@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { KV } from "./KV";
+import { Table } from "./Table";
 import { Section } from "./Section";
 
 /**
@@ -258,7 +259,12 @@ describe("a sticky section head over a sticky table head", () => {
     // the table head by the section head's own height (25px) stacks the two
     // instead of collapsing them onto each other. Asserted on the stylesheet:
     // jsdom does no layout, so nothing here can be observed by rendering.
-    expect(components).toContain(".subhead-caps ~ .tbl thead th { top: 25px; }");
+    const selector = ".subhead-caps ~ [data-table-root] > .tbl thead th";
+    const { container } = render(<Section title="Nodes" smallCaps padded={false}>
+      <Table columns={[{ key: "name", header: "Name" }]} data={[{ name: "worker" }]} getRowKey={row => row.name} />
+    </Section>);
+    expect(container.querySelector(selector)).toBe(container.querySelector("thead th"));
+    expect(components).toContain(`${selector} { top: 25px; }`);
   });
 });
 

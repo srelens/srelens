@@ -843,7 +843,8 @@
      head by the section head's fixed 25px height stacks the two instead of
      collapsing them onto each other. Scoped to a `.subhead-caps` sibling only
      — a table alone in a pane, under `.pane-head` instead, is unaffected. */
-  .subhead-caps ~ .tbl thead th { top: 25px; }
+  /* Table has a display:contents root. It still participates in selectors. */
+  .subhead-caps ~ [data-table-root] > .tbl thead th { top: 25px; }
 
   /* A section that folds: the heading itself is the control, so the whole
      line is clickable rather than a caret the size of a full stop beside it.

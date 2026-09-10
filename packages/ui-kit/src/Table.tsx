@@ -703,7 +703,7 @@ export function Table<T>({
     return <EmptyState title={emptyText} hint={emptyHint} />;
   }
   return (
-    <div ref={rootRef} style={{ display: "contents" }}>
+    <div ref={rootRef} data-table-root="" style={{ display: "contents" }}>
     <table
       className={cx(
         "tbl",
@@ -721,7 +721,9 @@ export function Table<T>({
           />
         ))}
       </colgroup>
-      <thead className="sticky top-0 z-10">
+      {/* Cells own vertical stickiness, including the offset beneath a section
+          band. A sticky thead would create a second scrolling/stacking layer. */}
+      <thead>
         <tr className="hover:bg-transparent">
           {selection && (
             <th className="tbl-check">
