@@ -96,27 +96,6 @@ export function FilterBar({
           <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
           <path d="m20 20-3.6-3.6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
         </svg>
-        <input
-          ref={fieldRef}
-          type="search"
-          value={value}
-          onChange={(e) => onValueChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key !== "Escape" || value === "") return;
-            // Claimed only while there is a filter to drop. Left alone, Escape
-            // belongs to whatever this list is inside.
-            e.preventDefault();
-            e.stopPropagation();
-            onValueChange("");
-          }}
-          placeholder={placeholder}
-          disabled={disabled}
-          aria-label={label}
-          aria-invalid={invalid ? true : undefined}
-          aria-describedby={invalid ? invalidId : undefined}
-          title={invalid ? "Invalid regular expression" : undefined}
-          className="w-full bg-transparent text-[0.8125rem] outline-none placeholder:text-faint"
-        />
         {onRegexChange && (
           <button
             type="button"
@@ -140,6 +119,27 @@ export function FilterBar({
             .*
           </button>
         )}
+        <input
+          ref={fieldRef}
+          type="search"
+          value={value}
+          onChange={(e) => onValueChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key !== "Escape" || value === "") return;
+            // Claimed only while there is a filter to drop. Left alone, Escape
+            // belongs to whatever this list is inside.
+            e.preventDefault();
+            e.stopPropagation();
+            onValueChange("");
+          }}
+          placeholder={placeholder}
+          disabled={disabled}
+          aria-label={label}
+          aria-invalid={invalid ? true : undefined}
+          aria-describedby={invalid ? invalidId : undefined}
+          title={invalid ? "Invalid regular expression" : undefined}
+          className="w-full bg-transparent text-[0.8125rem] outline-none placeholder:text-faint"
+        />
         {value !== "" && (
           <button
             type="button"
