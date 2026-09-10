@@ -18,6 +18,22 @@ pair, not proof that every screen is accessible.
 
 ## Theme and mode contract
 
+### Cluster overview refinements (2026-09-10)
+
+- Overview information belongs to the current cluster. Node-version counts
+  reuse its loaded node list; no Fleet queries run against other contexts.
+- Node actions reserve their intrinsic width so the overflow menu stays on
+  the same row as Cordon/Uncordon and Drain.
+- The node list displays CPU usage in cores, with up to three decimal places
+  below one core and two above it; sorting still uses raw millicores.
+- The overview has one title strip. Server version remains in Control plane.
+  Tab hints show additional context/detail without repeating the visible title,
+  and keep long identifiers on one horizontally scrollable line.
+
+Verified in a local browser harness with long node names, mixed versions,
+sub-core CPU usage, dark theme, and tab hover. This complements component tests;
+it does not replace native webview validation.
+
 | Axis | Supported values | Contract |
 | --- | --- | --- |
 | Theme | Light, Paper, Dark, Midnight, High contrast | Same information hierarchy and interaction model in every theme. |

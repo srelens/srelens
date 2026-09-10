@@ -437,6 +437,7 @@ describe("tab navigation enhancements", () => {
     await userEvent.tab();
     expect((await screen.findByRole("tooltip")).textContent).toContain("long-cluster-context");
     expect(screen.getByRole("tooltip").textContent).toContain("ConfigMap · monitoring");
+    expect(screen.getByRole("tooltip").textContent).not.toContain("ConfigMaps");
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("tooltip")).toBeNull();
   });

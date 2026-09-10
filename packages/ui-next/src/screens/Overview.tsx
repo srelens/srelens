@@ -32,6 +32,7 @@ import {
   Screen,
   Section,
   SideRail,
+  Spinner,
   Stat,
   StatusPill,
   StatusRow,
@@ -44,7 +45,7 @@ import {
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
 import { useClusterGate } from "../lib/clusterMoved";
-import { useActiveContext, useContexts } from "../lib/clusters";
+import { useActiveContext } from "../lib/clusters";
 import { detailRoute } from "../lib/detailRoute";
 import { FailureLine, FailureState, FailureWord, summarise } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
@@ -68,9 +69,8 @@ import {
 } from "../lib/overview";
 import { useInfo } from "../lib/probe";
 import { describe } from "../lib/routes";
-import { openTab, useTabs } from "../lib/tabsStore";
+import { openTab } from "../lib/tabsStore";
 import { LINK_WORD, useWorkspaceView } from "../lib/workspace";
-import { Fleet } from "./overview/Fleet";
 import { NoClusterScreen } from "./resourceShell";
 
 /**
@@ -166,10 +166,6 @@ function ClusterOverview({ title, context }: { title: string; context: ClusterCo
   const overview = useOverview(name);
   const { ask } = useConsole();
   const Sparkle = Icons.ask;
-  // The server version, from the probe the shell already ran at launch — the
-  // same reading the rail's `Version` row takes, not a second call. Absent
-  // until it lands, and the head then reads the cluster's name alone.
-  const version = useInfo(context.stableId)?.version ?? "";
 
   // `<cluster name> / <provider>`, and just the name until the facts answer.
   // A provider row that said "unknown" would look like an answer; an absent
@@ -204,11 +200,6 @@ function ClusterOverview({ title, context }: { title: string; context: ClusterCo
     >
       <SideRail
         head="At a glance"
-        // §7 heads the left pane too, level with the rail's own head:
-        // `<name> · <version>`. The separator goes with the version, so a
-        // cluster nobody has probed yet reads as its name rather than as a
-        // name trailing a dot.
-        mainHead={version ? `${name} · ${version}` : name}
         width={RAIL_WIDTH}
         rail={<AtAGlance context={context} overview={overview} />}
       >
@@ -278,27 +269,45 @@ function Stale({ overview }: { overview: OverviewData }) {
  * the same reason; the kit's suite pins it.
  */
 function AtAGlance({ context, overview }: { context: ClusterContext; overview: OverviewData }) {
-  const contexts = useContexts();
-  const { workspace } = useTabs();
-
-  // The workspace's own order, resolved through the context list — the same
-  // derivation the cluster rail down the edge of the window makes. An id whose
-  // context has gone is skipped rather than drawn as a placeholder; `Fleet`
-  // then puts this cluster back at the head if the list has lost it.
-  const byId = new Map(contexts.map((c) => [c.stableId, c]));
-  const clusters = workspace.clusters
-    .map((id) => byId.get(id))
-    .filter((c): c is ClusterContext => c !== undefined);
-
   return (
     <>
       <ControlPlane context={context} facts={overview.facts} />
       <ObjectsByKind context={context.name} objects={overview.objects} />
       <OpenIncidents />
-      <Section title="Fleet" smallCaps padded={false}>
-        <div className="px-3 py-2"><Fleet clusters={clusters} active={context} /></div>
-      </Section>
+      <NodeVersions nodes={overview.nodes} />
     </>
+  );
+}
+
+/** Reuse this cluster's node list; the rail must not contact other clusters. */
+function NodeVersions({ nodes }: { nodes: OverviewNodes }) {
+  const versions = new Map<string, number>();
+  for (const { node } of nodes.nodes) {
+    const version = node.version.trim() || "Not reported";
+    versions.set(version, (versions.get(version) ?? 0) + 1);
+  }
+  const rows = [...versions]
+    .sort(([a, n], [b, m]) => m - n || b.localeCompare(a, undefined, { numeric: true }))
+    .map(([version, count]): [string, ReactNode] => [
+      version,
+      <span className="num">{count} {count === 1 ? "node" : "nodes"}</span>,
+    ]);
+  return (
+    <Section title="Node versions" smallCaps padded={false}>
+      <div className="px-3 py-2">
+        {nodes.status === "loading" && rows.length === 0 && <Spinner label="Loading node versions" />}
+        {nodes.error && (
+          <>
+            <FailureWord error={nodes.error} lead="Could not read node versions: " />
+            <Button variant="ghost" size="sm" onClick={nodes.reload}>Retry</Button>
+          </>
+        )}
+        {rows.length > 0 && <KVList rows={rows} />}
+        {nodes.status !== "loading" && !nodes.error && rows.length === 0 && (
+          <span className="text-faint">No nodes</span>
+        )}
+      </div>
+    </Section>
   );
 }
 
@@ -411,8 +420,7 @@ function ControlPlane({ context, facts }: { context: ClusterContext; facts: Over
  * row.** `0` is a number a reader will believe, and a refused list and an
  * empty cluster are the same picture with opposite meanings. The em dash asks
  * the question, and the reason sits under the row that could not answer —
- * beside it, the way `Fleet` puts an unreachable cluster's reason on that
- * cluster's row, rather than as a paragraph under the section naming kinds a
+ * beside it, rather than as a paragraph under the section naming kinds a
  * second time.
  */
 function ObjectsByKind({ context, objects }: { context: string; objects: ObjectCounts }) {
@@ -471,7 +479,7 @@ function OpenIncidents() {
     <Section title="Open incidents" smallCaps padded={false}>
       {/* The rail-sized form. The page-sized one spends `py-10` on padding
           around three wrapped lines, and in a 286px rail that is enough to
-          push `Fleet` below the fold — a section stating an absence taking
+          push node versions below the fold — a section stating an absence taking
           the space from one with something to say. */}
       <EmptyState
         compact

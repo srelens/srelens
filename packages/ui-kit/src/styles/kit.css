@@ -1349,7 +1349,7 @@
     border-left: 1px solid var(--rule);
   }
   .tab-scroll:disabled { opacity: .3; cursor: default; pointer-events: none; }
-  .tab-tooltip { max-width: min(420px, calc(100vw - 32px)); white-space: nowrap; overflow-x: auto; line-height: 1.6; }
+  .tab-tooltip { max-width: min(320px, calc(100vw - 32px)); white-space: nowrap; overflow-x: auto; line-height: 1.35; }
   .tab[data-dragging="true"] { opacity: .55; }
   .tab[data-drop="before"] { box-shadow: inset 2px 0 var(--accent); }
   .tab[data-drop="after"] { box-shadow: inset -2px 0 var(--accent); }
