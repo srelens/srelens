@@ -179,6 +179,7 @@ export function TabStrip({
   const edges = useTabStripScroll(listRef, tabs.map(t => t.id).join("|"));
   const dragId = useRef<string | null>(null);
   const suppressClick = useRef(false);
+  const pressedControl = useRef(false);
   const [dragging, setDragging] = useState(false);
   const [dropAt, setDropAt] = useState<number | null>(null);
   const [announcement, setAnnouncement] = useState("");
@@ -356,9 +357,14 @@ export function TabStrip({
               data-drop={dropAt === index ? "before" : dropAt === tabs.length && index === tabs.length - 1 ? "after" : undefined}
               data-dragging={dragId.current === tab.id || undefined}
               draggable={!!onMove}
-              onPointerDown={() => { suppressClick.current = false; }}
+              onPointerDown={event => {
+                suppressClick.current = false;
+                // dragstart targets the draggable tab even when the gesture
+                // began on its close button (including the icon inside it).
+                pressedControl.current = !!(event.target as Element).closest("button");
+              }}
               onDragStart={event => {
-                if (!onMove || (event.target as HTMLElement).closest("button")) { event.preventDefault(); return; }
+                if (!onMove || pressedControl.current || (event.target as Element).closest("button")) { event.preventDefault(); return; }
                 dragId.current = tab.id; suppressClick.current = true; setDragging(true);
                 event.dataTransfer.effectAllowed = "move";
                 event.dataTransfer.setData("text/plain", tab.id);

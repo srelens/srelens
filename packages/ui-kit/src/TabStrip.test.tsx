@@ -489,3 +489,28 @@ it("shows an insertion marker and requests a drop without selecting", () => {
   expect(onMove).toHaveBeenCalledWith("shell",0);
   expect(onSelect).not.toHaveBeenCalled();
 });
+
+
+it("rejects a tab drag that began on its close button and permits the next body drag", () => {
+  const onMove = vi.fn();
+  const onClose = vi.fn();
+  const { onSelect } = setup({ onMove, onClose });
+  const source = tab("nginx-7d4b");
+  const close = screen.getByRole("button", { name: "Close nginx-7d4b" });
+  const dataTransfer = { setData: vi.fn() };
+  fireEvent.pointerDown(close.querySelector("svg") ?? close);
+  // Native dragstart targets the draggable ancestor, not the pressed button.
+  expect(fireEvent.dragStart(source, { dataTransfer })).toBe(false);
+  fireEvent.dragOver(tab("Pods"), { clientX: 0 });
+  fireEvent.drop(tab("Pods"), { clientX: 0 });
+  expect(onMove).not.toHaveBeenCalled();
+  expect(dataTransfer.setData).not.toHaveBeenCalled();
+  expect(onSelect).not.toHaveBeenCalled();
+  fireEvent.click(close);
+  expect(onClose).toHaveBeenCalledWith("shell");
+
+  fireEvent.pointerDown(source);
+  expect(fireEvent.dragStart(source, { dataTransfer })).toBe(true);
+  fireEvent.drop(tab("Pods"), { clientX: 0 });
+  expect(onMove).toHaveBeenCalledWith("shell", 0);
+});
