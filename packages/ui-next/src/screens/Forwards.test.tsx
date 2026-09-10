@@ -53,7 +53,7 @@ vi.mock("@srelens/core", async (orig) => ({
 import { type ActiveForward, type ClusterContext, kindToForwardTarget, toKubectl } from "@srelens/core";
 import { Forwards } from "./Forwards";
 import { resetContexts, setContexts } from "../lib/clusters";
-import { setActiveCluster, setState } from "../lib/tabsStore";
+import { currentWorkspace, setClusterPaused, setActiveCluster, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 
 const ROUTE = "/forwards";
@@ -603,6 +603,12 @@ describe("Forwards — the row's actions", () => {
 });
 
 describe("Forwards — the screen around the table", () => {
+  it("closes creation when its captured cluster is paused after a rail switch", async () => {
+    await fillNewForwardThenMove();
+    act(() => setClusterPaused(currentWorkspace().id, PROD.stableId, true));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(core.startPortForward).not.toHaveBeenCalled();
+  });
   it("adopts the forwards the backend is still running, once, on mount", async () => {
     open();
     // The web-mode leak this screen exists to close: the store is module-level

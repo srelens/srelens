@@ -313,6 +313,15 @@ describe("workspaces", () => {
     store.setWorkspaceClusters(id, ["x", "y"]);
     expect(store.currentWorkspace().clusters).toEqual(["x", "y"]);
   });
+
+  it("keeps a pause in its workspace and clears it when that cluster is removed", () => {
+    const id = store.getState().currentId;
+    store.setWorkspaceClusters(id, ["x", "y"]);
+    store.setClusterPaused(id, "x", true);
+    expect(store.isClusterPaused("x")).toBe(true);
+    store.setWorkspaceClusters(id, ["y"]);
+    expect(store.currentWorkspace().pausedClusters).toEqual([]);
+  });
 });
 
 describe("setState", () => {

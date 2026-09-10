@@ -80,6 +80,7 @@ function parseWorkspace(v: unknown): Workspace | null {
     activeId: v.activeId,
     closed,
   };
+  if (Array.isArray(v.pausedClusters)) ws.pausedClusters = v.pausedClusters.filter(isString).filter((id) => clusters.includes(id));
   // Only a cluster the workspace actually has: the field is an index into
   // `clusters`, and `reconcile` would drop a dangling one anyway.
   if (isString(v.activeCluster) && clusters.includes(v.activeCluster)) ws.activeCluster = v.activeCluster;

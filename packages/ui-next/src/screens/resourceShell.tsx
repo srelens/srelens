@@ -1,7 +1,9 @@
+import type { ClusterContext } from "@srelens/core";
 import { Alert, Button, Combobox, EmptyState, LoadingState, MultiSelect, Screen, Spinner, type Column, type TableSort } from "@srelens/ui-kit";
 import { useContextsError, useContextsStatus } from "../lib/clusters";
 import { toggleColumn } from "../lib/columnPrefs";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
+import { reconnectCluster } from "../lib/openCluster";
 import { setTabView, useTabs, useTabView } from "../lib/tabsStore";
 
 /**
@@ -72,6 +74,20 @@ export function NoClusterScreen({ title, noun }: { title: string; noun: string }
           className="flex-1"
         />
       )}
+    </Screen>
+  );
+}
+
+/** A paused cluster keeps its place while every resource reader is stopped. */
+export function PausedClusterScreen({ title, noun, context }: { title: string; noun: string; context: ClusterContext }) {
+  return (
+    <Screen title={title} eyebrow={context.name} fill>
+      <EmptyState
+        title={`${context.name} is paused`}
+        hint={`Reconnect this cluster to resume listing ${noun}.`}
+        action={<Button variant="primary" onClick={() => reconnectCluster(context)}>Reconnect</Button>}
+        className="flex-1"
+      />
     </Screen>
   );
 }

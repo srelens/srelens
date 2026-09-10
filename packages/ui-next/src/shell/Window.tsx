@@ -23,6 +23,8 @@ import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
 import { loadExpanded, loadNamespaces } from "../lib/workspace";
 import { defaultState, reconcile } from "../lib/tabs";
+import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
+import { isClusterScopedRoute, keepsManagementWhenPaused } from "../lib/routes";
 import { flushSave, installFlushOnUnload, loadTabsState, scheduleSave } from "../lib/tabsPersist";
 import {
   activateTab,
@@ -47,8 +49,6 @@ import {
   useTabs,
 } from "../lib/tabsStore";
 import { useConsole } from "../console";
-import { openCluster } from "../lib/openCluster";
-import { getInfo, probeCluster } from "../lib/probe";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
 import { Body } from "./Body";
@@ -102,13 +102,6 @@ export function Window({
   active = true,
 }: WindowProps) {
   const [booted, setBooted] = useState(false);
-  // A Home tab restored from disk is an explicit reader choice. Keep this
-  // separate from the tab shape: a fresh state has the same single `/` tab.
-  const restoredWorkspace = useRef(false);
-  const mounted = useRef(false);
-  const visible = useRef(active);
-  visible.current = active;
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   /**
    * The vault is usable, as `LockGate` reports it — classic's `vaultReady`, by
    * the same name and for the same one consumer. Flipped once per window; see
@@ -221,7 +214,6 @@ export function Window({
         failure = outcome.error ?? "";
         listed = true;
         const saved = loadTabsState();
-        restoredWorkspace.current = saved !== null;
         if (saved && failure !== "") {
           // The list failed, not the clusters: reconciling against nothing would
           // strip every workspace's cluster ids and the next change would persist
@@ -266,39 +258,6 @@ export function Window({
     };
   }, [booted]);
 
-  // Every cluster you are looking at gets probed once, so the rail shows link
-  // state and the status bar shows a version without waiting to be asked. The
-  // effect runs per workspace rather than per render — switching away and back
-  // re-runs it, and the probe store's memory is what keeps it to once each.
-  const startupOverviewOffered = useRef(false);
-  const workspaceId = workspace.id;
-  const workspaceClusterIds = workspace.clusters.join("\u0000");
-  useEffect(() => {
-    if (!booted) return;
-    if (!active) return;
-    const byId = new Map(contexts.map((c) => [c.stableId, c]));
-    // Only the untouched initial Home is a default destination. A slow probe
-    // must never replace a restored tab or navigation performed while it waits.
-    if (!startupOverviewOffered.current) {
-      startupOverviewOffered.current = true;
-      const initialState = getState();
-      const initialWorkspace = currentWorkspace();
-      const ctx = byId.get(initialWorkspace.activeCluster ?? "");
-      if (!restoredWorkspace.current && ctx && initialWorkspace.tabs.length === 1 && initialWorkspace.tabs[0].route === "/") {
-        const ready = getInfo(ctx.stableId) ? Promise.resolve() : probeCluster(ctx);
-        void ready.then(() => {
-          if (mounted.current && visible.current && getState() === initialState && getInfo(ctx.stableId)?.reachable) openCluster(ctx);
-        });
-      }
-    }
-    for (const id of currentWorkspace().clusters) {
-      if (getInfo(id)) continue;
-      const ctx = byId.get(id);
-      if (ctx) void probeCluster(ctx);
-    }
-    // `contexts` rides along because a kubeconfig change replaces them; the
-    // workspace id is the trigger for the switch case.
-  }, [booted, contexts, workspaceId, workspaceClusterIds, active]);
 
   /**
    * Which accelerators survive a raised cover, and why one of them does.
@@ -577,7 +536,23 @@ export function Window({
           />
         )}
         <div className="relative min-h-0 flex-1">
-          {tabs.map((tab) => (
+          {tabs.map((tab) => {
+            // An editor's target is pinned in its route. Its tab label follows
+            // the rail, so it cannot decide whether the editor's readers are
+            // paused.
+            const pinnedContext = parseEditRoute(tab.route)?.cluster ?? parseNewRoute(tab.route)?.cluster;
+            // Status-bar actions open cluster-following routes without a
+            // `clusterName`. They follow the active cluster and need its pause
+            // gate; app-level tabs never receive one just because it is active.
+            const context = pinnedContext
+              ? contexts.find((c) => c.name === pinnedContext)
+              : tab.sub === undefined
+              ? (isClusterScopedRoute(tab.route) ? activeCtx : undefined)
+              : contexts.find((c) => c.name === tab.sub);
+            // Keep Stop/Detach accessible even on explicitly labelled tabs.
+            // Their submission and creation controls check the actual target.
+            const pausedContext = !keepsManagementWhenPaused(tab.route) && context && workspace.pausedClusters?.includes(context.stableId) ? context : undefined;
+            return (
             <TabSurface key={tab.id} visible={tab.id === activeId}>
               {/* A placeholder tab without a cluster of its own still leaves
                   via the cluster this window is looking at — that is the
@@ -585,6 +560,7 @@ export function Window({
               <Body
                 route={tab.route}
                 clusterName={tab.sub ?? activeCtx?.name}
+                pausedContext={pausedContext}
                 ported={ported}
                 onOpenInClassic={onOpenInClassic}
                 onOpenGallery={onOpenGallery}
@@ -597,7 +573,8 @@ export function Window({
                 onLocked={lockWorkspace}
               />
             </TabSurface>
-          ))}
+            );
+          })}
         </div>
         {/* Not on `/agent`: that screen mounts the dock at the foot of its own
             main column, so its rail is a full-height sibling and uses the

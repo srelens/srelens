@@ -49,8 +49,8 @@ function setup(props: Partial<Parameters<typeof Rail>[0]> = {}) {
 }
 
 /** Right-click a mark and wait for the menu that names it. */
-async function openMenu(cluster: string) {
-  fireEvent.contextMenu(screen.getByRole("button", { name: cluster }));
+async function openMenu(cluster: string, buttonName = cluster) {
+  fireEvent.contextMenu(screen.getByRole("button", { name: buttonName }));
   return screen.findByRole("menu", { name: `${cluster} actions` });
 }
 
@@ -108,7 +108,7 @@ describe("Rail", () => {
     const items = within(menu)
       .getAllByRole("menuitem")
       .map((item) => item.getAttribute("aria-label"));
-    expect(items).toEqual(["Open prod-eu", "Customise…", "Connection details", "Remove from workspace"]);
+    expect(items).toEqual(["Open prod-eu", "Customise…", "Disconnect", "Connection details", "Remove from workspace"]);
     expect(screen.queryByRole("complementary", { name: "Details" })).toBeNull();
   });
 
@@ -169,6 +169,25 @@ describe("Rail", () => {
     setup();
     await pick("prod-eu", "Connection details");
     expect(currentWorkspace().tabs.map((t) => t.route)).toContain("/connections");
+  });
+
+  it("pauses a cluster in place and offers Reconnect from the same menu", async () => {
+    setup();
+    await pick("prod-eu", "Disconnect");
+    expect(currentWorkspace().clusters).toContain("prod-eu");
+    expect(currentWorkspace().pausedClusters).toEqual(["prod-eu"]);
+    expect(screen.getByRole("button", { name: "prod-eu, Paused" })).toBeDefined();
+    const menu = await openMenu("prod-eu", "prod-eu, Paused");
+    expect(within(menu).getByRole("menuitem", { name: "Reconnect" })).toBeDefined();
+  });
+
+  it("does not describe a paused cluster as connecting", async () => {
+    setLink("prod-eu", "connecting");
+    setup();
+    const menu = await openMenu("prod-eu", "prod-eu, Connecting");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Disconnect" }));
+    expect(screen.getByRole("button", { name: "prod-eu, Paused" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: /Connecting/ })).toBeNull();
   });
 
   it("removes the cluster from the workspace", async () => {

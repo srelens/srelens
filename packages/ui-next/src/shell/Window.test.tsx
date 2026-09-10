@@ -260,49 +260,25 @@ async function booted() {
 }
 
 describe("Window boot", () => {
-  it("opens the active cluster overview after the initial connection succeeds", async () => {
-    connectCluster.mockResolvedValue({ context: "prod", reachable: true });
+  it("keeps the agent console mounted when its explicitly scoped cluster is paused", async () => {
     await booted();
-    await waitFor(() => expect(store.activeRoute()).toBe("/overview"));
-    expect(store.currentWorkspace().tabs.filter(tab => tab.route === "/overview")).toHaveLength(1);
+    act(() => { store.openTab("/agent", { clusterName: "prod" }); });
+    expect(screen.getByRole("textbox", { name: "Console prompt" })).toBeDefined();
+    act(() => { store.setClusterPaused(store.currentWorkspace().id, "prod", true); });
+    expect(screen.getByRole("textbox", { name: "Console prompt" })).toBeDefined();
   });
 
-  it("keeps Home when the active cluster cannot connect, even if another can", async () => {
+  it("does not contact configured clusters until the reader opens one", async () => {
     listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
-    connectCluster.mockImplementation(async (name: string) => ({ context: name, reachable: name === "stage" }));
     await booted();
-    await waitFor(() => expect(connectCluster).toHaveBeenCalledTimes(2));
-    expect(store.activeRoute()).toBe("/");
-    expect(screen.getByRole("heading", { name: "Home", level: 1 })).toBeTruthy();
-  });
-
-  it("does not replace work opened while the initial cluster connection is pending", async () => {
-    let resolve!: (value: unknown) => void;
-    connectCluster.mockReturnValue(new Promise(done => { resolve = done; }));
-    await booted();
-    act(() => { store.openTab("/settings"); });
-    await act(async () => resolve({ context: "prod", reachable: true }));
-    expect(store.activeRoute()).toBe("/settings");
-    expect(store.currentWorkspace().tabs.some(tab => tab.route === "/overview")).toBe(false);
-  });
-
-  it("keeps a restored tab active after connecting", async () => {
-    connectCluster.mockResolvedValue({ context: "prod", reachable: true });
-    const saved = defaultState([ctx("prod")]);
-    const tab = makeTab("/settings");
-    saved.workspaces[0].tabs.push(tab);
-    saved.workspaces[0].activeId = tab.id;
-    loadTabsState.mockReturnValue(saved);
-    await booted();
-    await waitFor(() => expect(connectCluster).toHaveBeenCalled());
-    expect(store.activeRoute()).toBe("/settings");
+    expect(connectCluster).not.toHaveBeenCalled();
   });
 
   it("keeps a restored Home tab active after connecting", async () => {
     connectCluster.mockResolvedValue({ context: "prod", reachable: true });
     loadTabsState.mockReturnValue(defaultState([ctx("prod")]));
     await booted();
-    await waitFor(() => expect(connectCluster).toHaveBeenCalled());
+    expect(connectCluster).not.toHaveBeenCalled();
     expect(store.activeRoute()).toBe("/");
   });
 
@@ -665,7 +641,7 @@ describe("Window accelerators", () => {
     expect(store.currentWorkspace().tabs).toHaveLength(1);
   });
 
-  it("probes each cluster of the workspace once at boot", async () => {
+  it("does not probe workspace clusters at boot", async () => {
     listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("dev")] });
     render(
       <ConsoleProvider>
@@ -673,8 +649,7 @@ describe("Window accelerators", () => {
       </ConsoleProvider>,
     );
     await screen.findByRole("tablist");
-    await waitFor(() => expect(connectCluster).toHaveBeenCalledTimes(2));
-    expect(connectCluster.mock.calls.map((c) => c[0])).toEqual(["prod", "dev"]);
+    expect(connectCluster).not.toHaveBeenCalled();
   });
 
   it("probes a configured cluster when Home adds it to the workspace", async () => {
@@ -682,7 +657,7 @@ describe("Window accelerators", () => {
     loadTabsState.mockReturnValue(saved);
     listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("dev")] });
     await booted();
-    await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("prod"));
+    expect(connectCluster).not.toHaveBeenCalled();
     act(() => openCluster(ctx("dev")));
     await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("dev"));
   });

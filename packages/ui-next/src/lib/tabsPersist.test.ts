@@ -128,6 +128,13 @@ describe("parseStoredState", () => {
     expect(parseStoredState(raw)?.workspaces[0].activeCluster).toBeUndefined();
   });
 
+  it("restores pauses only for clusters that remain in the workspace", () => {
+    const s = defaultState([ctx("a"), ctx("b")]);
+    s.workspaces[0].pausedClusters = ["a"];
+    const raw = JSON.stringify({ version: STORAGE_VERSION, ...s }).replace('["a"]', '["a","gone",7]');
+    expect(parseStoredState(raw)?.workspaces[0].pausedClusters).toEqual(["a"]);
+  });
+
   it("keeps a tab's sort through a save and a load", () => {
     const s = valid();
     s.workspaces[0].tabs[1].view = {

@@ -161,4 +161,5 @@ export const STATUS: Record<ProbeState, { word: string; tone: BadgeTone }> = {
   reachable: { word: "reachable", tone: "ok" },
   unreachable: { word: "unreachable", tone: "sev" },
   unread: { word: "no reading", tone: "muted" },
+  paused: { word: "paused", tone: "muted" },
 };

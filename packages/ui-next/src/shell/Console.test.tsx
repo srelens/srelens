@@ -489,6 +489,36 @@ describe("Console", () => {
     expect(askAgent).not.toHaveBeenCalled();
   });
 
+  it("refuses both screen asks and typed questions for a paused cluster", async () => {
+    const user = userEvent.setup();
+    setup();
+    act(() => tabsStore.setClusterPaused(tabsStore.currentWorkspace().id, HARNESS_CTX.stableId, true));
+    await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    const box = screen.getByRole("textbox", { name: "Console prompt" });
+    await user.type(box, "why is it failing");
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(askAgent).not.toHaveBeenCalled();
+    expect((box as HTMLTextAreaElement).value).toBe("why is it failing");
+    expect(screen.getByText(/Reconnect .* to send a question/)).toBeTruthy();
+  });
+
+  it("checks the selected conversation's cluster even when the rail is elsewhere", async () => {
+    const stage = ctx("stage-id", "staging");
+    setContexts([HARNESS_CTX, stage]);
+    tabsStore.setState(defaultState([HARNESS_CTX, stage]));
+    tabsStore.setActiveCluster(stage.stableId, stage.name);
+    tabsStore.setClusterPaused(tabsStore.currentWorkspace().id, HARNESS_CTX.stableId, true);
+    tabsStore.openTab("/agent");
+    useRunSubject.mockReturnValue({ about: { cluster: HARNESS_CTX.name }, route: "/overview" });
+    useActiveRunKey.mockReturnValue("prod-eu|overview");
+    render(<ConsoleProvider onToggleTheme={() => {}}><Console fullView /></ConsoleProvider>);
+    const box = screen.getByRole("textbox", { name: "Console prompt" });
+    await userEvent.type(box, "inspect prod");
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(askAgent).not.toHaveBeenCalled();
+    expect(screen.getByText("Reconnect prod-eu to send a question")).toBeTruthy();
+  });
+
   /**
    * Codex P1: this component renders `null` in a browser, but the guard sits
    * BELOW the effect that registers the submit handler — so a screen's own Ask
@@ -1188,13 +1218,14 @@ describe("Console — header details", () => {
     expect(screen.getByText("2 exchanges")).toBeDefined();
   });
 
-  it("wires the dock's Stop to the store, and only while a turn is in flight", async () => {
+  it.each([false, true])("keeps Stop wired to the store while a turn is in flight (paused: %s)", async (paused) => {
     const user = userEvent.setup();
     useRun.mockReturnValue(
       runState({ busy: true, turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }] }),
     );
     setup();
     await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    if (paused) act(() => tabsStore.setClusterPaused(tabsStore.currentWorkspace().id, HARNESS_CTX.stableId, true));
     await user.click(screen.getByRole("button", { name: "Stop" }));
     expect(stopAgentRun).toHaveBeenCalledTimes(1);
   });

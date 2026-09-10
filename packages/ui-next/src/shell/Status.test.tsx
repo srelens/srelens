@@ -89,6 +89,12 @@ async function connect(version: string | null) {
 }
 
 describe("Status", () => {
+  it("does not assert disconnection before a cluster has been checked", () => {
+    setState(defaultState([ctx]));
+    mount(<Status contexts={[ctx]} />);
+    expect(screen.getByText("Not checked")).toBeTruthy();
+    expect(screen.queryByText("Disconnected")).toBeNull();
+  });
   it("says so when no cluster is active", () => {
     setState(defaultState([]));
     mount(<Status contexts={[]} />);
