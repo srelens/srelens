@@ -468,11 +468,14 @@ async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
     assert_eq!(app.helm_tick_counter, 36);
     assert!(app.helm_refreshing, "tick 36 triggers another refresh");
 
-    // 4. Leaving Helm view resets the counter and flag
+    // 4. Leaving Helm view resets the tick counter, while the in-flight guard is safely preserved until result handling
     app.active_view = ActiveView::Assistant;
     app.handle_tick();
     assert_eq!(app.helm_tick_counter, 0);
-    assert!(!app.helm_refreshing);
+    assert!(app.helm_refreshing, "fetch initiated on tick 36 is still in-flight");
+
+    app.handle_helm_releases_result("test-cluster", "default", Ok(vec![]));
+    assert!(!app.helm_refreshing, "handling result clears in-flight guard");
 
     // 5. Manual refresh keys: 'R' (Shift+R) and Ctrl+r trigger immediate refresh with toast
     app.active_view = ActiveView::Helm(srelens_tui::views::helm_view::HelmViewState::new());
@@ -480,7 +483,14 @@ async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
     assert!(app.helm_refreshing);
     assert!(app.toast.as_ref().map(|(msg, _, _)| msg.contains("Refreshing Helm releases")).unwrap_or(false));
 
-    app.helm_refreshing = false;
+    // While refresh is in-flight, subsequent 'R' does not spawn duplicate or reset guard
+    app.toast = None;
+    app.handle_key_event(common::ch('R')).await;
+    assert!(app.helm_refreshing);
+    assert!(app.toast.as_ref().map(|(msg, _, _)| msg.contains("already in progress")).unwrap_or(false));
+
+    app.handle_helm_releases_result("test-cluster", "default", Ok(vec![]));
+    assert!(!app.helm_refreshing);
     app.toast = None;
     app.handle_key_event(common::ctrl('r')).await;
     assert!(app.helm_refreshing);
@@ -490,6 +500,65 @@ async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
     app.toast = None;
     app.handle_key_event(common::ch('r')).await;
     assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn helm_refresh_in_flight_survives_namespace_switch_and_refetches_new_target() {
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Helm(srelens_tui::views::helm_view::HelmViewState::new());
+    app.active_context = "test-cluster".into();
+    app.active_namespace = "default".into();
+
+    // 1. Initial refresh starts for "default"
+    app.refresh_helm_releases();
+    assert!(app.helm_refreshing);
+
+    // 2. User switches namespace to "kube-system" while refresh is in-flight
+    app.switch_namespace("kube-system".into()).await;
+    assert_eq!(app.active_namespace, "kube-system");
+    // In-flight guard prevented duplicate concurrent fetch during switch
+    assert!(app.helm_refreshing);
+
+    // 3. Stale result for "default" arrives
+    let summary = srelens_kube::helm::HelmReleaseSummary {
+        name: "stale-nginx".into(),
+        namespace: "default".into(),
+        revision: 1,
+        status: "deployed".into(),
+        chart: "nginx-1.0.0".into(),
+        chart_version: "1.0.0".into(),
+        app_version: "1.25".into(),
+        updated: "2026-01-01".into(),
+    };
+    app.handle_helm_releases_result("test-cluster", "default", Ok(vec![summary]));
+
+    // Stale result is NOT applied to kube-system, and a fresh refresh is triggered for kube-system
+    if let ActiveView::Helm(h) = &app.active_view {
+        assert!(h.releases.is_empty(), "stale releases for old namespace should not be applied");
+    } else {
+        panic!("expected Helm view");
+    }
+    assert!(app.helm_refreshing, "new fetch for kube-system was immediately triggered");
+
+    // 4. Fresh result for "kube-system" arrives
+    let ks_summary = srelens_kube::helm::HelmReleaseSummary {
+        name: "cilium".into(),
+        namespace: "kube-system".into(),
+        revision: 1,
+        status: "deployed".into(),
+        chart: "cilium-1.14.0".into(),
+        chart_version: "1.14.0".into(),
+        app_version: "1.14.0".into(),
+        updated: "2026-01-01".into(),
+    };
+    app.handle_helm_releases_result("test-cluster", "kube-system", Ok(vec![ks_summary]));
+    assert!(!app.helm_refreshing);
+    if let ActiveView::Helm(h) = &app.active_view {
+        assert_eq!(h.releases.len(), 1);
+        assert_eq!(h.releases[0].name, "cilium");
+    } else {
+        panic!("expected Helm view");
+    }
 }
 
 #[tokio::test]

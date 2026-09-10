@@ -359,7 +359,6 @@ impl App {
             }
         } else {
             self.helm_tick_counter = 0;
-            self.helm_refreshing = false;
         }
     }
 
@@ -1335,7 +1334,6 @@ impl App {
         }
 
         if matches!(self.active_view, ActiveView::Helm(_)) {
-            self.helm_refreshing = false;
             self.refresh_helm_releases();
             return;
         }
@@ -3418,14 +3416,20 @@ impl App {
                         }
                     }
                     KeyCode::Char('R') => {
-                        self.helm_refreshing = false;
-                        self.refresh_helm_releases();
-                        self.set_toast("Refreshing Helm releases...".to_string(), Theme::status_ok());
+                        if self.helm_refreshing {
+                            self.set_toast("Helm releases refresh already in progress...".to_string(), Theme::status_warn());
+                        } else {
+                            self.refresh_helm_releases();
+                            self.set_toast("Refreshing Helm releases...".to_string(), Theme::status_ok());
+                        }
                     }
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.helm_refreshing = false;
-                        self.refresh_helm_releases();
-                        self.set_toast("Refreshing Helm releases...".to_string(), Theme::status_ok());
+                        if self.helm_refreshing {
+                            self.set_toast("Helm releases refresh already in progress...".to_string(), Theme::status_warn());
+                        } else {
+                            self.refresh_helm_releases();
+                            self.set_toast("Refreshing Helm releases...".to_string(), Theme::status_ok());
+                        }
                     }
                     KeyCode::Char('r') => {
                         if let Some(rel) = sel_rel {
@@ -6340,6 +6344,8 @@ impl App {
                         }
                     }
                 }
+            } else {
+                self.refresh_helm_releases();
             }
         }
     }
