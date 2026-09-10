@@ -22,6 +22,8 @@ export interface FilterBarProps {
   invalid?: boolean;
   /** Controls that filter alongside the text — a namespace picker, a toggle. */
   children?: ReactNode;
+  /** Selection actions shown before the search field. */
+  leading?: ReactNode;
   className?: string;
 }
 
@@ -66,6 +68,7 @@ export function FilterBar({
   onRegexChange,
   invalid = false,
   children,
+  leading,
   className,
 }: FilterBarProps) {
   const fieldRef = useRef<HTMLInputElement>(null);
@@ -78,6 +81,7 @@ export function FilterBar({
       className={cx("rule-b flex shrink-0 flex-wrap items-center gap-3 px-2.5 py-1.5", className)}
       style={{ background: "var(--surface-sunk)" }}
     >
+      {leading}
       <div
         className="flex min-w-[200px] flex-1 items-center gap-1.5 rounded border border-transparent px-1"
         data-invalid={invalid ? "true" : undefined}

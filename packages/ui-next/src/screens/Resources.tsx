@@ -519,15 +519,7 @@ function KindList({
         invalid={invalidFilter}
         label={`Filter ${lower}`}
         placeholder={`Filter ${lower}…`}
-      >
-        {!clusterScoped && (
-          <NamespacePicker
-            namespaces={namespaces}
-            selection={selection}
-            onChange={(next) => setNamespaces(context.stableId, next)}
-          />
-        )}
-        {showRows && (
+        leading={showRows && (
           <ResourceBulk
             selected={selected}
             kind={lower}
@@ -535,6 +527,14 @@ function KindList({
             context={name}
             rows={filtered}
             onDone={() => setSelected(new Set())}
+          />
+        )}
+      >
+        {!clusterScoped && (
+          <NamespacePicker
+            namespaces={namespaces}
+            selection={selection}
+            onChange={(next) => setNamespaces(context.stableId, next)}
           />
         )}
       </FilterBar>
