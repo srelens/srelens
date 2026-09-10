@@ -15,7 +15,10 @@
 import { setWebviewZoom } from "../transport/transport";
 import { settingsStorage } from "./settingsStorage";
 
+// Persist native percentages under the existing backend key so a previous
+// 110% preference becomes 100% without changing its physical size.
 const UI_SCALE_KEY = "srelens.uiScale";
+const BASELINE_PERCENT = 110;
 
 /** Interface scale bounds, in percent of the default size. */
 export const UI_SCALE = { MIN: 80, MAX: 150, DEFAULT: 100, STEP: 10 } as const;
@@ -31,7 +34,7 @@ export function clampUiScale(value: unknown): number {
 export function getUiScale(): number {
   try {
     const raw = settingsStorage.getItem(UI_SCALE_KEY);
-    return raw === null ? UI_SCALE.DEFAULT : clampUiScale(JSON.parse(raw));
+    return raw === null ? UI_SCALE.DEFAULT : clampUiScale(Number(JSON.parse(raw)) * 100 / BASELINE_PERCENT);
   } catch {
     return UI_SCALE.DEFAULT;
   }
@@ -41,11 +44,16 @@ export function getUiScale(): number {
 export function setUiScale(percent: number): number {
   const clamped = clampUiScale(percent);
   try {
-    settingsStorage.setItem(UI_SCALE_KEY, JSON.stringify(clamped));
+    settingsStorage.setItem(UI_SCALE_KEY, JSON.stringify(Math.round(clamped * BASELINE_PERCENT) / 100));
   } catch {
     // ignore unavailable/quota-exceeded storage
   }
   return clamped;
+}
+
+/** Native zoom factor: the old 110% size is now the 100% baseline. */
+export function uiScaleFactor(percent: number): number {
+  return Math.round(clampUiScale(percent) * BASELINE_PERCENT) / 10000;
 }
 
 /**
@@ -53,7 +61,7 @@ export function setUiScale(percent: number): number {
  * permission, web mode) must never break the caller's render or keystroke.
  */
 export function applyUiScale(percent: number): void {
-  void setWebviewZoom(clampUiScale(percent) / 100).catch(() => {});
+  void setWebviewZoom(uiScaleFactor(percent)).catch(() => {});
 }
 
 /**

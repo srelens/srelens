@@ -6,6 +6,7 @@ import {
   isApplePlatform,
   isTauri,
   setUiScale,
+  uiScaleFactor,
 } from "@srelens/core";
 import { Button, Panel } from "@srelens/ui-kit";
 import {
@@ -146,7 +147,7 @@ function bodyPixels(percent: number): number {
   } catch {
     // No stylesheet attached — a unit test, or a first paint.
   }
-  return Math.round((base * percent) / 100);
+  return Math.round(base * uiScaleFactor(percent));
 }
 
 /** The current row height, when a stylesheet is attached to say. */

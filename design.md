@@ -91,6 +91,10 @@ They are design targets, not a declaration of whole-application WCAG conformance
 
 ## Typography and weight
 
+Desktop zoom uses a 1.1 native scale at the displayed 100% baseline. The
+80–150% choices scale relative to that baseline. CSS sizes below are before
+native zoom; saved native percentages retain the previous 110% size as 100%.
+
 Use the existing system UI face for navigation and resource data. Use monospace
 for manifests, code and commands where alignment helps. Resource-table values,
 including node names, namespaces and images, share the UI font; an identifier

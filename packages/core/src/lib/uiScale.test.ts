@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const transportMocks = vi.hoisted(() => ({ setWebviewZoom: vi.fn(async () => {}) }));
 vi.mock("../transport/transport", () => transportMocks);
 
+import { settingsStorage } from "./settingsStorage";
+
 import {
   UI_SCALE,
   applyUiScale,
@@ -31,11 +33,24 @@ describe("clampUiScale", () => {
 });
 
 describe("persistence", () => {
-  it("round-trips through localStorage, clamped", () => {
+  it("round-trips through backend settings, clamped", () => {
     expect(setUiScale(120)).toBe(120);
     expect(getUiScale()).toBe(120);
     expect(setUiScale(9000)).toBe(UI_SCALE.MAX);
     expect(getUiScale()).toBe(UI_SCALE.MAX);
+  });
+
+  it("reads the previous 110% setting as the new 100% baseline", () => {
+    settingsStorage.setItem("srelens.uiScale", "110");
+    expect(getUiScale()).toBe(100);
+  });
+
+  it("stores native percentages so reopening does not compound the baseline", () => {
+    setUiScale(100);
+    expect(settingsStorage.getItem("srelens.uiScale")).toBe("110");
+    expect(getUiScale()).toBe(100);
+    setUiScale(getUiScale());
+    expect(settingsStorage.getItem("srelens.uiScale")).toBe("110");
   });
 
   it("defaults when unset or corrupted", () => {
@@ -48,12 +63,12 @@ describe("persistence", () => {
 describe("applyUiScale", () => {
   it("zooms the webview by the clamped percentage as a factor", () => {
     applyUiScale(120);
-    expect(transportMocks.setWebviewZoom).toHaveBeenCalledWith(1.2);
+    expect(transportMocks.setWebviewZoom).toHaveBeenCalledWith(1.32);
     applyUiScale(100);
-    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(1);
+    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(1.1);
     // Out-of-range input is clamped before it reaches the webview.
     applyUiScale(400);
-    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(UI_SCALE.MAX / 100);
+    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(1.65);
   });
 
   it("swallows a zoom rejection so a keystroke never throws", () => {
