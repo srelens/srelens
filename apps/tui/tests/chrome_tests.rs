@@ -22,7 +22,7 @@ use srelens_tui::ui::dialogs::{
 };
 use srelens_tui::ui::header::{render_header, ContextChipInfo, HeaderProps};
 use srelens_tui::ui::help::{centered_rect, render_help_modal};
-use srelens_tui::ui::statusbar::{render_statusbar, InputMode, StatusBarProps};
+use srelens_tui::ui::statusbar::{command_popup_rect, render_statusbar, InputMode, StatusBarProps};
 use srelens_tui::views::assistant_view::{
     format_message_content, format_message_content_with_width, parse_inline_markdown,
     render_assistant_view, render_markdown_table, wrap_line, AssistantViewState, ChatMessage,
@@ -116,6 +116,8 @@ fn status_props(mode: &InputMode) -> StatusBarProps<'_> {
         suggestions: None,
         close_pf_button: None,
         close_pf_rect: None,
+        command_popup_max_width: None,
+        command_popup_max_visible: None,
     }
 }
 
@@ -896,6 +898,60 @@ fn command_mode_pops_up_the_matching_commands_above_the_bar_and_arrows_the_selec
         .unwrap();
     assert!(popup_row < 22, "popup opens above the bar");
     assert!(lines[23].starts_with(":po█"), "{:?}", lines[23]);
+}
+
+#[test]
+fn command_popup_geometry_respects_max_width_and_visible_rows() {
+    let bar_area = Rect::new(0, 22, 80, 2);
+    // 2 items, max_visible 6 -> 2 items + 2 borders = 4 height, width 80 - 4 = 76 min 65 = 65
+    let r1 = command_popup_rect(bar_area, 2, 65, 6);
+    assert_eq!(r1, Rect::new(2, 18, 65, 4));
+
+    // 10 items, max_visible 6 -> 6 items + 2 borders = 8 height
+    let r2 = command_popup_rect(bar_area, 10, 65, 6);
+    assert_eq!(r2, Rect::new(2, 14, 65, 8));
+
+    // Narrow terminal: 50 cols, max_width 65 -> clamped to 50 - 4 = 46
+    let narrow_bar = Rect::new(0, 22, 50, 2);
+    let r3 = command_popup_rect(narrow_bar, 5, 65, 6);
+    assert_eq!(r3, Rect::new(2, 15, 46, 7));
+
+    // Wide terminal with custom config: 160 cols, 10 items, max_width 120, max_visible 10
+    let wide_bar = Rect::new(0, 22, 160, 2);
+    let r4 = command_popup_rect(wide_bar, 10, 120, 10);
+    assert_eq!(r4, Rect::new(2, 10, 120, 12));
+}
+
+#[test]
+fn command_popup_rendering_expands_to_configured_width_and_visible_rows() {
+    let suggs = command_suggestions("");
+    assert!(suggs.len() >= 10, "empty query matches all commands");
+
+    let mode = InputMode::Command;
+    let mut props = status_props(&mode);
+    props.command_input = "";
+    props.suggestions = Some((&suggs, 0));
+    props.command_popup_max_width = Some(110);
+    props.command_popup_max_visible = Some(10);
+
+    let lines = common::render_lines(160, 24, |f| {
+        render_statusbar(f, Rect::new(0, 22, 160, 2), props)
+    });
+
+    // With max_visible = 10, popup has 10 items + 2 borders = 12 rows tall.
+    // Base bar starts at y=22, so popup top is at y = 22 - 12 = 10.
+    let popup_title_row = lines
+        .iter()
+        .position(|l| l.contains("Commands [1/"))
+        .expect("popup title present");
+    assert_eq!(popup_title_row, 10, "top border of popup is at y=10");
+
+    // Check width of the box header line: title line should span ~110 chars
+    let header_line = &lines[popup_title_row];
+    assert!(
+        header_line.trim_end().len() >= 108,
+        "popup border should extend to configured max width of 110, got line: {header_line}"
+    );
 }
 
 #[test]

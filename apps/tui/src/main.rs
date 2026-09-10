@@ -29,6 +29,7 @@ mod deep_link;
 mod event;
 mod sink;
 mod theme;
+mod tui_config;
 mod ui;
 mod views;
 

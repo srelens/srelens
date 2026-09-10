@@ -10,6 +10,7 @@ pub mod event;
 pub mod self_update;
 pub mod sink;
 pub mod theme;
+pub mod tui_config;
 pub mod ui;
 pub mod views;
 
@@ -17,3 +18,4 @@ pub use ai_config::{AiProvider, AiSettings};
 pub use ai_skills::SkillDef;
 pub use app::App;
 pub use deep_link::DeepLink;
+pub use tui_config::TuiConfig;

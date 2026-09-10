@@ -3333,3 +3333,66 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
     }
 }
 
+#[tokio::test]
+async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
+    let (tx, _rx) = unbounded_channel();
+    let mut app = App::new(
+        Some("test-ctx".into()),
+        Some("default".into()),
+        false,
+        None,
+        vec![],
+        tx,
+    )
+    .await
+    .expect("app");
+
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("tui.json");
+    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_path);
+
+    // Initial state: pods table
+    assert!(matches!(app.active_view, ActiveView::Table(_)));
+
+    // Open :config
+    press(&mut app, ch(':')).await;
+    assert_eq!(app.input_mode, InputMode::Command);
+    type_str(&mut app, "config").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    // Active view is now TuiConfig
+    assert!(matches!(app.active_view, ActiveView::TuiConfig(_)));
+
+    // Initial config values
+    assert_eq!(app.tui_config.command_popup_max_width, 65);
+    assert_eq!(app.tui_config.command_popup_max_visible, 6);
+
+    // Adjust width (+5 with 'l')
+    press(&mut app, ch('l')).await;
+    assert_eq!(app.tui_config.command_popup_max_width, 70);
+
+    // Adjust width (-5 with 'h')
+    press(&mut app, ch('h')).await;
+    assert_eq!(app.tui_config.command_popup_max_width, 65);
+
+    // Switch to visible rows field with 'j'
+    press(&mut app, ch('j')).await;
+    if let ActiveView::TuiConfig(ref s) = app.active_view {
+        assert_eq!(s.selected_field, 1);
+    }
+
+    // Adjust visible rows (+1 with '+')
+    press(&mut app, ch('+')).await;
+    assert_eq!(app.tui_config.command_popup_max_visible, 7);
+
+    // Reset defaults with 'r'
+    press(&mut app, ch('r')).await;
+    assert_eq!(app.tui_config.command_popup_max_width, 65);
+    assert_eq!(app.tui_config.command_popup_max_visible, 6);
+
+    // Press Esc pops back to table view
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Table(_)));
+
+    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
+}

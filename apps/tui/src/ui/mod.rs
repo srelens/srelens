@@ -6,4 +6,4 @@ pub mod statusbar;
 pub use dialogs::{render_modal, Modal, ContainerAction};
 pub use header::{render_header, HeaderProps};
 pub use help::render_help_modal;
-pub use statusbar::{render_statusbar, InputMode, StatusBarProps};
+pub use statusbar::{command_popup_rect, render_statusbar, InputMode, StatusBarProps};

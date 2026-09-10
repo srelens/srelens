@@ -28,6 +28,25 @@ pub struct StatusBarProps<'a> {
     pub suggestions: Option<(&'a [(crate::commands::DynamicCommandDef, usize)], usize)>,
     pub close_pf_button: Option<(&'a str, Style)>,
     pub close_pf_rect: Option<&'a std::cell::RefCell<Option<Rect>>>,
+    pub command_popup_max_width: Option<u16>,
+    pub command_popup_max_visible: Option<usize>,
+}
+
+pub fn command_popup_rect(
+    area: Rect,
+    item_count: usize,
+    max_width: u16,
+    max_visible: usize,
+) -> Rect {
+    let visible_count = item_count.min(max_visible);
+    let popup_height = visible_count as u16 + 2;
+    let popup_width = area.width.saturating_sub(4).min(max_width);
+    Rect {
+        x: area.x + 2,
+        y: area.y.saturating_sub(popup_height),
+        width: popup_width,
+        height: popup_height,
+    }
 }
 
 pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
@@ -57,15 +76,10 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
             // Render autocomplete suggestions if typing
             if let Some((suggs, selected_idx)) = props.suggestions {
                 if !suggs.is_empty() {
-                    let max_visible = 6usize;
+                    let max_width = props.command_popup_max_width.unwrap_or(65);
+                    let max_visible = props.command_popup_max_visible.unwrap_or(6);
+                    let popup_area = command_popup_rect(area, suggs.len(), max_width, max_visible);
                     let visible_count = suggs.len().min(max_visible);
-                    let popup_height = (visible_count as u16 + 2).min(8);
-                    let popup_area = Rect {
-                        x: area.x + 2,
-                        y: area.y.saturating_sub(popup_height),
-                        width: area.width.saturating_sub(4).min(65),
-                        height: popup_height,
-                    };
                     f.render_widget(Clear, popup_area);
 
                     // Compute window offset to keep selected_idx visible

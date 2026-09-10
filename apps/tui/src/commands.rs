@@ -39,6 +39,7 @@ pub enum ResourceKind {
     Toolbox,
     Assistant,
     Settings,
+    TuiConfig,
     Workloads,
     Topology,
     GpuInfo,
@@ -106,6 +107,7 @@ impl ResourceKind {
             Self::Toolbox => "Toolbox Diagnostics",
             Self::Assistant => "SRElens Assistant",
             Self::Settings => "AI & Assistant Settings",
+            Self::TuiConfig => "TUI Configuration",
             Self::Workloads => "Workloads",
             Self::Topology => "Workload & Traffic Topology",
             Self::GpuInfo => "GPU Info & VRAM Allocation",
@@ -448,9 +450,15 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
     },
     CommandDef {
         name: "ai-settings",
-        aliases: &["settings", "config", "ai-config"],
+        aliases: &["settings", "ai-config"],
         description: "AI & Assistant Settings",
         target: CommandTarget::Resource(ResourceKind::Settings),
+    },
+    CommandDef {
+        name: "config",
+        aliases: &["tui-config", "tui"],
+        description: "TUI Configuration & Popup Size",
+        target: CommandTarget::Resource(ResourceKind::TuiConfig),
     },
     CommandDef {
         name: "help",
