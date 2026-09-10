@@ -1002,7 +1002,12 @@ function nodeColumns(context: string, open: (pending: Pending) => void): Column<
       sortable: false,
       filterable: false,
       render: (row) => (
-        <ActionBar actions={nodeActions(context, row, open)} label={`Actions for ${row.name}`} max={2} />
+        <ActionBar
+          actions={nodeActions(context, row, open)}
+          label={`Actions for ${row.name}`}
+          max={2}
+          className="w-max"
+        />
       ),
     },
   ];

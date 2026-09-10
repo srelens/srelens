@@ -1503,6 +1503,9 @@ describe("Overview — a nodes band that stays a summary", () => {
   it("marks the two node actions with the design's glyphs", async () => {
     open();
     await waitFor(() => expect(rowFor("n1")).toBeTruthy());
+    // Natural table sizing must reserve room for both buttons and overflow;
+    // otherwise the overflow trigger wraps and doubles every node's height.
+    expect(within(rowFor("n1")).getByRole("group", { name: "Actions for n1" }).className).toContain("w-max");
 
     // A crossed circle on Cordon, a wave on Drain. From `lib/icons` — the
     // app's vocabulary — because the kit takes no icon-set dependency.
