@@ -412,6 +412,9 @@ describe("Table", () => {
     );
     const selected = screen.getByText("web-1").closest("tr");
     expect(selected?.getAttribute("aria-selected")).toBe("true");
+    expect(selected?.getAttribute("data-state")).toBe("selected");
+    const css = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+    expect(css).toMatch(/\.tbl tbody tr\[data-state="selected"\]\s*\{\s*background: var\(--accent-wash\)/);
   });
 
   it("shows empty text when there is no data", () => {
@@ -704,6 +707,11 @@ describe("Table", () => {
  * is a browser fact, measured in one (see the task report), and no assertion
  * here can stand in for it.
  */
+it("lets header cells own stickiness without a second sticky row-group", () => {
+  const { container } = render(<Table columns={[{ key: "name", header: "Name" }]} data={[{ name: "worker" }]} getRowKey={row => row.name} />);
+  expect(container.querySelector("thead")?.classList.contains("sticky")).toBe(false);
+});
+
 describe("Table sticky columns", () => {
   const cols: Column<{ name: string }>[] = [
     { key: "name", header: "Name" },

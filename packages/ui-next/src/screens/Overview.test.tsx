@@ -967,6 +967,7 @@ describe("Overview — the rail's control plane", () => {
     expect(factLabels()).not.toContain("Region");
     // And nothing standing in for them: "unknown" and an em dash both read as
     // answers, and the cluster gave none.
+    expect(section("Control plane").hasAttribute("data-band")).toBe(true);
     expect(section("Control plane").textContent).not.toMatch(/unknown/i);
     expect(section("Control plane").textContent).not.toContain("—");
   });
@@ -1184,6 +1185,7 @@ describe("Overview — the rail's incidents and fleet", () => {
     open();
 
     const fleet = await waitFor(() => section("Fleet"));
+    expect(fleet.hasAttribute("data-band")).toBe(true);
     await waitFor(() => expect(fleet.textContent).toContain("30/33 running"));
     expect(within(fleet).getByText("prod-eu")).toBeTruthy();
     expect(core.podCount).toHaveBeenCalledWith("prod-eu");
@@ -1293,9 +1295,11 @@ describe("Overview — a flat surface, not a stack of cards", () => {
     expect(unpadded("Nodes")).toBe("false");
     expect(unpadded("Not ready")).toBe("false");
     expect(unpadded("Objects by kind")).toBe("false");
-    // The key/value bands keep theirs: a `.kv` row is not a full-width row.
-    expect(unpadded("Control plane")).toBeNull();
-    expect(unpadded("Fleet")).toBeNull();
+    // Headings are flush; only the fact content retains a reading gutter.
+    for (const title of ["Control plane", "Fleet"]) {
+      expect(unpadded(title)).toBe("false");
+      expect(section(title).querySelector(".px-3 > .kv")).not.toBeNull();
+    }
   });
 
   it("heads the left column with the cluster and its server version", async () => {

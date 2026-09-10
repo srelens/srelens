@@ -460,6 +460,6 @@ is *usable*.
 - **Branching** — `dev` is the default branch; open PRs against it. `main` carries stable releases.
 - **Commits** — imperative subject line, body explaining *why* when non-obvious. Stable releases are Conventional-Commit-driven, so use `feat(scope):` / `fix(scope):` prefixes.
 - **Formatting** — `cargo fmt` for Rust; the existing Prettier-ish style for TS (match surrounding code).
-- **UI** — primitives come from `src/components/ui` (shadcn/radix) and `src/ui`; feature views compose them. Styling lives in `src/ui/styles.css` design tokens — avoid ad-hoc inline styles.
+- **UI** — the new design composes `@srelens/ui-kit` in `packages/ui-next`; shared tokens and component rules live in `packages/ui-kit/src/styles`. Read the [design contract and visibility audit](../design.md) for theme, contrast, typography, density and verification rules. The classic design uses `src/components/ui` (shadcn/radix), `src/ui` and `src/ui/styles.css`. Use the owning design’s tokens rather than ad-hoc colours.
 - **No direct Tauri imports** outside `src/transport/`.
 - **No host-specific logic in `crates/`** — if a change only makes sense for the desktop or only for the web, it belongs in `apps/desktop/src-tauri` or `crates/server`, not in the shared core.

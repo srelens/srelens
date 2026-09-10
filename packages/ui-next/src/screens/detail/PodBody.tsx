@@ -258,7 +258,7 @@ function PodVolumesSection({ object }: { object: K8sObject }) {
   const volumes = asArray(spec.volumes).map(asRecord);
   if (volumes.length === 0) return null;
   return (
-    <Section title="Pod Volumes">
+    <Section title="Pod Volumes" padded={false}>
       <Table columns={VOLUME_COLUMNS} data={volumes} getRowKey={(v) => str(v.name)} />
     </Section>
   );
