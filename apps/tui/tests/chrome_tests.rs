@@ -968,6 +968,34 @@ fn normal_mode_prefixes_a_toast_and_appends_the_active_filter() {
 }
 
 #[test]
+fn normal_mode_appends_active_search_when_is_text_search_is_true() {
+    let mode = InputMode::Normal;
+    let mut props = status_props(&mode);
+    props.filter_input = "token";
+    props.matched_count = 2;
+    props.total_count = 100;
+    props.is_text_search = true;
+    let text = statusbar_text(props);
+    assert!(text.contains(" | Search: \"token\" [2 matches, n/N]"), "{text}");
+
+    let mut props = status_props(&mode);
+    props.filter_input = "token";
+    props.matched_count = 1;
+    props.total_count = 100;
+    props.is_text_search = true;
+    let text = statusbar_text(props);
+    assert!(text.contains(" | Search: \"token\" [1 match, n/N]"), "{text}");
+
+    let mut props = status_props(&mode);
+    props.filter_input = "token";
+    props.matched_count = 0;
+    props.total_count = 100;
+    props.is_text_search = true;
+    let text = statusbar_text(props);
+    assert!(text.contains(" | Search: \"token\" [0 matches]"), "{text}");
+}
+
+#[test]
 fn normal_mode_uses_custom_hints_when_a_view_supplies_them() {
     let mode = InputMode::Normal;
     let mut props = status_props(&mode);
@@ -2190,6 +2218,16 @@ async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
     detail_state.set_tab(HelmDetailTab::Manifest);
     let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
     assert!(text.contains("Rendered Kubernetes Manifests") && text.contains("kind: Deployment"), "{text}");
+
+    // Manifest search rendering
+    detail_state.set_search_query("Deployment");
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("[Search: \"Deployment\" (1/1 matches, n/N)]"), "{text}");
+
+    detail_state.set_search_query("nonexistent");
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("[Search: \"nonexistent\" (0 matches)]"), "{text}");
+    detail_state.clear_search();
 
     // Notes tab
     detail_state.set_tab(HelmDetailTab::Notes);

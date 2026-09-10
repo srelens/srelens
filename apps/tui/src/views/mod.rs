@@ -78,12 +78,12 @@ use ratatui::text::Span;
 
 /// Splits `text` into Spans, highlighting every case-insensitive occurrence of `query`
 /// with `match_style` while styling non-matching portions with `base_style`.
-pub fn highlight_text_matches<'a>(
-    text: &'a str,
+pub fn highlight_text_matches(
+    text: &str,
     query: &str,
     base_style: Style,
     match_style: Style,
-) -> Vec<Span<'a>> {
+) -> Vec<Span<'static>> {
     if query.is_empty() {
         return vec![Span::styled(text.to_string(), base_style)];
     }

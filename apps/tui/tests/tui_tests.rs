@@ -6723,6 +6723,83 @@ mod tests {
         assert!(res.is_ok());
         assert!(matches!(app.active_view, ActiveView::HelmDetail(_)));
     }
+
+    #[tokio::test]
+    async fn helm_detail_search_matches_and_navigates_across_tabs() {
+        use srelens_tui::views::helm_detail_view::{HelmDetailTab, HelmDetailViewState};
+        use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
+
+        let mut detail_state = HelmDetailViewState::new("app".to_string(), "default".to_string());
+        let mock_detail = HelmReleaseDetail {
+            name: "app".to_string(),
+            namespace: "default".to_string(),
+            revision: 1,
+            status: "deployed".to_string(),
+            chart: "app-chart".to_string(),
+            chart_version: "1.0.0".to_string(),
+            app_version: "1.0.0".to_string(),
+            updated: "2026-09-10T12:00:00Z".to_string(),
+            values_yaml: "apiKey: secret-token-123\nport: 8080\n".to_string(),
+            chart_values_yaml: "port: 80\n".to_string(),
+            computed_values_yaml: "apiKey: secret-token-123\nport: 8080\n".to_string(),
+            manifest: "---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app-token\ndata:\n  github_token: Z2hw...\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\n".to_string(),
+            notes: "Please copy your auth token from app-token Secret to proceed.\nEnjoy the app!".to_string(),
+            history: vec![
+                HelmRevision {
+                    revision: 1,
+                    status: "deployed".to_string(),
+                    updated: "2026-09-10T12:00:00Z".to_string(),
+                    chart_version: "app-chart-1.0.0".to_string(),
+                    description: "Initial install".to_string(),
+                },
+            ],
+        };
+        detail_state.set_detail(mock_detail);
+
+        // Switch to Manifest tab (tab 4)
+        detail_state.set_tab(HelmDetailTab::Manifest);
+        assert_eq!(detail_state.active_tab, HelmDetailTab::Manifest);
+
+        // Search for "token"
+        detail_state.set_search_query("token");
+        assert_eq!(detail_state.search_query, "token");
+        // Manifest contains "app-token" on line 4 (idx 4) and "github_token" on line 6 (idx 6)
+        assert_eq!(detail_state.search_matches.len(), 2);
+        assert_eq!(detail_state.current_match_idx, Some(0));
+        assert_eq!(detail_state.scroll_offset, detail_state.search_matches[0]);
+
+        // Navigate to next match
+        detail_state.next_match();
+        assert_eq!(detail_state.current_match_idx, Some(1));
+        assert_eq!(detail_state.scroll_offset, detail_state.search_matches[1]);
+
+        // Next wraps around to 0
+        detail_state.next_match();
+        assert_eq!(detail_state.current_match_idx, Some(0));
+        assert_eq!(detail_state.scroll_offset, detail_state.search_matches[0]);
+
+        // Previous wraps to last match
+        detail_state.prev_match();
+        assert_eq!(detail_state.current_match_idx, Some(1));
+        assert_eq!(detail_state.scroll_offset, detail_state.search_matches[1]);
+
+        // Scroll to bottom
+        detail_state.scroll_to_bottom();
+        assert_eq!(detail_state.scroll_offset, detail_state.manifest_line_count() - 1);
+
+        // Switch to Notes tab (tab 5) - should automatically recompute search for "token" in notes!
+        detail_state.set_tab(HelmDetailTab::Notes);
+        assert_eq!(detail_state.active_tab, HelmDetailTab::Notes);
+        // Notes has "Please copy your auth token from app-token Secret..." on line 0
+        assert_eq!(detail_state.search_matches.len(), 1);
+        assert_eq!(detail_state.search_matches[0], 0);
+
+        // Clear search
+        detail_state.clear_search();
+        assert!(detail_state.search_query.is_empty());
+        assert!(detail_state.search_matches.is_empty());
+        assert!(detail_state.current_match_idx.is_none());
+    }
 }
 
 

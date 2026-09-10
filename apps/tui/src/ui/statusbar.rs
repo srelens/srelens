@@ -189,9 +189,21 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
 
             if !props.filter_input.is_empty() {
                 spans.push(Span::raw(" | "));
-                spans.push(Span::styled("Filter: ", Theme::header_label()));
+                let label = if props.is_text_search { "Search: " } else { "Filter: " };
+                spans.push(Span::styled(label, Theme::header_label()));
+                let stats = if props.is_text_search {
+                    if props.matched_count == 0 {
+                        format!("\"{}\" [0 matches]", props.filter_input)
+                    } else if props.matched_count == 1 {
+                        format!("\"{}\" [1 match, n/N]", props.filter_input)
+                    } else {
+                        format!("\"{}\" [{} matches, n/N]", props.filter_input, props.matched_count)
+                    }
+                } else {
+                    format!("\"{}\" [{}/{}]", props.filter_input, props.matched_count, props.total_count)
+                };
                 spans.push(Span::styled(
-                    format!("\"{}\" [{}/{}]", props.filter_input, props.matched_count, props.total_count),
+                    stats,
                     Style::default().fg(Theme::yellow()),
                 ));
             }
