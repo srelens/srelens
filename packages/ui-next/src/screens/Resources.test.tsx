@@ -856,6 +856,10 @@ describe("Resources", () => {
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select default/web-1" }));
     await screen.findByText("1 selected");
+    const filterRow = screen.getByRole("search");
+    const selectionCount = within(filterRow).getByText("1 selected");
+    const search = within(filterRow).getByRole("searchbox");
+    expect(selectionCount.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     act(() => setNamespaces(CTX.stableId, ["billing"]));
 
