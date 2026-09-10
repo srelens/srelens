@@ -95,9 +95,8 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   // Found rather than assumed: the active id is persisted and the context list
   // is whatever the machine has now, so an id can outlive the context it named.
   const ctx = contexts.find((c) => c.stableId === activeId);
-  // Nothing has probed yet, or there is nothing to probe. Either way the link
-  // is not up, and "Disconnected" is the honest reading of that.
-  const state = (activeId ? links[activeId]?.state : undefined) ?? "disconnected";
+  // Absence of a probe is not evidence of a failed connection.
+  const state = activeId ? links[activeId]?.state : undefined;
   const paused = activeId !== null && (workspace.pausedClusters ?? []).includes(activeId);
   // Split rather than counted blind. A tunnel that gave up is still in the
   // store — it stays on the forwards screen until its reader dismisses it —
@@ -142,7 +141,7 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
       id: "ctx",
       label: ctx ? mark.name : "No cluster",
       dot: true,
-      tone: paused ? "muted" : LINK_TONE[state],
+      tone: paused || state === undefined ? "muted" : LINK_TONE[state],
       // Pressable only when there is a cluster to open. A "No cluster" button
       // that opens an overview of nothing is a dead end dressed as a way out.
       onSelect: ctx ? () => openTab("/overview", { clusterName: ctx.name }) : undefined,
@@ -157,7 +156,7 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   }
   // Pulsing only while connecting: the dot is animated for a readout that is
   // still changing, not for one that merely happens to be current.
-  segments.push({ id: "link", label: paused ? "Paused" : LINK_WORD[state], pulse: !paused && state === "connecting" });
+  segments.push({ id: "link", label: paused ? "Paused" : state === undefined ? "Not checked" : LINK_WORD[state], pulse: !paused && state === "connecting" });
 
   const end: StatusSegment[] = [];
   // Only when there is one, and this is the exception to the rule the version

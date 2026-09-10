@@ -1218,13 +1218,14 @@ describe("Console — header details", () => {
     expect(screen.getByText("2 exchanges")).toBeDefined();
   });
 
-  it("wires the dock's Stop to the store, and only while a turn is in flight", async () => {
+  it.each([false, true])("keeps Stop wired to the store while a turn is in flight (paused: %s)", async (paused) => {
     const user = userEvent.setup();
     useRun.mockReturnValue(
       runState({ busy: true, turns: [{ id: 1, role: "user", text: "q", calls: [], at: 1 }] }),
     );
     setup();
     await user.click(screen.getByRole("button", { name: "Ask from elsewhere" }));
+    if (paused) act(() => tabsStore.setClusterPaused(tabsStore.currentWorkspace().id, HARNESS_CTX.stableId, true));
     await user.click(screen.getByRole("button", { name: "Stop" }));
     expect(stopAgentRun).toHaveBeenCalledTimes(1);
   });

@@ -260,6 +260,14 @@ async function booted() {
 }
 
 describe("Window boot", () => {
+  it("keeps the agent console mounted when its explicitly scoped cluster is paused", async () => {
+    await booted();
+    act(() => { store.openTab("/agent", { clusterName: "prod" }); });
+    expect(screen.getByRole("textbox", { name: "Console prompt" })).toBeDefined();
+    act(() => { store.setClusterPaused(store.currentWorkspace().id, "prod", true); });
+    expect(screen.getByRole("textbox", { name: "Console prompt" })).toBeDefined();
+  });
+
   it("does not contact configured clusters until the reader opens one", async () => {
     listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
     await booted();

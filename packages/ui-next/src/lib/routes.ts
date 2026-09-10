@@ -197,6 +197,11 @@ export function isClusterScopedRoute(route: string): boolean {
   return describe(route, sentinel).sub === sentinel;
 }
 
+/** These screens own controls for work that survives their component lifetime. */
+export function keepsManagementWhenPaused(route: string): boolean {
+  return route === "/agent" || route === "/forwards" || route === "/terminals";
+}
+
 /**
  * What every routed screen is handed.
  *

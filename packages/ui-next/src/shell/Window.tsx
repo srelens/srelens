@@ -24,7 +24,7 @@ import { loadSectionFolds } from "../lib/sectionFolds";
 import { loadExpanded, loadNamespaces } from "../lib/workspace";
 import { defaultState, reconcile } from "../lib/tabs";
 import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
-import { isClusterScopedRoute } from "../lib/routes";
+import { isClusterScopedRoute, keepsManagementWhenPaused } from "../lib/routes";
 import { flushSave, installFlushOnUnload, loadTabsState, scheduleSave } from "../lib/tabsPersist";
 import {
   activateTab,
@@ -547,13 +547,11 @@ export function Window({
             const context = pinnedContext
               ? contexts.find((c) => c.name === pinnedContext)
               : tab.sub === undefined
-              // These screens manage forwards and shells that already exist.
-              // They must stay available to stop or detach them while their
-              // cluster is paused; their creation controls have their own
-              // capability gates.
-              ? (isClusterScopedRoute(tab.route) && tab.route !== "/forwards" && tab.route !== "/terminals" ? activeCtx : undefined)
+              ? (isClusterScopedRoute(tab.route) ? activeCtx : undefined)
               : contexts.find((c) => c.name === tab.sub);
-            const pausedContext = context && workspace.pausedClusters?.includes(context.stableId) ? context : undefined;
+            // Keep Stop/Detach accessible even on explicitly labelled tabs.
+            // Their submission and creation controls check the actual target.
+            const pausedContext = !keepsManagementWhenPaused(tab.route) && context && workspace.pausedClusters?.includes(context.stableId) ? context : undefined;
             return (
             <TabSurface key={tab.id} visible={tab.id === activeId}>
               {/* A placeholder tab without a cluster of its own still leaves

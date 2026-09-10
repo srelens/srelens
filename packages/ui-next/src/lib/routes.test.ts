@@ -7,6 +7,7 @@ import {
   describe,
   isBuiltInKind,
   isClusterScopedRoute,
+  keepsManagementWhenPaused,
   screenFor,
   type RoutedScreenProps,
   type ScreenComponent,
@@ -229,6 +230,10 @@ suite("describe", () => {
 });
 
 suite("isClusterScopedRoute", () => {
+  it("keeps run and stream management available while pausing cluster readers", () => {
+    for (const route of ["/agent", "/forwards", "/terminals"]) expect(keepsManagementWhenPaused(route)).toBe(true);
+    for (const route of ["/overview", "/helm", "/k/pods"]) expect(keepsManagementWhenPaused(route)).toBe(false);
+  });
   it("distinguishes cluster-following routes from app screens", () => {
     for (const route of ["/overview", "/helm", "/forwards", "/terminals", "/k/pods", "/k/Pod/default/web", "/edit/Pod/default/web"]) {
       expect(isClusterScopedRoute(route), route).toBe(true);
