@@ -1512,3 +1512,22 @@ it("shows saved display names on tabs while retaining the real context for opera
   act(() => setMark("prod", { ...defaultMark("prod"), name: "Production East" }));
   expect(screen.getByRole("tab", { name: /Pods · Production East/ })).toBeDefined();
 });
+
+
+it.each(["/forwards", "/terminals", "/helm"])("shows the active context for a status-opened %s tab", async route => {
+  loadTabsState.mockReturnValue(defaultState([ctx("prod")]));
+  await booted();
+  act(() => { store.openTab(route); });
+  const opened = store.getState().workspaces[0].tabs.find(t => t.route === route)!;
+  expect(opened.sub).toBeUndefined();
+  act(() => { screen.getByRole("tab", { name: opened.title }).focus(); });
+  expect((await screen.findByRole("tooltip")).textContent).toContain("prod");
+});
+
+it("does not label an app-level tab with the active cluster", async () => {
+  loadTabsState.mockReturnValue(defaultState([ctx("prod")]));
+  await booted();
+  act(() => { store.openTab("/settings"); });
+  act(() => { screen.getByRole("tab", { name: "Settings" }).focus(); });
+  expect((await screen.findByRole("tooltip")).textContent).not.toContain("prod");
+});

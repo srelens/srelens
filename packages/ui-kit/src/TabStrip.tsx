@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { cx } from "./cx";
 import type { IconComponent } from "./IconButton";
@@ -6,6 +6,8 @@ import { NavIcon } from "./NavIcon";
 import { Popover } from "./Popover";
 import { filled } from "./slot";
 import { toneColor } from "./tone";
+import { Tooltip, TooltipGroup } from "./Tooltip";
+import { useTabStripScroll } from "./useTabStripScroll";
 
 export interface StripTab {
   id: string;
@@ -13,6 +15,10 @@ export interface StripTab {
   title: string;
   /** The quiet tag after the title — the cluster, the namespace, "logs". */
   sub?: string;
+  /** Full context name, even when the visible tag uses a short display name. */
+  context?: string;
+  /** Resource kind and namespace, when the route carries them. */
+  detail?: string;
   /**
    * The glyph for this tab. Taken per tab rather than mapped from a kind:
    * which icon means "workloads" is the product's vocabulary, not the design
@@ -36,6 +42,8 @@ export interface TabStripProps {
   onSelect: (id: string) => void;
   /** Offered per tab when given, and never on a pinned one. Left out, no close at all. */
   onClose?: (id: string) => void;
+  /** Destination index in the resulting array. Does not activate the tab. */
+  onMove?: (id: string, toIndex: number) => void;
   /** Offered at the end of the strip when given. */
   onNew?: () => void;
   /** The right-click menu for one tab. Left out, tabs answer no right-click. */
@@ -148,6 +156,7 @@ export function TabStrip({
   activeId,
   onSelect,
   onClose,
+  onMove,
   onNew,
   menuFor,
   label = "Open tabs",
@@ -166,6 +175,53 @@ export function TabStrip({
   // closed. Held in a ref rather than state: nothing renders differently for
   // it, and it must survive the render that the close causes.
   const pending = useRef<{ closed: string; next: string } | null>(null);
+
+  const edges = useTabStripScroll(listRef, tabs.map(t => t.id).join("|"));
+  const dragId = useRef<string | null>(null);
+  const suppressClick = useRef(false);
+  const pressedControl = useRef(false);
+  const [dragging, setDragging] = useState(false);
+  const [dropAt, setDropAt] = useState<number | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  const moved = useRef<{ id: string; to: number; focus: boolean } | null>(null);
+  useEffect(() => {
+    const move = moved.current;
+    if (!move || tabs.findIndex(t => t.id === move.id) !== move.to) return;
+    moved.current = null;
+    const tab = tabs[move.to];
+    setAnnouncement(`${tab.title} moved to position ${move.to + 1} of ${tabs.length}`);
+    if (move.focus) refs.current.get(move.id)?.focus();
+    refs.current.get(move.id)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [tabs]);
+
+  function requestMove(id: string, to: number, focus: boolean) {
+    const from = tabs.findIndex(t => t.id === id);
+    to = Math.max(0, Math.min(tabs.length - 1, to));
+    if (!onMove || from < 0 || from === to) return;
+    moved.current = { id, to, focus };
+    onMove(id, to);
+  }
+  function dropPosition(event: DragEvent<HTMLDivElement>) {
+    const target = (event.target as HTMLElement).closest('[role="tab"]');
+    const index = tabs.findIndex(t => refs.current.get(t.id) === target);
+    if (index < 0) return tabs.length;
+    const rect = target!.getBoundingClientRect();
+    return index + (event.clientX > rect.left + rect.width / 2 ? 1 : 0);
+  }
+  function endDrag() { dragId.current = null; setDragging(false); setDropAt(null); }
+  function edgeButton(direction: -1 | 1) {
+    return <button type="button" className="tab-new tab-scroll" tabIndex={-1}
+      aria-label={`Scroll tabs ${direction === -1 ? "left" : "right"}`}
+      disabled={direction === -1 ? !edges.left : !edges.right}
+      onPointerDown={event => {
+        if (event.button !== 0) return;
+        event.preventDefault(); event.currentTarget.setPointerCapture?.(event.pointerId); edges.start(direction);
+      }}
+      onPointerUp={edges.stop} onPointerCancel={edges.stop} onLostPointerCapture={edges.stop}
+      onClick={() => edges.click(direction)}>
+      <span aria-hidden style={{ transform: `rotate(${direction === -1 ? 90 : -90}deg)` }}><ChevronGlyph /></span>
+    </button>;
+  }
 
   const closable = onClose !== undefined;
 
@@ -211,6 +267,12 @@ export function TabStrip({
     const from = tabs.findIndex((t) => refs.current.get(t.id) === target);
     if (from < 0) return;
 
+    if (onMove && (event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault(); event.stopPropagation();
+      requestMove(tabs[from].id, from + (event.key === "ArrowLeft" ? -1 : 1), true);
+      return;
+    }
+
     if (event.key === "Enter" || event.key === " ") {
       // A div is not a button, so neither key clicks it, and Space would scroll
       // the page instead.
@@ -241,7 +303,9 @@ export function TabStrip({
   }
 
   return (
-    <div className={cx("tabstrip", className)}>
+    <TooltipGroup><div className={cx("tabstrip", className)}>
+      {edgeButton(-1)}
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</span>
       {/*
         The tablist is the scrolling half rather than the whole bar, for two
         reasons: a tablist owns tabs and nothing else, so the new and overflow
@@ -254,6 +318,23 @@ export function TabStrip({
         aria-label={label}
         className="flex min-w-0 flex-1 overflow-x-auto"
         onKeyDown={onKeyDown}
+        onDragOver={event => {
+          if (!dragId.current) return;
+          event.preventDefault(); setDropAt(dropPosition(event));
+          const rect = event.currentTarget.getBoundingClientRect();
+          if (event.clientX < rect.left + 24) event.currentTarget.scrollBy?.({ left: -16 });
+          else if (event.clientX > rect.right - 24) event.currentTarget.scrollBy?.({ left: 16 });
+        }}
+        onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropAt(null); }}
+        onDrop={event => {
+          const id = dragId.current;
+          if (!id) return;
+          event.preventDefault();
+          const from = tabs.findIndex(t => t.id === id);
+          const insertion = dropPosition(event);
+          requestMove(id, insertion > from ? insertion - 1 : insertion, false);
+          endDrag();
+        }}
         onBlur={(event) => {
           // Focus has left the strip: the tab stop goes back to the active tab,
           // so returning to the strip lands on the document being read rather
@@ -261,7 +342,7 @@ export function TabStrip({
           if (!event.currentTarget.contains(event.relatedTarget)) setFocusedId(null);
         }}
       >
-        {tabs.map((tab) => {
+        {tabs.map((tab, index) => {
           const current = tab.id === activeId;
           const node = (
             <div
@@ -273,13 +354,30 @@ export function TabStrip({
               role="tab"
               className="tab"
               data-active={current}
+              data-drop={dropAt === index ? "before" : dropAt === tabs.length && index === tabs.length - 1 ? "after" : undefined}
+              data-dragging={dragId.current === tab.id || undefined}
+              draggable={!!onMove}
+              onPointerDown={event => {
+                suppressClick.current = false;
+                // dragstart targets the draggable tab even when the gesture
+                // began on its close button (including the icon inside it).
+                pressedControl.current = !!(event.target as Element).closest("button");
+              }}
+              onDragStart={event => {
+                if (!onMove || pressedControl.current || (event.target as Element).closest("button")) { event.preventDefault(); return; }
+                dragId.current = tab.id; suppressClick.current = true; setDragging(true);
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", tab.id);
+              }}
+              onDragEnd={endDrag}
               data-preview={tab.preview ? "true" : undefined}
               data-pinned={tab.pinned ? "true" : undefined}
               aria-selected={current}
+              aria-keyshortcuts={onMove ? "Control+Shift+ArrowLeft Control+Shift+ArrowRight Meta+Shift+ArrowLeft Meta+Shift+ArrowRight" : undefined}
               aria-label={tabName(tab)}
               tabIndex={tab.id === roving ? 0 : -1}
               onFocus={() => setFocusedId(tab.id)}
-              onClick={() => onSelect(tab.id)}
+              onClick={() => { if (!suppressClick.current) onSelect(tab.id); }}
               // Kept from the mock, where it was the only way to close a tab
               // that did not go through a window accelerator. It is a shortcut
               // now rather than the sole route, which is what made it a fault.
@@ -330,16 +428,22 @@ export function TabStrip({
             </div>
           );
 
+          const hinted = <Tooltip key={tab.id} side="bottom" disabled={dragging} label={<div className="tab-tooltip">
+            <strong>{tab.title}</strong>
+            {filled(tab.context ?? tab.sub) && <div>{tab.context ?? tab.sub}</div>}
+            {filled(tab.detail) && <div>{tab.detail}</div>}
+          </div>}>{node}</Tooltip>;
           return menuFor ? (
             <ContextMenu key={tab.id} items={menuFor(tab)} label={`${tab.title} actions`}>
-              {node}
+              {hinted}
             </ContextMenu>
           ) : (
-            node
+            hinted
           );
         })}
       </div>
 
+      {edgeButton(1)}
       {filled(onNew ? newLabel : null) && (
         <button
           type="button"
@@ -408,6 +512,6 @@ export function TabStrip({
           )}
         </Popover>
       )}
-    </div>
+    </div></TooltipGroup>
   );
 }

@@ -189,6 +189,14 @@ export function describe(route: string, clusterName?: string): RouteInfo {
   return { route, title: route.replace(/^\//, "") || "Untitled", sub, kind: "control" };
 }
 
+/** Extra identity for a document-tab hover card, decoded by the route parsers. */
+export function tabDetail(route: string): string | undefined {
+  const parts = parseEditRoute(route) ?? parseDetailRoute(route) ?? parseLogsRoute(route);
+  if (!parts) return undefined;
+  const kind = "group" in parts && parts.group ? `${parts.group}/${parts.kind}` : parts.kind;
+  return `${kind} · ${parts.namespace ?? "Cluster-scoped"}`;
+}
+
 /** Whether a route follows a cluster rather than being an app-level screen. */
 export function isClusterScopedRoute(route: string): boolean {
   // `describe` is already the one exhaustive parser for route shapes. Passing
