@@ -131,6 +131,16 @@ function participantIsValid(clusterId: string, workspaceId: string, generation: 
 export function invalidateProbe(workspaceId: string, clusterId: string): void {
   const key = pauseKey(workspaceId, clusterId);
   pauseGenerations.set(key, (pauseGenerations.get(key) ?? 0) + 1);
+  const running = reading.get(clusterId);
+  if (running && ![...running.participants].some(([id, generation]) => participantIsValid(clusterId, id, generation))) {
+    restoreObservedLink(clusterId);
+  }
+}
+
+/** An abandoned request is no longer connecting; retain only accepted facts. */
+function restoreObservedLink(clusterId: string): void {
+  const info = infos[clusterId];
+  setLink(clusterId, !info ? undefined : info.reachable ? "connected" : info.error ? "error" : "disconnected", info?.error ?? undefined);
 }
 
 interface ProbeOptions {
@@ -216,7 +226,11 @@ async function read(
   const elapsedMs = now() - started;
   // Disconnect may have been picked while the probe was in flight. Its result
   // is an observation from before that choice, so never revive a paused row.
-  if (![...participants].some(([workspaceId, generation]) => participantIsValid(ctx.stableId, workspaceId, generation))) return;
+  if (![...participants].some(([workspaceId, generation]) => participantIsValid(ctx.stableId, workspaceId, generation))) {
+    // A newer read owns the link once this one has been replaced.
+    if (reading.get(ctx.stableId)?.participants === participants) restoreObservedLink(ctx.stableId);
+    return;
+  }
   infos = { ...infos, [ctx.stableId]: info };
   probes = { ...probes, [ctx.stableId]: deriveProbe(info, elapsedMs) };
   emit();

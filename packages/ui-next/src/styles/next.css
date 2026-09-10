@@ -53,8 +53,7 @@
 .home-action { display: grid; grid-template-columns: 18px minmax(0, 1fr) 12px; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 10px 20px; border-bottom: 1px solid var(--rule); font-size: 13px; }
 @container (max-width: 720px) {
   .home-intro { align-items: flex-start; flex-direction: column; padding: 24px 20px; gap: 18px; }
-  .home-page { overflow: auto; }
-  .home-layout { display: block; flex: none; min-height: 0; }
+  .home-layout { display: block; overflow: auto; }
   .home-cluster-list { overflow: visible; }
   .home-start { overflow: visible; border-left: 0; border-top: 1px solid var(--rule); }
 }

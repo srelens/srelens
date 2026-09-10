@@ -13,6 +13,20 @@ const ctx = {
 beforeEach(() => { resetView(); resetProbes(); setState(defaultState([ctx])); });
 
 describe("probeCluster", () => {
+  it.each([false, true])("restores the last observation when the only participant disconnects (previous: %s)", async (previous) => {
+    if (previous) await probeCluster(ctx, vi.fn().mockResolvedValue({ context: ctx.name, reachable: true }));
+    const before = getView().links.prod;
+    let settle!: (value: never) => void;
+    const pending = probeCluster(ctx, () => new Promise(resolve => { settle = resolve; }));
+    const workspace = currentWorkspace().id;
+    setClusterPaused(workspace, ctx.stableId, true);
+    invalidateProbe(workspace, ctx.stableId);
+    expect(getView().links.prod).toEqual(before);
+    settle({ context: ctx.name, reachable: true } as never);
+    await pending;
+    expect(getView().links.prod).toEqual(before);
+  });
+
   it("marks connecting, then connected with the version", async () => {
     let resolve!: (v: unknown) => void;
     const connect = vi.fn(() => new Promise<never>((r) => { resolve = r as never; }));
@@ -192,6 +206,7 @@ describe("one read per cluster", () => {
     settles[0]({ context: ctx.name, reachable: true });
     await first;
     expect(getProbe(ctx.stableId).state).toBe("unread");
+    expect(getView().links.prod.state).toBe("connecting");
 
     settles[1]({ context: ctx.name, reachable: true });
     await second;
