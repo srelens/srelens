@@ -17,7 +17,8 @@ import { contextLabelFor } from "../lib/agentSuggestions";
 import { setContexts, setKubeconfigFiles, useContexts, useContextsError } from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
-import { getMark, loadMarks, useMark } from "../lib/marks";
+import { getMark, getContextLabel, loadMarks, useMark } from "../lib/marks";
+import { useContextLabel } from "../lib/contextLabel";
 import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
@@ -154,9 +155,11 @@ export function Window({
     if (!booted || !active || !probeContext || probePaused || getInfo(probeContext.stableId)) return;
     void probeCluster(probeContext, undefined, undefined, { workspaceId: workspace.id });
   }, [booted, active, probeContext, probePaused, workspace.id]);
+  const scopeName = routeCluster ?? activeCtx?.name ?? "";
+  const scopeLabel = useContextLabel(scopeName, contexts.find(c => c.name === scopeName)?.stableId);
   useEffect(() => {
-    setScope(contextLabelFor(activeTabRoute, activeCtx?.name ?? ""));
-  }, [activeTabRoute, activeCtx?.name, setScope]);
+    setScope(contextLabelFor(activeTabRoute, scopeLabel));
+  }, [activeTabRoute, scopeLabel, setScope]);
 
   useEffect(() => {
     let cancelled = false;
@@ -536,10 +539,12 @@ export function Window({
           <TabStrip
             tabs={tabs.map(tab => {
               const context = contexts.find(c => c.name === tab.sub);
+              const tooltipName = parseEditRoute(tab.route)?.cluster ?? parseNewRoute(tab.route)?.cluster ?? tab.sub
+                ?? (isClusterScopedRoute(tab.route) ? activeCtx?.name : undefined);
+              const tooltipContext = contexts.find(c => c.name === tooltipName);
               return { ...tab,
                 sub: context ? getMark(context.stableId, context.name).name : tab.sub,
-                context: parseEditRoute(tab.route)?.cluster ?? parseNewRoute(tab.route)?.cluster ?? tab.sub
-                  ?? (isClusterScopedRoute(tab.route) ? activeCtx?.name : undefined),
+                context: tooltipContext ? getContextLabel(tooltipContext.stableId, tooltipContext.name) : tooltipName,
                 detail: tabDetail(tab.route),
               };
             })}

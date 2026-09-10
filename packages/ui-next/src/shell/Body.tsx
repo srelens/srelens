@@ -1,5 +1,6 @@
 import type { ClusterContext } from "@srelens/core";
 import { Activity } from "react";
+import { ContextLabel } from "../lib/contextLabel";
 import { Button, EmptyState, Screen as AppScreen } from "@srelens/ui-kit";
 import { describe, screenFor } from "../lib/routes";
 import { reconnectCluster } from "../lib/openCluster";
@@ -33,7 +34,7 @@ export function Body({ onLocked, pausedContext, ...props }: BodyProps) {
   if (pausedContext) {
     const title = describe(props.route, pausedContext.name).title;
     pausedView = (
-      <AppScreen title={title} eyebrow={pausedContext.name} fill>
+      <AppScreen title={title} eyebrow={<ContextLabel context={pausedContext} />} fill>
         <EmptyState
           title={`${pausedContext.name} is paused`}
           hint="Reconnect this cluster to resume this view."

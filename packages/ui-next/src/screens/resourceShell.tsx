@@ -1,3 +1,4 @@
+import { ContextLabel } from "../lib/contextLabel";
 import type { ClusterContext } from "@srelens/core";
 import { Alert, Button, Combobox, EmptyState, LoadingState, MultiSelect, Screen, Spinner, type Column, type TableSort } from "@srelens/ui-kit";
 import { useContextsError, useContextsStatus } from "../lib/clusters";
@@ -81,7 +82,7 @@ export function NoClusterScreen({ title, noun }: { title: string; noun: string }
 /** A paused cluster keeps its place while every resource reader is stopped. */
 export function PausedClusterScreen({ title, noun, context }: { title: string; noun: string; context: ClusterContext }) {
   return (
-    <Screen title={title} eyebrow={context.name} fill>
+    <Screen title={title} eyebrow={<ContextLabel context={context} />} fill>
       <EmptyState
         title={`${context.name} is paused`}
         hint={`Reconnect this cluster to resume listing ${noun}.`}

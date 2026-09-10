@@ -1,3 +1,4 @@
+import { ContextLabel } from "../lib/contextLabel";
 import { useEffect, useMemo, useState } from "react";
 import {
   listCrds,
@@ -338,7 +339,7 @@ function KindList({
 
   if (!descriptor) {
     return (
-      <Screen title={title} eyebrow={name} fill>
+      <Screen title={title} eyebrow={<ContextLabel context={context} />} fill>
         {!builtIn && discovery.status === "loading" ? (
           <LoadingState label={`Looking for ${slug}`} />
         ) : discovery.status === "error" ? (
@@ -484,7 +485,7 @@ function KindList({
   return (
     <Screen
       title={title}
-      eyebrow={name}
+      eyebrow={<ContextLabel context={context} />}
       fill
       actions={
         <>
@@ -630,7 +631,7 @@ export function ResourceDetailScreen({ route }: { route: string }) {
     // a throw: a route string can arrive from a persisted session, and a tab
     // that says what is wrong with it is worth more than a blank surface.
     return (
-      <Screen title={title} eyebrow={context.name} fill>
+      <Screen title={title} eyebrow={<ContextLabel context={context} />} fill>
         <ErrorState
           title={`${route} does not name a resource`}
           detail="A resource tab's route is /k/<kind>/<namespace>/<name>. Close this tab and open the resource from its list."

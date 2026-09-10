@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { defaultMark, setMark, resetMark } from "../lib/marks";
 
 // Everything the screen reaches into core for. `watchResource` is held open by
 // the test rather than resolved once: half of what this screen does is react to
@@ -291,6 +292,18 @@ function open(route: string) {
     </ConsoleProvider>,
   );
 }
+
+it("uses the configured short context name in the header and updates it live", () => {
+  setMark(CTX.stableId, { ...defaultMark(CTX.name), short: "M01" });
+  try {
+    const { container } = open("/k/pods");
+    expect(container.querySelector(".crumb")?.textContent).toBe("M01");
+    act(() => setMark(CTX.stableId, { ...defaultMark(CTX.name), short: "M02" }));
+    expect(container.querySelector(".crumb")?.textContent).toBe("M02");
+  } finally {
+    act(() => resetMark(CTX.stableId));
+  }
+});
 
 /**
  * The detail, in whichever host is on screen — they are two screens now, not

@@ -1,3 +1,4 @@
+import { useContextLabel } from "../lib/contextLabel";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import {
   K8S_KIND,
@@ -163,6 +164,7 @@ function ClusterOverview({ title, context }: { title: string; context: ClusterCo
   // Core takes a context *name*; the workspace holds a `stableId`. The two are
   // never interchangeable — see `lib/clusters`.
   const name = context.name;
+  const contextLabel = useContextLabel(name, context.stableId);
   const overview = useOverview(name);
   const { ask } = useConsole();
   const Sparkle = Icons.ask;
@@ -175,7 +177,7 @@ function ClusterOverview({ title, context }: { title: string; context: ClusterCo
   return (
     <Screen
       title={title}
-      eyebrow={provider ? `${shorten(name)} / ${provider}` : shorten(name)}
+      eyebrow={provider ? `${shorten(contextLabel)} / ${provider}` : shorten(contextLabel)}
       // The rail is full height beside the main column, so the body fills and
       // the column below scrolls inside itself rather than the page scrolling
       // the rail away with it.
