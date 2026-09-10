@@ -604,6 +604,7 @@ fn render_values_diff_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState
         .fg(Color::Rgb(20, 20, 20))
         .add_modifier(Modifier::BOLD);
 
+    let query_lower = state.search_query.to_lowercase();
     let viewport_height = inner.height as usize;
     let visible_lines: Vec<Line> = diff_lines
         .iter()
@@ -625,8 +626,8 @@ fn render_values_diff_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState
                 Span::styled(prefix, style.add_modifier(Modifier::BOLD)),
             ];
 
-            let has_match = !state.search_query.is_empty()
-                && clean_text.to_lowercase().contains(&state.search_query.to_lowercase());
+            let has_match = !query_lower.is_empty()
+                && clean_text.to_lowercase().contains(&query_lower);
 
             if has_match {
                 let highlighted = super::highlight_text_matches(&clean_text, &state.search_query, style, match_style);
@@ -777,6 +778,7 @@ fn render_manifest_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         .fg(Color::Rgb(20, 20, 20))
         .add_modifier(Modifier::BOLD);
 
+    let query_lower = state.search_query.to_lowercase();
     let viewport_height = inner.height as usize;
     let lines: Vec<Line> = d
         .manifest
@@ -803,8 +805,8 @@ fn render_manifest_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
                 Span::styled(format!("{:>5} │ ", line_idx), Style::default().fg(Theme::dim())),
             ];
 
-            let has_match = !state.search_query.is_empty()
-                && clean_l.to_lowercase().contains(&state.search_query.to_lowercase());
+            let has_match = !query_lower.is_empty()
+                && clean_l.to_lowercase().contains(&query_lower);
 
             if has_match {
                 let highlighted = super::highlight_text_matches(&clean_l, &state.search_query, style, match_style);
@@ -859,6 +861,7 @@ fn render_notes_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         .fg(Color::Rgb(20, 20, 20))
         .add_modifier(Modifier::BOLD);
 
+    let query_lower = state.search_query.to_lowercase();
     let viewport_height = inner.height as usize;
     let lines: Vec<Line> = d
         .notes
@@ -867,8 +870,8 @@ fn render_notes_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         .take(viewport_height)
         .map(|l| {
             let clean_l = super::sanitize_span_text(l);
-            let has_match = !state.search_query.is_empty()
-                && clean_l.to_lowercase().contains(&state.search_query.to_lowercase());
+            let has_match = !query_lower.is_empty()
+                && clean_l.to_lowercase().contains(&query_lower);
 
             if has_match {
                 let highlighted = super::highlight_text_matches(
