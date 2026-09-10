@@ -74,6 +74,13 @@ describe("StreamRail", () => {
     expect(STREAM_RAIL_WIDTH).toBe(272);
   });
 
+  it("draws Sources and Top terms as flush section bands", () => {
+    const { container } = rail();
+    const sections = [...container.querySelectorAll("section")];
+    expect(sections.length).toBe(2);
+    expect(sections.every(section => section.hasAttribute("data-band"))).toBe(true);
+  });
+
   describe("Sources", () => {
     it("draws a row per pod, with its name and its revision", () => {
       const { container } = rail();

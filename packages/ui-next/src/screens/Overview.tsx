@@ -295,8 +295,8 @@ function AtAGlance({ context, overview }: { context: ClusterContext; overview: O
       <ControlPlane context={context} facts={overview.facts} />
       <ObjectsByKind context={context.name} objects={overview.objects} />
       <OpenIncidents />
-      <Section title="Fleet" smallCaps>
-        <Fleet clusters={clusters} active={context} />
+      <Section title="Fleet" smallCaps padded={false}>
+        <div className="px-3 py-2"><Fleet clusters={clusters} active={context} /></div>
       </Section>
     </>
   );
@@ -376,17 +376,19 @@ function ControlPlane({ context, facts }: { context: ClusterContext; facts: Over
   if (metrics) rows.push(["Metrics server", metrics]);
 
   return (
-    <Section title="Control plane" smallCaps>
-      <KVList rows={rows} />
-      {/* The facts call itself failing is not the same as a cluster that named
-          none, and the rows above cannot tell the reader which happened. */}
-      {facts.error && (
-        <FailureWord
-          error={facts.error}
-          lead="Could not read the cluster's facts: "
-          className="text-faint"
-        />
-      )}
+    <Section title="Control plane" smallCaps padded={false}>
+      <div className="px-3 py-2">
+        <KVList rows={rows} />
+        {/* The facts call itself failing is not the same as a cluster that named
+            none, and the rows above cannot tell the reader which happened. */}
+        {facts.error && (
+          <FailureWord
+            error={facts.error}
+            lead="Could not read the cluster's facts: "
+            className="text-faint"
+          />
+        )}
+      </div>
     </Section>
   );
 }
