@@ -176,6 +176,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
       { kind: "sep" },
       { label: workspace.pausedClusters?.includes(item.id) ? "Reconnect" : "Disconnect", onPick: () => toggleConnection(item.id) },
       { label: "Connection details", onPick: () => openTab("/connections") },
+      { kind: "sep" },
       // Named for what it does. See the note above on the design's Disconnect.
       { label: "Remove from workspace", icon: Icons.trash, danger: true, onPick: () => remove(item.id) },
     ];

@@ -109,6 +109,9 @@ describe("Rail", () => {
       .getAllByRole("menuitem")
       .map((item) => item.getAttribute("aria-label"));
     expect(items).toEqual(["Open prod-eu", "Customise…", "Disconnect", "Connection details", "Remove from workspace"]);
+    const remove = within(menu).getByRole("menuitem", { name: "Remove from workspace" });
+    expect(remove.previousElementSibling?.getAttribute("role")).toBe("separator");
+    expect(remove.previousElementSibling?.previousElementSibling?.getAttribute("aria-label")).toBe("Connection details");
     expect(screen.queryByRole("complementary", { name: "Details" })).toBeNull();
   });
 
