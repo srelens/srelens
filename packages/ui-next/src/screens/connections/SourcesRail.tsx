@@ -1,5 +1,6 @@
+import { getMark, useMark } from "../../lib/marks";
 import { useId } from "react";
-import { contextDisplayName, plural } from "@srelens/core";
+import { plural } from "@srelens/core";
 import { Badge, Button, Section, cx } from "@srelens/ui-kit";
 import type { ClusterRow } from "./ClusterTable";
 import { joined, latencyLabel, viaOf } from "./clusterText";
@@ -172,6 +173,7 @@ function countLine({ contexts, inUse }: FileRow): string {
  * platform claim out of a button.
  */
 export function SourcesRail({ rows, files, onAddFile, desktop, className }: SourcesRailProps) {
+  useMark("", "");
   const headId = useId();
   const sources = fileRows(files, rows);
   const local = rows.filter((row) => row.context.isLocal);
@@ -302,7 +304,7 @@ export function SourcesRail({ rows, files, onAddFile, desktop, className }: Sour
                         table cell sizes to its content instead. */}
                     <div className="flex min-w-0 flex-1 flex-col">
                       <span className="block truncate font-medium" title={context.name}>
-                        {contextDisplayName(context.name)}
+                        {getMark(context.stableId, context.name).name}
                       </span>
                       {via !== "" && (
                         <span className="path block truncate font-mono" title={via}>

@@ -2,9 +2,10 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
 
@@ -24,6 +25,7 @@ pub struct LogsViewState {
     pub is_multi_pod: bool,
     pub known_sources: Vec<String>,
     pub scroll_offset: usize,
+    pub horizontal_scroll: usize,
     pub follow: bool,
     pub timestamps: bool,
     pub previous: bool,
@@ -45,9 +47,16 @@ impl LogsViewState {
             is_multi_pod: false,
             known_sources: Vec::new(),
             scroll_offset: 0,
+            horizontal_scroll: 0,
             follow: true,
             timestamps: false,
             previous: false,
+            // Off by default. A pod that logs one long JSON entry gets a
+            // paragraph-shaped block that pushes the short lines around it
+            // out of view -- and the wrapped renderer scrolls by entry, so
+            // an entry taller than the viewport has middle rows nothing can
+            // reach. Machine text runs on one row and scrolls sideways;
+            // `w` turns wrapping on for anyone reading prose.
             wrap: false,
             search_query: String::new(),
             search_matches: Vec::new(),
@@ -66,9 +75,16 @@ impl LogsViewState {
             is_multi_pod: true,
             known_sources: pod_names,
             scroll_offset: 0,
+            horizontal_scroll: 0,
             follow: true,
             timestamps: false,
             previous: false,
+            // Off by default. A pod that logs one long JSON entry gets a
+            // paragraph-shaped block that pushes the short lines around it
+            // out of view -- and the wrapped renderer scrolls by entry, so
+            // an entry taller than the viewport has middle rows nothing can
+            // reach. Machine text runs on one row and scrolls sideways;
+            // `w` turns wrapping on for anyone reading prose.
             wrap: false,
             search_query: String::new(),
             search_matches: Vec::new(),
@@ -189,8 +205,19 @@ impl LogsViewState {
         self.previous = !self.previous;
     }
 
+    pub fn scroll_left(&mut self, n: usize) {
+        self.horizontal_scroll = self.horizontal_scroll.saturating_sub(n);
+    }
+
+    pub fn scroll_right(&mut self, n: usize) {
+        self.horizontal_scroll = self.horizontal_scroll.saturating_add(n);
+    }
+
     pub fn toggle_wrap(&mut self) {
         self.wrap = !self.wrap;
+        if self.wrap {
+            self.horizontal_scroll = 0;
+        }
     }
 
     pub fn save_to_file(&self) -> Result<String, String> {
@@ -248,6 +275,230 @@ fn chrono_timestamp() -> String {
     dur.as_secs().to_string()
 }
 
+fn style_log_content<'a>(line: &'a str, search_query: &str, match_style: Style) -> Vec<Span<'a>> {
+    let has_match = !search_query.is_empty()
+        && line.to_lowercase().contains(&search_query.to_lowercase());
+
+    if has_match {
+        super::highlight_text_matches(line, search_query, Style::default().fg(Theme::FG), match_style)
+    } else {
+        let lower = line.to_lowercase();
+        let log_style = if lower.contains("error") || lower.contains("fatal") || lower.contains("exception") || lower.contains("panic") {
+            Style::default().fg(Theme::RED)
+        } else if lower.contains("warn") || lower.contains("warning") {
+            Style::default().fg(Theme::YELLOW)
+        } else if lower.contains("info") {
+            Style::default().fg(Theme::FG)
+        } else if lower.contains("debug") || lower.contains("trace") {
+            Style::default().fg(Theme::DIM)
+        } else {
+            Style::default().fg(Theme::FG)
+        };
+        vec![Span::styled(line, log_style)]
+    }
+}
+
+fn horizontal_slice_spans<'a>(spans: Vec<Span<'a>>, mut skip: usize) -> Vec<Span<'a>> {
+    if skip == 0 {
+        return spans;
+    }
+    let mut result = Vec::new();
+    for span in spans {
+        if skip == 0 {
+            result.push(span);
+            continue;
+        }
+        let w = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
+        if w <= skip {
+            skip -= w;
+            continue;
+        }
+        let mut cur_skip = skip;
+        let mut start_byte = span.content.len();
+        for (b_idx, ch) in span.content.char_indices() {
+            if cur_skip == 0 {
+                start_byte = b_idx;
+                break;
+            }
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+            cur_skip = cur_skip.saturating_sub(cw);
+        }
+        let remaining_text = span.content[start_byte..].to_string();
+        if !remaining_text.is_empty() {
+            result.push(Span::styled(remaining_text, span.style));
+        }
+        skip = 0;
+    }
+    result
+}
+
+fn wrap_spans_to_visual_lines<'a>(
+    spans: Vec<Span<'a>>,
+    first_max_w: usize,
+    cont_max_w: usize,
+) -> Vec<Vec<Span<'static>>> {
+    if spans.is_empty() {
+        return vec![Vec::new()];
+    }
+
+    let first_max_w = first_max_w.max(5);
+    let cont_max_w = cont_max_w.max(5);
+
+    let mut result: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current_line: Vec<Span<'static>> = Vec::new();
+    let mut current_line_width: usize = 0;
+
+    let target_width = |line_idx: usize| -> usize {
+        if line_idx == 0 {
+            first_max_w
+        } else {
+            cont_max_w
+        }
+    };
+
+    for span in spans {
+        let style = span.style;
+        let content = span.content;
+
+        let mut chunks: Vec<String> = Vec::new();
+        let mut cur_chunk = String::new();
+        let mut is_space = false;
+
+        for ch in content.chars() {
+            let ch_is_space = ch == ' ';
+            if cur_chunk.is_empty() {
+                cur_chunk.push(ch);
+                is_space = ch_is_space;
+            } else if ch_is_space == is_space {
+                cur_chunk.push(ch);
+            } else {
+                chunks.push(cur_chunk);
+                cur_chunk = String::new();
+                cur_chunk.push(ch);
+                is_space = ch_is_space;
+            }
+        }
+        if !cur_chunk.is_empty() {
+            chunks.push(cur_chunk);
+        }
+
+        for chunk in chunks {
+            let chunk_width = unicode_width::UnicodeWidthStr::width(chunk.as_str());
+            let is_whitespace = chunk.chars().all(|c| c == ' ');
+
+            let max_w = target_width(result.len());
+
+            if current_line_width + chunk_width <= max_w {
+                current_line.push(Span::styled(chunk, style));
+                current_line_width += chunk_width;
+            } else if is_whitespace {
+                if !current_line.is_empty() {
+                    result.push(std::mem::take(&mut current_line));
+                    current_line_width = 0;
+                }
+            } else {
+                if current_line_width > 0 {
+                    result.push(std::mem::take(&mut current_line));
+                    current_line_width = 0;
+                }
+
+                let max_w = target_width(result.len());
+                if chunk_width > max_w {
+                    let mut sub = String::new();
+                    let mut sub_w = 0;
+                    for ch in chunk.chars() {
+                        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                        let cur_max = target_width(result.len());
+                        if sub_w + cw > cur_max && sub_w > 0 {
+                            result.push(vec![Span::styled(sub, style)]);
+                            sub = String::new();
+                            sub_w = 0;
+                        }
+                        sub.push(ch);
+                        sub_w += cw;
+                    }
+                    if !sub.is_empty() {
+                        current_line.push(Span::styled(sub, style));
+                        current_line_width = sub_w;
+                    }
+                } else {
+                    current_line.push(Span::styled(chunk, style));
+                    current_line_width = chunk_width;
+                }
+            }
+        }
+    }
+
+    if !current_line.is_empty() || result.is_empty() {
+        result.push(current_line);
+    }
+
+    result
+}
+
+fn format_entry_wrapped(
+    i: usize,
+    state: &LogsViewState,
+    cont_max_w: usize,
+    match_style: Style,
+) -> Vec<Line<'static>> {
+    let line_num = Span::styled(
+        format!("{:5} │ ", i + 1),
+        Style::default().fg(Theme::DIM),
+    );
+    let cont_num = Span::styled(
+        "      │ ".to_string(),
+        Style::default().fg(Theme::DIM),
+    );
+
+    let (source_span, source_w, content_spans) = if state.is_multi_pod {
+        if let Some(entry) = state.entries.get(i) {
+            let (src_span, src_w) = if let Some(src) = &entry.source {
+                let color = source_color(src);
+                let clean_src = sanitize_log_line(src);
+                let text = format!("[{}] ", clean_src);
+                let w = unicode_width::UnicodeWidthStr::width(text.as_str());
+                (Some(Span::styled(text, Style::default().fg(color).add_modifier(Modifier::BOLD))), w)
+            } else {
+                (None, 0)
+            };
+            (src_span, src_w, style_log_content(&entry.line, &state.search_query, match_style))
+        } else {
+            (None, 0, Vec::new())
+        }
+    } else if let Some(line) = state.lines.get(i) {
+        (None, 0, style_log_content(line, &state.search_query, match_style))
+    } else {
+        (None, 0, Vec::new())
+    };
+
+    let first_max_w = cont_max_w.saturating_sub(source_w).max(5);
+    let chunks = wrap_spans_to_visual_lines(content_spans, first_max_w, cont_max_w);
+
+    let mut visual_rows = Vec::with_capacity(chunks.len());
+    for (c_idx, chunk_spans) in chunks.into_iter().enumerate() {
+        let mut row_spans = Vec::new();
+        if c_idx == 0 {
+            row_spans.push(line_num.clone());
+            if let Some(ref s) = source_span {
+                row_spans.push(s.clone());
+            }
+        } else {
+            row_spans.push(cont_num.clone());
+        }
+        row_spans.extend(chunk_spans);
+        visual_rows.push(Line::from(row_spans));
+    }
+    if visual_rows.is_empty() {
+        let mut row_spans = vec![line_num];
+        if let Some(ref s) = source_span {
+            row_spans.push(s.clone());
+        }
+        visual_rows.push(Line::from(row_spans));
+    }
+    visual_rows
+}
+
 pub fn render_logs_view(f: &mut Frame, area: Rect, state: &LogsViewState) {
     let container_str = state.container.as_deref().unwrap_or("all");
     let flags_str = format!(
@@ -279,10 +530,16 @@ pub fn render_logs_view(f: &mut Frame, area: Rect, state: &LogsViewState) {
         state.lines.len()
     };
 
+    let h_scroll_badge = if !state.wrap && state.horizontal_scroll > 0 {
+        format!(" [H+{}col]", state.horizontal_scroll)
+    } else {
+        String::new()
+    };
+
     let title = if state.is_multi_pod {
         let pod_count = state.known_sources.len();
         format!(
-            " Logs: {} ({} pod{} in {}) {} [{}/{} lines]{} (<f> Follow <t> Time <p> Prev <w> Wrap <s> Save <Esc> Back) ",
+            " Logs: {} ({} pod{} in {}) {} [{}/{} lines]{}{} (<f> Follow <t> Time <p> Prev <w> Wrap <s> Save <Esc> Back) ",
             state.pod_name,
             pod_count,
             if pod_count == 1 { "" } else { "s" },
@@ -291,10 +548,11 @@ pub fn render_logs_view(f: &mut Frame, area: Rect, state: &LogsViewState) {
             state.scroll_offset + 1,
             total_lines,
             search_badge,
+            h_scroll_badge,
         )
     } else {
         format!(
-            " Logs: {} ({}/{}) {} [{}/{} lines]{} (<f> Follow <t> Time <p> Prev <w> Wrap <s> Save <Esc> Back) ",
+            " Logs: {} ({}/{}) {} [{}/{} lines]{}{} (<f> Follow <t> Time <p> Prev <w> Wrap <s> Save <Esc> Back) ",
             state.pod_name,
             state.namespace,
             container_str,
@@ -302,6 +560,7 @@ pub fn render_logs_view(f: &mut Frame, area: Rect, state: &LogsViewState) {
             state.scroll_offset + 1,
             total_lines,
             search_badge,
+            h_scroll_badge,
         )
     };
 
@@ -322,102 +581,101 @@ pub fn render_logs_view(f: &mut Frame, area: Rect, state: &LogsViewState) {
     }
 
     let visible_lines = inner.height as usize;
-    let start_idx = if state.follow {
-        total_lines.saturating_sub(visible_lines)
-    } else {
-        state.scroll_offset
-    };
-    let end_idx = (start_idx + visible_lines).min(total_lines);
+    if visible_lines == 0 {
+        return;
+    }
 
     let match_style = Style::default()
         .bg(Theme::YELLOW)
         .fg(Color::Rgb(20, 20, 20))
         .add_modifier(Modifier::BOLD);
 
-    let mut rendered_lines = Vec::new();
+    let rendered_lines = if !state.wrap {
+        // Unwrapped mode: 1 visual line per entry, supports horizontal scroll with pinned line numbers.
+        let start_idx = if state.follow {
+            total_lines.saturating_sub(visible_lines)
+        } else {
+            state.scroll_offset.min(total_lines.saturating_sub(1))
+        };
+        let end_idx = (start_idx + visible_lines).min(total_lines);
 
-    if state.is_multi_pod {
-        for (i, entry) in state.entries.iter().enumerate().take(end_idx).skip(start_idx) {
+        let mut lines = Vec::with_capacity(end_idx.saturating_sub(start_idx));
+        for i in start_idx..end_idx {
             let line_num = Span::styled(
                 format!("{:5} │ ", i + 1),
                 Style::default().fg(Theme::DIM),
             );
 
-            let mut spans = vec![line_num];
-
-            if let Some(src) = &entry.source {
-                let color = source_color(src);
-                let clean_src = sanitize_log_line(src);
-                spans.push(Span::styled(
-                    format!("[{}] ", clean_src),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ));
+            let mut content_spans = Vec::new();
+            if state.is_multi_pod {
+                if let Some(entry) = state.entries.get(i) {
+                    if let Some(src) = &entry.source {
+                        let color = source_color(src);
+                        let clean_src = sanitize_log_line(src);
+                        content_spans.push(Span::styled(
+                            format!("[{}] ", clean_src),
+                            Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                    content_spans.extend(style_log_content(&entry.line, &state.search_query, match_style));
+                }
+            } else if let Some(line) = state.lines.get(i) {
+                content_spans.extend(style_log_content(line, &state.search_query, match_style));
             }
 
-            let line = &entry.line;
-            let has_match = !state.search_query.is_empty()
-                && line.to_lowercase().contains(&state.search_query.to_lowercase());
-
-            if has_match {
-                let highlighted = super::highlight_text_matches(line, &state.search_query, Style::default().fg(Theme::FG), match_style);
-                spans.extend(highlighted);
-            } else {
-                let lower = line.to_lowercase();
-                let log_style = if lower.contains("error") || lower.contains("fatal") || lower.contains("exception") || lower.contains("panic") {
-                    Style::default().fg(Theme::RED)
-                } else if lower.contains("warn") || lower.contains("warning") {
-                    Style::default().fg(Theme::YELLOW)
-                } else if lower.contains("info") {
-                    Style::default().fg(Theme::FG)
-                } else if lower.contains("debug") || lower.contains("trace") {
-                    Style::default().fg(Theme::DIM)
-                } else {
-                    Style::default().fg(Theme::FG)
-                };
-                spans.push(Span::styled(line.clone(), log_style));
-            }
-
-            rendered_lines.push(Line::from(spans));
+            let scrolled_content = horizontal_slice_spans(content_spans, state.horizontal_scroll);
+            let mut spans = Vec::with_capacity(scrolled_content.len() + 1);
+            spans.push(line_num);
+            spans.extend(scrolled_content);
+            lines.push(Line::from(spans));
         }
+        lines
     } else {
-        for (i, line) in state.lines.iter().enumerate().take(end_idx).skip(start_idx) {
-            let line_num = Span::styled(
-                format!("{:5} │ ", i + 1),
-                Style::default().fg(Theme::DIM),
-            );
+        // Wrapped mode: entries wrap into visual lines with continuation indent "      │ "
+        let avail_w = (inner.width as usize).saturating_sub(8); // line number gutter is 8 columns
+        let cont_max_w = avail_w.max(5);
 
-            let mut spans = vec![line_num];
-
-            let has_match = !state.search_query.is_empty()
-                && line.to_lowercase().contains(&state.search_query.to_lowercase());
-
-            if has_match {
-                let highlighted = super::highlight_text_matches(line, &state.search_query, Style::default().fg(Theme::FG), match_style);
-                spans.extend(highlighted);
-            } else {
-                let lower = line.to_lowercase();
-                let log_style = if lower.contains("error") || lower.contains("fatal") || lower.contains("exception") || lower.contains("panic") {
-                    Style::default().fg(Theme::RED)
-                } else if lower.contains("warn") || lower.contains("warning") {
-                    Style::default().fg(Theme::YELLOW)
-                } else if lower.contains("info") {
-                    Style::default().fg(Theme::FG)
-                } else if lower.contains("debug") || lower.contains("trace") {
-                    Style::default().fg(Theme::DIM)
+        if state.follow {
+            let mut rev_lines: Vec<Line<'static>> = Vec::new();
+            for i in (0..total_lines).rev() {
+                if rev_lines.len() >= visible_lines {
+                    break;
+                }
+                let visual_rows = format_entry_wrapped(i, state, cont_max_w, match_style);
+                let needed = visible_lines - rev_lines.len();
+                if visual_rows.len() <= needed {
+                    for row in visual_rows.into_iter().rev() {
+                        rev_lines.push(row);
+                    }
                 } else {
-                    Style::default().fg(Theme::FG)
-                };
-                spans.push(Span::styled(line.clone(), log_style));
+                    let skip_top = visual_rows.len() - needed;
+                    for row in visual_rows.into_iter().skip(skip_top).rev() {
+                        rev_lines.push(row);
+                    }
+                }
             }
-
-            rendered_lines.push(Line::from(spans));
+            rev_lines.reverse();
+            rev_lines
+        } else {
+            let start_entry = state.scroll_offset.min(total_lines.saturating_sub(1));
+            let mut lines = Vec::new();
+            for i in start_entry..total_lines {
+                if lines.len() >= visible_lines {
+                    break;
+                }
+                let visual_rows = format_entry_wrapped(i, state, cont_max_w, match_style);
+                for row in visual_rows {
+                    if lines.len() >= visible_lines {
+                        break;
+                    }
+                    lines.push(row);
+                }
+            }
+            lines
         }
-    }
+    };
 
-    let mut paragraph = Paragraph::new(rendered_lines);
-    if state.wrap {
-        paragraph = paragraph.wrap(Wrap { trim: false });
-    }
+    let paragraph = Paragraph::new(rendered_lines);
     f.render_widget(paragraph, inner);
 }
 

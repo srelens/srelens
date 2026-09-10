@@ -1597,8 +1597,8 @@ mod tests {
 
         assert_eq!(app.assistant_state.get_selected_text().as_deref(), Some("OutOfMemory"));
 
-        // Pressing 'c' copies selection and toasts
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        // Pressing Ctrl+c copies selection and toasts
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)).await;
         assert!(app.toast.is_some());
         assert!(app.toast.as_ref().unwrap().0.contains("Copied selection"));
 

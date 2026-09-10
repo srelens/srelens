@@ -23,6 +23,7 @@ import {
   Table,
   Tabs,
   filterTableData,
+  tableFilterError,
   type Column,
   type ContextMenuItem,
   type StatusKind,
@@ -47,13 +48,14 @@ import { withRowAffordances } from "../lib/kinds/rowAffordances";
 import type { ListRow } from "../lib/kinds/types";
 import { useResourceList, type ResourceList } from "../lib/resourceList";
 import { describe } from "../lib/routes";
-import { openTab } from "../lib/tabsStore";
+import { openTab, useTabs } from "../lib/tabsStore";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { useRowMenu } from "./ResourceMenu";
 import {
   NamespaceErrorAlert,
   NamespacePicker,
   NoClusterScreen,
+  PausedClusterScreen,
   StaleSelectionAlert,
   columnOptionsFor,
   emptyTableCopy,
@@ -240,10 +242,14 @@ const UNION_COLUMNS: Column<WorkloadRow>[] = [
  */
 export function Workloads({ route }: { route: string }) {
   const context = useActiveContext();
+  const { workspace } = useTabs();
   const title = describe(route, context?.name).title;
 
   if (!context) {
     return <NoClusterScreen title={title} noun="workloads" />;
+  }
+  if (workspace.pausedClusters?.includes(context.stableId)) {
+    return <PausedClusterScreen title={title} noun="workloads" context={context} />;
   }
 
   return <WorkloadList route={route} title={title} context={context} />;
@@ -396,12 +402,23 @@ function WorkloadList({
     [columns, ask],
   );
 
-  const { tabId, sort, filter, filterKey, setFilter, setSort, setFilterKey } = useResourceTabView(route, columns);
+  const {
+    tabId,
+    sort,
+    filter,
+    filterKey,
+    regex,
+    setFilter,
+    setSort,
+    setFilterKey,
+    setRegex,
+  } = useResourceTabView(route, columns);
 
   const filtered = useMemo(
-    () => filterTableData(segmented, columns, filter, filterKey),
-    [segmented, columns, filter, filterKey],
+    () => filterTableData(segmented, columns, filter, filterKey, regex),
+    [segmented, columns, filter, filterKey, regex],
   );
+  const invalidFilter = tableFilterError(filter, regex) !== null;
 
   function onToggleColumn(key: string) {
     toggleColumnVisibility({ key, storageKey: "workloads", hidden, filterKey, tabId });
@@ -450,6 +467,9 @@ function WorkloadList({
       <FilterBar
         value={filter}
         onValueChange={setFilter}
+        regex={regex}
+        onRegexChange={setRegex}
+        invalid={invalidFilter}
         label={`Filter ${lower}`}
         placeholder={`Filter ${lower}…`}
       >

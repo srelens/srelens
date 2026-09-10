@@ -401,12 +401,22 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 })
                 .collect();
 
-            let items: Vec<ListItem> = filtered
+            let visible_items = (chunks[1].height as usize / 2).max(1);
+            let sel = (*selected_idx).min(filtered.len().saturating_sub(1));
+            let start_idx = if sel >= visible_items {
+                sel + 1 - visible_items
+            } else {
+                0
+            };
+            let end_idx = (start_idx + visible_items).min(filtered.len());
+
+            let items: Vec<ListItem> = filtered[start_idx..end_idx]
                 .iter()
                 .enumerate()
-                .map(|(i, c)| {
+                .map(|(rel_i, c)| {
+                    let i = start_idx + rel_i;
                     let is_active = c.name == *current_context;
-                    let is_sel = i == *selected_idx;
+                    let is_sel = i == sel;
                     let color = Theme::context_color(&c.name, c.is_local);
 
                     let prefix = if is_active { "★ " } else if is_sel { "▶ " } else { "  " };
@@ -504,12 +514,22 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 .cloned()
                 .collect();
 
-            let items: Vec<ListItem> = all_ns
+            let visible_height = (chunks[1].height as usize).max(1);
+            let sel = (*selected_idx).min(all_ns.len().saturating_sub(1));
+            let start_idx = if sel >= visible_height {
+                sel + 1 - visible_height
+            } else {
+                0
+            };
+            let end_idx = (start_idx + visible_height).min(all_ns.len());
+
+            let items: Vec<ListItem> = all_ns[start_idx..end_idx]
                 .iter()
                 .enumerate()
-                .map(|(i, name)| {
+                .map(|(rel_i, name)| {
+                    let i = start_idx + rel_i;
                     let is_active = name == current_namespace;
-                    let is_sel = i == *selected_idx;
+                    let is_sel = i == sel;
                     let prefix = if is_active { "★ " } else if is_sel { "▶ " } else { "  " };
                     let style = if is_sel {
                         Theme::selected_row()
@@ -586,11 +606,21 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 })
                 .collect();
 
-            let items: Vec<ListItem> = filtered
+            let visible_items = (chunks[1].height as usize / 2).max(1);
+            let sel = (*selected_idx).min(filtered.len().saturating_sub(1));
+            let start_idx = if sel >= visible_items {
+                sel + 1 - visible_items
+            } else {
+                0
+            };
+            let end_idx = (start_idx + visible_items).min(filtered.len());
+
+            let items: Vec<ListItem> = filtered[start_idx..end_idx]
                 .iter()
                 .enumerate()
-                .map(|(i, a)| {
-                    let is_sel = i == *selected_idx;
+                .map(|(rel_i, a)| {
+                    let i = start_idx + rel_i;
+                    let is_sel = i == sel;
                     let prefix = if is_sel { "▶ " } else { "  " };
 
                     let line1 = Line::from(vec![

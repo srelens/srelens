@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { settingsStorage } from "@srelens/core";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { DESIGN_KEY, PORTED_SCREENS, loadDesign, saveDesign } from "./design";
 
 beforeEach(() => localStorage.clear());
@@ -55,6 +56,7 @@ describe("the list of ported screens", () => {
     // so the two cannot disagree about what has been ported. A screen is added
     // here in the PR that ports it.
     expect(PORTED_SCREENS.map((s) => s.route)).toEqual([
+      "/",
       "/applog",
       "/notes",
       "/agent",
@@ -76,6 +78,7 @@ describe("the list of ported screens", () => {
 
   it("gives every screen a name to show, since the route is not user-facing", () => {
     expect(PORTED_SCREENS.map((s) => s.name)).toEqual([
+      "Home",
       "Application log",
       "Release notes",
       "Agent",
@@ -94,4 +97,12 @@ describe("the list of ported screens", () => {
       "Settings",
     ]);
   });
+});
+
+it("stores the design choice through the shared backend settings adapter", () => {
+  const write = vi.spyOn(settingsStorage, "setItem").mockImplementation(() => {});
+  expect(saveDesign("next")).toBe(true);
+  expect(write).toHaveBeenCalledWith(DESIGN_KEY, "next");
+  expect(localStorage.getItem(DESIGN_KEY)).toBeNull();
+  write.mockRestore();
 });

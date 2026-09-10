@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { ReactElement } from "react";
 import { render } from "@testing-library/react";
+import { filterTableData } from "@srelens/ui-kit";
 import { cronJobStatus, jobStatus, scaledStatus } from "@srelens/core";
 import {
   podColumns,
@@ -231,13 +232,22 @@ describe("pod columns", () => {
     expect(image.render!(pod({ image: "" }))).toBe("—");
   });
 
-  it("drops the Node column — the design does not show one for pods", () => {
-    expect(podColumns.some((c) => c.key === "node")).toBe(false);
+  it("keeps Node in the table contract so a Node detail can open this list prefiltered", () => {
+    const node = podColumns.find((c) => c.key === "node")!;
+    expect(node.header).toBe("Node");
+    expect(
+      filterTableData(
+        [pod({ name: "on-worker-2", node: "worker-2" }), pod({ name: "elsewhere", node: "worker-3" })],
+        podColumns,
+        "worker-2",
+        "node",
+      ).map((row) => row.name),
+    ).toEqual(["on-worker-2"]);
   });
 
   it("keeps Image last, matching the design mock's row order", () => {
     expect(podColumns.map((c) => c.key)).toEqual([
-      "name", "namespace", "ready", "phase", "restarts", "cpu", "memory", "age", "image",
+      "name", "namespace", "node", "ready", "phase", "restarts", "cpu", "memory", "age", "image",
     ]);
   });
 

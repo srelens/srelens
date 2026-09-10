@@ -38,6 +38,48 @@ describe("mcpClientConfig", () => {
     }
   });
 
+  it("uses an absolute executable path when stdio cannot rely on PATH", () => {
+    const command = String.raw`C:\Program Files\srelens\srelens.exe`;
+    expect(JSON.parse(mcpClientConfig("cursor", "stdio", { command }).snippet).mcpServers.srelens.command).toBe(command);
+    expect(mcpClientConfig("codex", "stdio", { command }).snippet).toContain(String.raw`command = "C:\\Program Files\\srelens\\srelens.exe"`);
+    expect(mcpClientConfig("claude-code", "stdio", { command }).snippet).toContain(String.raw`-- 'C:\Program Files\srelens\srelens.exe' --mcp-stdio`);
+  });
+
+  it("shell-escapes command substitution characters in executable paths", () => {
+    const command = String.raw`/Applications/Srelens $(touch /tmp/unsafe) ` + "`whoami`";
+    const snippet = mcpClientConfig("claude-code", "stdio", { command }).snippet;
+    expect(snippet).toContain(`'/Applications/Srelens $(touch /tmp/unsafe) \`whoami\`'`);
+  });
+
+  it("protects Bash history expansion in Unix executable paths", () => {
+    const command = "/home/user!/srelens";
+    expect(mcpClientConfig("claude-code", "stdio", { command }).snippet)
+      .toContain("-- '/home/user!/srelens' --mcp-stdio");
+  });
+
+  it("quotes literal backslashes in Unix executable paths", () => {
+    const command = String.raw`/home/alice\ops/.local/bin/srelens`;
+    expect(mcpClientConfig("claude-code", "stdio", { command, platform: "unix" }).snippet)
+      .toContain(String.raw`-- '/home/alice\ops/.local/bin/srelens' --mcp-stdio`);
+  });
+
+  it("uses PowerShell quoting for shell-active Windows executable paths", () => {
+    const command = String.raw`C:\Apps\$(whoami)\O'Brien\srelens.exe`;
+    const config = mcpClientConfig("claude-code", "stdio", { command, platform: "windows" });
+    const snippet = config.snippet;
+    expect(snippet).toMatch(/^& \{ claude mcp add/);
+    expect(snippet).toContain(String.raw`-- 'C:\Apps\$(whoami)\O''Brien\srelens.exe' --mcp-stdio`);
+    expect(snippet).not.toContain(String.raw`-- "C:\Apps`);
+    expect(config.hint).toMatch(/PowerShell/i);
+  });
+
+  it("labels ordinary Windows paths as PowerShell-only instead of emitting cmd syntax", () => {
+    const command = String.raw`C:\Program Files\srelens\srelens.exe`;
+    const config = mcpClientConfig("claude-code", "stdio", { command, platform: "windows" });
+    expect(config.snippet).toBe(String.raw`& { claude mcp add srelens -- 'C:\Program Files\srelens\srelens.exe' --mcp-stdio }`);
+    expect(config.hint).toMatch(/PowerShell/i);
+  });
+
   it("emits a url entry with a bearer header for JSON tools over http", () => {
     const c = mcpClientConfig("cursor", "http", {
       url: "http://127.0.0.1:9000/mcp",

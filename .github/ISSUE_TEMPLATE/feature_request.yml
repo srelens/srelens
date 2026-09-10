@@ -1,0 +1,49 @@
+name: Feature request
+description: Suggest a feature or improvement for srelens.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Search existing issues first; add context to an existing request when it describes the same need.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the workflow, who needs it, and what is difficult today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe what you would like srelens to do and give an example of how you would use it.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Relevant surfaces
+      multiple: true
+      options:
+        - Desktop — new UI
+        - Desktop — classic UI
+        - Web
+        - TUI
+        - MCP
+        - Build or installation
+        - Documentation
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: What have you tried, and what is still missing?
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add related issues, examples, sketches or screenshots that clarify the request.

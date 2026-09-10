@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::client_cache::ClientCache;
-use crate::context_resolve::{resolve_context, resolve_contexts, ResolvedContext};
+use crate::context_resolve::{resolve_context, resolve_from, ResolvedContext, SourceConfig};
 use crate::local_cluster::classify;
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -76,6 +76,9 @@ pub struct ContextDto {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ListContextsOut {
     pub contexts: Vec<ContextDto>,
+    /// A partial inventory is usable, but cannot establish legacy ownership.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Build the capability over the shared cache. Supplying `paths` replaces the
@@ -136,26 +139,33 @@ pub fn list_contexts_capability(
                 // files are dropped: one that exists but is malformed still
                 // reaches the reader and surfaces its parse error, which the
                 // caller needs to see.
-                paths.retain(|path| path.exists());
+                paths.retain(|path| !matches!(path.try_exists(), Ok(false)));
                 cache.set_paths(paths).await;
                 // Enumerate every context across all files with duplicate-name
                 // disambiguation, so contexts that share a name (e.g. `default`
                 // across per-cluster kubeconfigs) are all visible and each
                 // resolves to its own file — kube-rs merge would drop them.
                 let paths = cache.paths().await;
-                let resolved = resolve_contexts(&paths);
-                // Resilient to a bad additional file. An empty result is only an
-                // error when *no* kubeconfig could be read at all; a readable file
-                // with zero contexts (e.g. after deleting the last one) is fine.
-                if resolved.is_empty()
-                    && !paths.iter().any(|path| kube::config::Kubeconfig::read_from(path).is_ok())
-                {
+                let mut configs = Vec::new();
+                let mut failed = Vec::new();
+                for path in &paths {
+                    match kube::config::Kubeconfig::read_from(path) {
+                        Ok(config) => configs.push(SourceConfig { source: path.clone(), config }),
+                        // Parser errors may quote credential values. Report the
+                        // source, never its contents, on this read-only surface.
+                        Err(_) => failed.push(path.display().to_string()),
+                    }
+                }
+                if configs.is_empty() {
                     return Err(CapabilityError::Handler(
                         "no kubeconfig contexts could be read".to_string(),
                     ));
                 }
-                let contexts = resolved.into_iter().map(build_context_dto).collect();
-                Ok(ListContextsOut { contexts })
+                let contexts = resolve_from(&configs).into_iter().map(build_context_dto).collect();
+                let error = if failed.is_empty() { None } else {
+                    Some(format!("Could not read kubeconfig files: {}", failed.join(", ")))
+                };
+                Ok(ListContextsOut { contexts, error })
             }
         },
     )
@@ -528,6 +538,25 @@ mod tests {
         assert_eq!(out["contexts"][0]["name"], "ctx-a");
         assert_eq!(out["contexts"][0]["server"], "https://a");
         let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn partial_inventory_reports_unreadable_sources_until_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.yaml");
+        let bad = dir.path().join("bad.yaml");
+        let yaml = "contexts:\n- name: prod\n  context: { cluster: c }\n";
+        std::fs::write(&good, yaml).unwrap();
+        std::fs::write(&bad, "contexts: [invalid").unwrap();
+        let mut reg = Registry::new();
+        reg.register(list_contexts_capability(ClientCache::new(good.clone()), vec![good, bad.clone()], None));
+        let partial = reg.invoke("k8s.listContexts", json!({"paths": []})).await.unwrap();
+        assert_eq!(partial["contexts"].as_array().unwrap().len(), 1);
+        assert!(partial["error"].as_str().unwrap().contains("bad.yaml"));
+        std::fs::write(&bad, yaml).unwrap();
+        let complete = reg.invoke("k8s.listContexts", json!({"paths": []})).await.unwrap();
+        assert_eq!(complete["contexts"].as_array().unwrap().len(), 2);
+        assert!(complete.get("error").is_none());
     }
 
     #[tokio::test]

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 
 const { loadEditableManifestMock } = vi.hoisted(() => ({ loadEditableManifestMock: vi.fn() }));
@@ -11,17 +11,31 @@ vi.mock("@srelens/core/lib/manifest", async (importOriginal) => ({
 }));
 vi.mock("@srelens/core/lib/schema", () => ({ openApiSchema: vi.fn().mockResolvedValue({ error: "n/a" }) }));
 vi.mock("../ui/CodeEditor", () => ({
-  CodeEditor: ({ value, ariaLabel }: { value: string; ariaLabel?: string }) => (
-    <textarea aria-label={ariaLabel} value={value} readOnly />
+  CodeEditor: ({ value, onChange, ariaLabel }: { value: string; onChange?: (v: string) => void; ariaLabel?: string }) => (
+    <textarea aria-label={ariaLabel} value={value} onChange={(e) => onChange?.(e.target.value)} />
   ),
 }));
 
 import { EditResourceTab } from "./EditResourceTab";
 
+function StatefulEditResourceTab(
+  props: Omit<React.ComponentProps<typeof EditResourceTab>, "draft" | "onDraftChange">,
+) {
+  const [draft, setDraft] = React.useState<string | null>(null);
+  return <EditResourceTab {...props} draft={draft} onDraftChange={setDraft} />;
+}
+
 describe("EditResourceTab", () => {
   it("preloads the resource's manifest into the editor with an Apply action", async () => {
     loadEditableManifestMock.mockResolvedValue({ yaml: "kind: ConfigMap\nmetadata:\n  name: web\n" });
-    render(<EditResourceTab context="kind-dev" kind="ConfigMap" namespace="default" name="web" />);
+    render(
+      <StatefulEditResourceTab
+        context="kind-dev"
+        kind="ConfigMap"
+        namespace="default"
+        name="web"
+      />,
+    );
     await waitFor(() =>
       expect(loadEditableManifestMock).toHaveBeenCalledWith("kind-dev", "ConfigMap", "default", "web"),
     );
@@ -33,7 +47,36 @@ describe("EditResourceTab", () => {
 
   it("shows an error when the manifest can't be loaded", async () => {
     loadEditableManifestMock.mockResolvedValue({ error: "not found" });
-    render(<EditResourceTab context="kind-dev" kind="Pod" namespace="default" name="ghost" />);
+    render(
+      <StatefulEditResourceTab
+        context="kind-dev"
+        kind="Pod"
+        namespace="default"
+        name="ghost"
+      />,
+    );
     expect(await screen.findByText(/not found/)).toBeDefined();
+  });
+
+  it("uses the tab's existing draft without fetching over it", () => {
+    loadEditableManifestMock.mockClear();
+    const onDraftChange = vi.fn();
+    const draft = "kind: ConfigMap\nmetadata:\n  name: unsaved\n";
+    render(
+      <EditResourceTab
+        context="kind-dev"
+        kind="ConfigMap"
+        namespace="default"
+        name="web"
+        draft={draft}
+        onDraftChange={onDraftChange}
+      />,
+    );
+
+    const editor = screen.getByLabelText("Edit resource YAML") as HTMLTextAreaElement;
+    expect(editor.value).toBe(draft);
+    fireEvent.change(editor, { target: { value: `${draft}data:\n  key: changed\n` } });
+    expect(onDraftChange).toHaveBeenCalledWith(`${draft}data:\n  key: changed\n`);
+    expect(loadEditableManifestMock).not.toHaveBeenCalled();
   });
 });

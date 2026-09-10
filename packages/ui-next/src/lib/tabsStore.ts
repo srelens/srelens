@@ -351,11 +351,27 @@ export function setWorkspaceClusters(id: string, clusters: string[]): void {
     // from the machine, not ones dropped from a workspace.
     const active = w.activeCluster && clusters.includes(w.activeCluster) ? w.activeCluster : clusters[0];
     if (same && active === w.activeCluster) return w;
-    const next: Workspace = { ...w, clusters: [...clusters] };
+    const next: Workspace = { ...w, clusters: [...clusters], pausedClusters: (w.pausedClusters ?? []).filter((cluster) => clusters.includes(cluster)) };
     if (active) next.activeCluster = active;
     else delete next.activeCluster;
     return next;
   });
+}
+
+/** A pause belongs to one workspace: another workspace may still use this cluster. */
+export function setClusterPaused(workspaceId: string, clusterId: string, paused: boolean): void {
+  patchWorkspace(workspaceId, (w) => {
+    if (!w.clusters.includes(clusterId)) return w;
+    const current = w.pausedClusters ?? [];
+    const next = paused ? (current.includes(clusterId) ? current : [...current, clusterId]) : current.filter((id) => id !== clusterId);
+    if (next.length === current.length && next.every((id, index) => id === current[index])) return w;
+    return { ...w, pausedClusters: next };
+  });
+}
+
+export function isClusterPaused(clusterId: string, workspaceId = currentWorkspace().id): boolean {
+  const workspace = getState().workspaces.find((w) => w.id === workspaceId);
+  return (workspace?.pausedClusters ?? []).includes(clusterId);
 }
 
 const EMPTY_VIEW: NonNullable<Tab["view"]> = {};
@@ -367,7 +383,7 @@ function sortEqual(a: TableSort | null | undefined, b: TableSort | null | undefi
 }
 
 /**
- * A resource list's sort, filter string and active filter column, merged
+ * A resource list's sort, filter string, mode and active filter column, merged
  * into whatever the tab already has. Guarded like every other action here:
  * one subscriber writes a file, so patching a view with values it already
  * holds must not emit.
@@ -378,7 +394,12 @@ export function setTabView(tabId: string, patch: Partial<NonNullable<Tab["view"]
     if (at < 0) return w;
     const current = w.tabs[at].view ?? EMPTY_VIEW;
     const next: NonNullable<Tab["view"]> = { ...current, ...patch };
-    if (sortEqual(current.sort, next.sort) && current.filter === next.filter && current.filterKey === next.filterKey) {
+    if (
+      sortEqual(current.sort, next.sort) &&
+      current.filter === next.filter &&
+      current.filterKey === next.filterKey &&
+      current.regex === next.regex
+    ) {
       return w;
     }
     const tabs = w.tabs.map((t, i) => (i === at ? { ...t, view: next } : t));

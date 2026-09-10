@@ -3,7 +3,7 @@ import { act, render, screen, fireEvent, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext } from "@srelens/core";
 import { Rail } from "./Rail";
-import { activeCluster, currentWorkspace, openTab, setState } from "../lib/tabsStore";
+import { activeCluster, activeRoute, currentWorkspace, openTab, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 import { resetView, setLink } from "../lib/workspace";
 import { defaultMark, getMark, loadMarks, setMark } from "../lib/marks";
@@ -49,8 +49,8 @@ function setup(props: Partial<Parameters<typeof Rail>[0]> = {}) {
 }
 
 /** Right-click a mark and wait for the menu that names it. */
-async function openMenu(cluster: string) {
-  fireEvent.contextMenu(screen.getByRole("button", { name: cluster }));
+async function openMenu(cluster: string, buttonName = cluster) {
+  fireEvent.contextMenu(screen.getByRole("button", { name: buttonName }));
   return screen.findByRole("menu", { name: `${cluster} actions` });
 }
 
@@ -70,6 +70,7 @@ describe("Rail", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "staging" }));
     expect(activeCluster()).toBe("staging");
+    expect(activeRoute()).toBe("/overview");
   });
 
   it("says why a cluster is out of reach in its name, classified rather than quoted", () => {
@@ -107,7 +108,7 @@ describe("Rail", () => {
     const items = within(menu)
       .getAllByRole("menuitem")
       .map((item) => item.getAttribute("aria-label"));
-    expect(items).toEqual(["Open prod-eu", "Customise…", "Connection details", "Remove from workspace"]);
+    expect(items).toEqual(["Open prod-eu", "Customise…", "Disconnect", "Connection details", "Remove from workspace"]);
     expect(screen.queryByRole("complementary", { name: "Details" })).toBeNull();
   });
 
@@ -115,6 +116,7 @@ describe("Rail", () => {
     setup();
     await pick("staging", "Open staging");
     expect(activeCluster()).toBe("staging");
+    expect(activeRoute()).toBe("/overview");
   });
 
   /**
@@ -144,7 +146,7 @@ describe("Rail", () => {
 
     expect(activeCluster()).toBe("id-stage");
     const subs = currentWorkspace().tabs.map((t) => t.sub);
-    expect(subs).toEqual(["staging-eu", "staging-eu", "staging-eu"]);
+    expect(subs).toEqual([undefined, "staging-eu", "staging-eu"]);
     expect(subs).not.toContain("id-stage");
   });
 
@@ -160,13 +162,32 @@ describe("Rail", () => {
     await pick("staging-eu", "Open staging-eu");
 
     expect(activeCluster()).toBe("id-stage");
-    expect(currentWorkspace().tabs.map((t) => t.sub)).toEqual(["staging-eu", "staging-eu"]);
+    expect(currentWorkspace().tabs.map((t) => t.sub)).toEqual([undefined, "staging-eu"]);
   });
 
   it("opens the Connections tab", async () => {
     setup();
     await pick("prod-eu", "Connection details");
     expect(currentWorkspace().tabs.map((t) => t.route)).toContain("/connections");
+  });
+
+  it("pauses a cluster in place and offers Reconnect from the same menu", async () => {
+    setup();
+    await pick("prod-eu", "Disconnect");
+    expect(currentWorkspace().clusters).toContain("prod-eu");
+    expect(currentWorkspace().pausedClusters).toEqual(["prod-eu"]);
+    expect(screen.getByRole("button", { name: "prod-eu, Paused" })).toBeDefined();
+    const menu = await openMenu("prod-eu", "prod-eu, Paused");
+    expect(within(menu).getByRole("menuitem", { name: "Reconnect" })).toBeDefined();
+  });
+
+  it("does not describe a paused cluster as connecting", async () => {
+    setLink("prod-eu", "connecting");
+    setup();
+    const menu = await openMenu("prod-eu", "prod-eu, Connecting");
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Disconnect" }));
+    expect(screen.getByRole("button", { name: "prod-eu, Paused" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: /Connecting/ })).toBeNull();
   });
 
   it("removes the cluster from the workspace", async () => {
@@ -181,12 +202,11 @@ describe("Rail", () => {
     expect(onConnect).toHaveBeenCalled();
   });
 
-  it("draws a customised mark, and still names the button after the context", () => {
+  it("draws and names the button using the saved context identity", () => {
+    getMark("prod-eu", "prod-eu");
     setMark("prod-eu", { ...defaultMark("prod-eu"), name: "Production EU", short: "PX" });
     setup();
-    // The rail is a list of the workspace's contexts: what a button is called
-    // is the context's business, and what the square says is the mark's.
-    expect(screen.getByRole("button", { name: "prod-eu" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Production EU" })).toBeDefined();
     expect(screen.getByText("PX")).toBeDefined();
   });
 
@@ -283,4 +303,26 @@ describe("Rail draws a symbol mark", () => {
     expect(container.querySelector('[data-slot="chip-mark"] svg')).toBeNull();
     expect(screen.getByText("PE")).toBeDefined();
   });
+});
+
+it("uses classic context order for the workspace rail", async () => {
+  const { saveContextOrder } = await import("@srelens/core");
+  saveContextOrder(["staging", "prod-eu"]);
+  setup();
+  const buttons = screen.getAllByRole("button").filter(b => ["staging", "prod-eu"].includes(b.getAttribute("aria-label") ?? ""));
+  expect(buttons.map(b => b.getAttribute("aria-label"))).toEqual(["staging", "prod-eu"]);
+});
+
+it("keeps blank names editable while the rail retains its context label", async () => {
+  const user = userEvent.setup(); setup();
+  await pick("prod-eu", "Customise…");
+  const panel = await screen.findByRole("dialog");
+  const input = within(panel).getByLabelText("Display name") as HTMLInputElement;
+  await user.clear(input);
+  expect(input.value).toBe("");
+  expect(getMark("prod-eu", "prod-eu").name).toBe("prod-eu");
+  await user.type(input, "  Production Europe  ");
+  expect(input.value).toBe("  Production Europe  ");
+  await user.click(within(panel).getByRole("button", { name: "Done" }));
+  expect(screen.getByRole("button", { name: "Production Europe" })).toBeTruthy();
 });

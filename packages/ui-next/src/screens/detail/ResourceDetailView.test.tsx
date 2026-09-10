@@ -12,7 +12,7 @@ import type { KindDescriptor, ListRow } from "../../lib/kinds/types";
 // manifest. All four are core's, mocked here so a test controls what "the
 // cluster said" without one — `importOriginal` keeps everything else
 // (K8S_KIND, and the real types) intact.
-const { getObject, getManifest, listEvents, listCrds, deleteResource } = vi.hoisted(() => ({
+const { getObject, getManifest, listEvents, listCrds, deleteResource, podsOnNode } = vi.hoisted(() => ({
   getObject: vi.fn(async (): Promise<{ object?: K8sObject; error?: string }> => ({})),
   getManifest: vi.fn(async (): Promise<{ yaml?: string; error?: string }> => ({ yaml: "" })),
   listEvents: vi.fn(async (): Promise<{ events?: EventSummary[]; error?: string }> => ({ events: [] })),
@@ -20,6 +20,7 @@ const { getObject, getManifest, listEvents, listCrds, deleteResource } = vi.hois
   // The footer's actions are the row menu's, so the one write a test reaches
   // for is mocked here too — a confirm that is never taken must reach nothing.
   deleteResource: vi.fn(async (): Promise<{ error?: string }> => ({})),
+  podsOnNode: vi.fn(async () => ({ pods: [] })),
 }));
 
 vi.mock("@srelens/core", async (importOriginal) => ({
@@ -29,6 +30,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   listEvents,
   listCrds,
   deleteResource,
+  podsOnNode,
 }));
 
 // The shell asks the same descriptor the list screen resolves, only to read
@@ -193,6 +195,7 @@ describe("ResourceDetailView", () => {
     getManifest.mockResolvedValue({ yaml: "kind: Pod\n" });
     listEvents.mockResolvedValue({ events: [] });
     listCrds.mockResolvedValue({ crds: [] });
+    podsOnNode.mockResolvedValue({ pods: [] });
     descriptorFor.mockReturnValue(undefined);
     codeEditorProps.length = 0;
     asked.length = 0;
@@ -255,6 +258,24 @@ describe("ResourceDetailView", () => {
     const { getByRole, queryByRole } = render(<ResourceDetailView context="ctx" kind="Node" namespace={null} name="n1" />);
     await waitFor(() => expect(getByRole("tab", { name: "Metrics" })).toBeDefined());
     expect(queryByRole("tab", { name: "Containers" })).toBeNull();
+  });
+
+  it("places a Node's scheduled pods after its annotations", async () => {
+    getObject.mockResolvedValue({
+      object: {
+        kind: "Node",
+        apiVersion: "v1",
+        metadata: { name: "n1", labels: { zone: "east" }, annotations: { owner: "sre" } },
+      },
+    });
+    descriptorFor.mockReturnValue(baseDescriptor({ k8sKind: "Node", scope: "cluster" }));
+    setSectionOpen("Node", "Pods", true);
+    render(<ResourceDetailView context="ctx" kind="Node" namespace={null} name="n1" />);
+
+    const podsHeading = await screen.findByRole("heading", { level: 3, name: "Pods (0)" });
+    const annotations = screen.getByRole("heading", { level: 3, name: "Annotations" }).closest("section")!;
+    const pods = podsHeading.closest("section")!;
+    expect(annotations.compareDocumentPosition(pods) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
   });
 
   it("loads YAML and Events lazily, only once each pane is opened, and never refetches a pane already opened", async () => {

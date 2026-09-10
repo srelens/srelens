@@ -47,8 +47,8 @@ export async function listContexts(
   invoke: Invoker = invokeCapability,
 ): Promise<ContextsOutcome> {
   try {
-    const out = await invoke<{ contexts: ClusterContext[] }>("k8s.listContexts", { paths: additionalPaths });
-    return { contexts: out.contexts };
+    const out = await invoke<{ contexts: ClusterContext[]; error?: string }>("k8s.listContexts", { paths: additionalPaths });
+    return { contexts: out.contexts, ...(out.error ? { error: out.error } : {}) };
   } catch (e) {
     return { error: String(e) };
   }

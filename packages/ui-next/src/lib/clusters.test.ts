@@ -165,3 +165,23 @@ describe("contexts store — a listing that invalidates the workspace", () => {
     expect(store.currentWorkspace().clusters).toEqual(["prod-1", "dev-1"]);
   });
 });
+
+it("defers legacy profile migration until every source has been read", async () => {
+  const { saveContextProfiles, loadContextProfiles } = await import("@srelens/core");
+  const { loadMarks, getMark } = await import("./marks");
+  saveContextProfiles({ prod: { displayName: "Original production" } });
+  loadMarks();
+  setContexts([ctx("a-id", "prod")], "Could not read kubeconfig: /bad.yaml");
+  expect(loadContextProfiles()).toEqual({ prod: { displayName: "Original production" } });
+  expect(getMark("a-id", "prod").name).toBe("prod");
+  setContexts([ctx("a-id", "file-a/prod"), ctx("b-id", "file-b/prod")]);
+  expect(loadContextProfiles()).toEqual({ prod: { displayName: "Original production" } });
+});
+it("migrates an unambiguous profile after a failed source is repaired", async () => {
+  const { saveContextProfiles, loadContextProfiles } = await import("@srelens/core");
+  const { loadMarks } = await import("./marks");
+  saveContextProfiles({ prod: { displayName: "Production" } }); loadMarks();
+  setContexts([ctx("a-id", "prod")], "Unreadable source");
+  setContexts([ctx("a-id", "prod"), ctx("b-id", "staging")]);
+  expect(loadContextProfiles()).toEqual({ "a-id": { displayName: "Production" } });
+});

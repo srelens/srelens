@@ -1543,12 +1543,22 @@ async fn the_node_inspector_describes_and_shows_yaml_for_the_node_or_the_highlig
 async fn the_node_inspector_offers_a_debug_shell_command_and_an_action_palette() {
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
 
+    // With a pod highlighted, 's' opens the pod's shell
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", false, true));
     app.handle_key_event(common::ch('s')).await;
-    assert_eq!(
-        toast(&app),
-        "Node debug command: kubectl debug node/gpu-1 -it --image=busybox"
-    );
+    assert!(matches!(
+        &app.requires_terminal_suspend,
+        Some(SuspendAction::PodShell { pod, .. }) if pod == "api-0"
+    ));
+    app.requires_terminal_suspend = None;
+
+    // 'S' launches a node debug shell even with a pod highlighted
+    app.handle_key_event(common::ch('S')).await;
+    assert!(matches!(
+        &app.requires_terminal_suspend,
+        Some(SuspendAction::NodeShell { node }) if node == "gpu-1"
+    ));
+    app.requires_terminal_suspend = None;
 
     app.handle_key_event(common::ch('x')).await;
     match &app.modal {
@@ -1564,7 +1574,15 @@ async fn the_node_inspector_offers_a_debug_shell_command_and_an_action_palette()
     }
     app.modal = None;
 
+    // With no pods, 's' launches the node debug shell
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", false, false));
+    app.handle_key_event(common::ch('s')).await;
+    assert!(matches!(
+        &app.requires_terminal_suspend,
+        Some(SuspendAction::NodeShell { node }) if node == "gpu-1"
+    ));
+    app.requires_terminal_suspend = None;
+
     app.handle_key_event(common::ch('x')).await;
     match &app.modal {
         Some(Modal::ActionPalette {
@@ -1993,17 +2011,26 @@ async fn assistant_chords_clear_the_conversation_and_toggle_tool_chips() {
 }
 
 #[tokio::test]
-async fn ctrl_c_in_the_assistant_quits_instead_of_copying_the_last_answer() {
-    // `handle_key_event` treats Ctrl+C as the global quit before the assistant
-    // ever sees it, so the assistant's own Ctrl+C copy chord cannot fire.
+async fn ctrl_c_in_the_assistant_copies_the_last_answer() {
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.active_view = ActiveView::Assistant;
     app.assistant_state
         .add_assistant_message("the cluster is fine".into());
 
     app.handle_key_event(common::ctrl('c')).await;
-    assert!(!app.is_running, "Ctrl+C exits the TUI");
-    assert_eq!(toast(&app), "", "nothing is copied on the way out");
+    assert!(app.is_running, "Ctrl+C copies without exiting");
+    assert_eq!(toast(&app), "✓ Copied assistant answer to clipboard");
+}
+
+#[tokio::test]
+async fn ctrl_c_in_the_assistant_without_messages_warns_and_does_not_exit() {
+    let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
+    app.active_view = ActiveView::Assistant;
+    app.assistant_state.messages.clear();
+
+    app.handle_key_event(common::ctrl('c')).await;
+    assert!(app.is_running, "Ctrl+C does not exit the TUI");
+    assert_eq!(toast(&app), "Nothing to copy");
 }
 
 // ---------------------------------------------------------------------------

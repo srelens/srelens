@@ -885,6 +885,14 @@ async fn namespace_picker_filters_navigates_and_switches() {
     assert_eq!(sel(&app).0, 0);
     press(&mut app, ctrl('k')).await;
     assert_eq!(sel(&app).0, 2);
+    press(&mut app, key(KeyCode::Home)).await;
+    assert_eq!(sel(&app).0, 0, "Home moves to the start");
+    press(&mut app, ctrl('g')).await;
+    assert_eq!(sel(&app).0, 2, "Ctrl+g moves to the end");
+    press(&mut app, key(KeyCode::Home)).await;
+    assert_eq!(sel(&app).0, 0);
+    press(&mut app, key(KeyCode::End)).await;
+    assert_eq!(sel(&app).0, 2, "End moves to the end");
     press(&mut app, key(KeyCode::Null)).await;
     assert_eq!(sel(&app).0, 2, "unknown keys leave the picker alone");
 
@@ -1969,7 +1977,7 @@ async fn container_picker_cycles_and_enter_opens_logs_or_a_shell() {
     press(&mut app, ch('s')).await;
     press(&mut app, key(KeyCode::Enter)).await;
     match &app.requires_terminal_suspend {
-        Some(SuspendAction::PodShell { pod, container }) => {
+        Some(SuspendAction::PodShell { pod, container, .. }) => {
             assert_eq!(pod, "multi");
             assert_eq!(container.as_deref(), Some("app"));
         }
@@ -2003,7 +2011,7 @@ async fn l_and_s_on_a_single_container_pod_go_straight_to_logs_and_shell() {
 
     press(&mut app, ch('s')).await;
     match &app.requires_terminal_suspend {
-        Some(SuspendAction::PodShell { pod, container }) => {
+        Some(SuspendAction::PodShell { pod, container, .. }) => {
             assert_eq!(pod, "pod-a");
             assert!(container.is_none());
         }
@@ -2927,3 +2935,163 @@ async fn the_workloads_view_watches_every_constituent_kind_and_rebuilds_from_the
         "the workloads view watches exactly its five constituent kinds"
     );
 }
+
+#[tokio::test]
+async fn test_nodes_table_press_s_triggers_node_shell() {
+    let (mut app, _rx) = common::app().await;
+    seed_table(
+        &mut app,
+        ResourceKind::Nodes,
+        vec![json!({ "name": "node-a", "status": "Ready", "roles": "master" })],
+    );
+    press(&mut app, ch('s')).await;
+    match &app.requires_terminal_suspend {
+        Some(SuspendAction::NodeShell { node }) => {
+            assert_eq!(node, "node-a");
+        }
+        _ => panic!("expected NodeShell suspend action"),
+    }
+}
+
+#[tokio::test]
+async fn test_node_inspector_press_s_on_selected_pod() {
+    let (mut app, _rx) = common::app().await;
+    let mut ni = NodeInspectorState::new("node-1".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-1".into(),
+        status: "Ready".into(),
+        pods: vec![srelens_kube::node_inspector::NodePodItem {
+            name: "test-pod".into(),
+            namespace: "custom-ns".into(),
+            phase: "Running".into(),
+            ready_containers: "1/1".into(),
+            restarts: 0,
+            age: "1d".into(),
+            cpu_requests_millicores: 100,
+            mem_requests_mib: 256,
+            gpu_requests: 0,
+            gpu_mem_requests_mib: 0,
+            pod_ip: "10.244.0.5".into(),
+        }],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    press(&mut app, ch('s')).await;
+    match &app.requires_terminal_suspend {
+        Some(SuspendAction::PodShell { pod, namespace, .. }) => {
+            assert_eq!(pod, "test-pod");
+            assert_eq!(namespace.as_deref(), Some("custom-ns"));
+        }
+        _ => panic!("expected PodShell suspend action with custom-ns namespace"),
+    }
+}
+
+#[tokio::test]
+async fn test_node_inspector_press_s_when_no_pods_triggers_node_shell() {
+    let (mut app, _rx) = common::app().await;
+    let mut ni = NodeInspectorState::new("node-empty".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-empty".into(),
+        status: "Ready".into(),
+        pods: vec![],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    press(&mut app, ch('s')).await;
+    match &app.requires_terminal_suspend {
+        Some(SuspendAction::NodeShell { node }) => {
+            assert_eq!(node, "node-empty");
+        }
+        _ => panic!("expected NodeShell suspend action when no pods scheduled"),
+    }
+}
+
+#[tokio::test]
+async fn test_node_inspector_press_capital_s_triggers_node_shell_even_with_pods() {
+    let (mut app, _rx) = common::app().await;
+    let mut ni = NodeInspectorState::new("node-2".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-2".into(),
+        status: "Ready".into(),
+        pods: vec![srelens_kube::node_inspector::NodePodItem {
+            name: "test-pod-2".into(),
+            namespace: "default".into(),
+            phase: "Running".into(),
+            ready_containers: "1/1".into(),
+            restarts: 0,
+            age: "1d".into(),
+            cpu_requests_millicores: 100,
+            mem_requests_mib: 256,
+            gpu_requests: 0,
+            gpu_mem_requests_mib: 0,
+            pod_ip: "10.244.0.6".into(),
+        }],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    press(&mut app, ch('S')).await;
+    match &app.requires_terminal_suspend {
+        Some(SuspendAction::NodeShell { node }) => {
+            assert_eq!(node, "node-2");
+        }
+        _ => panic!("expected NodeShell suspend action when pressing capital S"),
+    }
+}
+
+#[tokio::test]
+async fn non_pod_and_custom_resources_reject_pod_actions() {
+    let (mut app, _rx) = common::app().await;
+    let secret_store_crd = ResourceKind::CustomResource(CrdMeta {
+        crd_name: "secretstores.external-secrets.io".to_string(),
+        group: "external-secrets.io".to_string(),
+        version: "v1beta1".to_string(),
+        kind: "SecretStore".to_string(),
+        plural: "secretstores".to_string(),
+        singular: "secretstore".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+    });
+
+    for kind in [secret_store_crd, ResourceKind::ConfigMaps, ResourceKind::Secrets] {
+        set_table(
+            &mut app,
+            kind.clone(),
+            vec![json!({ "name": "my-resource", "namespace": "default" })],
+        );
+
+        // 1. Port forward rejected
+        press(&mut app, ch('f')).await;
+        assert!(app.modal.is_none());
+        assert_eq!(toast(&app), "Port forward is only available for Pods and Services");
+
+        press(&mut app, ch('F')).await;
+        assert!(app.modal.is_none());
+        assert_eq!(toast(&app), "Port forward is only available for Pods and Services");
+
+        // 2. Logs rejected
+        press(&mut app, ch('l')).await;
+        assert_eq!(toast(&app), "Logs are only available for Pods and Workloads");
+
+        // 3. Rollout restart rejected
+        press(&mut app, ch('r')).await;
+        assert!(app.modal.is_none());
+        assert_eq!(toast(&app), "Rollout restart is only available for Deployments, StatefulSets, and DaemonSets");
+
+        // 4. Scale rejected
+        press(&mut app, ctrl('s')).await;
+        assert!(app.modal.is_none());
+        assert_eq!(toast(&app), "Scale is only available for Deployments and StatefulSets");
+
+        // 5. Shell rejected
+        press(&mut app, ch('s')).await;
+        assert_eq!(toast(&app), "Shell only available for Pods and Nodes");
+    }
+}
+

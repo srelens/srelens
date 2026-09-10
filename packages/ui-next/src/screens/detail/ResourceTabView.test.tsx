@@ -9,13 +9,14 @@ import type { KindDescriptor, ListRow } from "../../lib/kinds/types";
 // The reads behind the tab: the object itself, the pod usage its CPU and
 // Memory tiles show, and the two pane fetches it inherits from the shared
 // pane machinery.
-const { getObject, getManifest, listEvents, listCrds, podMetrics, podsForSelector } = vi.hoisted(() => ({
+const { getObject, getManifest, listEvents, listCrds, podMetrics, podsForSelector, podsOnNode } = vi.hoisted(() => ({
   getObject: vi.fn(async (): Promise<{ object?: K8sObject; error?: string }> => ({})),
   getManifest: vi.fn(async (): Promise<{ yaml?: string; error?: string }> => ({ yaml: "" })),
   listEvents: vi.fn(async () => ({ events: [] })),
   listCrds: vi.fn(async () => ({ crds: [] })),
   podMetrics: vi.fn(async (): Promise<{ metrics?: PodMetric[]; error?: string }> => ({ metrics: [] })),
   podsForSelector: vi.fn(async () => ({ pods: [] })),
+  podsOnNode: vi.fn(async () => ({ pods: [] })),
 }));
 
 vi.mock("@srelens/core", async (importOriginal) => ({
@@ -26,6 +27,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   listCrds,
   podMetrics,
   podsForSelector,
+  podsOnNode,
 }));
 
 const { descriptorFor } = vi.hoisted(() => ({
@@ -183,6 +185,24 @@ describe("ResourceTabView — the full tab the design draws", () => {
         "prod-eu",
         "Node",
       ]);
+    });
+
+    it("places a Node's scheduled pods after the Labels/Annotations pair", async () => {
+      getObject.mockResolvedValue({
+        object: {
+          kind: "Node",
+          apiVersion: "v1",
+          metadata: { name: "worker-1", labels: { zone: "east" }, annotations: { owner: "sre" } },
+        },
+      });
+      podsOnNode.mockResolvedValue({ pods: [] });
+      descriptorFor.mockReturnValue(podDescriptor({ k8sKind: "Node", panes: {} }));
+      setSectionOpen("Node", "Pods", true);
+      await openPod({ kind: "Node", namespace: null, name: "worker-1" });
+
+      const pair = document.querySelector<HTMLElement>('[data-slot="metadata-pair"]')!;
+      const pods = (await screen.findByRole("heading", { level: 3, name: "Pods (0)" })).closest("section")!;
+      expect(pair.compareDocumentPosition(pods) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     });
 
     it("puts the actions in the header row, not in a footer bar", async () => {

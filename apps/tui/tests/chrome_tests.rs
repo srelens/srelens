@@ -583,6 +583,34 @@ fn the_namespace_picker_filter_narrows_the_list_and_reindexes_the_selection() {
     assert!(!text.contains("payments"), "{text}");
 }
 
+#[test]
+fn the_namespace_picker_windows_when_selected_at_the_end_of_a_long_list() {
+    let namespaces: Vec<String> = (1..=30).map(|i| format!("ns-{:02}", i)).collect();
+    let modal = Modal::NamespacePicker {
+        namespaces,
+        current_namespace: "ns-01".into(),
+        selected_idx: 29, // last item: ns-30
+        filter: String::new(),
+    };
+    let text = modal_text(100, 20, &modal);
+    assert!(text.contains("▶ ns-30"), "selected item at the end is visible: {text}");
+    assert!(!text.contains("ns-01"), "first item scrolled out of view: {text}");
+}
+
+#[test]
+fn the_namespace_picker_renders_selection_marker_even_when_selected_idx_is_out_of_bounds() {
+    let namespaces = vec!["alpha".into(), "beta".into(), "gamma".into()];
+    let modal = Modal::NamespacePicker {
+        namespaces,
+        current_namespace: "alpha".into(),
+        selected_idx: 99, // out of bounds
+        filter: String::new(),
+    };
+    let text = modal_text(80, 15, &modal);
+    // Clamped selection is index 2 ("gamma"), which must be marked with ▶
+    assert!(text.contains("▶ gamma"), "clamped row is marked selected: {text}");
+}
+
 // ───────────────────────── dialogs: ActionPalette ─────────────────────────
 
 #[test]
@@ -907,13 +935,16 @@ fn normal_mode_shows_the_default_key_palette() {
     for hint in [
         "<:> Cmd",
         "</> Filter",
-        "<c> CopyURL",
-        "<l> Logs",
-        "<s> Shell",
-        "<f>/<F> PortForward",
         "<d> Describe",
+        "<y> YAML",
+        "<e> Edit",
+        "<^d> Delete",
+        "<?> Help",
     ] {
         assert!(text.contains(hint), "missing {hint}: {text}");
+    }
+    for excluded in ["PortForward", "Logs", "Shell", "Restart", "Scale"] {
+        assert!(!text.contains(excluded), "unexpected {excluded} in default palette: {text}");
     }
     assert!(!text.contains("Filter:"), "{text}");
     assert!(!text.contains('➜'), "{text}");
@@ -1139,13 +1170,13 @@ fn the_assistant_title_names_the_provider_model_and_key_hints() {
     let text = assistant_text(200, 30, &state);
     let settings = AiSettings::default();
     let model = settings.get_model(settings.default_provider);
-    assert!(text.contains(&format!(" SRElens AI Assistant[Anthropic (Claude) - {model}] [<c> Copy, <Ctrl+t> Tools, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ")), "{text}");
+    assert!(text.contains(&format!(" SRElens AI Assistant[Anthropic (Claude) - {model}] [<Ctrl+c> Copy, <Ctrl+t> Tools, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ")), "{text}");
     assert!(text.contains("SRElens [10:00:00]:"), "{text}");
     assert!(
         text.contains("Hello! I am your SRElens AI Assistant."),
         "{text}"
     );
-    assert!(text.contains(" Ask Assistant (Type '/' for SRE Playbooks, ↑/↓ History, <c> Copy, <Ctrl+s> Settings) "), "{text}");
+    assert!(text.contains(" Ask Assistant (Type '/' for SRE Playbooks, ↑/↓ History, <Ctrl+c> Copy, <Ctrl+s> Settings) "), "{text}");
 }
 
 #[test]
@@ -1175,7 +1206,7 @@ fn the_assistant_title_reflects_context_caveman_tokens_selection_and_folded_tool
         "{text}"
     );
     assert!(
-        text.contains("[⚡  1,234 tokens, <c> Copy Selection, <Ctrl+t> Fold Tools, <Ctrl+e> Save"),
+        text.contains("[⚡  1,234 tokens, <Ctrl+c> Copy Selection, <Ctrl+t> Fold Tools, <Ctrl+e> Save"),
         "{text}"
     );
 }
@@ -1608,7 +1639,7 @@ fn a_selection_spanning_rows_is_highlighted_and_extracted_from_the_rendered_rows
         Some("[10:00:00]:\nhello")
     );
     let text = assistant_text(160, 30, &state);
-    assert!(text.contains("<c> Copy Selection"), "{text}");
+    assert!(text.contains("<Ctrl+c> Copy Selection"), "{text}");
     assert!(
         text.contains("hello world"),
         "highlighting keeps the text intact: {text}"

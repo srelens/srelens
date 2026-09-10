@@ -19,6 +19,7 @@ import {
   SideRail,
   Table,
   filterTableData,
+  tableFilterError,
   type Column,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
@@ -32,7 +33,7 @@ import { rowKey, type KindDescriptor, type ListRow } from "../lib/kinds/types";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
 import { useResourceList } from "../lib/resourceList";
 import { describe, isBuiltInKind } from "../lib/routes";
-import { openTab } from "../lib/tabsStore";
+import { openTab, useTabs } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
@@ -45,6 +46,7 @@ import {
   NamespaceErrorAlert,
   NamespacePicker,
   NoClusterScreen,
+  PausedClusterScreen,
   StaleSelectionAlert,
   columnOptionsFor,
   defaultHiddenKeys,
@@ -78,6 +80,7 @@ const CRD_RAIL_WIDTH = 264;
  */
 export function Resources({ route }: { route: string }) {
   const context = useActiveContext();
+  const { workspace } = useTabs();
   const slug = route.slice("/k/".length);
   // The tab strip already knows what this route is called; asking `describe`
   // keeps the screen's title and the tab's title the same string.
@@ -85,6 +88,9 @@ export function Resources({ route }: { route: string }) {
 
   if (!context) {
     return <NoClusterScreen title={title} noun="resources" />;
+  }
+  if (workspace.pausedClusters?.includes(context.stableId)) {
+    return <PausedClusterScreen title={title} noun="resources" context={context} />;
   }
 
   return <KindList route={route} slug={slug} title={title} context={context} />;
@@ -194,7 +200,17 @@ function KindList({
   // Sort, filter text and filter column live on the tab — see
   // `useResourceTabView`'s own comment for why, and why `filterKey` is
   // derived rather than merely cleared when this screen hides a column.
-  const { tabId, sort, filter, filterKey, setFilter, setSort, setFilterKey } = useResourceTabView(route, columns);
+  const {
+    tabId,
+    sort,
+    filter,
+    filterKey,
+    regex,
+    setFilter,
+    setSort,
+    setFilterKey,
+    setRegex,
+  } = useResourceTabView(route, columns);
 
   const rows = useMemo(
     () =>
@@ -204,9 +220,10 @@ function KindList({
     [list.rows, clusterScoped, selection],
   );
   const filtered = useMemo(
-    () => filterTableData(rows, columns, filter, filterKey),
-    [rows, columns, filter, filterKey],
+    () => filterTableData(rows, columns, filter, filterKey, regex),
+    [rows, columns, filter, filterKey, regex],
   );
+  const invalidFilter = tableFilterError(filter, regex) !== null;
 
   // Called unconditionally — same reason every hook above it is: the guard
   // for "no descriptor yet" is a `return` below, not a skip, and a hook
@@ -497,6 +514,9 @@ function KindList({
       <FilterBar
         value={filter}
         onValueChange={setFilter}
+        regex={regex}
+        onRegexChange={setRegex}
+        invalid={invalidFilter}
         label={`Filter ${lower}`}
         placeholder={`Filter ${lower}…`}
       >

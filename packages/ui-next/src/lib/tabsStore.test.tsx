@@ -313,6 +313,15 @@ describe("workspaces", () => {
     store.setWorkspaceClusters(id, ["x", "y"]);
     expect(store.currentWorkspace().clusters).toEqual(["x", "y"]);
   });
+
+  it("keeps a pause in its workspace and clears it when that cluster is removed", () => {
+    const id = store.getState().currentId;
+    store.setWorkspaceClusters(id, ["x", "y"]);
+    store.setClusterPaused(id, "x", true);
+    expect(store.isClusterPaused("x")).toBe(true);
+    store.setWorkspaceClusters(id, ["y"]);
+    expect(store.currentWorkspace().pausedClusters).toEqual([]);
+  });
 });
 
 describe("setState", () => {
@@ -403,7 +412,7 @@ describe("activeCluster", () => {
     expect(tabs.filter((t) => t.sub === "prod-eu")).toEqual([]);
     expect(subFor("/overview")).toBe("staging-eu");
     expect(subFor("/k/pods")).toBe("staging-eu");
-    expect(subFor("/")).toBe("staging-eu");
+    expect(subFor("/")).toBeUndefined();
     // A stableId on the strip would satisfy "no longer prod-eu" and be the
     // same bug wearing the other name.
     expect(tabs.filter((t) => t.sub === "id-stage")).toEqual([]);
@@ -481,9 +490,11 @@ describe("setTabView / useTabView", () => {
     const id = active().id;
     store.setTabView(id, { filter: "abc" });
     store.setTabView(id, { sort: { key: "name", direction: "asc" } });
+    store.setTabView(id, { regex: true });
     expect(store.currentWorkspace().tabs.find((t) => t.id === id)?.view).toEqual({
       filter: "abc",
       sort: { key: "name", direction: "asc" },
+      regex: true,
     });
   });
 
@@ -492,6 +503,12 @@ describe("setTabView / useTabView", () => {
     const { result } = renderHook(() => store.useTabView(id));
     act(() => store.setTabView(id, { filter: "x" }));
     expect(result.current.filter).toBe("x");
+  });
+
+  it("does not discard a regex-only view change", () => {
+    const id = active().id;
+    store.setTabView(id, { regex: true });
+    expect(store.currentWorkspace().tabs.find((t) => t.id === id)?.view?.regex).toBe(true);
   });
 
   it("ignores an id that is not there", () => {

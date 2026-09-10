@@ -1,6 +1,7 @@
 import type { ClusterContext } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
 import { describe, type TabKind } from "./routes";
+import { parseEditRoute, parseNewRoute } from "./detailRoute";
 
 export interface Tab {
   id: string;
@@ -17,7 +18,7 @@ export interface Tab {
    * to the tab, not the screen, so it survives a restart the way the rest of
    * the tab does. Absent until the user sorts or filters — see `setTabView`.
    */
-  view?: { sort?: TableSort | null; filter?: string; filterKey?: string | null };
+  view?: { sort?: TableSort | null; filter?: string; filterKey?: string | null; regex?: boolean };
 }
 
 export interface Workspace {
@@ -25,6 +26,8 @@ export interface Workspace {
   name: string;
   /** `ClusterContext.stableId`s. Never display names — see #265. */
   clusters: string[];
+  /** Clusters the reader has paused without removing from this workspace. */
+  pausedClusters?: string[];
   /** The cluster the sidebar and status bar are about. A `stableId` in `clusters`. */
   activeCluster?: string;
   tabs: Tab[];
@@ -121,6 +124,7 @@ export function defaultState(contexts: ClusterContext[]): TabsState {
     id: newId(),
     name: "Default",
     clusters: ids,
+    pausedClusters: [],
     tabs: [home],
     activeId: home.id,
     closed: [],
@@ -137,18 +141,22 @@ export function defaultState(contexts: ClusterContext[]): TabsState {
  */
 export function reconcile(state: TabsState, contexts: ClusterContext[]): TabsState {
   const known = new Set(contexts.map((c) => c.stableId));
+  const contextNames = new Map(contexts.map((c) => [c.stableId, c.name]));
   let changed = false;
 
   let workspaces = state.workspaces.map((w) => {
     let next = w;
     const clusters = w.clusters.filter((id) => known.has(id));
     if (clusters.length !== w.clusters.length) next = { ...next, clusters };
+    const pausedClusters = (w.pausedClusters ?? []).filter((id) => clusters.includes(id));
+    if (pausedClusters.length !== (w.pausedClusters ?? []).length) next = { ...next, pausedClusters };
 
     // The active cluster follows its list: it survives if it is still there,
     // and otherwise the first that remains takes over — including for a
     // workspace stored before the field existed, which has none at all.
     const active = w.activeCluster && clusters.includes(w.activeCluster) ? w.activeCluster : clusters[0];
-    if (active !== w.activeCluster) {
+    const activeChanged = active !== w.activeCluster;
+    if (activeChanged) {
       next = { ...next };
       if (active) next.activeCluster = active;
       else delete next.activeCluster;
@@ -156,6 +164,16 @@ export function reconcile(state: TabsState, contexts: ClusterContext[]): TabsSta
 
     let tabs = next.tabs;
     if (tabs.length === 0) tabs = [homeTab()];
+    if (active) {
+      const clusterName = contextNames.get(active);
+      if (clusterName) {
+        const relabelled = tabs.map((tab) =>
+          parseEditRoute(tab.route)?.cluster || parseNewRoute(tab.route)?.cluster
+            ? tab
+            : relabel(tab, clusterName));
+        if (relabelled.some((tab, index) => tab !== tabs[index])) tabs = relabelled;
+      }
+    }
     if (tabs !== next.tabs) next = { ...next, tabs };
 
     if (!tabs.some((t) => t.id === next.activeId)) next = { ...next, activeId: tabs[0].id };

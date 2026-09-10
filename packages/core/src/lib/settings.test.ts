@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   loadClusterNamespaces,
+  removeClusterNamespace,
   saveClusterNamespaces,
   getDefaultNamespace,
   setDefaultNamespace,
@@ -61,6 +62,12 @@ describe("settings persistence", () => {
     expect(loadClusterNamespaces()).toEqual({});
     saveClusterNamespaces({ "kind-dev": "kube-system", prod: "monitoring" });
     expect(loadClusterNamespaces()).toEqual({ "kind-dev": "kube-system", prod: "monitoring" });
+  });
+
+  it("removes only the deleted cluster's namespace", () => {
+    saveClusterNamespaces({ "kind-dev": "kube-system", prod: "monitoring" });
+    removeClusterNamespace("prod");
+    expect(loadClusterNamespaces()).toEqual({ "kind-dev": "kube-system" });
   });
 
   it("round-trips the default namespace", () => {

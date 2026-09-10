@@ -17,12 +17,15 @@ import { contextLabelFor } from "../lib/agentSuggestions";
 import { setContexts, setKubeconfigFiles, useContexts, useContextsError } from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
-import { loadMarks } from "../lib/marks";
+import { getMark, loadMarks, useMark } from "../lib/marks";
 import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
-import { loadNamespaces } from "../lib/workspace";
+import { loadExpanded, loadNamespaces } from "../lib/workspace";
+import { getInfo, probeCluster } from "../lib/probe";
 import { defaultState, reconcile } from "../lib/tabs";
+import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
+import { isClusterScopedRoute, keepsManagementWhenPaused } from "../lib/routes";
 import { flushSave, installFlushOnUnload, loadTabsState, scheduleSave } from "../lib/tabsPersist";
 import {
   activateTab,
@@ -47,7 +50,6 @@ import {
   useTabs,
 } from "../lib/tabsStore";
 import { useConsole } from "../console";
-import { getInfo, probeCluster } from "../lib/probe";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
 import { Body } from "./Body";
@@ -134,12 +136,23 @@ export function Window({
   const desktop = useMemo(() => isTauri(), []);
   const { setOpen, setScope } = useConsole();
   const { tabs, activeId, workspace } = useTabs();
+  useMark("", "");
   const activeIdCluster = useActiveCluster();
   const activeCtx = contexts.find((c) => c.stableId === activeIdCluster) ?? null;
   // The console dock's own scope label — `Window`'s job because it is the one
   // place that already knows both the active tab's route and the active
   // cluster's name; `Console` itself only reads `scope` back off the provider.
   const activeTabRoute = tabs.find((t) => t.id === activeId)?.route ?? "/";
+  const activeTab = tabs.find((t) => t.id === activeId);
+  const routeCluster = parseEditRoute(activeTabRoute)?.cluster ?? parseNewRoute(activeTabRoute)?.cluster ?? activeTab?.sub;
+  const probeContext = isClusterScopedRoute(activeTabRoute)
+    ? (routeCluster ? contexts.find(c => c.name === routeCluster) : activeCtx)
+    : undefined;
+  const probePaused = !!probeContext && !!workspace.pausedClusters?.includes(probeContext.stableId);
+  useEffect(() => {
+    if (!booted || !active || !probeContext || probePaused || getInfo(probeContext.stableId)) return;
+    void probeCluster(probeContext, undefined, undefined, { workspaceId: workspace.id });
+  }, [booted, active, probeContext, probePaused, workspace.id]);
   useEffect(() => {
     setScope(contextLabelFor(activeTabRoute, activeCtx?.name ?? ""));
   }, [activeTabRoute, activeCtx?.name, setScope]);
@@ -173,9 +186,9 @@ export function Window({
       // unfolded — and the first unfold then spreads over an empty record and
       // erases every other kind's, exactly as `loadMarks` above describes.
       loadSectionFolds();
-      // And the namespace selection each cluster was narrowed to — unlike
-      // `links`/`expanded` on the same store, this one is persisted, and
-      // unread it costs the reader their picker choice on every launch.
+      // Restore each cluster's sidebar groups and namespace selection before
+      // rendering navigation, so the first toggle preserves other clusters.
+      loadExpanded();
       loadNamespaces();
       // And the subjects a bare `/logs` offers as a way in. Unread, that
       // screen has nothing to offer on the first visit of every launch — and
@@ -256,23 +269,6 @@ export function Window({
     };
   }, [booted]);
 
-  // Every cluster you are looking at gets probed once, so the rail shows link
-  // state and the status bar shows a version without waiting to be asked. The
-  // effect runs per workspace rather than per render — switching away and back
-  // re-runs it, and the probe store's memory is what keeps it to once each.
-  const workspaceId = workspace.id;
-  useEffect(() => {
-    if (!booted) return;
-    if (!active) return;
-    const byId = new Map(contexts.map((c) => [c.stableId, c]));
-    for (const id of currentWorkspace().clusters) {
-      if (getInfo(id)) continue;
-      const ctx = byId.get(id);
-      if (ctx) void probeCluster(ctx);
-    }
-    // `contexts` rides along because a kubeconfig change replaces them; the
-    // workspace id is the trigger for the switch case.
-  }, [booted, contexts, workspaceId, active]);
 
   /**
    * Which accelerators survive a raised cover, and why one of them does.
@@ -526,7 +522,7 @@ export function Window({
       {active && (
         <Rail contexts={contexts} error={contextsError || undefined} onConnect={() => openTab("/connect")} />
       )}
-      {active && <Nav contexts={contexts} />}
+      {active && activeTabRoute !== "/" && <Nav contexts={contexts} />}
       {/* `min-w-0` as well as `min-h-0`. This column holds the tab strip
           and the screen, and a flex item's implicit `min-width: auto`
           refuses to shrink below its content — so a wide screen widens the
@@ -537,7 +533,10 @@ export function Window({
       <div data-slot="screen-column" className="flex min-h-0 min-w-0 flex-1 flex-col">
         {active && (
           <TabStrip
-            tabs={tabs}
+            tabs={tabs.map(tab => {
+              const context = contexts.find(c => c.name === tab.sub);
+              return context ? { ...tab, sub: getMark(context.stableId, context.name).name } : tab;
+            })}
             activeId={activeId}
             onSelect={activateTab}
             onClose={closeTab}
@@ -548,7 +547,23 @@ export function Window({
           />
         )}
         <div className="relative min-h-0 flex-1">
-          {tabs.map((tab) => (
+          {tabs.map((tab) => {
+            // An editor's target is pinned in its route. Its tab label follows
+            // the rail, so it cannot decide whether the editor's readers are
+            // paused.
+            const pinnedContext = parseEditRoute(tab.route)?.cluster ?? parseNewRoute(tab.route)?.cluster;
+            // Status-bar actions open cluster-following routes without a
+            // `clusterName`. They follow the active cluster and need its pause
+            // gate; app-level tabs never receive one just because it is active.
+            const context = pinnedContext
+              ? contexts.find((c) => c.name === pinnedContext)
+              : tab.sub === undefined
+              ? (isClusterScopedRoute(tab.route) ? activeCtx : undefined)
+              : contexts.find((c) => c.name === tab.sub);
+            // Keep Stop/Detach accessible even on explicitly labelled tabs.
+            // Their submission and creation controls check the actual target.
+            const pausedContext = !keepsManagementWhenPaused(tab.route) && context && workspace.pausedClusters?.includes(context.stableId) ? context : undefined;
+            return (
             <TabSurface key={tab.id} visible={tab.id === activeId}>
               {/* A placeholder tab without a cluster of its own still leaves
                   via the cluster this window is looking at — that is the
@@ -556,6 +571,7 @@ export function Window({
               <Body
                 route={tab.route}
                 clusterName={tab.sub ?? activeCtx?.name}
+                pausedContext={pausedContext}
                 ported={ported}
                 onOpenInClassic={onOpenInClassic}
                 onOpenGallery={onOpenGallery}
@@ -568,7 +584,8 @@ export function Window({
                 onLocked={lockWorkspace}
               />
             </TabSurface>
-          ))}
+            );
+          })}
         </div>
         {/* Not on `/agent`: that screen mounts the dock at the foot of its own
             main column, so its rail is a full-height sibling and uses the

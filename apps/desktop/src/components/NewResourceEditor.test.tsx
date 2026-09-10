@@ -17,6 +17,13 @@ import { NewResourceEditor } from "./NewResourceEditor";
 
 beforeEach(() => applyManifestMock.mockReset());
 
+function StatefulNewResourceEditor(
+  props: Omit<React.ComponentProps<typeof NewResourceEditor>, "draft" | "onDraftChange">,
+) {
+  const [draft, setDraft] = React.useState<React.ComponentProps<typeof NewResourceEditor>["draft"]>();
+  return <NewResourceEditor {...props} draft={draft} onDraftChange={setDraft} />;
+}
+
 describe("NewResourceEditor", () => {
   it("prefills a template and applies it, staying open on success", async () => {
     applyManifestMock.mockResolvedValue({
@@ -24,7 +31,14 @@ describe("NewResourceEditor", () => {
       documents: [{ kind: "Service", name: "my-app", applied: true }],
     });
     const onCreated = vi.fn();
-    render(<NewResourceEditor context="kind-dev" namespace="prod" initialKind="Service" onCreated={onCreated} />);
+    render(
+      <StatefulNewResourceEditor
+        context="kind-dev"
+        namespace="prod"
+        initialKind="Service"
+        onCreated={onCreated}
+      />,
+    );
 
     const editor = (await screen.findByLabelText("New resource YAML")) as HTMLTextAreaElement;
     expect(editor.value).toContain("kind: Service");
@@ -41,8 +55,32 @@ describe("NewResourceEditor", () => {
 
   it("surfaces an apply error", async () => {
     applyManifestMock.mockResolvedValue({ error: "invalid manifest" });
-    render(<NewResourceEditor context="kind-dev" />);
+    render(<StatefulNewResourceEditor context="kind-dev" />);
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
     expect(await screen.findByText(/invalid manifest/)).toBeDefined();
+  });
+
+  it("renders and updates the draft owned by its tab", () => {
+    const onDraftChange = vi.fn();
+    const draft = {
+      template: "Secret",
+      yaml: "apiVersion: v1\nkind: Secret\nmetadata:\n  name: hand-written\n",
+    };
+    render(
+      <NewResourceEditor
+        context="kind-dev"
+        initialKind="Deployment"
+        draft={draft}
+        onDraftChange={onDraftChange}
+      />,
+    );
+
+    const editor = screen.getByLabelText("New resource YAML") as HTMLTextAreaElement;
+    expect(editor.value).toBe(draft.yaml);
+    fireEvent.change(editor, { target: { value: `${draft.yaml}stringData:\n  token: changed\n` } });
+    expect(onDraftChange).toHaveBeenCalledWith({
+      template: "Secret",
+      yaml: `${draft.yaml}stringData:\n  token: changed\n`,
+    });
   });
 });

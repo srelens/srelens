@@ -213,6 +213,20 @@ export async function podsForSelector(
   }
 }
 
+/** Pods scheduled on one node across all namespaces via `k8s.podsOnNode`. */
+export async function podsOnNode(
+  context: string,
+  node: string,
+  invoke: Invoker = invokeCapability,
+): Promise<PodsOutcome> {
+  try {
+    const out = await invoke<{ pods: PodSummary[] }>("k8s.podsOnNode", { context, node });
+    return { pods: out.pods };
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
 /** Per-pod CPU/memory usage in a namespace via `k8s.podMetrics`. */
 export async function podMetrics(
   context: string,
