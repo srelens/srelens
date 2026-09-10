@@ -103,7 +103,7 @@ export const podColumns: Column<PodRow>[] = [
     key: "node",
     header: "Node",
     sortable: true,
-    render: (p) => <span className="font-mono">{p.node || "—"}</span>,
+    render: (p) => p.node || "—",
   },
   { key: "ready", header: "Ready", align: "end" },
   {

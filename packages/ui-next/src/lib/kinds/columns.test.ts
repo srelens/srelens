@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import type { ReactElement } from "react";
+import { createElement, type ReactElement } from "react";
 import { render } from "@testing-library/react";
-import { filterTableData } from "@srelens/ui-kit";
+import { Table, filterTableData } from "@srelens/ui-kit";
 import { cronJobStatus, jobStatus, scaledStatus } from "@srelens/core";
 import {
   podColumns,
@@ -230,6 +230,18 @@ describe("pod columns", () => {
   it("falls back to an em dash for a pod with no containers, like the other optional text columns", () => {
     const image = podColumns.find((c) => c.key === "image")!;
     expect(image.render!(pod({ image: "" }))).toBe("—");
+  });
+
+  it("uses the same UI typography for pod identifiers and preserves unscheduled nodes", () => {
+    const { container } = render(createElement(Table<PodRow>, {
+      columns: podColumns,
+      data: [pod({ node: "worker-15-k8s.example.test" }), pod({ name: "pending", node: "" })],
+      getRowKey: (row) => row.name,
+    }));
+    const rows = container.querySelectorAll("tbody tr");
+    expect(rows[0].textContent).toContain("worker-15-k8s.example.test");
+    expect(rows[0].querySelector(".font-mono, .code")).toBeNull();
+    expect(rows[1].querySelectorAll("td")[2].textContent).toBe("—");
   });
 
   it("keeps Node in the table contract so a Node detail can open this list prefiltered", () => {

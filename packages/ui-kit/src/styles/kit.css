@@ -1417,10 +1417,12 @@
   }
   button.status-seg:hover { background: var(--field); color: var(--ink); }
 
+  /* Keep the divider on the pane edge; an outward offset draws over the
+     neighboring pane and breaks the junction with its horizontal rules. */
   .resize-handle {
     position: absolute;
     top: 0;
-    right: -2px;
+    right: 0;
     width: 5px;
     height: 100%;
     cursor: col-resize;
@@ -1436,7 +1438,7 @@
      landed in `utilities` would win and lose against the wrong things. */
   .resize-handle[data-edge="left"] {
     right: auto;
-    left: -2px;
+    left: 0;
     border-right: none;
     border-left: 1px solid var(--rule);
   }

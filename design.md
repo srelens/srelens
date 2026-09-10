@@ -92,7 +92,9 @@ They are design targets, not a declaration of whole-application WCAG conformance
 ## Typography and weight
 
 Use the existing system UI face for navigation and resource data. Use monospace
-for manifests, commands and machine identifiers where alignment helps. Do not
+for manifests, code and commands where alignment helps. Resource-table values,
+including node names, namespaces and images, share the UI font; an identifier
+is not a reason to switch typefaces. Keep these values single-line. Do not
 uppercase cluster names or identifiers: preserve their case and spelling.
 
 | Role | Size at 100% | Weight | Use |
