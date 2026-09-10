@@ -433,11 +433,12 @@ describe("TabStrip with nothing open", () => {
 
 describe("tab navigation enhancements", () => {
   it("shows full identity on keyboard focus and dismisses it with Escape", async () => {
-    setup({ tabs: [{ id: "one", title: "ConfigMaps", sub: "short", context: "long-cluster-context", detail: "ConfigMap · monitoring" }] });
+    const title = "production-monitoring-collector-configuration";
+    setup({ tabs: [{ id: "one", title, sub: "short", context: "long-cluster-context", detail: "ConfigMap · monitoring" }] });
     await userEvent.tab();
     expect((await screen.findByRole("tooltip")).textContent).toContain("long-cluster-context");
     expect(screen.getByRole("tooltip").textContent).toContain("ConfigMap · monitoring");
-    expect(screen.getByRole("tooltip").textContent).not.toContain("ConfigMaps");
+    expect(screen.getByRole("tooltip").textContent).toContain(title);
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("tooltip")).toBeNull();
   });

@@ -429,7 +429,7 @@ export function TabStrip({
           );
 
           const hinted = <Tooltip key={tab.id} side="bottom" disabled={dragging} label={<div className="tab-tooltip">
-            {!filled(tab.context ?? tab.sub) && !filled(tab.detail) && tab.title}
+            <div>{tab.title}</div>
             {filled(tab.context ?? tab.sub) && <div>{tab.context ?? tab.sub}</div>}
             {filled(tab.detail) && <div>{tab.detail}</div>}
           </div>}>{node}</Tooltip>;

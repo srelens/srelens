@@ -27,8 +27,8 @@ pair, not proof that every screen is accessible.
 - The node list displays CPU usage in cores, with up to three decimal places
   below one core and two above it; sorting still uses raw millicores.
 - The overview has one title strip. Server version remains in Control plane.
-  Tab hints show additional context/detail without repeating the visible title,
-  and keep long identifiers on one horizontally scrollable line.
+  Compact tab hints retain the full title alongside context/detail so truncated
+  resource names remain readable, with each identifier horizontally scrollable.
 
 Verified in a local browser harness with long node names, mixed versions,
 sub-core CPU usage, dark theme, and tab hover. This complements component tests;
