@@ -33,6 +33,7 @@ import { openTab, setActiveCluster, switchWorkspace, useTabs } from "../lib/tabs
 import { logsRoute } from "../screens/Logs";
 import { Transcript } from "../screens/agent/Transcript";
 import { useWorkspaceSealed } from "./LockGate";
+import { isContextPaused } from "../lib/pausedContext";
 
 /** §F's four palette groups, in the order the mock lists them. */
 const GROUPS: readonly CommandGroup[] = ["Action", "Go", "Cluster", "Workspace"];
@@ -268,6 +269,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
   // `askAgent` will be given.
   const askAbout = shown?.about ?? about;
   const askCluster = askAbout.cluster || context;
+  const askPaused = contexts.some(c => c.name === askCluster && workspace.pausedClusters?.includes(c.stableId));
   const askScope = shown ? contextLabelFor(shown.route, shown.about.cluster) : scope;
 
   const deps = useMemo<CommandDeps>(
@@ -363,6 +365,12 @@ export function Console({ fullView }: { fullView?: boolean }) {
       return false;
     }
     setNoCluster(false);
+    // A selected conversation can target a different cluster from the rail.
+    // Check that actual target at submission time, before consuming the draft.
+    if (isContextPaused(askCluster)) {
+      setOpen(true);
+      return false;
+    }
     return true;
   }
 
@@ -688,6 +696,11 @@ export function Console({ fullView }: { fullView?: boolean }) {
           {noCluster && (
             <span className="chip" style={{ color: "var(--sev)" }}>
               <span>No cluster is active — connect one before asking</span>
+            </span>
+          )}
+          {askPaused && (
+            <span className="chip">
+              <span>Reconnect {askCluster} to send a question</span>
             </span>
           )}
           {reading > 0 && (

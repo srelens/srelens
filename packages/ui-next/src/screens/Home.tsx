@@ -103,7 +103,7 @@ function ClusterRow({ context, link, paused }: { context: ClusterContext; link?:
         <span className="block truncate font-medium">{mark.name}</span>
         <span className="block truncate text-xs text-muted" title={secondary}>{secondary}</span>
       </span>
-      <StatusPill status={status} kind={link?.state === "connected" ? "success" : link?.state === "connecting" ? "info" : link?.state === "error" ? "danger" : "neutral"} />
+      <StatusPill status={status} kind={paused ? "neutral" : link?.state === "connected" ? "success" : link?.state === "connecting" ? "info" : link?.state === "error" ? "danger" : "neutral"} />
       <span aria-hidden className="text-muted">→</span>
     </button>
   </li>;

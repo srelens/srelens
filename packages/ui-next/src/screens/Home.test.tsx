@@ -6,7 +6,7 @@ import { screenFor } from "../lib/routes";
 import { Home } from "./Home";
 import { resetContexts, setContexts } from "../lib/clusters";
 import { defaultMark, loadMarks, setMark } from "../lib/marks";
-import { activeCluster, activeRoute, currentWorkspace, setState } from "../lib/tabsStore";
+import { activeCluster, activeRoute, currentWorkspace, setState, setClusterPaused } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 import { resetView, setLink } from "../lib/workspace";
 
@@ -25,6 +25,15 @@ beforeEach(() => {
 });
 
 describe("Home", () => {
+  it("uses a neutral status for a paused cluster with a retained successful probe", () => {
+    setContexts([PROD]);
+    setState(defaultState([PROD]));
+    setLink(PROD.stableId, "connected");
+    setClusterPaused(currentWorkspace().id, PROD.stableId, true);
+    render(<Home />);
+    const row = screen.getByRole("button", { name: "Open cluster prod — Paused" });
+    expect(row.querySelector(".status")?.getAttribute("data-kind")).toBe("neutral");
+  });
   it("offers a working first step when no clusters are configured", async () => {
     setContexts([]);
     render(<Home />);
