@@ -14,6 +14,7 @@ import { useConsole } from "../console";
 import { useActiveContext } from "../lib/clusters";
 import { ClusterMovedAlert } from "../lib/clusterMoved";
 import { useTabs } from "../lib/tabsStore";
+import { useDismissOnPause } from "../lib/pausedContext";
 import {
   endSession,
   getSessions,
@@ -209,6 +210,7 @@ export function Terminals(_props: { route: string }) {
    * `ResourceMenu`'s `Open shell` pinned its own pick for the same reason.
    */
   const [newSession, setNewSession] = useState<{ context: string; namespace: string } | null>(null);
+  const targetPaused = useDismissOnPause(newSession?.context, () => setNewSession(null));
 
   /**
    * A session started anywhere — this screen's menu, or the resource row
@@ -278,7 +280,7 @@ export function Terminals(_props: { route: string }) {
         </>
       }
     >
-      {newSession && (
+      {newSession && !targetPaused && (
         <NewSessionMenu
           // The cluster that was in focus when `New session` was pressed, not
           // the active session's and not the one in focus now: a new session is

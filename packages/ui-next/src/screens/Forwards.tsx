@@ -30,6 +30,7 @@ import {
 } from "@srelens/ui-kit";
 import { useActiveContext } from "../lib/clusters";
 import { useTabs } from "../lib/tabsStore";
+import { useDismissOnPause } from "../lib/pausedContext";
 import { FailureAlert, FailureWord } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { formatBytes } from "../lib/numbers";
@@ -267,6 +268,7 @@ export function Forwards(_props: { route: string }) {
    * for exactly that reason (see `Forwarding` there); this is the other door.
    */
   const [newForward, setNewForward] = useState<{ context: string; namespace?: string } | null>(null);
+  const targetPaused = useDismissOnPause(newForward?.context, () => setNewForward(null));
   const { workspace } = useTabs();
   const paused = cluster !== undefined && workspace.pausedClusters?.includes(cluster.stableId) === true;
 
@@ -423,7 +425,7 @@ export function Forwards(_props: { route: string }) {
     <Screen title="Port forwards" eyebrow="all clusters" actions={newForwardButton} fill>
       {/* Beside the body rather than inside either branch of it, so the dialog
           opens the same from a populated screen and an empty one. */}
-      {newForward && (
+      {newForward && !targetPaused && (
         <NewForwardDialog
           // The cluster that was in focus when the dialog was asked for, not
           // the one in focus now. A forward is made in one cluster even though
