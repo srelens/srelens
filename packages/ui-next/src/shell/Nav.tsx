@@ -76,20 +76,21 @@ export function Nav({ contexts }: NavProps) {
 
   // Subscribes the sidebar to the strip: which row is highlighted is a fact
   // about the active tab, and that changes from a dozen places that are not here.
-  const { tabs, activeId } = useTabs();
+  const { tabs, activeId, workspace } = useTabs();
   const route = tabs.find((t) => t.id === activeId)?.route ?? "/";
 
   const name = ctx?.name;
+  const paused = ctx !== null && (workspace.pausedClusters ?? []).includes(ctx.stableId);
   const discovery = useResource<CrdRef[]>(
     async () => {
-      if (!name) return [];
+      if (!name || paused) return [];
       const out = await listCrds(name);
       // `listCrds` reports failure in the result rather than by rejecting, and
       // an empty tree is not the same news as "we were not allowed to look".
       if (out.error) throw new Error(out.error);
       return out.crds ?? [];
     },
-    [name],
+    [name, paused],
   );
   const crds = useMemo(() => discovery.data ?? [], [discovery.data]);
 
@@ -118,7 +119,9 @@ export function Nav({ contexts }: NavProps) {
     [crds, crdChildren],
   );
 
-  const link = ctx ? (view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN) : UNKNOWN;
+  const link = ctx
+    ? (paused ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)
+    : UNKNOWN;
 
   const navigationWidth = useNavigationWidth();
 

@@ -263,13 +263,21 @@ describe("Connections", () => {
     expect(screen.getAllByText("no reading").length).toBe(2);
   });
 
+  it("does not contact every configured cluster when the screen opens", async () => {
+    open();
+    await screen.findByText("prod-eu");
+    expect(core.connectCluster).not.toHaveBeenCalled();
+  });
+
   it("one cluster that does not answer does not hold up the others", async () => {
     core.connectCluster.mockImplementation(async (name: string) => {
       if (name === "prod-eu") return never<ClusterInfo>();
       clock += LATENCY[name] ?? 0;
       return REACHABLE[name];
     });
+    const user = userEvent.setup();
     open();
+    await user.click(refreshAll());
     // The reachable one's own round trip, while the other is still out.
     expect(await screen.findByText("12 ms")).toBeTruthy();
     expect(within(rowFor("staging-eu")).getByText("reachable")).toBeTruthy();
@@ -282,7 +290,9 @@ describe("Connections", () => {
    * different round trips that answer them.
    */
   it("fills in the control-plane facts once a cluster has answered", async () => {
+    const user = userEvent.setup();
     open();
+    await user.click(refreshAll());
     expect(await screen.findByText("gke · v1.30.6 · europe-west4")).toBeTruthy();
     expect(core.clusterFacts).toHaveBeenCalledWith("staging-eu");
   });
@@ -293,7 +303,9 @@ describe("Connections", () => {
       reachable: false,
       error: "no route to host",
     }));
+    const user = userEvent.setup();
     open();
+    await user.click(refreshAll());
     await waitFor(() => expect(screen.getAllByText("unreachable").length).toBe(2));
     expect(core.clusterFacts).not.toHaveBeenCalled();
   });
@@ -403,6 +415,7 @@ describe("Connections", () => {
   it("re-lists and re-reads every cluster on Refresh all", async () => {
     const user = userEvent.setup();
     open();
+    await user.click(refreshAll());
     await waitFor(() => expect(screen.getByText("12 ms")).toBeTruthy());
     expect(core.connectCluster).toHaveBeenCalledTimes(2);
 
@@ -432,6 +445,19 @@ describe("Connections", () => {
     expect(core.clusterFacts.mock.calls.filter((c) => c[0] === "staging-eu").length).toBe(2);
   });
 
+  it("shows a paused cluster as paused instead of its retained reading", async () => {
+    const user = userEvent.setup();
+    open();
+    await user.click(refreshAll());
+    await waitFor(() => expect(within(rowFor("prod-eu")).getByText("reachable")).toBeTruthy());
+
+    act(() => store.setClusterPaused(store.currentWorkspace().id, PROD.stableId, true));
+
+    await waitFor(() => expect(within(rowFor("prod-eu")).getByText("paused")).toBeTruthy());
+    expect(within(rowFor("prod-eu")).queryByText("41 ms")).toBeNull();
+    expect(detailFor(PROD)).toBeNull();
+  });
+
   /**
    * **The sequence guard.** A reader who hits `Refresh all` twice must be left
    * looking at the second answer, whatever order the two listings come back in.
@@ -443,9 +469,9 @@ describe("Connections", () => {
       .mockResolvedValueOnce({ contexts: [PROD] });
     const user = userEvent.setup();
     open();
+    await user.click(refreshAll());
     await waitFor(() => expect(drawn().length).toBe(2));
 
-    await user.click(refreshAll());
     await user.click(refreshAll());
     await waitFor(() => expect(drawn()).toEqual(["prod-eu"]));
 
@@ -481,6 +507,7 @@ describe("Connections", () => {
     });
     const user = userEvent.setup();
     open();
+    await user.click(refreshAll());
     await waitFor(() => expect(drawn().length).toBe(2));
 
     // The new listing lands while staging is still connecting. Waited on prod's
@@ -526,7 +553,9 @@ describe("Connections", () => {
     core.clusterFacts.mockImplementation(async (context: string) =>
       context === "staging-eu" && ++asked === 1 ? slow.promise : facts({ context }),
     );
+    const user = userEvent.setup();
     open();
+    await user.click(refreshAll());
     await waitFor(() => expect(core.clusterFacts).toHaveBeenCalledWith("staging-eu"));
 
     // Somebody else lists the contexts. No `reload()`, no re-read flag — just a
@@ -553,7 +582,9 @@ describe("Connections", () => {
    */
   it("files a cluster's facts under its stableId, not its name", async () => {
     expect(STAGING.stableId).not.toBe(STAGING.name);
+    const user = userEvent.setup();
     open();
+    await user.click(refreshAll());
     await waitFor(() => expect(detailFor(STAGING)).toBe("gke · v1.30.6 · europe-west4"));
     // The capability takes a context name, and that is what it was handed.
     expect(core.clusterFacts).toHaveBeenCalledWith(STAGING.name);
@@ -576,6 +607,7 @@ describe("Connections", () => {
     });
     const user = userEvent.setup();
     open();
+    await user.click(refreshAll());
     await waitFor(() => expect(screen.getByText("12 ms")).toBeTruthy());
 
     await user.click(refreshAll());

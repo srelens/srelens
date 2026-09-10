@@ -1,7 +1,18 @@
-import { screenFor } from "../lib/routes";
+import type { ClusterContext } from "@srelens/core";
+import { Activity } from "react";
+import { Button, EmptyState, Screen as AppScreen } from "@srelens/ui-kit";
+import { describe, screenFor } from "../lib/routes";
+import { reconnectCluster } from "../lib/openCluster";
+import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
 import { Placeholder, type PlaceholderProps } from "./Placeholder";
 
 export interface BodyProps extends PlaceholderProps {
+  /**
+   * The cluster pinned to this tab when it has been paused. Kept at the router
+   * boundary so even hidden, mounted tabs cannot keep capability readers
+   * alive after their cluster is disconnected.
+   */
+  pausedContext?: ClusterContext;
   /**
    * Raise the lock surface over the window. Forwarded to the screen untouched
    * — see `RoutedScreenProps.onLocked` for what the contract is and why it is
@@ -16,9 +27,25 @@ export interface BodyProps extends PlaceholderProps {
  * This is the whole of the router. Everything about which screens exist lives
  * in `screenFor`; this only asks.
  */
-export function Body({ onLocked, ...props }: BodyProps) {
+export function Body({ onLocked, pausedContext, ...props }: BodyProps) {
+  const preserveDraft = !!parseEditRoute(props.route) || !!parseNewRoute(props.route) || props.route === "/new";
+  let pausedView = null;
+  if (pausedContext) {
+    const title = describe(props.route, pausedContext.name).title;
+    pausedView = (
+      <AppScreen title={title} eyebrow={pausedContext.name} fill>
+        <EmptyState
+          title={`${pausedContext.name} is paused`}
+          hint="Reconnect this cluster to resume this view."
+          action={<Button variant="primary" onClick={() => reconnectCluster(pausedContext)}>Reconnect</Button>}
+          className="flex-1"
+        />
+      </AppScreen>
+    );
+  }
+  if (pausedContext && !preserveDraft) return pausedView;
   const Screen = screenFor(props.route);
-  return Screen ? (
+  const content = Screen ? (
     <Screen
       route={props.route}
       // The same two the Placeholder beside it consumes, down the same path —
@@ -39,4 +66,10 @@ export function Body({ onLocked, ...props }: BodyProps) {
   ) : (
     <Placeholder {...props} />
   );
+  // Hidden Activity retains React state but cleans up effects and hides DOM.
+  // A paused editor therefore keeps its draft without keeping readers alive.
+  return preserveDraft ? <>
+    <Activity mode={pausedContext ? "hidden" : "visible"}>{content}</Activity>
+    {pausedView}
+  </> : content;
 }

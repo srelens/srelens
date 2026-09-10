@@ -313,6 +313,15 @@ describe("workspaces", () => {
     store.setWorkspaceClusters(id, ["x", "y"]);
     expect(store.currentWorkspace().clusters).toEqual(["x", "y"]);
   });
+
+  it("keeps a pause in its workspace and clears it when that cluster is removed", () => {
+    const id = store.getState().currentId;
+    store.setWorkspaceClusters(id, ["x", "y"]);
+    store.setClusterPaused(id, "x", true);
+    expect(store.isClusterPaused("x")).toBe(true);
+    store.setWorkspaceClusters(id, ["y"]);
+    expect(store.currentWorkspace().pausedClusters).toEqual([]);
+  });
 });
 
 describe("setState", () => {
@@ -403,7 +412,7 @@ describe("activeCluster", () => {
     expect(tabs.filter((t) => t.sub === "prod-eu")).toEqual([]);
     expect(subFor("/overview")).toBe("staging-eu");
     expect(subFor("/k/pods")).toBe("staging-eu");
-    expect(subFor("/")).toBe("staging-eu");
+    expect(subFor("/")).toBeUndefined();
     // A stableId on the strip would satisfy "no longer prod-eu" and be the
     // same bug wearing the other name.
     expect(tabs.filter((t) => t.sub === "id-stage")).toEqual([]);

@@ -93,8 +93,15 @@ export function useWorkspaceView(): WorkspaceView {
   return useSyncExternalStore(subscribe, getView, getView);
 }
 
-export function setLink(id: string, state: LinkState, error?: string): void {
+export function setLink(id: string, state: LinkState | undefined, error?: string): void {
   const current = view.links[id];
+  if (state === undefined) {
+    if (!current) return;
+    const links = { ...view.links };
+    delete links[id];
+    emit({ ...view, links });
+    return;
+  }
   if (current && current.state === state && current.error === error) return;
   const entry = error === undefined ? { state } : { state, error };
   emit({ ...view, links: { ...view.links, [id]: entry } });
