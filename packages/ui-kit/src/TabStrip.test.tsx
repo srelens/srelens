@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import { useState, type FormEvent } from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
@@ -513,4 +515,13 @@ it("rejects a tab drag that began on its close button and permits the next body 
   expect(fireEvent.dragStart(source, { dataTransfer })).toBe(true);
   fireEvent.drop(tab("Pods"), { clientX: 0 });
   expect(onMove).toHaveBeenCalledWith("shell", 0);
+});
+
+
+it("keeps long tooltip identifiers on one horizontally scrollable line", () => {
+  const css = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  const rule = css.match(/\.tab-tooltip\s*\{([^}]+)\}/)?.[1] ?? "";
+  expect(rule).toMatch(/white-space:\s*nowrap/);
+  expect(rule).toMatch(/overflow-x:\s*auto/);
+  expect(rule).not.toMatch(/overflow-wrap:\s*anywhere/);
 });

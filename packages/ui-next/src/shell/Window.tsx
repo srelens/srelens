@@ -538,7 +538,8 @@ export function Window({
               const context = contexts.find(c => c.name === tab.sub);
               return { ...tab,
                 sub: context ? getMark(context.stableId, context.name).name : tab.sub,
-                context: parseEditRoute(tab.route)?.cluster ?? parseNewRoute(tab.route)?.cluster ?? tab.sub,
+                context: parseEditRoute(tab.route)?.cluster ?? parseNewRoute(tab.route)?.cluster ?? tab.sub
+                  ?? (isClusterScopedRoute(tab.route) ? activeCtx?.name : undefined),
                 detail: tabDetail(tab.route),
               };
             })}
