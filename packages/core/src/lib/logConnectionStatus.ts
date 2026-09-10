@@ -1,15 +1,15 @@
 /**
  * A log stream's connection state, turned into a word and a tone — the ONE
- * place that does this, so a screen never hand-pairs one of these four states
+ * place that does this, so a screen never hand-pairs one of these states
  * with a colour itself.
  *
  * Core has no other vocabulary for this: `k8sStatus.ts` and `k8sHealth.ts`
  * cover Kubernetes *resources* — a Pod's phase, a Node's readiness — and a
  * stream's connection is not one. `startLogStream` (`./logsStream`) only ever
- * reports `LogStatus` ("live" | "reconnecting") once a connection exists;
+ * reports `LogStatus` ("live" | "reconnecting" | "completed") once a connection exists;
  * "connecting" (before the first status arrives) and "error" (the stream
  * gave up) are states only the caller that opened the stream can observe, so
- * this module's own union names all four rather than importing a narrower
+ * this module's own union names all states rather than importing a narrower
  * one and widening it ad hoc.
  *
  * Shaped after `StatusVerdict` in `k8sStatus.ts`: the word and the tone are
@@ -46,6 +46,8 @@ export function logConnectionStatus(status: LogConnectionStatus): LogConnectionV
       return CONNECTING;
     case "live":
       return LIVE;
+    case "completed":
+      return { label: "Completed", health: "neutral" };
     case "reconnecting":
       return RECONNECTING;
     case "error":

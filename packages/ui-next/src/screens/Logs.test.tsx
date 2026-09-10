@@ -31,6 +31,7 @@ const h = vi.hoisted(() => {
       /** Per-target truth: how many are streaming, how many are down, of how
        *  many altogether. */
       live: 4,
+      completed: 0,
       reconnecting: 0,
       total: 4,
       restarts: 0,
@@ -88,6 +89,7 @@ vi.mock("../lib/logStream", async () => {
         paused: h.state.paused,
         pendingWhilePaused: h.state.pending,
         liveTargets: h.state.live,
+        completedTargets: h.state.completed,
         reconnectingTargets: h.state.reconnecting,
         totalTargets: h.state.total,
         togglePause: () => {
@@ -237,6 +239,7 @@ beforeEach(() => {
     paused: false,
     pending: 0,
     live: 4,
+    completed: 0,
     reconnecting: 0,
     total: 4,
     restarts: 0,
@@ -526,6 +529,13 @@ describe("Logs", () => {
     push(...LINES);
     await userEvent.selectOptions(screen.getByRole("combobox", { name: /container/i }), "otel-sidecar");
     expect(rendered(region).map((r) => r.split("|")[3])).toEqual(["warn exporter queue is full"]);
+  });
+
+  it("reports completed sources separately from the live count", async () => {
+    h.state.live = 3;
+    h.state.completed = 1;
+    await (draw(), body());
+    expect(screen.getByText("Following — 3 of 4 streaming, 1 completed")).toBeDefined();
   });
 
   it("shows init-container lines and fetches that container's previous logs", async () => {

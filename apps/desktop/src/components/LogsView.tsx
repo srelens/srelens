@@ -301,6 +301,7 @@ export function LogsView({
     setStreamError("");
     setLoading(true);
     setStreamStatus("connecting");
+    const statuses = new Map<string, LogStatus>();
     void startLogStream(
       context,
       namespace,
@@ -310,8 +311,13 @@ export function LogsView({
         if (next.length > MAX_LINES) next.splice(0, next.length - MAX_LINES);
         setBuffer(next);
       },
-      (status) => {
-        if (!stopped) setStreamStatus(status);
+      (status, source) => {
+        if (stopped) return;
+        statuses.set(source, status);
+        const values = [...statuses.values()];
+        setStreamStatus(values.includes("reconnecting") ? "reconnecting"
+          : statuses.size < targets.length ? "connecting"
+          : values.every((s) => s === "completed") ? "completed" : "live");
       },
       { timestamps, sinceSeconds, tailLines },
     ).then((s) => {
@@ -514,6 +520,9 @@ export function LogsView({
           {loading && <Spinner label="Loading logs" />}
           {follow && streamStatus === "reconnecting" && (
             <span className="text-amber-600 dark:text-amber-400">reconnecting…</span>
+          )}
+          {follow && streamStatus === "completed" && (
+            <span className="text-muted-foreground">completed</span>
           )}
           {follow && streamStatus === "connecting" && (
             <span className="text-muted-foreground">connecting…</span>
