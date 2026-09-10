@@ -147,7 +147,7 @@ function bodyPixels(percent: number, nativeZoom = true): number {
   } catch {
     // No stylesheet attached — a unit test, or a first paint.
   }
-  return Math.round(base * (nativeZoom ? uiScaleFactor(percent) : percent / 100));
+  return Math.round(base * (nativeZoom ? uiScaleFactor(percent, "next") : percent / 100));
 }
 
 /** The current row height, when a stylesheet is attached to say. */
@@ -196,9 +196,9 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
   // three buttons both go through `Chrome`'s `zoom`, which writes core's
   // setting and asks the webview to scale. Native zoom does move the layout
   // viewport, though, so a resize is the one signal that reaches here.
-  const [scale, setScale] = useState(getUiScale);
+  const [scale, setScale] = useState(() => getUiScale("next"));
   useEffect(() => {
-    const reread = () => setScale(getUiScale());
+    const reread = () => setScale(getUiScale("next"));
     window.addEventListener("resize", reread);
     return () => window.removeEventListener("resize", reread);
   }, []);
@@ -229,9 +229,9 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
   function pickScale(percent: number) {
     // `setUiScale` clamps and returns what it stored, so what is applied and
     // what is shown are both the stored value rather than the asked-for one.
-    const stored = setUiScale(percent);
+    const stored = setUiScale(percent, "next");
     setScale(stored);
-    applyUiScale(stored);
+    applyUiScale(stored, "next");
   }
 
   return (

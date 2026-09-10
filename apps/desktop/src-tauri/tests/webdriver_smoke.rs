@@ -305,33 +305,6 @@ async fn run_flow(driver: &WebDriver, context: &str, full: bool) -> Result<(), F
         .await?;
 
     // ---- 2. Land, and open the kind context from the landing page.
-    // Keep WebKitWebDriver's pointer coordinates at 1:1. With native zoom,
-    // an element click can succeed without hitting the target (the failure
-    // screenshot stays on Home). This smoke tests real pointer interactions
-    // and the cluster bridge; zoom factors have their own frontend tests.
-    driver
-        .query(By::Css(&format!("[aria-label='Open context {context}']")))
-        .wait(Duration::from_secs(60), Duration::from_millis(500))
-        .first()
-        .await?;
-    let zoom = driver
-        .execute_async(
-            r#"
-            const done = arguments[arguments.length - 1];
-            const api = window.__TAURI_INTERNALS__;
-            api.invoke('plugin:webview|set_webview_zoom', {
-                label: api.metadata.currentWebview.label, value: 1
-            }).then(
-                () => requestAnimationFrame(() => requestAnimationFrame(() => done(null))),
-                error => done(String(error))
-            );
-            "#,
-            vec![],
-        )
-        .await?;
-    if !zoom.json().is_null() {
-        return Err(format!("could not set smoke viewport zoom: {}", zoom.json()).into());
-    }
     click(driver, By::Css(&format!("[aria-label='Open context {context}']")), 60).await?;
 
     // ---- 3. Browse pods. Opening a context lands on Overview, so only the

@@ -427,23 +427,22 @@ describe("SettingsView", () => {
     const slider = screen.getByRole("slider", { name: "Interface scale in percent" });
     fireEvent.change(slider, { target: { value: "120" } });
     // Native webview zoom, not a CSS knob — the stylesheet is px-based.
-    // Displayed percentages are relative to the new 1.1 native baseline.
-    expect(transportMocks.setWebviewZoom).toHaveBeenCalledWith(1.32);
-    expect(localStorage.getItem("srelens.uiScale")).toBe("132");
+    expect(transportMocks.setWebviewZoom).toHaveBeenCalledWith(1.2);
+    expect(localStorage.getItem("srelens.uiScale")).toBe("120");
 
     // The steppers move one step and stay in sync with the slider.
     fireEvent.click(screen.getByRole("button", { name: "Increase interface scale" }));
     expect((slider as HTMLInputElement).value).toBe("130");
-    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(1.43);
+    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(1.3);
     fireEvent.click(screen.getByRole("button", { name: "Decrease interface scale" }));
     expect((slider as HTMLInputElement).value).toBe("120");
 
     fireEvent.click(screen.getByRole("button", { name: "Reset" }));
     expect((slider as HTMLInputElement).value).toBe("100");
-    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(1.1);
+    expect(transportMocks.setWebviewZoom).toHaveBeenLastCalledWith(1);
 
     // The zoom shortcuts announce their changes; the open slider follows.
-    localStorage.setItem("srelens.uiScale", "143");
+    localStorage.setItem("srelens.uiScale", "130");
     fireEvent(window, new Event("srelens:uiscale"));
     expect((slider as HTMLInputElement).value).toBe("130");
   });
