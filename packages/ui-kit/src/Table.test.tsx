@@ -412,6 +412,9 @@ describe("Table", () => {
     );
     const selected = screen.getByText("web-1").closest("tr");
     expect(selected?.getAttribute("aria-selected")).toBe("true");
+    expect(selected?.getAttribute("data-state")).toBe("selected");
+    const css = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+    expect(css).toMatch(/\.tbl tbody tr\[data-state="selected"\]\s*\{\s*background: var\(--accent-wash\)/);
   });
 
   it("shows empty text when there is no data", () => {

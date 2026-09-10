@@ -66,9 +66,9 @@
   /* --- the label voice ----------------------------------------- */
   .eyebrow {
     font-family: var(--font-mono);
-    font-size: 0.625rem;
+    font-size: var(--text-meta);
     font-weight: 500;
-    letter-spacing: 0.14em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--ink-muted);
   }
@@ -179,7 +179,7 @@
     border-color: var(--accent);
     color: var(--accent-ink);
   }
-  .btn-accent:hover { background: var(--accent); border-color: var(--accent); filter: brightness(1.08); }
+  .btn-accent:hover { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); box-shadow: inset 0 0 0 1px var(--accent-ink); }
   .btn-danger { color: var(--sev); border-color: color-mix(in srgb, var(--sev) 32%, transparent); }
   .btn-danger:hover { background: var(--sev-wash); border-color: var(--sev); color: var(--sev); }
 
@@ -227,7 +227,7 @@
     padding: 0.35rem 0.7rem;
     background: var(--surface);
     border-bottom: 1px solid var(--rule);
-    font-size: 0.625rem;
+    font-size: var(--text-meta);
     font-weight: 600;
     letter-spacing: 0.07em;
     text-transform: uppercase;
@@ -243,7 +243,8 @@
   .tbl tbody tr:last-child { border-bottom: 0; }
   .tbl tbody tr:hover { background: var(--surface-sunk); }
   .tbl tbody tr:hover .row-ask { opacity: 1; }
-  .tbl tbody tr[data-selected="true"] { background: var(--accent-wash); }
+  .tbl tbody tr[data-selected="true"],
+  .tbl tbody tr[data-state="selected"] { background: var(--accent-wash); }
   /* Tabular figures, because these cells hold live numbers. CPU, MEMORY,
      RESTARTS and AGE refresh on a poll while the reader is looking at the list,
      and `--font-sans` (system-ui) spaces its digits proportionally: measured at
@@ -254,7 +255,7 @@
   .tbl td {
     padding: var(--pad-y) 0.7rem;
     height: var(--row-h);
-    font-size: 0.8125rem;
+    font-size: var(--text-body);
     vertical-align: middle;
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
@@ -325,7 +326,7 @@
   .tbl-group th {
     padding: 0.5rem 0.7rem 0.3rem;
     border-bottom: 1px solid var(--rule);
-    font-size: 0.625rem;
+    font-size: var(--text-meta);
     font-weight: 600;
     letter-spacing: 0.07em;
     text-transform: uppercase;
@@ -1288,9 +1289,9 @@
   .tab[data-preview="true"] { font-style: italic; }
   .tab-sub {
     font-family: var(--font-mono);
-    font-size: 0.5625rem;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    font-size: var(--text-meta);
+    letter-spacing: 0.02em;
+    font-weight: var(--weight-medium);
     color: var(--ink-faint);
   }
   .tab-close {
@@ -1367,8 +1368,8 @@
     border-bottom: 1px solid var(--rule);
   }
   .toolbar-title {
-    font-size: 0.8125rem;
-    font-weight: 600;
+    font-size: var(--text-body);
+    font-weight: var(--weight-semibold);
   }
 
   .statusbar {
@@ -1408,9 +1409,9 @@
     padding: 0 0.4rem;
     border-radius: 4px;
     font-family: var(--font-mono);
-    font-size: 0.5625rem;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
+    font-size: var(--text-meta);
+    letter-spacing: 0.02em;
+    font-weight: var(--weight-medium);
     color: var(--ink-muted);
     white-space: nowrap;
   }
