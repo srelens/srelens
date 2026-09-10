@@ -29,6 +29,7 @@ import {
   type StatusKind,
 } from "@srelens/ui-kit";
 import { useActiveContext } from "../lib/clusters";
+import { useTabs } from "../lib/tabsStore";
 import { FailureAlert, FailureWord } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { formatBytes } from "../lib/numbers";
@@ -266,6 +267,8 @@ export function Forwards(_props: { route: string }) {
    * for exactly that reason (see `Forwarding` there); this is the other door.
    */
   const [newForward, setNewForward] = useState<{ context: string; namespace?: string } | null>(null);
+  const { workspace } = useTabs();
+  const paused = cluster !== undefined && workspace.pausedClusters?.includes(cluster.stableId) === true;
 
   /**
    * What the dialog says, and asks again, when the rail moves out from under
@@ -295,7 +298,7 @@ export function Forwards(_props: { route: string }) {
   };
 
   const newForwardButton = (
-    <Button variant="primary" size="sm" onClick={openNewForward}>
+    <Button variant="primary" size="sm" onClick={openNewForward} disabled={paused}>
       New forward
     </Button>
   );

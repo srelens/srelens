@@ -23,6 +23,7 @@ import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
 import { loadExpanded, loadNamespaces } from "../lib/workspace";
 import { defaultState, reconcile } from "../lib/tabs";
+import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
 import { isClusterScopedRoute } from "../lib/routes";
 import { flushSave, installFlushOnUnload, loadTabsState, scheduleSave } from "../lib/tabsPersist";
 import {
@@ -536,10 +537,16 @@ export function Window({
         )}
         <div className="relative min-h-0 flex-1">
           {tabs.map((tab) => {
+            // An editor's target is pinned in its route. Its tab label follows
+            // the rail, so it cannot decide whether the editor's readers are
+            // paused.
+            const pinnedContext = parseEditRoute(tab.route)?.cluster ?? parseNewRoute(tab.route)?.cluster;
             // Status-bar actions open cluster-following routes without a
             // `clusterName`. They follow the active cluster and need its pause
             // gate; app-level tabs never receive one just because it is active.
-            const context = tab.sub === undefined
+            const context = pinnedContext
+              ? contexts.find((c) => c.name === pinnedContext)
+              : tab.sub === undefined
               // These screens manage forwards and shells that already exist.
               // They must stay available to stop or detach them while their
               // cluster is paused; their creation controls have their own

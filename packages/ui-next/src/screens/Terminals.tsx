@@ -13,6 +13,7 @@ import {
 import { useConsole } from "../console";
 import { useActiveContext } from "../lib/clusters";
 import { ClusterMovedAlert } from "../lib/clusterMoved";
+import { useTabs } from "../lib/tabsStore";
 import {
   endSession,
   getSessions,
@@ -192,6 +193,8 @@ function askQuestion(session: TerminalSessionRow | undefined, context: string): 
 export function Terminals(_props: { route: string }) {
   const sessions = useSyncExternalStore(subscribeSessions, getSessions, getSessions);
   const cluster = useActiveContext();
+  const { workspace } = useTabs();
+  const paused = cluster !== undefined && workspace.pausedClusters?.includes(cluster.stableId) === true;
   const { ask } = useConsole();
   const [picked, setPicked] = useState<number | null>(null);
   /**
@@ -265,6 +268,7 @@ export function Terminals(_props: { route: string }) {
           <Button
             variant="primary"
             size="sm"
+            disabled={paused}
             onClick={() =>
               setNewSession({ context: cluster?.name ?? "", namespace: cluster?.namespace ?? "" })
             }
@@ -316,6 +320,7 @@ export function Terminals(_props: { route: string }) {
             onNewSession={() =>
               setNewSession({ context: cluster?.name ?? "", namespace: cluster?.namespace ?? "" })
             }
+            newSessionDisabled={paused}
           />
         }
         mainHead={
