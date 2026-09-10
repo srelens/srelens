@@ -527,6 +527,16 @@ function KindList({
             onChange={(next) => setNamespaces(context.stableId, next)}
           />
         )}
+        {showRows && (
+          <ResourceBulk
+            selected={selected}
+            kind={lower}
+            descriptor={descriptor}
+            context={name}
+            rows={filtered}
+            onDone={() => setSelected(new Set())}
+          />
+        )}
       </FilterBar>
 
       {!clusterScoped && <NamespaceErrorAlert error={namespaceError} />}
@@ -548,19 +558,6 @@ function KindList({
         // anyone. The table runs flush to the panel, so the alert carries
         // its own inset rather than borrowing the container's.
         <FailureAlert title={`These ${lower} are stale`} error={list.error} className="mx-3 mt-3 mb-3" />
-      )}
-      {showRows && (
-        // Same reason as the alert above: selection actions that scroll out
-        // of reach while the selection persists are worse than a warning
-        // nobody sees.
-        <ResourceBulk
-          selected={selected}
-          kind={lower}
-          descriptor={descriptor}
-          context={name}
-          rows={filtered}
-          onDone={() => setSelected(new Set())}
-        />
       )}
       {crd ? (
         // The rail is the whole of what a custom resource's list adds. It is

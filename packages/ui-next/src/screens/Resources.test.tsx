@@ -833,6 +833,10 @@ describe("Resources", () => {
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select default/web-1" }));
     await screen.findByText("1 selected");
+    const filterRow = screen.getByRole("search", { name: "Filter pods" });
+    expect(within(filterRow).getByText("1 selected")).toBeTruthy();
+    expect(within(filterRow).getByRole("button", { name: "Delete" })).toBeTruthy();
+
 
     const scrollBody = document.querySelector<HTMLElement>(".scroll")!;
     expect(within(scrollBody).queryByText(/stale/i)).toBeNull();

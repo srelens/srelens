@@ -188,10 +188,8 @@ export function ResourceBulk({ selected, kind, descriptor, context, rows, onDone
   return (
     <>
       {selectedRows.length > 0 && (
-        // The table runs flush to the panel now (f088d92); this bar sits in
-        // the same container, so — like the stale-rows Alert next to it —
-        // it carries its own inset instead of borrowing the container's.
-        <div className="mx-3 mt-3 mb-3 flex items-center gap-2">
+        // Inline in the filter row, which owns the padding and stays visible.
+        <div className="flex shrink-0 items-center gap-2 whitespace-nowrap">
           <span className="text-muted text-[0.8125rem]">{selectedRows.length} selected</span>
           <ActionBar actions={actions} label={`${kind} actions`} />
         </div>
