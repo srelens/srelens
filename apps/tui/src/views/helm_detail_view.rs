@@ -173,7 +173,7 @@ impl HelmDetailViewState {
         match self.active_tab {
             HelmDetailTab::Manifest => self.detail.as_ref().map(|d| d.manifest.lines().count()).unwrap_or(0),
             HelmDetailTab::Notes => self.detail.as_ref().map(|d| d.notes.lines().count()).unwrap_or(0),
-            HelmDetailTab::ValuesDiff => self.compute_values_diff().len(),
+            HelmDetailTab::ValuesDiff => self.values_diff_line_count(),
             HelmDetailTab::Revisions => self.detail.as_ref().map(|d| d.history.len()).unwrap_or(0),
             HelmDetailTab::Overview => 0,
         }
@@ -301,8 +301,8 @@ impl HelmDetailViewState {
         d.history.get(self.selected_revision_idx)
     }
 
-    pub fn compute_values_diff(&self) -> Vec<DiffLine> {
-        let (left, right) = match self.values_diff_mode {
+    fn values_diff_inputs(&self) -> (&str, &str) {
+        match self.values_diff_mode {
             ValuesDiffMode::CustomVsComputed => {
                 let custom_values = self.detail.as_ref().map(|d| d.values_yaml.as_str()).unwrap_or("");
                 let computed_values = self.detail.as_ref().map(|d| d.computed_values_yaml.as_str()).unwrap_or("");
@@ -318,8 +318,16 @@ impl HelmDetailViewState {
                 let curr = self.detail.as_ref().map(|d| d.values_yaml.as_str()).unwrap_or("");
                 (prev, curr)
             }
-        };
+        }
+    }
 
+    pub fn values_diff_line_count(&self) -> usize {
+        let (left, right) = self.values_diff_inputs();
+        similar::TextDiff::from_lines(left, right).iter_all_changes().count()
+    }
+
+    pub fn compute_values_diff(&self) -> Vec<DiffLine> {
+        let (left, right) = self.values_diff_inputs();
         let diff = similar::TextDiff::from_lines(left, right);
         let mut lines = Vec::new();
         let mut left_line = 1;
