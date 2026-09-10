@@ -1229,6 +1229,38 @@ fn helm_view_set_releases_clamps_the_selection() {
 }
 
 #[test]
+fn helm_view_set_releases_preserves_selected_release_by_name_and_namespace() {
+    let mut state = HelmViewState::new();
+    let mut rel_c_default = release("c", "deployed", 1);
+    rel_c_default.namespace = "default".to_string();
+    let mut rel_c_platform = release("c", "deployed", 1);
+    rel_c_platform.namespace = "platform".to_string();
+
+    state.set_releases(vec![
+        release("b", "deployed", 1),
+        rel_c_platform.clone(),
+        rel_c_default.clone(),
+    ]);
+    state.select_next();
+    state.select_next();
+    assert_eq!(state.selected_release().unwrap().name, "c");
+    assert_eq!(state.selected_release().unwrap().namespace, "default");
+    assert_eq!(state.selected_idx, 2);
+
+    // A new release "a" is installed and prepended:
+    state.set_releases(vec![
+        release("a", "deployed", 1),
+        release("b", "deployed", 1),
+        rel_c_platform.clone(),
+        rel_c_default.clone(),
+    ]);
+    // Selection stays locked to release ("c", "default") at index 3:
+    assert_eq!(state.selected_release().unwrap().name, "c");
+    assert_eq!(state.selected_release().unwrap().namespace, "default");
+    assert_eq!(state.selected_idx, 3);
+}
+
+#[test]
 fn helm_view_renders_the_empty_placeholder() {
     let mut state = HelmViewState::new();
     state.set_releases(vec![]);

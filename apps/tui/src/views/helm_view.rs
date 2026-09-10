@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::theme::Theme;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelmReleaseItem {
     pub name: String,
     pub namespace: String,
@@ -57,10 +57,25 @@ impl HelmViewState {
     }
 
     pub fn set_releases(&mut self, releases: Vec<HelmReleaseItem>) {
+        if self.releases == releases {
+            self.is_loading = false;
+            self.error = None;
+            return;
+        }
+        let sel_target = self.selected_release().map(|r| (r.name.clone(), r.namespace.clone()));
         self.releases = releases;
         self.is_loading = false;
         self.error = None;
-        let count = self.filtered_indices().len();
+        let indices = self.filtered_indices();
+        if let Some((name, ns)) = sel_target {
+            if let Some(pos) = indices.iter().position(|&idx| {
+                self.releases.get(idx).map(|r| r.name == name && r.namespace == ns).unwrap_or(false)
+            }) {
+                self.selected_idx = pos;
+                return;
+            }
+        }
+        let count = indices.len();
         if self.selected_idx >= count {
             self.selected_idx = count.saturating_sub(1);
         }
@@ -118,7 +133,7 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
     };
 
     let title = format!(
-        " ⎈ Helm 3 Releases [{}] (<Enter> Deep Inspector  <v> Values  <y> Manifest  <d> History  <r> Rollback  <ctrl-d> Uninstall  <Esc> Back) ",
+        " ⎈ Helm 3 Releases [{}] (<Enter> Deep Inspector  <v> Values  <y> Manifest  <d> History  <R> Refresh  <r> Rollback  <ctrl-d> Uninstall  <Esc> Back) ",
         count_text
     );
 
