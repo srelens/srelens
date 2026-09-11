@@ -1,16 +1,32 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
-import { probeCluster, getInfo, useInfo, useInfos, getProbe, useProbe, useProbes, resetProbes } from "./probe";
+import { invalidateProbe, probeCluster, getInfo, useInfo, useInfos, getProbe, useProbe, useProbes, resetProbes } from "./probe";
 import { getView, resetView } from "./workspace";
+import { defaultState } from "./tabs";
+import { currentWorkspace, setClusterPaused, setState, switchWorkspace } from "./tabsStore";
 
 const ctx = {
   name: "prod-eu", stableId: "prod", cluster: "c", server: "", isCurrent: false,
   sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 };
 
-beforeEach(() => { resetView(); resetProbes(); });
+beforeEach(() => { resetView(); resetProbes(); setState(defaultState([ctx])); });
 
 describe("probeCluster", () => {
+  it.each([false, true])("restores the last observation when the only participant disconnects (previous: %s)", async (previous) => {
+    if (previous) await probeCluster(ctx, vi.fn().mockResolvedValue({ context: ctx.name, reachable: true }));
+    const before = getView().links.prod;
+    let settle!: (value: never) => void;
+    const pending = probeCluster(ctx, () => new Promise(resolve => { settle = resolve; }));
+    const workspace = currentWorkspace().id;
+    setClusterPaused(workspace, ctx.stableId, true);
+    invalidateProbe(workspace, ctx.stableId);
+    expect(getView().links.prod).toEqual(before);
+    settle({ context: ctx.name, reachable: true } as never);
+    await pending;
+    expect(getView().links.prod).toEqual(before);
+  });
+
   it("marks connecting, then connected with the version", async () => {
     let resolve!: (v: unknown) => void;
     const connect = vi.fn(() => new Promise<never>((r) => { resolve = r as never; }));
@@ -176,6 +192,101 @@ describe("useProbes", () => {
  * whatever order they finish, and the loser is not recoverable from here.
  */
 describe("one read per cluster", () => {
+  it("discards a disconnected read and reconnects with a fresh one", async () => {
+    const settles: ((value: unknown) => void)[] = [];
+    const connect = vi.fn(() => new Promise<never>((resolve) => { settles.push(resolve as never); }));
+    const workspaceId = currentWorkspace().id;
+    const first = probeCluster(ctx, connect as never, () => 0, { workspaceId });
+    setClusterPaused(workspaceId, ctx.stableId, true);
+    invalidateProbe(workspaceId, ctx.stableId);
+    setClusterPaused(workspaceId, ctx.stableId, false);
+    const second = probeCluster(ctx, connect as never, () => 0, { workspaceId, fresh: true });
+    expect(connect).toHaveBeenCalledTimes(2);
+
+    settles[0]({ context: ctx.name, reachable: true });
+    await first;
+    expect(getProbe(ctx.stableId).state).toBe("unread");
+    expect(getView().links.prod.state).toBe("connecting");
+
+    settles[1]({ context: ctx.name, reachable: true });
+    await second;
+    expect(getProbe(ctx.stableId).state).toBe("reachable");
+  });
+
+  it("keeps a probe owned by its starting workspace when another workspace pauses", async () => {
+    const firstWorkspace = currentWorkspace().id;
+    const pausedWorkspace = "paused";
+    const state = defaultState([ctx]);
+    state.workspaces.push({ ...state.workspaces[0], id: pausedWorkspace, name: "Paused", pausedClusters: [ctx.stableId] });
+    setState(state);
+    const reading = probeCluster(ctx, vi.fn().mockResolvedValue({ context: ctx.name, reachable: true }) as never, () => 0, { workspaceId: firstWorkspace });
+    switchWorkspace(pausedWorkspace);
+    await reading;
+    expect(getProbe(ctx.stableId).state).toBe("reachable");
+  });
+
+  it("does not join a read invalidated by another workspace", async () => {
+    const firstWorkspace = currentWorkspace().id;
+    const secondWorkspace = "second";
+    const state = defaultState([ctx]);
+    state.workspaces.push({ ...state.workspaces[0], id: secondWorkspace, name: "Second", pausedClusters: [] });
+    setState(state);
+    const settles: ((value: unknown) => void)[] = [];
+    const connect = vi.fn(() => new Promise<never>((resolve) => { settles.push(resolve as never); }));
+
+    const first = probeCluster(ctx, connect as never, () => 0, { workspaceId: firstWorkspace });
+    setClusterPaused(firstWorkspace, ctx.stableId, true);
+    invalidateProbe(firstWorkspace, ctx.stableId);
+    const second = probeCluster(ctx, connect as never, () => 0, { workspaceId: secondWorkspace });
+
+    expect(second).not.toBe(first);
+    expect(connect).toHaveBeenCalledTimes(2);
+    settles[0]({ context: ctx.name, reachable: true });
+    await first;
+    expect(getProbe(ctx.stableId).state).toBe("unread");
+    settles[1]({ context: ctx.name, reachable: true });
+    await second;
+    expect(getProbe(ctx.stableId).state).toBe("reachable");
+  });
+
+  it("joins a valid cross-workspace read even when reconnect asks fresh", async () => {
+    const firstWorkspace = currentWorkspace().id;
+    const secondWorkspace = "second";
+    const state = defaultState([ctx]);
+    state.workspaces.push({ ...state.workspaces[0], id: secondWorkspace, name: "Second", pausedClusters: [] });
+    setState(state);
+    let settle!: (value: unknown) => void;
+    const connect = vi.fn(() => new Promise<never>((resolve) => { settle = resolve as never; }));
+
+    const first = probeCluster(ctx, connect as never, () => 0, { workspaceId: firstWorkspace });
+    const second = probeCluster(ctx, connect as never, () => 0, { workspaceId: secondWorkspace, fresh: true });
+
+    expect(second).toBe(first);
+    expect(connect).toHaveBeenCalledTimes(1);
+    settle({ context: ctx.name, reachable: true });
+    await second;
+  });
+
+  it("keeps a joined read when its initiating workspace disconnects", async () => {
+    const firstWorkspace = currentWorkspace().id;
+    const secondWorkspace = "second";
+    const state = defaultState([ctx]);
+    state.workspaces.push({ ...state.workspaces[0], id: secondWorkspace, name: "Second", pausedClusters: [] });
+    setState(state);
+    let settle!: (value: unknown) => void;
+    const connect = vi.fn(() => new Promise<never>((resolve) => { settle = resolve as never; }));
+
+    const first = probeCluster(ctx, connect as never, () => 0, { workspaceId: firstWorkspace });
+    const second = probeCluster(ctx, connect as never, () => 0, { workspaceId: secondWorkspace });
+    setClusterPaused(firstWorkspace, ctx.stableId, true);
+    invalidateProbe(firstWorkspace, ctx.stableId);
+    settle({ context: ctx.name, reachable: true });
+    await second;
+
+    expect(second).toBe(first);
+    expect(getProbe(ctx.stableId).state).toBe("reachable");
+  });
+
   it("joins the read already out rather than starting a second", async () => {
     let settle!: (v: unknown) => void;
     const connect = vi.fn(() => new Promise<never>((r) => { settle = r as never; }));

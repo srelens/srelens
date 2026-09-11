@@ -26,6 +26,10 @@ pub struct DeploymentSummary {
     #[serde(rename = "upToDate")]
     pub up_to_date: i32,
     pub available: i32,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
     /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
     /// age live at render time. Empty when the resource carries none.
@@ -52,6 +56,7 @@ pub(crate) fn summarise(dep: Deployment) -> DeploymentSummary {
         ready: format!("{ready}/{desired}"),
         up_to_date,
         available,
+        created: crate::creation_rfc3339(dep.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(dep.metadata.creation_timestamp.as_ref()),
         created_at: crate::creation_timestamp_iso(dep.metadata.creation_timestamp.as_ref()),
     }
@@ -100,6 +105,10 @@ pub struct ReplicaSetSummary {
     pub desired: i32,
     pub ready: i32,
     pub current: i32,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
     /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
     /// age live at render time. Empty when the resource carries none.
@@ -137,6 +146,7 @@ pub(crate) fn summarise_rs(rs: ReplicaSet) -> ReplicaSetSummary {
         desired,
         ready,
         current,
+        created: crate::creation_rfc3339(rs.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(rs.metadata.creation_timestamp.as_ref()),
         created_at: crate::creation_timestamp_iso(rs.metadata.creation_timestamp.as_ref()),
     }

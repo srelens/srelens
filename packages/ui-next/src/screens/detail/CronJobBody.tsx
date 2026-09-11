@@ -13,6 +13,7 @@ import { KV, LoadingState, StatusPill, Table, type Column } from "@srelens/ui-ki
 import { Section } from "./Section";
 import { SectionFailure, useSectionList } from "./sectionList";
 import { StringList } from "./sections";
+import { AgeCell } from "../../lib/ageCell";
 
 /**
  * A CronJob's schedule — classic's "Schedule" section, ported fact-for-fact:
@@ -77,7 +78,7 @@ const RECENT_JOB_COLUMNS: Column<JobSummary>[] = [
     },
   },
   { key: "duration", header: "Duration", render: (j) => j.duration || "—" },
-  { key: "age", header: "Age", getSortValue: ageSortValue, render: (j) => j.age },
+  { key: "age", header: "Age", getSortValue: ageSortValue, render: (j) => <AgeCell created={j.created} age={j.age} /> },
 ];
 
 /**

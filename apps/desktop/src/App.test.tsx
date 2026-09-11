@@ -118,6 +118,7 @@ vi.mock("./components/ResourceBrowser", () => ({
     onOpenResource,
     onOpenEdit,
     onOpenNew,
+    onNamespaceChange,
   }: {
     context: string;
     kind: string;
@@ -126,6 +127,7 @@ vi.mock("./components/ResourceBrowser", () => ({
     onOpenResource?: (target: { kind: string; namespace: string | null; name: string }) => void;
     onOpenEdit?: (kind: string, namespace: string | null, name: string) => void;
     onOpenNew?: (initialKind?: string) => void;
+    onNamespaceChange?: (namespace: string) => void;
   }) => (
     <div data-testid="browser">
       {context}:{kind}
@@ -138,6 +140,8 @@ vi.mock("./components/ResourceBrowser", () => ({
       </button>
       <button onClick={() => onOpenEdit?.("Deployment", "default", "web")}>edit-web</button>
       <button onClick={() => onOpenNew?.("Secret")}>new-secret</button>
+      <button onClick={() => onNamespaceChange?.("team-a")}>use-team-a</button>
+      <button onClick={() => onOpenNew?.("ConfigMap")}>new-config-map</button>
     </div>
   ),
 }));
@@ -191,11 +195,13 @@ vi.mock("./components/EditResourceTab", () => ({
 vi.mock("./components/NewResourceEditor", () => ({
   NewResourceEditor: ({
     initialKind,
+    namespace,
     draft,
     onDraftChange,
     onCreated,
   }: {
     initialKind?: string;
+    namespace?: string;
     draft?: { template: string; yaml: string };
     onDraftChange: (draft: { template: string; yaml: string }) => void;
     onCreated?: () => void;
@@ -207,6 +213,7 @@ vi.mock("./components/NewResourceEditor", () => ({
     return (
       <div data-testid="new-resource-tab">
         <span>{current.template}</span>
+        <span data-testid="new-resource-namespace">{namespace}</span>
         <textarea
           aria-label="mock new draft"
           value={current.yaml}
@@ -335,6 +342,15 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("tab", { name: /Services/ }));
     fireEvent.click(screen.getByText("edit-web"));
     expect(screen.getAllByRole("tab", { name: /edit: Deployment\/web/ })).toHaveLength(1);
+  });
+
+  it("scopes a new-resource editor to the namespace selected in its source tab (#404)", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    fireEvent.click(screen.getByText("use-team-a"));
+    fireEvent.click(screen.getByText("new-config-map"));
+    expect(screen.getByTestId("new-resource-namespace").textContent).toBe("team-a");
   });
 
   it("keeps new-resource YAML in its tab while another tab is active (#403)", () => {

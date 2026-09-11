@@ -295,6 +295,20 @@ export function duplicateTab(id: string): void {
   });
 }
 
+/** Move a document without selecting it; array order is persisted as-is. */
+export function moveTab(id: string, toIndex: number): void {
+  if (!Number.isFinite(toIndex)) return;
+  patchCurrent(w => {
+    const from = w.tabs.findIndex(tab => tab.id === id);
+    const to = Math.max(0, Math.min(w.tabs.length - 1, Math.trunc(toIndex)));
+    if (from < 0 || from === to) return w;
+    const tabs = [...w.tabs];
+    const [tab] = tabs.splice(from, 1);
+    tabs.splice(to, 0, tab);
+    return { ...w, tabs };
+  });
+}
+
 export function togglePin(id: string): void {
   patchCurrent((w) => {
     if (!w.tabs.some((t) => t.id === id)) return w;
@@ -351,11 +365,27 @@ export function setWorkspaceClusters(id: string, clusters: string[]): void {
     // from the machine, not ones dropped from a workspace.
     const active = w.activeCluster && clusters.includes(w.activeCluster) ? w.activeCluster : clusters[0];
     if (same && active === w.activeCluster) return w;
-    const next: Workspace = { ...w, clusters: [...clusters] };
+    const next: Workspace = { ...w, clusters: [...clusters], pausedClusters: (w.pausedClusters ?? []).filter((cluster) => clusters.includes(cluster)) };
     if (active) next.activeCluster = active;
     else delete next.activeCluster;
     return next;
   });
+}
+
+/** A pause belongs to one workspace: another workspace may still use this cluster. */
+export function setClusterPaused(workspaceId: string, clusterId: string, paused: boolean): void {
+  patchWorkspace(workspaceId, (w) => {
+    if (!w.clusters.includes(clusterId)) return w;
+    const current = w.pausedClusters ?? [];
+    const next = paused ? (current.includes(clusterId) ? current : [...current, clusterId]) : current.filter((id) => id !== clusterId);
+    if (next.length === current.length && next.every((id, index) => id === current[index])) return w;
+    return { ...w, pausedClusters: next };
+  });
+}
+
+export function isClusterPaused(clusterId: string, workspaceId = currentWorkspace().id): boolean {
+  const workspace = getState().workspaces.find((w) => w.id === workspaceId);
+  return (workspace?.pausedClusters ?? []).includes(clusterId);
 }
 
 const EMPTY_VIEW: NonNullable<Tab["view"]> = {};

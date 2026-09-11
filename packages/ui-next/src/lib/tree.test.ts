@@ -138,7 +138,7 @@ describe("routeForNode", () => {
 describe("INVESTIGATE", () => {
   it("is the control room, incidents, topology and the agent", () => {
     expect(INVESTIGATE.map((i) => [i.label, i.route])).toEqual([
-      ["Control room", "/"],
+      ["Home", "/"],
       ["Incidents", "/incidents"],
       ["Topology", "/topology"],
       ["Agent", "/agent"],

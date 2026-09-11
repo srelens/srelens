@@ -1,14 +1,22 @@
-import { isValidElement, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, isValidElement, type ComponentProps, type ReactNode } from "react";
 import { Tooltip as RadixTooltip } from "radix-ui";
 import { usePortalContainer } from "./portal";
 import { filled } from "./slot";
 
-export interface TooltipProps {
+export interface TooltipProps extends Omit<ComponentProps<typeof RadixTooltip.Trigger>, "children" | "asChild"> {
   /** The hint. Empty means there is nothing to say, and nothing is shown. */
-  label: string;
+  label: ReactNode;
+  disabled?: boolean;
   /** What the hint is about. A single element becomes the target itself. */
   children: ReactNode;
   side?: "top" | "right" | "bottom" | "left";
+}
+
+const Grouped = createContext(false);
+
+/** Neighbouring hints share the delay window; isolated Tooltip callers need no provider. */
+export function TooltipGroup({ children }: { children: ReactNode }) {
+  return <Grouped.Provider value={true}><RadixTooltip.Provider delayDuration={500} skipDelayDuration={300}>{children}</RadixTooltip.Provider></Grouped.Provider>;
 }
 
 /**
@@ -40,13 +48,9 @@ export interface TooltipProps {
  * size and tokens, minus its `pointer-events: none`, because 1.4.13 also asks
  * that a hint be hoverable.
  *
- * Radix's Tooltip throws unless a `Tooltip.Provider` sits above it, and that
- * provider is rendered here rather than exported for every app to remember. The
- * only thing a shared one buys is a skip-delay window across neighbouring
- * tooltips, and every tooltip in this design is an isolated hint on a single
- * control; a kit primitive that throws because an app forgot a root wrapper is
- * the worse trade. If a dense grid of them ever wants the shared window, the
- * provider can be exported then without changing a single call site.
+ * A standalone hint supplies its own provider. TooltipGroup shares the delay
+ * window for neighbours such as document tabs, without changing other callers.
+ * Trigger props and refs are forwarded so a ContextMenu can share the target.
  *
  * One more thing the mock got wrong: `.tip` is a plain span, so its
  * `:focus-within` fired only when the caller happened to wrap something
@@ -63,12 +67,14 @@ export interface TooltipProps {
  * that is no longer on screen is a caption on the wrong picture, and one line
  * makes the question not arise. Outside a scope nothing changes. (#357)
  */
-export function Tooltip({ label, children, side = "top" }: TooltipProps) {
+export function Tooltip({ label, children, side = "top", disabled = false, ...triggerProps }: TooltipProps) {
   const container = usePortalContainer();
-  return (
-    <RadixTooltip.Provider delayDuration={200}>
-      <RadixTooltip.Root>
-        <RadixTooltip.Trigger asChild>
+  const grouped = useContext(Grouped);
+  const [open, setOpen] = useState(false);
+  useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
+  const content = (
+      <RadixTooltip.Root open={open && !disabled} onOpenChange={setOpen}>
+        <RadixTooltip.Trigger {...triggerProps} asChild>
           {isValidElement(children) ? (
             children
           ) : (
@@ -103,6 +109,6 @@ export function Tooltip({ label, children, side = "top" }: TooltipProps) {
           </RadixTooltip.Portal>
         )}
       </RadixTooltip.Root>
-    </RadixTooltip.Provider>
   );
+  return grouped ? content : <RadixTooltip.Provider delayDuration={200}>{content}</RadixTooltip.Provider>;
 }

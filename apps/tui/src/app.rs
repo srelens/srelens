@@ -44,6 +44,7 @@ pub enum ActiveView {
     Toolbox(ToolboxViewState),
     Assistant,
     Settings(SettingsViewState),
+    TuiConfig(TuiConfigViewState),
     Tree(tree_view::TreeViewState),
     NodeInspector(node_inspector_view::NodeInspectorState),
     Topology(topology_view::TopologyViewState),
@@ -92,10 +93,13 @@ pub struct App {
     pub connection_attempt_start: std::time::Instant,
     pub cluster_unreachable: bool,
     pub ai_settings: crate::ai_config::AiSettings,
+    pub tui_config: crate::tui_config::TuiConfig,
     pub assistant_state: AssistantViewState,
     pub assistant_states: HashMap<String, AssistantViewState>,
     pub pod_metrics_tick_counter: usize,
     pub node_metrics_tick_counter: usize,
+    pub helm_tick_counter: usize,
+    pub helm_refreshing: bool,
     pub node_metrics_history: HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
     pub pod_metrics_history: HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
     pub cluster_overview_data: Option<crate::views::overview_view::ClusterOverviewData>,
@@ -214,6 +218,8 @@ impl App {
             active_namespace.clone()
         };
 
+        let tui_config = crate::tui_config::TuiConfig::load();
+
         let mut app = Self {
             active_context: active_context.clone(),
             active_namespace,
@@ -254,10 +260,13 @@ impl App {
             connection_attempt_start: Instant::now(),
             cluster_unreachable: false,
             ai_settings: crate::ai_config::AiSettings::load(),
+            tui_config,
             assistant_state: AssistantViewState::for_context(&active_context),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
+            helm_tick_counter: 0,
+            helm_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -345,6 +354,16 @@ impl App {
 
         if matches!(self.active_view, ActiveView::PortForwards(_)) {
             self.sync_port_forwards();
+        }
+
+        // Periodically refresh Helm releases every ~3.5 seconds (35 ticks at 100ms)
+        if matches!(self.active_view, ActiveView::Helm(_)) {
+            self.helm_tick_counter = self.helm_tick_counter.saturating_add(1);
+            if self.helm_tick_counter % 35 == 1 && !self.helm_refreshing {
+                self.refresh_helm_releases();
+            }
+        } else {
+            self.helm_tick_counter = 0;
         }
     }
 
@@ -1251,6 +1270,10 @@ impl App {
             d.is_reachable = true;
             ov.set_data(d);
         }
+        if let ActiveView::Helm(helm) = &mut self.active_view {
+            helm.releases.clear();
+            helm.is_loading = true;
+        }
         self.set_toast(format!("Switched to context '{}'", self.active_context), Theme::status_ok());
         self.refresh_cluster_info();
         self.refresh_cluster_overview();
@@ -1504,6 +1527,66 @@ impl App {
         // 2. Interactive Dialog Modal Open
         if let Some(modal) = self.modal.clone() {
             match modal {
+                Modal::FeatureBanner { .. } => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+                        return;
+                    }
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                            self.modal = None;
+                        }
+                        KeyCode::Char('t') | KeyCode::Char('T') => {
+                            self.tui_config.show_feature_banner = !self.tui_config.show_feature_banner;
+                            let _ = self.tui_config.save();
+                            let is_enabled = self.tui_config.show_feature_banner;
+                            self.modal = Some(Modal::FeatureBanner { show_on_startup: is_enabled });
+                            if is_enabled {
+                                self.set_toast("Startup feature banner: Enabled".to_string(), Theme::status_ok());
+                            } else {
+                                self.set_toast("Startup feature banner: Disabled".to_string(), Theme::status_warn());
+                            }
+                        }
+                        KeyCode::Char(':') => {
+                            self.modal = None;
+                            self.input_mode = InputMode::Command;
+                            self.command_buffer.clear();
+                        }
+                        KeyCode::Char('/') => {
+                            self.modal = None;
+                            self.input_mode = InputMode::Filter;
+                            self.filter_buffer.clear();
+                        }
+                        KeyCode::Char('1') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::HelmReleases).await;
+                        }
+                        KeyCode::Char('2') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Overview).await;
+                        }
+                        KeyCode::Char('3') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::GpuInfo).await;
+                        }
+                        KeyCode::Char('4') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Workloads).await;
+                        }
+                        KeyCode::Char('5') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Assistant).await;
+                        }
+                        KeyCode::Char('6') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Settings).await;
+                        }
+                        KeyCode::Char('7') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::TuiConfig).await;
+                        }
+                        _ => {}
+                    }
+                }
                 Modal::Confirm { action_name, .. } => {
                     match key.code {
                         KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -2212,22 +2295,23 @@ impl App {
                 }
                 KeyCode::Enter => {
                     let trimmed = self.command_buffer.trim().trim_start_matches(':').trim();
-                    if trimmed.is_empty() {
-                        self.input_mode = InputMode::Normal;
-                        self.command_buffer.clear();
-                        self.command_suggestion_idx = 0;
-                        return;
-                    }
 
                     // Special contextual colon commands handled directly by execute_colon_command
-                    if trimmed == "save-ai" || trimmed == "export-ai"
-                        || (trimmed == "save" && matches!(self.active_view, ActiveView::Assistant))
-                        || trimmed == "clear-ai"
-                        || (trimmed == "clear" && matches!(self.active_view, ActiveView::Assistant))
-                        || trimmed == "tree" || trimmed == "lineage" || trimmed == "related"
-                        || trimmed == "actions" || trimmed == "act"
-                        || trimmed == "metrics" || trimmed == "metric"
-                        || trimmed == "reasons" || trimmed == "reason"
+                    if !trimmed.is_empty()
+                        && (trimmed == "save-ai"
+                            || trimmed == "export-ai"
+                            || (trimmed == "save" && matches!(self.active_view, ActiveView::Assistant))
+                            || trimmed == "clear-ai"
+                            || (trimmed == "clear" && matches!(self.active_view, ActiveView::Assistant))
+                            || trimmed == "tree"
+                            || trimmed == "lineage"
+                            || trimmed == "related"
+                            || trimmed == "actions"
+                            || trimmed == "act"
+                            || trimmed == "metrics"
+                            || trimmed == "metric"
+                            || trimmed == "reasons"
+                            || trimmed == "reason")
                     {
                         let cmd = self.command_buffer.clone();
                         self.input_mode = InputMode::Normal;
@@ -2249,7 +2333,7 @@ impl App {
                     self.command_suggestion_idx = 0;
                     if let Some(target) = target {
                         self.execute_command_target(target).await;
-                    } else {
+                    } else if !fallback_cmd.trim().trim_start_matches(':').trim().is_empty() {
                         self.execute_colon_command(&fallback_cmd).await;
                     }
                 }
@@ -2258,7 +2342,14 @@ impl App {
                     if !suggestions.is_empty() {
                         let idx = self.command_suggestion_idx % suggestions.len();
                         self.command_buffer = suggestions[idx].0.name.clone();
-                        self.command_suggestion_idx = (idx + 1) % suggestions.len();
+                        // Completion changes the query and rebuilds the list.
+                        // Names and aliases can collide, so follow the selected
+                        // target (including its CRD group), not the old index.
+                        let target = &suggestions[idx].0.target;
+                        self.command_suggestion_idx = command_suggestions_with_crds(&self.command_buffer, &self.crds)
+                            .iter()
+                            .position(|(command, _)| &command.target == target)
+                            .unwrap_or(0);
                     }
                 }
                 KeyCode::BackTab => {
@@ -2377,6 +2468,16 @@ impl App {
             return;
         }
 
+        if matches!(self.active_view, ActiveView::TuiConfig(_)) {
+            if key.code == KeyCode::Char(':') {
+                self.input_mode = InputMode::Command;
+                self.command_buffer.clear();
+                return;
+            }
+            self.handle_view_key_event(key).await;
+            return;
+        }
+
         // 6. Normal Mode - k9s Global & View Keybindings
         match key.code {
             // Enter Command Mode
@@ -2393,25 +2494,27 @@ impl App {
                     ActiveView::Logs(logs) => self.filter_buffer = logs.search_query.clone(),
                     ActiveView::Top(top) => self.filter_buffer = top.filter.clone(),
                     ActiveView::Helm(helm) => self.filter_buffer = helm.filter_query.clone(),
-                    ActiveView::HelmDetail(detail) => self.filter_buffer = detail.filter_query.clone(),
+                    ActiveView::HelmDetail(detail) => self.filter_buffer = detail.search_query.clone(),
                     _ => {}
                 }
             }
-            // Next search match in text views (Describe, YAML, Logs)
-            KeyCode::Char('n') if matches!(self.active_view, ActiveView::Describe(_) | ActiveView::Yaml(_) | ActiveView::Logs(_)) => {
+            // Next search match in text views (Describe, YAML, Logs, HelmDetail)
+            KeyCode::Char('n') if matches!(self.active_view, ActiveView::Describe(_) | ActiveView::Yaml(_) | ActiveView::Logs(_) | ActiveView::HelmDetail(_)) => {
                 match &mut self.active_view {
                     ActiveView::Describe(desc) => desc.next_match(),
                     ActiveView::Yaml(yaml) => yaml.next_match(),
                     ActiveView::Logs(logs) => logs.next_match(),
+                    ActiveView::HelmDetail(detail) => detail.next_match(),
                     _ => {}
                 }
             }
-            // Previous search match in text views (Describe, YAML, Logs)
-            KeyCode::Char('N') if matches!(self.active_view, ActiveView::Describe(_) | ActiveView::Yaml(_) | ActiveView::Logs(_)) => {
+            // Previous search match in text views (Describe, YAML, Logs, HelmDetail)
+            KeyCode::Char('N') if matches!(self.active_view, ActiveView::Describe(_) | ActiveView::Yaml(_) | ActiveView::Logs(_) | ActiveView::HelmDetail(_)) => {
                 match &mut self.active_view {
                     ActiveView::Describe(desc) => desc.prev_match(),
                     ActiveView::Yaml(yaml) => yaml.prev_match(),
                     ActiveView::Logs(logs) => logs.prev_match(),
+                    ActiveView::HelmDetail(detail) => detail.prev_match(),
                     _ => {}
                 }
             }
@@ -3397,6 +3500,22 @@ impl App {
                             });
                         }
                     }
+                    KeyCode::Char('R') => {
+                        if self.helm_refreshing {
+                            self.set_toast("Helm releases refresh already in progress...".to_string(), Theme::status_warn());
+                        } else {
+                            self.refresh_helm_releases();
+                            self.set_toast("Refreshing Helm releases...".to_string(), Theme::status_ok());
+                        }
+                    }
+                    KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if self.helm_refreshing {
+                            self.set_toast("Helm releases refresh already in progress...".to_string(), Theme::status_warn());
+                        } else {
+                            self.refresh_helm_releases();
+                            self.set_toast("Refreshing Helm releases...".to_string(), Theme::status_ok());
+                        }
+                    }
                     KeyCode::Char('r') => {
                         if let Some(rel) = sel_rel {
                             if rel.revision > 1 {
@@ -3824,6 +3943,39 @@ impl App {
                         }
                         _ => {}
                     }
+                }
+            }
+            ActiveView::TuiConfig(cfg_state) => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        if let Some(prev) = self.nav_stack.pop() {
+                            self.active_view = prev;
+                        } else {
+                            self.switch_view_to_kind(ResourceKind::Pods).await;
+                        }
+                    }
+                    KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => cfg_state.select_next_field(),
+                    KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => cfg_state.select_prev_field(),
+                    KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('-') => {
+                        cfg_state.adjust_current(-1, &mut self.tui_config);
+                    }
+                    KeyCode::Char('l') | KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => {
+                        cfg_state.adjust_current(1, &mut self.tui_config);
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        cfg_state.cycle_current(&mut self.tui_config);
+                    }
+                    KeyCode::Char('[') | KeyCode::Char('{') => {
+                        cfg_state.adjust_current(-5, &mut self.tui_config);
+                    }
+                    KeyCode::Char(']') | KeyCode::Char('}') => {
+                        cfg_state.adjust_current(5, &mut self.tui_config);
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('d') => {
+                        cfg_state.reset_defaults(&mut self.tui_config);
+                        self.set_toast("Reset TUI settings to defaults".to_string(), Theme::status_ok());
+                    }
+                    _ => {}
                 }
             }
             ActiveView::Tree(tree) => {
@@ -4364,6 +4516,7 @@ impl App {
                     KeyCode::PageUp => detail.scroll_up(15),
                     KeyCode::PageDown => detail.scroll_down(15),
                     KeyCode::Char('g') => detail.scroll_to_top(),
+                    KeyCode::Char('G') => detail.scroll_to_bottom(),
                     KeyCode::Char('m') => {
                         if detail.active_tab == HelmDetailTab::ValuesDiff {
                             detail.toggle_diff_mode();
@@ -4890,7 +5043,7 @@ impl App {
                 }
             }
             ActiveView::HelmDetail(detail) => {
-                detail.filter_query = filter;
+                detail.set_search_query(&filter);
             }
             _ => {}
         }
@@ -4920,7 +5073,7 @@ impl App {
                 helm.filter_query.clear();
             }
             ActiveView::HelmDetail(detail) => {
-                detail.filter_query.clear();
+                detail.clear_search();
             }
             _ => {}
         }
@@ -5123,6 +5276,11 @@ impl App {
                 } else {
                     self.set_toast(format!("Unknown theme '{}'. Try :themes to pick.", theme_name), Theme::status_warn());
                 }
+            }
+            CommandTarget::FeatureBanner => {
+                self.modal = Some(Modal::FeatureBanner {
+                    show_on_startup: self.tui_config.show_feature_banner,
+                });
             }
             CommandTarget::OpenUrl(_) => {}
         }
@@ -5340,6 +5498,7 @@ impl App {
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
             ResourceKind::Assistant => ActiveView::Assistant,
             ResourceKind::Settings => ActiveView::Settings(SettingsViewState::new()),
+            ResourceKind::TuiConfig => ActiveView::TuiConfig(TuiConfigViewState::new()),
             ResourceKind::Topology => {
                 let namespaces = if self.active_namespace.is_empty() {
                     vec![]
@@ -6260,8 +6419,14 @@ impl App {
     }
 
     pub fn refresh_helm_releases(&mut self) {
+        if self.helm_refreshing {
+            return;
+        }
+        self.helm_refreshing = true;
         if let ActiveView::Helm(helm) = &mut self.active_view {
-            helm.is_loading = true;
+            if helm.releases.is_empty() {
+                helm.is_loading = true;
+            }
             helm.error = None;
         }
         let ctx = self.active_context.clone();
@@ -6287,20 +6452,25 @@ impl App {
     pub fn handle_helm_releases_result(
         &mut self,
         context: &str,
-        _namespace: &str,
+        namespace: &str,
         result: Result<Vec<srelens_kube::helm::HelmReleaseSummary>, String>,
     ) {
+        self.helm_refreshing = false;
         if let ActiveView::Helm(helm) = &mut self.active_view {
-            if self.active_context == context {
+            if self.active_context == context && self.active_namespace == namespace {
                 match result {
                     Ok(summaries) => {
                         let items: Vec<HelmReleaseItem> = summaries.into_iter().map(Into::into).collect();
                         helm.set_releases(items);
                     }
                     Err(err) => {
-                        helm.set_error(err);
+                        if helm.releases.is_empty() {
+                            helm.set_error(err);
+                        }
                     }
                 }
+            } else {
+                self.refresh_helm_releases();
             }
         }
     }
@@ -7541,6 +7711,7 @@ impl App {
             ActiveView::Toolbox(_) => "Toolbox",
             ActiveView::Assistant => "AI Assistant",
             ActiveView::Settings(_) => "AI Settings",
+            ActiveView::TuiConfig(_) => "TUI Configuration",
             ActiveView::Tree(_) => "Resource Relationship Tree",
             ActiveView::NodeInspector(_) => "Node & GPU Hardware Inspector",
             ActiveView::Topology(_) => "Workload & Traffic Topology Flow",
@@ -7621,6 +7792,7 @@ impl App {
             ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
             ActiveView::Assistant => render_assistant_view(f, chunks[1], &self.assistant_state, &self.ai_settings),
             ActiveView::Settings(s) => render_settings_view(f, chunks[1], s),
+            ActiveView::TuiConfig(s) => render_tui_config_view(f, chunks[1], s, &self.tui_config),
             ActiveView::Tree(tree) => render_tree_view(f, chunks[1], tree),
             ActiveView::NodeInspector(ni) => render_node_inspector_view(f, chunks[1], ni),
             ActiveView::Topology(topo) => topology_view::render_topology_view(f, chunks[1], topo),
@@ -7636,6 +7808,7 @@ impl App {
             ActiveView::Logs(logs) => (logs.search_matches.len(), logs.lines.len(), true),
             ActiveView::Helm(helm) => (helm.filtered_indices().len(), helm.releases.len(), false),
             ActiveView::Top(top) => (top.visible_count(), if top.active_tab == top_view::TopTab::Pods { top.pods.len() } else { top.nodes.len() }, false),
+            ActiveView::HelmDetail(detail) => (detail.search_matches.len(), detail.total_lines_for_active_tab(), true),
             _ => (0, 0, false),
         };
 
@@ -7991,6 +8164,7 @@ impl App {
                 ("<v>", "Values"),
                 ("<y>", "Manifest"),
                 ("<d>", "History"),
+                ("<R>", "Refresh"),
                 ("<r>", "Rollback"),
                 ("<^d>", "Uninstall"),
                 ("<c>", "CopyURL"),
@@ -7999,10 +8173,21 @@ impl App {
             ][..]),
             ActiveView::HelmDetail(_) => Some(&[
                 ("<:>", "Cmd"),
+                ("</>", "Search"),
+                ("<n/N>", "Next/Prev"),
+                ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
             ActiveView::Settings(_) => Some(&[
                 ("<:>", "Cmd"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::TuiConfig(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<j/k>", "Select"),
+                ("<h/l>", "Adjust"),
+                ("<r>", "Reset"),
+                ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),
             ActiveView::Toolbox(_) => Some(&[
@@ -8028,6 +8213,9 @@ impl App {
                 suggestions: suggestions_prop,
                 close_pf_button: close_pf_button_data.as_ref().map(|(l, s)| (l.as_str(), *s)),
                 close_pf_rect: Some(&self.close_pf_button_rect),
+                command_popup_max_width: Some(self.tui_config.command_popup_max_width),
+                command_popup_max_visible: Some(self.tui_config.command_popup_max_visible),
+                command_popup_density: Some(self.tui_config.command_popup_density),
             },
         );
 

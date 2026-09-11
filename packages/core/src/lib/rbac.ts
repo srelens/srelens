@@ -6,6 +6,9 @@ export interface ServiceAccountSummary {
   name: string;
   namespace: string;
   secrets: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -14,6 +17,9 @@ export interface RoleSummary {
   name: string;
   namespace: string;
   rules: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -21,6 +27,9 @@ export interface RoleSummary {
 export interface ClusterRoleSummary {
   name: string;
   rules: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -31,6 +40,9 @@ export interface RoleBindingSummary {
   /** The referenced role as "Kind/name". */
   role: string;
   subjects: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -39,6 +51,9 @@ export interface ClusterRoleBindingSummary {
   name: string;
   role: string;
   subjects: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 

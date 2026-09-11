@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-import type { ReactElement } from "react";
-import { render } from "@testing-library/react";
-import { filterTableData } from "@srelens/ui-kit";
+import { createElement, type ReactElement } from "react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { Table, filterTableData } from "@srelens/ui-kit";
 import { cronJobStatus, jobStatus, scaledStatus } from "@srelens/core";
 import {
   podColumns,
@@ -11,6 +12,7 @@ import {
   jobColumns,
   cronJobColumns,
   nodeColumns,
+  namespaceColumns,
   configMapColumns,
   secretColumns,
   resourceQuotaColumns,
@@ -46,9 +48,9 @@ import { customColumns } from "./custom";
 import { genericClusterColumns, genericColumns } from "./generic";
 import type { CrdRef, NodeTaint } from "@srelens/core";
 
-/** Every typed column set columns.tsx exports — the design mock titles every
- *  one of these "Name", never the kind, and none of them may ask for a
- *  per-column funnel (the mock has one search box, not 23). */
+/** Every typed column set columns.tsx exports — the design titles every one
+ *  of these "Name", never the kind. Namespace Status is the single deliberate
+ *  per-column funnel; all other searching stays in the shared search box. */
 const ALL_TYPED_SETS = [
   podColumns,
   deploymentColumns,
@@ -57,6 +59,7 @@ const ALL_TYPED_SETS = [
   jobColumns,
   cronJobColumns,
   nodeColumns,
+  namespaceColumns,
   configMapColumns,
   secretColumns,
   resourceQuotaColumns,
@@ -74,6 +77,76 @@ const ALL_TYPED_SETS = [
   roleBindingColumns,
   clusterRoleBindingColumns,
 ];
+
+describe("namespace columns", () => {
+  const namespace = {
+    name: "legacy-billing",
+    phase: "Terminating",
+    labels: {
+      "kubernetes.io/metadata.name": "legacy-billing",
+      zone: "west",
+      team: "payments",
+      env: "prod",
+      tier: "backend",
+    },
+    age: "17m",
+  };
+
+  it("puts Status and Labels between Name and Age, with only Status filterable", () => {
+    expect(namespaceColumns.map((column) => column.key)).toEqual([
+      "name",
+      "phase",
+      "labels",
+      "age",
+    ]);
+    expect(namespaceColumns.find((column) => column.key === "phase")?.filterable).toBe(true);
+    expect(namespaceColumns.find((column) => column.key === "labels")?.sortable).toBe(false);
+  });
+
+  it("renders Active green and Terminating amber through the shared phase verdict", () => {
+    const status = namespaceColumns.find((column) => column.key === "phase")!;
+    const terminating = status.render!(namespace) as { props: { status: string; kind: string } };
+    const active = status.render!({ ...namespace, phase: "Active" }) as {
+      props: { status: string; kind: string };
+    };
+    expect(terminating.props).toMatchObject({ status: "Terminating", kind: "warning" });
+    expect(active.props).toMatchObject({ status: "Active", kind: "success" });
+  });
+
+  it("renders an unavailable legacy phase neutrally instead of inventing a cluster failure", () => {
+    const status = namespaceColumns.find((column) => column.key === "phase")!;
+    const unavailable = status.render!({ ...namespace, phase: "-" }) as {
+      props: { status: string; kind: string };
+    };
+
+    expect(unavailable.props).toMatchObject({ status: "-", kind: "neutral" });
+  });
+
+  it("shows two user labels plus an overflow, suppresses the automatic label, and exposes all user labels by keyboard", async () => {
+    const labels = namespaceColumns.find((column) => column.key === "labels")!;
+    const view = render(labels.render!(namespace) as ReactElement);
+
+    expect(view.container.textContent).toBe("env=prodteam=payments+2");
+    expect(view.container.textContent).not.toContain("kubernetes.io/metadata.name");
+    await userEvent.tab();
+    expect((await screen.findByRole("tooltip")).textContent).toBe(
+      "env=prod, team=payments, tier=backend, zone=west",
+    );
+  });
+
+  it("searches every user label as key=value, including those behind +N", () => {
+    const labels = namespaceColumns.find((column) => column.key === "labels")!;
+    expect(labels.getValue!(namespace)).toBe(
+      "env=prod team=payments tier=backend zone=west",
+    );
+  });
+
+  it("renders a dash when the namespace has no user labels", () => {
+    const labels = namespaceColumns.find((column) => column.key === "labels")!;
+    const view = render(labels.render!({ ...namespace, labels: {} }) as ReactElement);
+    expect(view.container.textContent).toBe("—");
+  });
+});
 
 const pod = (over: Partial<PodRow> = {}): PodRow => ({
   name: "web-0", namespace: "default", phase: "Running", ready: "1/1",
@@ -232,6 +305,18 @@ describe("pod columns", () => {
     expect(image.render!(pod({ image: "" }))).toBe("—");
   });
 
+  it("uses the same UI typography for pod identifiers and preserves unscheduled nodes", () => {
+    const { container } = render(createElement(Table<PodRow>, {
+      columns: podColumns,
+      data: [pod({ node: "worker-15-k8s.example.test" }), pod({ name: "pending", node: "" })],
+      getRowKey: (row) => row.name,
+    }));
+    const rows = container.querySelectorAll("tbody tr");
+    expect(rows[0].textContent).toContain("worker-15-k8s.example.test");
+    expect(rows[0].querySelector(".font-mono, .code")).toBeNull();
+    expect(rows[1].querySelectorAll("td")[2].textContent).toBe("—");
+  });
+
   it("keeps Node in the table contract so a Node detail can open this list prefiltered", () => {
     const node = podColumns.find((c) => c.key === "node")!;
     expect(node.header).toBe("Node");
@@ -262,7 +347,7 @@ describe("node columns", () => {
     expect(nodeColumns.some((c) => c.key === "namespace")).toBe(false);
   });
 
-  it("formats CPU and memory exactly as pods do — the same two readings must not drift", () => {
+  it("shows node CPU in cores while preserving memory units", () => {
     const cpu = nodeColumns.find((c) => c.key === "cpu")!;
     const memory = nodeColumns.find((c) => c.key === "memory")!;
     const node = {
@@ -271,7 +356,12 @@ describe("node columns", () => {
     };
     const withCpu = { ...node, cpu: 2410 };
     const withMemory = { ...node, memory: 3174 };
-    expect(cpu.render!(withCpu)).toBe("2 410m");
+    expect(cpu.render!(withCpu)).toBe("2.41 cores");
+    expect(cpu.render!({ ...node, cpu: 10399 })).toBe("10.4 cores");
+    expect(cpu.render!({ ...node, cpu: 964 })).toBe("0.964 cores");
+    expect(cpu.render!({ ...node, cpu: 1000 })).toBe("1 core");
+    expect(cpu.render!({ ...node, cpu: 0 })).toBe("0 cores");
+    expect(cpu.render!(node)).toBe("—");
     expect(memory.render!(withMemory)).toBe("3.1 Gi");
   });
 });
@@ -349,17 +439,20 @@ describe("the rules every typed set follows", () => {
     expect(clusterRoleColumns.some((c) => c.key === "namespace")).toBe(false);
   });
 
-  it("titles the identifier column Name for every one of the 23 typed sets", () => {
+  it("titles the identifier column Name for every typed set", () => {
     for (const set of ALL_TYPED_SETS) {
       expect(set[0].key).toBe("name");
       expect(set[0].header).toBe("Name");
     }
   });
 
-  it("asks for no per-column funnel anywhere — the mock has one search box, not 23", () => {
-    for (const set of ALL_TYPED_SETS) {
+  it("keeps the namespace Status funnel as the one deliberate typed-list exception", () => {
+    for (const set of ALL_TYPED_SETS.filter((columns) => columns !== namespaceColumns)) {
       expect(set.some((c) => c.filterable)).toBe(false);
     }
+    expect(namespaceColumns.filter((column) => column.filterable).map((column) => column.key)).toEqual([
+      "phase",
+    ]);
   });
 });
 
@@ -455,7 +548,7 @@ describe("custom-resource columns ask for no per-column funnel either", () => {
 
 describe("column alignment — a count or a measurement is end-aligned, everything else stays default", () => {
   /** [set, the keys on it that must be `align: "end"`] — every other key on
-   *  the set must NOT be. Covers all 23 typed sets, not just the workloads.
+   *  the set must NOT be. Covers every typed set, not just the workloads.
    *  Typed on just `key`/`align`: the sets differ in row type, and alignment
    *  is the only thing this test needs to see. */
   const CASES: [{ key: string; align?: "start" | "end" }[], string[]][] = [
@@ -466,6 +559,7 @@ describe("column alignment — a count or a measurement is end-aligned, everythi
     [jobColumns, ["completions", "duration", "age"]],
     [cronJobColumns, ["active", "age"]],
     [nodeColumns, ["cpu", "memory", "taints", "age"]],
+    [namespaceColumns, ["age"]],
     [configMapColumns, ["keys", "age"]],
     [secretColumns, ["keys", "age"]],
     [resourceQuotaColumns, ["resources", "age"]],
@@ -504,7 +598,7 @@ describe("column alignment — a count or a measurement is end-aligned, everythi
   });
 });
 
-// Whole-branch review (FIX 6): every test above is scoped to the 23 typed
+// Whole-branch review (FIX 6): every test above is scoped to the typed
 // sets, which is exactly why the generic and custom families drifted from
 // the same two rules — custom.ts headered its first column with the CRD's
 // kind, and neither generic.ts nor custom.ts end-aligned Age. Widened here so

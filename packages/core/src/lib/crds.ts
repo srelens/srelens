@@ -32,6 +32,9 @@ export interface CrdRef {
 export interface CustomRow {
   name: string;
   namespace: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
   /** Values for the CRD's printer columns, in declaration order. */
   columns?: string[];

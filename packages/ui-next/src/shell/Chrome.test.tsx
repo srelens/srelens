@@ -137,8 +137,14 @@ describe("Chrome", () => {
   it("zooms through uiScale", async () => {
     chrome();
     await userEvent.click(screen.getByRole("button", { name: "Zoom in" }));
-    expect(scale.set).toHaveBeenCalledWith(110);
-    expect(scale.apply).toHaveBeenCalledWith(110);
+    expect(scale.set).toHaveBeenCalledWith(110, "next");
+    expect(scale.apply).toHaveBeenCalledWith(110, "next");
+  });
+
+  it("restores only the new design's scale when its shell mounts", () => {
+    chrome();
+    expect(scale.get).toHaveBeenCalledWith("next");
+    expect(scale.apply).toHaveBeenCalledWith(100, "next");
   });
 
   it("switches workspaces from the switcher", async () => {
@@ -206,6 +212,7 @@ describe("Chrome", () => {
     desktop.mockReturnValue(false);
     chrome();
     expect(screen.queryByRole("button", { name: "Zoom in" })).toBeNull();
+    expect(scale.apply).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Theme" })).toBeDefined();
   });
 

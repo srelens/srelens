@@ -4,6 +4,7 @@ import {
   listNodes,
   applyManifest,
   diffManifest,
+  validateManifest,
   parseResourceVersion,
   listEvents,
   listResource,
@@ -92,10 +93,11 @@ describe("listEvents", () => {
 describe("applyManifest", () => {
   it("passes context+yaml and returns applied", async () => {
     const invoke = vi.fn().mockResolvedValue({ documents: [{ kind: "ConfigMap", name: "cm", applied: true, conflict: null, error: null }], applied: true });
-    const out = await applyManifest("kind-dev", "kind: ConfigMap\n", false, undefined, invoke);
+    const out = await applyManifest("kind-dev", "kind: ConfigMap\n", false, "team-a", invoke);
     expect(invoke).toHaveBeenCalledWith("k8s.applyManifest", {
       context: "kind-dev",
       yaml: "kind: ConfigMap\n",
+      namespace: "team-a",
       force: false,
     });
     expect(out.applied).toBe(true);
@@ -135,8 +137,8 @@ describe("applyManifest force + multi-doc", () => {
       documents: [{ kind: "ConfigMap", name: "a", applied: true, conflict: null, error: null }],
       applied: true,
     });
-    const out = await applyManifest("ctx", "kind: ConfigMap", true, undefined, invoke);
-    expect(invoke).toHaveBeenCalledWith("k8s.applyManifest", { context: "ctx", yaml: "kind: ConfigMap", force: true });
+    const out = await applyManifest("ctx", "kind: ConfigMap", true, "prod", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.applyManifest", { context: "ctx", yaml: "kind: ConfigMap", namespace: "prod", force: true });
     expect(out.applied).toBe(true);
     expect(out.documents?.[0].name).toBe("a");
   });
@@ -159,9 +161,22 @@ describe("diffManifest", () => {
     const invoke = vi.fn().mockResolvedValue({
       documents: [{ kind: "ConfigMap", name: "a", namespace: "d", exists: true, changed: true, rows: [], currentResourceVersion: "9" }],
     });
-    const out = await diffManifest("ctx", "kind: ConfigMap", undefined, invoke);
-    expect(invoke).toHaveBeenCalledWith("k8s.diffManifest", { context: "ctx", yaml: "kind: ConfigMap" });
+    const out = await diffManifest("ctx", "kind: ConfigMap", "team-a", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.diffManifest", { context: "ctx", yaml: "kind: ConfigMap", namespace: "team-a" });
     expect(out.documents?.[0].currentResourceVersion).toBe("9");
+  });
+});
+
+describe("validateManifest", () => {
+  it("passes the editor's fallback namespace to server-side validation", async () => {
+    const invoke = vi.fn().mockResolvedValue({ valid: true, errors: [] });
+    const out = await validateManifest("ctx", "kind: ConfigMap", "team-a", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.validateManifest", {
+      context: "ctx",
+      yaml: "kind: ConfigMap",
+      namespace: "team-a",
+    });
+    expect(out.valid).toBe(true);
   });
 });
 
