@@ -248,3 +248,6 @@
   vertical-align: middle;
   margin-right: 6px;
 }
+
+.freelens-view { display:flex; flex-direction:column; height:100%; min-height:0; overflow:hidden; }
+.freelens-view iframe { display:block; border:0; width:100%; flex:1; min-height:0; }

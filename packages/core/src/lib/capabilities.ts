@@ -49,7 +49,7 @@ export const CAPABILITY_CATALOG: readonly CapabilityFacts[] = catalog;
  * fixing a large one is how the large one came to be.
  */
 export const HOST_ONLY_CAPABILITY_IDS: readonly string[] = [
-  "settings.get", "settings.set", "extensions.list", "extensions.configure", "extensions.read",
+  "settings.get", "settings.set", "extensions.list", "extensions.configure", "extensions.read", "extensions.freelensRead",
 ];
 
 /**

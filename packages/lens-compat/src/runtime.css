@@ -1,0 +1,239 @@
+:root {
+  color-scheme: light dark;
+  font:
+    13px system-ui,
+    sans-serif;
+  color: var(--ink, #29272d);
+  background: var(--surface, #f8f8fa);
+  --borderFaintColor: var(--line, #dedde3);
+  --textColorPrimary: var(--ink);
+  --textColorSecondary: var(--muted, #777);
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+button,
+input {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--line, #dedde3);
+  border-radius: 4px;
+  min-height: 28px;
+  padding: 3px 8px;
+}
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+button[aria-current="page"] {
+  color: var(--accent, #a33460);
+  border-color: currentColor;
+}
+.link {
+  border: 0;
+  padding: 0;
+  text-align: left;
+  min-height: 24px;
+  color: var(--accent, #a33460);
+}
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line, #dedde3);
+}
+header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line, #dedde3);
+}
+header input {
+  min-width: 80px;
+  max-width: 230px;
+}
+header strong {
+  margin-right: auto;
+}
+header h5 {
+  font: 600 15px system-ui;
+  margin: 0;
+}
+header label {
+  white-space: nowrap;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font: inherit;
+}
+th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  background: var(--surface, #f8f8fa);
+  position: sticky;
+  top: 0;
+}
+td,
+th {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line, #dedde3);
+  height: 30px;
+  white-space: nowrap;
+  max-width: 32em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.table-scroll {
+  overflow: auto;
+}
+p {
+  padding: 0 10px;
+}
+.details {
+  position: fixed;
+  inset: 0 0 0 auto;
+  width: min(620px, 95vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface, #f8f8fa);
+  border-left: 1px solid var(--line, #dedde3);
+  box-shadow: -12px 0 30px #0002;
+  z-index: 100;
+}
+.detail-content {
+  overflow: auto;
+  flex: 1;
+  padding: 10px 14px;
+  min-height: 0;
+}
+.drawer-item {
+  display: grid;
+  grid-template-columns: minmax(90px, 30%) minmax(0, 1fr);
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line, #dedde3);
+}
+dt {
+  color: var(--muted, #777);
+}
+dd {
+  margin: 0;
+  overflow: auto;
+}
+h3 {
+  font-size: 13px;
+  margin: 18px 0 6px;
+}
+pre {
+  white-space: pre;
+  overflow: auto;
+  font:
+    12px ui-monospace,
+    monospace;
+}
+a {
+  color: var(--accent, #a33460);
+}
+.chart {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px;
+}
+.donut {
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  position: relative;
+}
+.donut:after {
+  content: "";
+  position: absolute;
+  inset: 12px;
+  border-radius: 50%;
+  background: var(--surface, #f8f8fa);
+}
+.chart ul {
+  list-style: none;
+  padding: 0;
+  line-height: 1.8;
+}
+.chart li i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+}
+[role="alert"] {
+  padding: 10px;
+  border-bottom: 1px solid var(--line, #dedde3);
+  color: #c74a42;
+}
+
+.page-menu {
+  position: relative;
+}
+.page-menu summary {
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.page-menu > div {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 20;
+  min-width: 210px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--surface, #f8f8fa);
+  border: 1px solid var(--line, #dedde3);
+  box-shadow: 0 5px 15px #0002;
+}
+.page-menu button {
+  text-align: left;
+  border: 0;
+}
+.page-menu button:hover {
+  background: #80808020;
+}
+
+.namespace-picker {
+  position: relative;
+}
+.namespace-picker [role="listbox"] {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 25;
+  display: flex;
+  flex-direction: column;
+  min-width: 210px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--surface, #f8f8fa);
+  border: 1px solid var(--line, #dedde3);
+}
+.namespace-picker [role="option"] {
+  text-align: left;
+  border: 0;
+}
+button:focus-visible,
+input:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent, #a33460);
+  outline-offset: 1px;
+}

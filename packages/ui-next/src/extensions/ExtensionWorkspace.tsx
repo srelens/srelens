@@ -1,3 +1,4 @@
+import { FreelensView } from "./FreelensView";
 import { useContext, useState } from "react";
 import {
   listNamespaces,
@@ -223,7 +224,14 @@ function Events({
 }
 
 /** Native, data-only extension workspace. Every reader stays pinned to this route's context. */
-export function ExtensionWorkspace({
+export function ExtensionWorkspace(
+  props: Parameters<typeof NativeExtensionWorkspace>[0],
+) {
+  if (props.plugin.freelens)
+    return <FreelensView plugin={props.plugin} context={props.context} />;
+  return <NativeExtensionWorkspace {...props} />;
+}
+function NativeExtensionWorkspace({
   plugin,
   page,
   context,

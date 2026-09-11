@@ -39,8 +39,8 @@ any extension is enabled. Turning developer mode off disables all extensions.
 The app deliberately accepts a narrower surface than the developer broker:
 `k8s.listCustomResource` bindings with fixed, nonempty group/version/plural/kind
 and fixed resource scope, plus explicitly granted `k8s.listEvents` readers. Only `context` and `namespace` are forwarded from the
-host view. Core-group resources, caller-supplied resource selectors, executable
-entry points and operations requiring consent are rejected. Reads remain subject
+host view. Core-group resources, caller-supplied resource selectors, arbitrary executable
+entry points and operations requiring consent are rejected by the declarative path. Reads remain subject
 to the selected cluster's RBAC; the extension receives no kubeconfig or token.
 
 The inventory lives next to the desktop settings file, using the settings path
@@ -54,18 +54,59 @@ settings are JSON data; this declarative version does not interpolate settings
 into capability arguments.
 
 The application exposes `extensions.list`, `extensions.configure` and
-`extensions.read` through the shared capability registry and MCP. Configure is
+`extensions.read`, plus the read-only `extensions.freelensRead` compatibility broker, through the shared capability registry and MCP. Configure is
 mutating and uses the normal MCP consent gate. App-installed operations currently
 use the `extensions.read` facade with installation ID, revision, operation and
 context; individual `plugin/...` tool discovery remains a developer-harness
 feature. The app facade refuses a host reader with stronger consent annotations.
-All three capabilities are unavailable on the multi-user web host until per-user
+All four capabilities are unavailable on the multi-user web host until per-user
 extension state is implemented.
 
-No third-party code, subprocess, iframe, download, npm install or lifecycle script
-is executed. `lens-compat` packages still fail explicitly. Signed distribution,
-executable runtimes, sandboxing and the Freelens/OpenLens adapter remain later
-stages; local developer-mode support does not claim those protections.
+## Run the Freelens FluxCD archive
+
+Both desktop designs can import the **original @freelensapp/fluxcd-extension
+5.3.1 release archive** from
+[the upstream release](https://github.com/freelensapp/freelens-fluxcd-extension/releases/tag/v5.3.1).
+
+1. Enable developer mode in **Settings → Extensions**.
+2. Choose `freelensapp-fluxcd-extension-5.3.1.tgz` in the archive picker.
+3. Review and grant `freelens.flux.read`, then open **FluxCD (Freelens)** for a
+   connected cluster. Existing native Flux manifests remain separate installs.
+4. Use the extension navigation for its dashboard and resource pages. Click a
+   resource name to open its registered detail components; **Object** shows the
+   full custom resource, and Escape closes the panel.
+
+This executes the package's actual CommonJS renderer and React/MobX components;
+it does not translate the tarball into a native table manifest. The host supplies
+compatible list, chart, navigation, store and detail primitives using an isolated
+React 17 runtime. Native app React 19 and native extension authoring remain separate.
+Duplicate upstream menu/detail registrations are deduplicated. Resource stores
+resolve by declared API version, kind and plural rather than trusting a conflicting
+`apiBase` (the upstream HelmChart v1 declaration names the HelmRepository path).
+
+This first compatibility target is deliberately version-specific. The backend
+verifies SHA-256
+`27b433c2738e6228cd06c79fe98d0141101180679474dd6e81a56f12aacb4ddf`
+before reading the bounded archive. Other releases, repacked files and unrelated
+Freelens/OpenLens extensions fail with an explicit unsupported-package error.
+No archive is extracted to disk; npm installation, lifecycle scripts and the
+package's Node main process are not run. Additional packages need a compatibility
+and permission audit, not just a new filename in the picker.
+
+The renderer runs in an `allow-scripts`-only iframe with an opaque origin. Its CSP
+blocks direct network reads, forms and external assets; the parent permits only
+blob frames. Messages are accepted only from the mounted frame and expose only
+resource/event reads. The host supplies the pinned context and installation
+revision, and the backend rechecks the durable grant and served Flux CRDs for
+reads. The renderer receives no kubeconfig, token, Tauri API or filesystem API.
+Reads refresh every 30 seconds while a page is mounted. Discovery/RBAC failures
+remain errors; an empty discovery result is reported separately.
+
+**Current limits:** read-only compatibility. Reconcile, suspend/resume, edit,
+delete and core-resource/Secret reads are not exposed. Core-resource references
+are displayed as text; use the host browser for those resources. Marketplace,
+signing, generic Node/Electron execution and arbitrary third-party packages remain
+future work. Developer mode and the archive integrity allowlist are required.
 
 ## Try a native extension
 

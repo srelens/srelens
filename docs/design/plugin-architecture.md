@@ -208,3 +208,13 @@ Each reference plugin simultaneously validates a backend capability set, a front
 - Watch/subscription semantics over the broker (backpressure, teardown on disable).
 - Marketplace hosting/ownership and the plugin review process.
 - Whether multi-window (#150) implies per-window or shared plugin instances.
+
+## Implementation note: first Freelens renderer target
+
+The initial compatibility implementation runs the audited FluxCD 5.3.1 renderer
+archive in the browser sandbox through `@srelens/lens-compat`, with an isolated
+React 17 stack and a read-only `extensions.freelensRead` backend bridge. Its Node
+main entry has no required runtime work and is not executed. This is a bounded
+renderer target, not the generic Node extension host proposed above. See
+[the shipped compatibility contract](../EXTENSIONS.md#run-the-freelens-fluxcd-archive)
+for supported APIs, installation, integrity restrictions and limitations.

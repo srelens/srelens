@@ -6,6 +6,12 @@
     "requiresConfirm": true
   },
   {
+    "id": "extensions.freelensRead",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
     "id": "extensions.list",
     "readOnly": true,
     "destructive": false,

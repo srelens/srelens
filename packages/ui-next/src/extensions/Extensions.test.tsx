@@ -143,7 +143,9 @@ it("persists settings, disable and remove through the backend", async () => {
     }),
   );
   await waitFor(() => {
-    const remove = screen.getByRole("button", { name: "Remove" }) as HTMLButtonElement;
+    const remove = screen.getByRole("button", {
+      name: "Remove",
+    }) as HTMLButtonElement;
     expect(remove.disabled).toBe(false);
     // Reload can replace the inventory between two separate async lookups.
     fireEvent.click(remove);
@@ -344,11 +346,61 @@ it("renders readable conditions and short revisions while preserving the full va
   const revision = "main@sha1:0123456789abcdef0123456789abcdef01234567";
   const displayPlugin = structuredClone(plugin);
   displayPlugin.manifest.capabilities[0].arguments.printerColumns = [
-    {name:"Ready"}, {name:"Suspended"}, {name:"Revision"},
+    { name: "Ready" },
+    { name: "Suspended" },
+    { name: "Revision" },
   ];
-  vi.mocked(readExtension).mockResolvedValue({items:[{name:"apps",namespace:"flux-system",age:"1d",columns:["True","false",revision]}]});
-  render(<ExtensionResults plugin={displayPlugin} capability="list" context="staging"/>);
-  expect(await screen.findByText("Ready", {selector:"td span"})).toBeTruthy();
-  expect(screen.getByText("No", {selector:"td span"})).toBeTruthy();
-  expect(screen.getByText("main@01234567").getAttribute("title")).toBe(revision);
+  vi.mocked(readExtension).mockResolvedValue({
+    items: [
+      {
+        name: "apps",
+        namespace: "flux-system",
+        age: "1d",
+        columns: ["True", "false", revision],
+      },
+    ],
+  });
+  render(
+    <ExtensionResults
+      plugin={displayPlugin}
+      capability="list"
+      context="staging"
+    />,
+  );
+  expect(
+    await screen.findByText("Ready", { selector: "td span" }),
+  ).toBeTruthy();
+  expect(screen.getByText("No", { selector: "td span" })).toBeTruthy();
+  expect(screen.getByText("main@01234567").getAttribute("title")).toBe(
+    revision,
+  );
+});
+it("reviews archive read access before sending the original bytes to the backend", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    developerMode: true,
+    nextRevision: 1,
+    plugins: [],
+  });
+  render(<ExtensionManager />);
+  const input = await screen.findByLabelText(
+    "Freelens FluxCD 5.3.1 archive (.tgz)",
+  );
+  const file = new File([new Uint8Array([1, 2, 3])], "flux.tgz");
+  Object.defineProperty(file, "arrayBuffer", {
+    value: async () => new Uint8Array([1, 2, 3]).buffer,
+  });
+  fireEvent.change(input, { target: { files: [file] } });
+  const install = await screen.findByText(
+    "Install archive and grant read access",
+  );
+  expect(configureExtensions).not.toHaveBeenCalled();
+  fireEvent.click(install);
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({
+      action: "installArchive",
+      archive: "AQID",
+      grants: ["freelens.flux.read"],
+    }),
+  );
 });

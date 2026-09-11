@@ -20,7 +20,7 @@ export default defineConfig({
     // resolved on its own, and only the root-only options (coverage,
     // reporters) are read from this block. So the shared ones live in
     // `vitest.shared.ts` and each of the four imports them.
-    projects: ["apps/desktop", "packages/core", "packages/ui-kit", "packages/ui-next"],
+    projects: ["apps/desktop", "packages/core", "packages/ui-kit", "packages/ui-next", "packages/lens-compat"],
     coverage: {
       provider: "v8",
       // Never lower any of these.
@@ -30,6 +30,7 @@ export default defineConfig({
         "packages/core/src/**/*.ts",
         "packages/ui-kit/src/**/*.{ts,tsx}",
         "packages/ui-next/src/**/*.{ts,tsx}",
+        "packages/lens-compat/src/**/*.jsx",
       ],
       exclude: [
         "**/*.test.{ts,tsx}",

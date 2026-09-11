@@ -1,4 +1,5 @@
 //! Durable, developer-mode declarative extensions for desktop hosts.
+use base64::Engine;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -15,6 +16,8 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct Installed {
     manifest: Manifest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    freelens: Option<String>,
     grants: Vec<String>,
     enabled: bool,
     revision: u64,
@@ -49,6 +52,11 @@ enum Configure {
     #[serde(rename = "install")]
     Install {
         manifest: String,
+        grants: Vec<String>,
+    },
+    #[serde(rename = "installArchive")]
+    InstallArchive {
+        archive: String,
         grants: Vec<String>,
     },
     #[serde(rename = "enable")]
@@ -269,6 +277,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 .map(|i| state.plugins.remove(i));
             state.plugins.push(Installed {
                 manifest,
+                freelens: None,
                 grants,
                 enabled: true,
                 revision,
@@ -277,6 +286,47 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             state
                 .plugins
                 .sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
+        }
+        Configure::InstallArchive { archive, grants } => {
+            if !state.developer_mode {
+                return Err(
+                    "Enable developer mode before installing a compatibility package".into(),
+                );
+            }
+            if grants != ["freelens.flux.read"] {
+                return Err("The archive requires the freelens.flux.read grant".into());
+            }
+            let package = decode_archive(&archive)?;
+            let mut manifest =
+                Manifest::parse(include_str!("../../../examples/extensions/flux.json"))?;
+            manifest.id = "org.freelensapp.fluxcd".into();
+            manifest.name = "FluxCD (Freelens)".into();
+            manifest.version = package.version;
+            // Host navigation entry only: the package supplies the real pages.
+            manifest.contributions.pages.truncate(1);
+            manifest.contributions.detail_tabs.clear();
+            manifest.contributions.row_actions.clear();
+            manifest.contributions.pages[0].dashboard = None;
+            manifest.contributions.pages[0].title = "FluxCD".into();
+            let revision = state.next_revision;
+            state.next_revision = revision
+                .checked_add(1)
+                .ok_or("Extension revision limit reached")?;
+            let settings = state
+                .plugins
+                .iter()
+                .find(|p| p.manifest.id == manifest.id)
+                .map(|p| p.settings.clone())
+                .unwrap_or_default();
+            state.plugins.retain(|p| p.manifest.id != manifest.id);
+            state.plugins.push(Installed {
+                manifest,
+                freelens: Some(archive),
+                grants,
+                enabled: true,
+                revision,
+                settings,
+            });
         }
         Configure::Enable { id, enabled } => {
             if enabled && !state.developer_mode {
@@ -288,7 +338,11 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 .find(|p| p.manifest.id == id)
                 .ok_or("Extension is not installed")?;
             if enabled {
-                validate_app(&p.manifest, &p.grants, core)?;
+                if let Some(archive) = &p.freelens {
+                    decode_archive(archive)?;
+                } else {
+                    validate_app(&p.manifest, &p.grants, core)?;
+                }
             }
             p.enabled = enabled;
         }
@@ -311,6 +365,94 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
     }
     write(path, &state)?;
     Ok(state)
+}
+fn decode_archive(archive: &str) -> Result<srelens_plugin_host::freelens::FluxArchive, String> {
+    if archive.len() > 1400000 {
+        return Err("Archive exceeds size limit".into());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(archive)
+        .map_err(|e| e.to_string())?;
+    srelens_plugin_host::freelens::FluxArchive::parse(&bytes)
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct FreelensRead {
+    id: String,
+    revision: u64,
+    context: String,
+    operation: String,
+    #[serde(default)]
+    group: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    plural: String,
+    #[serde(default)]
+    kind: String,
+}
+fn flux_group(group: &str) -> bool {
+    matches!(
+        group,
+        "source.toolkit.fluxcd.io"
+            | "kustomize.toolkit.fluxcd.io"
+            | "helm.toolkit.fluxcd.io"
+            | "image.toolkit.fluxcd.io"
+            | "notification.toolkit.fluxcd.io"
+            | "fluxcd.controlplane.io"
+    )
+}
+async fn invoke_freelens_read(
+    core: &Registry,
+    id: &str,
+    arguments: Value,
+) -> Result<Value, CapabilityError> {
+    let capability = core
+        .get(id)
+        .ok_or_else(|| CapabilityError::Handler("Extension reader unavailable".into()))?;
+    let annotations = &capability.annotations;
+    if !annotations.read_only
+        || annotations.requires_confirm
+        || annotations.sensitive
+        || annotations.destructive
+    {
+        return Err(CapabilityError::Handler(
+            "The compatibility runtime cannot invoke a gated or mutating reader".into(),
+        ));
+    }
+    core.invoke(id, arguments).await
+}
+fn register_freelens(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
+    reg.register(Capability::typed::<FreelensRead, Value, _, _>(
+        "extensions.freelensRead", "Read Flux custom resources for an enabled, audited Freelens renderer", Annotations::READ_ONLY,
+        move |input: FreelensRead| {
+            let path = path.clone(); let core = core.clone();
+            async move {
+                let fail = |message: &str| CapabilityError::Handler(message.into());
+                if input.context.trim().is_empty() { return Err(fail("An explicit cluster context is required")); }
+                let state = tokio::task::spawn_blocking(move || read(&path)).await.map_err(|e|fail(&e.to_string()))?.map_err(|e|fail(&e))?;
+                let plugin = state.plugins.iter().find(|p| p.manifest.id == input.id && p.revision == input.revision && p.enabled && state.developer_mode)
+                    .ok_or_else(||fail("Extension was disabled, removed or updated; refresh the view"))?;
+                if plugin.grants != ["freelens.flux.read"] { return Err(fail("Freelens read permission is not granted")); }
+                let package = decode_archive(plugin.freelens.as_deref().ok_or_else(||fail("Not a Freelens package"))?).map_err(|e|fail(&e))?;
+                if !matches!(input.operation.as_str(), "bootstrap" | "resource" | "events") { return Err(fail("Unsupported Freelens operation; only reads are allowed")); }
+                if input.operation == "events" {
+                    let mut result = invoke_freelens_read(&core, "k8s.listEvents",json!({"context":input.context,"namespace":""})).await?;
+                    if let Some(events) = result["events"].as_array_mut() { events.retain(|e| e["objectApiVersion"].as_str().and_then(|v|v.split_once('/')).is_some_and(|(g,_)|flux_group(g))); }
+                    return Ok(result);
+                }
+                let result = invoke_freelens_read(&core, "k8s.listCrds",json!({"context":input.context})).await?;
+                let crds: Vec<Value> = result["crds"].as_array().ok_or_else(||fail("CRD discovery returned no result"))?.iter().filter(|c| c["group"].as_str().is_some_and(flux_group)).cloned().collect();
+                if input.operation == "bootstrap" {
+                    let namespaces = invoke_freelens_read(&core, "k8s.listNamespaces",json!({"context":input.context})).await?;
+                    return Ok(json!({"source":package.renderer,"crds":crds,"namespaces":namespaces["namespaces"]}));
+                }
+                let crd = crds.iter().find(|c| c["group"] == input.group && c["plural"] == input.plural && c["kind"] == input.kind && c["versions"].as_array().is_some_and(|versions|versions.contains(&json!(input.version))))
+                    .ok_or_else(||fail("The requested Flux API is not served by this cluster"))?;
+                invoke_freelens_read(&core, "k8s.listCustomResource",json!({"context":input.context,"group":input.group,"version":input.version,"plural":input.plural,"kind":crd["kind"],"namespaced":crd["namespaced"],"namespace":"","includeObjects":true})).await
+            }
+        }
+    ));
 }
 pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
     let p = path.clone();
@@ -345,6 +487,7 @@ pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
             }
         },
     ));
+    register_freelens(reg, path.clone(), core.clone());
     reg.register(Capability::typed::<Read, Value, _, _>(
         "extensions.read",
         "Read a declared custom-resource contribution from an enabled extension",
@@ -427,6 +570,156 @@ mod tests {
     }
     fn manifest() -> String {
         include_str!("../../../examples/extensions/argocd.json").into()
+    }
+    #[tokio::test]
+    async fn archive_installation_is_durable_and_reads_are_revoked() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let reg = setup(&path);
+        let archive = base64::engine::general_purpose::STANDARD.encode(include_bytes!(
+            "../../plugin-host/tests/fixtures/freelens-flux-5.3.1.tgz"
+        ));
+        let install =
+            json!({"action":"installArchive","archive":archive,"grants":["freelens.flux.read"]});
+        assert!(reg
+            .invoke("extensions.configure", install.clone())
+            .await
+            .is_err());
+        reg.invoke(
+            "extensions.configure",
+            json!({"action":"developerMode","enabled":true}),
+        )
+        .await
+        .unwrap();
+        let state = reg.invoke("extensions.configure", install).await.unwrap();
+        assert_eq!(state["plugins"][0]["manifest"]["name"], "FluxCD (Freelens)");
+        assert!(state["plugins"][0]["freelens"].is_string());
+        let input = json!({"id":"org.freelensapp.fluxcd","revision":1,"context":"test","operation":"bootstrap"});
+        reg.invoke(
+            "extensions.configure",
+            json!({"action":"enable","id":"org.freelensapp.fluxcd","enabled":false}),
+        )
+        .await
+        .unwrap();
+        assert!(reg
+            .invoke("extensions.freelensRead", input)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("disabled"));
+        assert_eq!(
+            setup(&path)
+                .invoke("extensions.list", json!({}))
+                .await
+                .unwrap()["plugins"][0]["enabled"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn freelens_broker_reads_only_discovered_flux_resources_in_explicit_context() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let mut core = Registry::new();
+        core.register(Capability::read_only("k8s.listCrds","fixture",|args|async move {
+            assert_eq!(args["context"], "staging");
+            Ok(json!({"crds":[{"group":"source.toolkit.fluxcd.io","kind":"GitRepository","plural":"gitrepositories","versions":["v1"],"namespaced":true},{"group":"other.example","kind":"Secret","plural":"secrets","versions":["v1"]}]}))
+        }));
+        core.register(Capability::read_only(
+            "k8s.listNamespaces",
+            "fixture",
+            |_| async { Ok(json!({"namespaces":["flux-system"]})) },
+        ));
+        core.register(Capability::read_only("k8s.listCustomResource","fixture",|args|async move {
+            assert_eq!(args["context"],"staging");assert_eq!(args["includeObjects"],true);assert_eq!(args["group"],"source.toolkit.fluxcd.io");assert_eq!(args["namespace"],"");
+            Ok(json!({"objects":[{"metadata":{"name":"repo"},"spec":{"url":"https://example.test"}}]}))
+        }));
+        core.register(Capability::read_only("k8s.listEvents","fixture",|_|async {Ok(json!({"events":[{"objectApiVersion":"v1"},{"objectApiVersion":"source.toolkit.fluxcd.io/v1"}]}))}));
+        let mut reg = Registry::new();
+        register(&mut reg, path, Arc::new(core));
+        reg.invoke(
+            "extensions.configure",
+            json!({"action":"developerMode","enabled":true}),
+        )
+        .await
+        .unwrap();
+        let archive = base64::engine::general_purpose::STANDARD.encode(include_bytes!(
+            "../../plugin-host/tests/fixtures/freelens-flux-5.3.1.tgz"
+        ));
+        reg.invoke(
+            "extensions.configure",
+            json!({"action":"installArchive","archive":archive,"grants":["freelens.flux.read"]}),
+        )
+        .await
+        .unwrap();
+        let mut request = json!({"id":"org.freelensapp.fluxcd","revision":1,"context":"staging","operation":"bootstrap"});
+        let bootstrap = reg
+            .invoke("extensions.freelensRead", request.clone())
+            .await
+            .unwrap();
+        assert_eq!(bootstrap["crds"].as_array().unwrap().len(), 1);
+        assert!(bootstrap["source"]
+            .as_str()
+            .unwrap()
+            .contains("kubeObjectDetailItems"));
+        request["operation"] = json!("events");
+        assert_eq!(
+            reg.invoke("extensions.freelensRead", request.clone())
+                .await
+                .unwrap()["events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        request["operation"] = json!("resource");
+        request["group"] = json!("source.toolkit.fluxcd.io");
+        request["version"] = json!("v1");
+        request["kind"] = json!("GitRepository");
+        request["plural"] = json!("gitrepositories");
+        assert_eq!(
+            reg.invoke("extensions.freelensRead", request.clone())
+                .await
+                .unwrap()["objects"][0]["metadata"]["name"],
+            "repo"
+        );
+        for (key, value) in [
+            ("group", "other.example"),
+            ("group", ""),
+            ("version", "v99"),
+            ("plural", "secrets"),
+            ("operation", "patch"),
+            ("context", ""),
+        ] {
+            let mut bad = request.clone();
+            bad[key] = json!(value);
+            assert!(
+                reg.invoke("extensions.freelensRead", bad).await.is_err(),
+                "{key}={value}"
+            );
+        }
+        request["revision"] = json!(99);
+        assert!(reg
+            .invoke("extensions.freelensRead", request)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn compatibility_reader_cannot_bypass_a_host_consent_gate() {
+        let mut core = Registry::new();
+        let mut capability = Capability::read_only("fixture", "fixture", |_| async {
+            panic!("gated handler must not execute");
+            #[allow(unreachable_code)]
+            Ok(json!({}))
+        });
+        capability.annotations = Annotations::SENSITIVE_READ;
+        core.register(capability);
+        assert!(invoke_freelens_read(&core, "fixture", json!({}))
+            .await
+            .is_err());
     }
     #[test]
     fn events_are_an_explicit_read_only_grant() {
@@ -735,8 +1028,14 @@ mod tests {
                 .requires_confirm
         );
         assert!(reg.get("extensions.read").unwrap().annotations.read_only);
+        assert!(
+            reg.get("extensions.freelensRead")
+                .unwrap()
+                .annotations
+                .read_only
+        );
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 3);
+        assert_eq!(mcp.list_tools().len(), 4);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"developerMode","enabled":true}),

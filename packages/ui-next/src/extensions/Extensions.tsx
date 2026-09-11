@@ -50,6 +50,10 @@ export function ExtensionManager({
 }) {
   const { Button, Combobox } = useContext(ExtensionControls);
   const inventory = useExtensions();
+  const [archive, setArchive] = useState<{
+    name: string;
+    content: string;
+  } | null>(null);
   const [source, setSource] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -72,6 +76,7 @@ export function ExtensionManager({
       await configureExtensions(action);
       inventory.reload();
       setReview(null);
+      setArchive(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -124,7 +129,8 @@ export function ExtensionManager({
       {state.developerMode && (
         <p className="extension-warning" role="status">
           Developer mode: unsigned local extensions are allowed. Only read-only
-          custom-resource manifests are supported.
+          custom-resource manifests and the audited Freelens FluxCD 5.3.1
+          archive are supported.
         </p>
       )}
       {error && (
@@ -132,6 +138,57 @@ export function ExtensionManager({
           {error}
         </p>
       )}
+      <div className="extension-install">
+        <label htmlFor="extension-archive">
+          Freelens FluxCD 5.3.1 archive (.tgz)
+        </label>
+        <input
+          id="extension-archive"
+          type="file"
+          accept=".tgz,.tar.gz"
+          disabled={busy || !state.developerMode}
+          onChange={async (e) => {
+            const file = e.target.files?.[0];
+            setArchive(null);
+            if (!file) return;
+            if (file.size > 1024 * 1024) {
+              setError("Extension archive exceeds 1 MiB");
+              return;
+            }
+            try {
+              const bytes = new Uint8Array(await file.arrayBuffer());
+              let binary = "";
+              for (const byte of bytes) binary += String.fromCharCode(byte);
+              setArchive({ name: file.name, content: btoa(binary) });
+              setError("");
+            } catch (error) {
+              setError(String(error));
+            }
+          }}
+        />
+        {archive && (
+          <section aria-label="Review archive permissions">
+            <p>
+              <strong>{archive.name}</strong> requests read access to Flux
+              custom resources, their details, namespaces, and Flux events in
+              the cluster you open. Cluster writes are unavailable. The backend
+              verifies the original release archive before installing.
+            </p>
+            <Button
+              disabled={busy || !state.developerMode}
+              onClick={() =>
+                void change({
+                  action: "installArchive",
+                  archive: archive.content,
+                  grants: ["freelens.flux.read"],
+                })
+              }
+            >
+              Install archive and grant read access
+            </Button>
+          </section>
+        )}
+      </div>
       <div className="extension-install">
         <label htmlFor="extension-manifest">
           Local extension manifest (JSON)

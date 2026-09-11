@@ -47,3 +47,18 @@ it("matches contribution kinds by their actual API group", async () => {
   expect(contributionKind("acme.io/Deployment")).toBe("acme.io/Deployment");
   expect(contributionKind("UnknownCustomKind")).toBe("");
 });
+it("pins Freelens broker scope after the frame request fields", async () => {
+  const { readFreelensExtension } = await import("./extensions");
+  await readFreelensExtension("org.freelensapp.fluxcd", 3, "staging", {
+    operation: "events",
+    context: "prod",
+    revision: 99,
+    id: "other",
+  });
+  expect(invokeCapability).toHaveBeenCalledWith("extensions.freelensRead", {
+    operation: "events",
+    id: "org.freelensapp.fluxcd",
+    revision: 3,
+    context: "staging",
+  });
+});

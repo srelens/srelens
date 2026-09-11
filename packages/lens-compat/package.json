@@ -1,0 +1,26 @@
+{
+  "name": "@srelens/lens-compat",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./runtime": "./dist/runtime.js",
+    "./styles": "./src/runtime.css"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node build.mjs && node --test --test-force-exit tests/*.test.mjs"
+  },
+  "dependencies": {
+    "react": "17.0.2",
+    "react-dom": "17.0.2",
+    "mobx": "6.13.7",
+    "mobx-react": "7.6.0",
+    "react-router-dom": "5.3.4",
+    "@noble/hashes": "^2.0.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "jsdom": "^24.0.0"
+  }
+}

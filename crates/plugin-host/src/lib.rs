@@ -2,6 +2,7 @@
 //!
 //! No package code is loaded here. A trusted installer supplies explicit
 //! grants; the future Freelens adapter targets this same host contract.
+pub mod freelens;
 mod manifest;
 pub use manifest::*;
 
