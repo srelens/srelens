@@ -40,6 +40,40 @@ export function ErrorNotice({
     </div>
   );
 }
+function ResultValue({ value, column }: { value?: string; column: string }) {
+  const raw = value || "—";
+  const boolean = raw.toLowerCase();
+  let label = raw;
+  let tone = "neutral";
+  if (column === "Ready" && (boolean === "true" || boolean === "false")) {
+    label = boolean === "true" ? "Ready" : "Not ready";
+    tone = boolean === "true" ? "ready" : "warning";
+  } else if (
+    ["Suspended", "Reconciling"].includes(column) &&
+    ["true", "false"].includes(boolean)
+  ) {
+    label =
+      boolean === "false"
+        ? "No"
+        : column === "Reconciling"
+          ? "In progress"
+          : "Yes";
+    tone = boolean === "true" ? "warning" : "muted";
+  }
+  const revision = raw.match(/^(.*?)@sha(?:1|256):([a-f0-9]{16,})$/i);
+  if (revision) label = `${revision[1]}@${revision[2].slice(0, 8)}`;
+  return (
+    <span
+      className="extension-value"
+      data-tone={tone}
+      title={raw}
+      aria-label={revision ? raw : undefined}
+    >
+      {label}
+    </span>
+  );
+}
+
 export function ExtensionResults({
   plugin,
   capability,
@@ -162,10 +196,21 @@ export function ExtensionResults({
             <tbody>
               {rows.map((row) => (
                 <tr key={`${row.namespace}/${row.name}`}>
-                  <td>{row.name}</td>
-                  <td>{row.namespace || "—"}</td>
-                  {columns.map((_, i) => (
-                    <td key={i}>{row.columns?.[i] || "—"}</td>
+                  <td>
+                    <span className="extension-resource-name" title={row.name}>
+                      {row.name}
+                    </span>
+                  </td>
+                  <td className="extension-namespace">
+                    {row.namespace || "—"}
+                  </td>
+                  {columns.map((column, i) => (
+                    <td key={i}>
+                      <ResultValue
+                        value={row.columns?.[i]}
+                        column={column.name}
+                      />
+                    </td>
                   ))}
                   <td>{row.age}</td>
                 </tr>

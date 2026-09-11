@@ -265,7 +265,7 @@ export function ExtensionWorkspace({
   return (
     <div className="extension-workspace">
       <nav
-        className="extension-toolbar"
+        className="extension-toolbar extension-navigation"
         aria-label={`${plugin.manifest.name} pages`}
       >
         {groups.map((group) => (
@@ -283,7 +283,7 @@ export function ExtensionWorkspace({
       </nav>
       {current.group && (
         <nav
-          className="extension-toolbar"
+          className="extension-toolbar extension-navigation extension-subnavigation"
           aria-label={`${current.group} pages`}
         >
           {pages
@@ -300,7 +300,7 @@ export function ExtensionWorkspace({
             ))}
         </nav>
       )}
-      <div className="extension-toolbar">
+      <div className="extension-toolbar extension-filters">
         <Combobox
           ariaLabel="Extension namespace"
           value={namespace}

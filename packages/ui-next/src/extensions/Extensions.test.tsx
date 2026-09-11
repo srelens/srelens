@@ -339,3 +339,16 @@ it.each(["ApiError: Forbidden (code: 403)", "list custom resource timed out"])(
     ).toBeNull();
   },
 );
+
+it("renders readable conditions and short revisions while preserving the full value", async () => {
+  const revision = "main@sha1:0123456789abcdef0123456789abcdef01234567";
+  const displayPlugin = structuredClone(plugin);
+  displayPlugin.manifest.capabilities[0].arguments.printerColumns = [
+    {name:"Ready"}, {name:"Suspended"}, {name:"Revision"},
+  ];
+  vi.mocked(readExtension).mockResolvedValue({items:[{name:"apps",namespace:"flux-system",age:"1d",columns:["True","false",revision]}]});
+  render(<ExtensionResults plugin={displayPlugin} capability="list" context="staging"/>);
+  expect(await screen.findByText("Ready", {selector:"td span"})).toBeTruthy();
+  expect(screen.getByText("No", {selector:"td span"})).toBeTruthy();
+  expect(screen.getByText("main@01234567").getAttribute("title")).toBe(revision);
+});

@@ -156,3 +156,95 @@
   color: var(--ink, var(--fl-color-text, #eee));
   font-size: 1.5rem;
 }
+
+/* Match the host's resource-table density, including compact/comfortable mode. */
+.extension-workspace,
+.extension-results {
+  font-family: inherit;
+  font-size: var(--text-body, 0.8125rem);
+}
+.extension-navigation {
+  gap: 2px;
+  padding: 0 8px;
+  min-height: 32px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+.extension-navigation > button {
+  flex-shrink: 0;
+  align-self: stretch;
+  border-radius: 0;
+  padding: 6px 10px;
+  font-size: inherit;
+  font-weight: 500;
+}
+.extension-subnavigation {
+  background: var(--surface-sunk, var(--fl-color-bg));
+}
+.extension-filters {
+  padding: 6px 10px;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+.extension-filters > button {
+  flex-shrink: 0;
+}
+.extension-search {
+  font: inherit;
+  min-width: 4rem;
+  width: 0;
+  height: 28px;
+  box-sizing: border-box;
+  padding: 3px 8px;
+}
+.extension-results th {
+  font-size: var(--text-meta, 0.6875rem);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-faint, var(--fl-color-text-muted));
+  padding: 5px 10px;
+}
+.extension-results td {
+  font-size: var(--text-body, 0.8125rem);
+  padding: var(--pad-y, 0.2rem) 10px;
+  height: var(--row-h, 27px);
+  box-sizing: border-box;
+  font-variant-numeric: tabular-nums;
+}
+.extension-results td:last-child,
+.extension-results th:last-child {
+  text-align: right;
+}
+.extension-results tbody tr:hover {
+  background: var(--surface-sunk, var(--fl-color-surface-alt));
+}
+.extension-value,
+.extension-resource-name {
+  display: inline-block;
+  max-width: 32ch;
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.extension-value[data-tone="ready"] {
+  color: var(--ok, var(--fl-color-success));
+}
+.extension-value[data-tone="warning"] {
+  color: var(--warn, var(--fl-color-warning));
+}
+.extension-value[data-tone="muted"],
+.extension-namespace {
+  color: var(--ink-muted, var(--fl-color-text-muted));
+}
+.extension-value[data-tone="ready"]::before,
+.extension-value[data-tone="warning"]::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: middle;
+  margin-right: 6px;
+}
