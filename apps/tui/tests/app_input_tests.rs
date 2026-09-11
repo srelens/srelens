@@ -1123,14 +1123,14 @@ async fn command_mode_tab_and_arrow_keys_cycle_the_suggestions() {
     let len = suggestions.len();
     assert!(len > 1, "':s' should offer several commands");
 
-    // Tab completes to suggestion and advances index
+    // Tab completes the text, so selection resets for the newly filtered list.
     app.command_buffer = "s".to_string();
     app.command_suggestion_idx = 0;
     press(&mut app, key(KeyCode::Tab)).await;
     assert_eq!(app.command_buffer, suggestions[0].0.name);
     assert_eq!(
-        app.command_suggestion_idx, 1,
-        "the cursor advances to the next candidate"
+        app.command_suggestion_idx, 0,
+        "the cursor stays on the completed command in the new list"
     );
 
     // Down arrow and Ctrl-N advance selection index in popup
@@ -1278,6 +1278,31 @@ async fn command_enter_runs_the_command_and_unknown_commands_toast() {
     type_str(&mut app, "q").await;
     press(&mut app, key(KeyCode::Enter)).await;
     assert!(!app.is_running);
+}
+
+#[tokio::test]
+async fn command_tab_then_enter_executes_the_completed_command() {
+    for query in ["serv", "s"] {
+        let (mut app, _rx) = common::app().await;
+        press(&mut app, ch(':')).await;
+        type_str(&mut app, query).await;
+        let suggestions = command_suggestions_with_crds(query, &app.crds);
+        let selected = suggestions.iter().position(|(cmd, _)| cmd.name == "services").unwrap();
+        for _ in 0..selected {
+            press(&mut app, key(KeyCode::Down)).await;
+        }
+        press(&mut app, key(KeyCode::Tab)).await;
+        assert_eq!(app.command_buffer, "services");
+        assert_eq!(app.command_suggestion_idx, 0);
+        let screen = common::render_app(&mut app, 120, 30);
+        assert!(screen.contains(":services"), "screen: {screen}");
+        // Repeated Tab must not move to a secondary match for the completed text.
+        press(&mut app, key(KeyCode::Tab)).await;
+        assert_eq!(app.command_buffer, "services");
+        press(&mut app, key(KeyCode::Enter)).await;
+        assert_eq!(table(&app).kind, ResourceKind::Services);
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
 }
 
 #[tokio::test]

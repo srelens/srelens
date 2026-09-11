@@ -2342,7 +2342,9 @@ impl App {
                     if !suggestions.is_empty() {
                         let idx = self.command_suggestion_idx % suggestions.len();
                         self.command_buffer = suggestions[idx].0.name.clone();
-                        self.command_suggestion_idx = (idx + 1) % suggestions.len();
+                        // Completion changes the query and rebuilds the list.
+                        // Its exact match is first; the old index is no longer valid.
+                        self.command_suggestion_idx = 0;
                     }
                 }
                 KeyCode::BackTab => {
