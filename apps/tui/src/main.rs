@@ -232,6 +232,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await
     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
+    if parsed_target.is_none() && app.tui_config.show_feature_banner {
+        app.modal = Some(ui::Modal::FeatureBanner {
+            show_on_startup: true,
+        });
+    }
+
     if let Some(link) = parsed_target {
         let _ = app.navigate_deep_link(&link).await;
     }

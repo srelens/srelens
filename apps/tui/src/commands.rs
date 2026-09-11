@@ -223,6 +223,7 @@ pub enum CommandTarget {
     OpenUrl(String),
     ThemePicker,
     SetTheme(String),
+    FeatureBanner,
 }
 
 pub const COMMAND_REGISTRY: &[CommandDef] = &[
@@ -461,6 +462,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         target: CommandTarget::Resource(ResourceKind::TuiConfig),
     },
     CommandDef {
+        name: "features",
+        aliases: &["banner", "guide", "welcome"],
+        description: "Show SRElens feature highlights banner (:helm, :overview, :gpuinfo, :workloads, :ai, :ai-settings, :config)",
+        target: CommandTarget::FeatureBanner,
+    },
+    CommandDef {
         name: "help",
         aliases: &["?"],
         description: "Show interactive keybindings palette and command cheatsheet",
@@ -577,6 +584,7 @@ impl DynamicCommandDef {
             CommandTarget::Contexts => "Context",
             CommandTarget::Namespaces => "Namespace",
             CommandTarget::Help => "Help",
+            CommandTarget::FeatureBanner => "Guide",
             CommandTarget::Quit => "System",
             CommandTarget::OpenUrl(_) => "Navigation",
         }
@@ -604,6 +612,7 @@ impl DynamicCommandDef {
             CommandTarget::Namespaces => ":namespaces",
             CommandTarget::Contexts => ":contexts",
             CommandTarget::Help => ":help",
+            CommandTarget::FeatureBanner => ":features",
             CommandTarget::Quit => ":quit",
             CommandTarget::OpenUrl(_) => ":open <url>",
             _ => "",

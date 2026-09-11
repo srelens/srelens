@@ -41,7 +41,7 @@ pub const SAMPLE_SUGGESTIONS: &[(&str, &[&str], &str, &str, &str)] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiConfigViewState {
-    pub selected_field: usize, // 0 = Width, 1 = Visible Rows, 2 = Text Size / Density
+    pub selected_field: usize, // 0 = Width, 1 = Visible Rows, 2 = Text Size / Density, 3 = Startup Banner
 }
 
 impl Default for TuiConfigViewState {
@@ -56,12 +56,12 @@ impl TuiConfigViewState {
     }
 
     pub fn select_next_field(&mut self) {
-        self.selected_field = (self.selected_field + 1) % 3;
+        self.selected_field = (self.selected_field + 1) % 4;
     }
 
     pub fn select_prev_field(&mut self) {
         if self.selected_field == 0 {
-            self.selected_field = 2;
+            self.selected_field = 3;
         } else {
             self.selected_field -= 1;
         }
@@ -84,6 +84,9 @@ impl TuiConfigViewState {
                 let next = (current + delta).clamp(1, 4) as u8;
                 config.command_popup_density = CommandPopupDensity::from_scale(next);
             }
+            3 => {
+                config.show_feature_banner = !config.show_feature_banner;
+            }
             _ => {}
         }
         let _ = config.save();
@@ -101,6 +104,9 @@ impl TuiConfigViewState {
             }
             2 => {
                 config.command_popup_density = config.command_popup_density.toggle();
+            }
+            3 => {
+                config.show_feature_banner = !config.show_feature_banner;
             }
             _ => {}
         }
@@ -148,7 +154,7 @@ pub fn render_tui_config_view(
         Line::from(vec![
             Span::styled("TUI Display & Layout Options: ", Theme::header_label()),
             Span::styled(
-                "Configure command popup dimensions, visible rows & text size.",
+                "Configure command popup dimensions, visible rows, text size & startup banner.",
                 Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -169,7 +175,7 @@ pub fn render_tui_config_view(
     } else {
         let v_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(16), Constraint::Min(8)])
+            .constraints([Constraint::Length(21), Constraint::Min(8)])
             .split(chunks[1]);
         (v_chunks[0], v_chunks[1])
     };
@@ -181,6 +187,7 @@ pub fn render_tui_config_view(
             Constraint::Length(5), // Width card
             Constraint::Length(5), // Visible rows card
             Constraint::Length(5), // Text size card
+            Constraint::Length(5), // Startup banner card
             Constraint::Min(0),
         ])
         .split(controls_area);
@@ -347,19 +354,92 @@ pub fn render_tui_config_view(
     ];
     f.render_widget(Paragraph::new(density_lines), density_inner);
 
-    // 3. Live Preview of Command Popup
-    let preview_block = Block::default()
+    // Setting 3: Startup Feature Banner
+    let is_banner_selected = state.selected_field == 3;
+    let banner_border_color = if is_banner_selected {
+        Theme::cyan()
+    } else {
+        Theme::border()
+    };
+    let banner_title = if is_banner_selected {
+        " ▶ Startup Feature Banner "
+    } else {
+        "   Startup Feature Banner "
+    };
+    let banner_block = Block::default()
         .borders(Borders::ALL)
         .border_type(Theme::border_type())
-        .border_style(Style::default().fg(Theme::border()))
+        .border_style(Style::default().fg(banner_border_color))
         .title(Span::styled(
-            " Live Preview: Command Popup (:) ",
-            Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD),
+            banner_title,
+            if is_banner_selected {
+                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::fg())
+            },
         ));
-    let preview_inner = preview_block.inner(preview_area);
-    f.render_widget(preview_block, preview_area);
+    let banner_inner = banner_block.inner(control_chunks[3]);
+    f.render_widget(banner_block, control_chunks[3]);
 
-    if preview_inner.height >= 4 && preview_inner.width >= 20 {
+    let (checkbox_str, status_str, status_style) = if config.show_feature_banner {
+        ("[● Show on startup]", "Enabled", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD))
+    } else {
+        ("[○ Don't show]", "Disabled", Style::default().fg(Theme::dim()))
+    };
+
+    let banner_lines = vec![
+        Line::from(vec![
+            Span::styled("Banner: ", Style::default().fg(Theme::dim())),
+            Span::styled(
+                checkbox_str,
+                if config.show_feature_banner {
+                    Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Theme::dim())
+                },
+            ),
+            Span::styled("  Status: ", Style::default().fg(Theme::dim())),
+            Span::styled(status_str, status_style),
+        ]),
+        Line::from(vec![
+            Span::styled("Action: Toggle  |  Use ", Style::default().fg(Theme::dim())),
+            Span::styled("Space", Style::default().fg(Theme::yellow())),
+            Span::styled(" or ", Style::default().fg(Theme::dim())),
+            Span::styled("Enter", Style::default().fg(Theme::yellow())),
+            Span::styled(" or ", Style::default().fg(Theme::dim())),
+            Span::styled("←/→", Style::default().fg(Theme::yellow())),
+            Span::styled(" to toggle", Style::default().fg(Theme::dim())),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(banner_lines), banner_inner);
+
+    // 3. Live Preview (Feature Banner or Command Popup)
+    if state.selected_field == 3 {
+        let preview_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(Theme::border_type())
+            .border_style(Style::default().fg(Theme::border()))
+            .title(Span::styled(
+                " Live Preview: Startup Feature Banner (:features, :banner) ",
+                Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD),
+            ));
+        let preview_inner = preview_block.inner(preview_area);
+        f.render_widget(preview_block, preview_area);
+
+        crate::ui::render_feature_banner_modal(f, preview_inner, config.show_feature_banner);
+    } else {
+        let preview_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(Theme::border_type())
+            .border_style(Style::default().fg(Theme::border()))
+            .title(Span::styled(
+                " Live Preview: Command Popup (:) ",
+                Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD),
+            ));
+        let preview_inner = preview_block.inner(preview_area);
+        f.render_widget(preview_block, preview_area);
+
+        if preview_inner.height >= 4 && preview_inner.width >= 20 {
         // Simulated statusbar at bottom of preview area
         let sim_bar_y = preview_inner.y + preview_inner.height.saturating_sub(1);
         let sim_bar_area = Rect {
@@ -696,6 +776,7 @@ pub fn render_tui_config_view(
         );
         f.render_widget(list, popup_area);
     }
+}
 
     // 4. Bottom Key Hints
     let hints_line = Line::from(vec![

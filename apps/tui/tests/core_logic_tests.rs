@@ -1966,6 +1966,7 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_max_width: 120,
         command_popup_max_visible: 12,
         command_popup_density: CommandPopupDensity::Large,
+        show_feature_banner: true,
     };
     cfg.save().expect("save succeeds");
     assert!(file.is_file());
@@ -1981,21 +1982,25 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_max_width: 500,
         command_popup_max_visible: 1,
         command_popup_density: CommandPopupDensity::Compact,
+        show_feature_banner: true,
     };
     clamped.clamp();
     assert_eq!(clamped.command_popup_max_width, 200);
     assert_eq!(clamped.command_popup_max_visible, 3);
     assert_eq!(clamped.command_popup_density, CommandPopupDensity::Compact);
+    assert!(clamped.show_feature_banner);
 
     let mut low = TuiConfig {
         command_popup_max_width: 10,
         command_popup_max_visible: 99,
         command_popup_density: CommandPopupDensity::Large,
+        show_feature_banner: false,
     };
     low.clamp();
     assert_eq!(low.command_popup_max_width, 40);
     assert_eq!(low.command_popup_max_visible, 20);
     assert_eq!(low.command_popup_density, CommandPopupDensity::Large);
+    assert!(!low.show_feature_banner);
 
     // 5. Corrupt file gracefully falls back to default
     std::fs::write(&file, "{ corrupt json").unwrap();

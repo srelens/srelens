@@ -2369,3 +2369,28 @@ async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
     let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
     assert!(text.contains("Chart Release Notes") && text.contains("everything is ready"), "{text}");
 }
+
+#[test]
+fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
+    let modal_enabled = Modal::FeatureBanner { show_on_startup: true };
+    let text_enabled = modal_text(100, 30, &modal_enabled);
+
+    assert!(text_enabled.contains("Welcome to SRElens — Feature Highlights"), "has header title");
+    assert!(text_enabled.contains(":helm"), "shows helm command");
+    assert!(text_enabled.contains(":overview"), "shows overview command");
+    assert!(text_enabled.contains(":gpuinfo"), "shows gpuinfo command");
+    assert!(text_enabled.contains(":workloads"), "shows workloads command");
+    assert!(text_enabled.contains(":ai"), "shows ai assistant command");
+    assert!(text_enabled.contains(":ai-settings"), "shows ai-settings command");
+    assert!(text_enabled.contains(":config"), "shows config command");
+    assert!(text_enabled.contains("[●]"), "shows enabled checkbox dot");
+    assert!(text_enabled.contains("Show this feature banner on startup"), "shows checkbox label");
+    assert!(text_enabled.contains("to dismiss"), "shows dismiss key hint");
+    assert!(text_enabled.contains("to jump directly"), "shows jump hint");
+
+    let modal_disabled = Modal::FeatureBanner { show_on_startup: false };
+    let text_disabled = modal_text(100, 30, &modal_disabled);
+    assert!(text_disabled.contains("[○]"), "shows unchecked checkbox");
+    assert!(text_disabled.contains("Disabled"), "shows disabled state");
+}
+

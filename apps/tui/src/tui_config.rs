@@ -13,6 +13,8 @@ pub const DEFAULT_COMMAND_POPUP_TEXT_SCALE: u8 = 1;
 pub const MIN_COMMAND_POPUP_TEXT_SCALE: u8 = 1;
 pub const MAX_COMMAND_POPUP_TEXT_SCALE: u8 = 4;
 
+pub const DEFAULT_SHOW_FEATURE_BANNER: bool = true;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommandPopupDensity {
     #[default]
@@ -143,6 +145,7 @@ pub struct TuiConfig {
     pub command_popup_max_visible: usize,
     #[serde(alias = "commandPopupTextScale")]
     pub command_popup_density: CommandPopupDensity,
+    pub show_feature_banner: bool,
 }
 
 impl Default for TuiConfig {
@@ -151,6 +154,7 @@ impl Default for TuiConfig {
             command_popup_max_width: DEFAULT_COMMAND_POPUP_MAX_WIDTH,
             command_popup_max_visible: DEFAULT_COMMAND_POPUP_MAX_VISIBLE,
             command_popup_density: CommandPopupDensity::default(),
+            show_feature_banner: DEFAULT_SHOW_FEATURE_BANNER,
         }
     }
 }

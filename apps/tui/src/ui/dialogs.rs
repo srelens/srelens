@@ -74,6 +74,9 @@ pub enum Modal {
         selected_idx: usize,
         initial_theme_idx: usize,
     },
+    FeatureBanner {
+        show_on_startup: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -748,5 +751,129 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             ])).alignment(Alignment::Center);
             f.render_widget(footer, chunks[1]);
         }
+        Modal::FeatureBanner { show_on_startup } => {
+            render_feature_banner_modal(f, area, *show_on_startup);
+        }
     }
+}
+
+pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: bool) {
+    let modal_width = (area.width.saturating_sub(4)).min(94).max(48);
+    let modal_height = (area.height.saturating_sub(2)).min(21).max(14);
+    let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
+    let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
+    let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::cyan()))
+        .title(Span::styled(
+            " ✨ Welcome to SRElens — Feature Highlights ✨ ",
+            Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // Top description
+            Constraint::Min(7),   // Features list
+            Constraint::Length(3), // Checkbox and key hints
+        ])
+        .split(inner);
+
+    // 1. Header description
+    let header_lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "Kubernetes control room with high-velocity SRE troubleshooting capabilities.",
+                Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "Key built-in features you should know (press [1-7] to jump directly, or type ':' for command prompt):",
+                Style::default().fg(Theme::dim()),
+            ),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(header_lines), chunks[0]);
+
+    // 2. Feature highlights
+    let features: &[(&str, &str, &str, &str, &str)] = &[
+        ("[1]", ":helm",        "[Helm 3]",        "Helm 3 release revisions, rollback status, values & manifests", ":helm [ns]"),
+        ("[2]", ":overview",    "[Cluster]",       "Cluster overview, health summary & node/pod capacity",          ":overview"),
+        ("[3]", ":gpuinfo",     "[Hardware]",      "GPU hardware inspector, specs & per-pod VRAM allocations",     ":gpuinfo"),
+        ("[4]", ":workloads",   "[Workload]",      "Unified workloads view (Pods, Deployments, STS, DS, Jobs)",     ":workloads [ns]"),
+        ("[5]", ":ai",          "[AI Assistant]",  "Interactive AI troubleshooting chat for automated RCA",         ":ai"),
+        ("[6]", ":ai-settings", "[AI Config]",     "Configure AI providers (Claude, OpenAI, Gemini), models & keys", ":ai-settings"),
+        ("[7]", ":config",      "[Lens Settings]", "Lens settings: popup width, visible rows, text scale & banner",  ":config"),
+    ];
+
+    let inner_w = chunks[1].width as usize;
+    let items: Vec<ListItem> = features
+        .iter()
+        .map(|(num, cmd, cat, desc, syntax)| {
+            let mut spans = vec![
+                Span::styled(format!("{num} "), Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:<13}", cmd), Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:<15}", cat), Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:<desc_len$}", desc, desc_len = if inner_w >= 85 { 44 } else { 32 }), Style::default().fg(Theme::fg())),
+            ];
+            if inner_w >= 80 {
+                spans.push(Span::styled(format!("  ({})", syntax), Style::default().fg(Theme::dim())));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    f.render_widget(List::new(items), chunks[1]);
+
+    // 3. Footer with Startup Checkbox & Key hints
+    let checkbox_spans = if show_on_startup {
+        vec![
+            Span::styled(" [●] ", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled("Show this feature banner on startup", Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)),
+            Span::styled(" (Press ", Style::default().fg(Theme::dim())),
+            Span::styled("t", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(" to toggle)", Style::default().fg(Theme::dim())),
+        ]
+    } else {
+        vec![
+            Span::styled(" [○] ", Style::default().fg(Theme::dim())),
+            Span::styled("Show this feature banner on startup", Style::default().fg(Theme::dim())),
+            Span::styled(" (Currently ", Style::default().fg(Theme::dim())),
+            Span::styled("Disabled", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(" • Press ", Style::default().fg(Theme::dim())),
+            Span::styled("t", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(" to enable)", Style::default().fg(Theme::dim())),
+        ]
+    };
+
+    let footer_lines = vec![
+        Line::from(vec![
+            Span::styled("─".repeat(inner_w.min(90)), Style::default().fg(Theme::border())),
+        ]),
+        Line::from(checkbox_spans),
+        Line::from(vec![
+            Span::styled(" Press ", Style::default().fg(Theme::dim())),
+            Span::styled("Enter", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(", ", Style::default().fg(Theme::dim())),
+            Span::styled("Esc", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(", or ", Style::default().fg(Theme::dim())),
+            Span::styled("q", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(" to dismiss  |  Press ", Style::default().fg(Theme::dim())),
+            Span::styled("1-7", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled(" to jump directly  |  ", Style::default().fg(Theme::dim())),
+            Span::styled(":banner", Style::default().fg(Theme::accent())),
+            Span::styled(" to reopen anytime", Style::default().fg(Theme::dim())),
+        ]),
+    ];
+
+    f.render_widget(Paragraph::new(footer_lines), chunks[2]);
 }

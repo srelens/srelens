@@ -218,6 +218,8 @@ impl App {
             active_namespace.clone()
         };
 
+        let tui_config = crate::tui_config::TuiConfig::load();
+
         let mut app = Self {
             active_context: active_context.clone(),
             active_namespace,
@@ -258,7 +260,7 @@ impl App {
             connection_attempt_start: Instant::now(),
             cluster_unreachable: false,
             ai_settings: crate::ai_config::AiSettings::load(),
-            tui_config: crate::tui_config::TuiConfig::load(),
+            tui_config,
             assistant_state: AssistantViewState::for_context(&active_context),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -1525,6 +1527,66 @@ impl App {
         // 2. Interactive Dialog Modal Open
         if let Some(modal) = self.modal.clone() {
             match modal {
+                Modal::FeatureBanner { .. } => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+                        return;
+                    }
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                            self.modal = None;
+                        }
+                        KeyCode::Char('t') | KeyCode::Char('T') => {
+                            self.tui_config.show_feature_banner = !self.tui_config.show_feature_banner;
+                            let _ = self.tui_config.save();
+                            let is_enabled = self.tui_config.show_feature_banner;
+                            self.modal = Some(Modal::FeatureBanner { show_on_startup: is_enabled });
+                            if is_enabled {
+                                self.set_toast("Startup feature banner: Enabled".to_string(), Theme::status_ok());
+                            } else {
+                                self.set_toast("Startup feature banner: Disabled".to_string(), Theme::status_warn());
+                            }
+                        }
+                        KeyCode::Char(':') => {
+                            self.modal = None;
+                            self.input_mode = InputMode::Command;
+                            self.command_buffer.clear();
+                        }
+                        KeyCode::Char('/') => {
+                            self.modal = None;
+                            self.input_mode = InputMode::Filter;
+                            self.filter_buffer.clear();
+                        }
+                        KeyCode::Char('1') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::HelmReleases).await;
+                        }
+                        KeyCode::Char('2') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Overview).await;
+                        }
+                        KeyCode::Char('3') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::GpuInfo).await;
+                        }
+                        KeyCode::Char('4') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Workloads).await;
+                        }
+                        KeyCode::Char('5') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Assistant).await;
+                        }
+                        KeyCode::Char('6') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Settings).await;
+                        }
+                        KeyCode::Char('7') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::TuiConfig).await;
+                        }
+                        _ => {}
+                    }
+                }
                 Modal::Confirm { action_name, .. } => {
                     match key.code {
                         KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -5206,6 +5268,11 @@ impl App {
                 } else {
                     self.set_toast(format!("Unknown theme '{}'. Try :themes to pick.", theme_name), Theme::status_warn());
                 }
+            }
+            CommandTarget::FeatureBanner => {
+                self.modal = Some(Modal::FeatureBanner {
+                    show_on_startup: self.tui_config.show_feature_banner,
+                });
             }
             CommandTarget::OpenUrl(_) => {}
         }

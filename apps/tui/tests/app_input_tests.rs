@@ -3413,15 +3413,72 @@ async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
     press(&mut app, key(KeyCode::Enter)).await;
     assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::ExtraLarge);
 
+    // Switch to startup banner field with 'j'
+    press(&mut app, ch('j')).await;
+    if let ActiveView::TuiConfig(ref s) = app.active_view {
+        assert_eq!(s.selected_field, 3);
+    }
+
+    // Toggle startup banner with Space
+    assert!(app.tui_config.show_feature_banner);
+    press(&mut app, ch(' ')).await;
+    assert!(!app.tui_config.show_feature_banner);
+
+    // Toggle back with Enter
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.tui_config.show_feature_banner);
+
     // Reset defaults with 'r'
     press(&mut app, ch('r')).await;
     assert_eq!(app.tui_config.command_popup_max_width, 65);
     assert_eq!(app.tui_config.command_popup_max_visible, 6);
     assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Compact);
+    assert!(app.tui_config.show_feature_banner);
 
     // Press Esc pops back to table view
     press(&mut app, key(KeyCode::Esc)).await;
     assert!(matches!(app.active_view, ActiveView::Table(_)));
+
+    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
+}
+
+#[tokio::test]
+async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_file = tmp.path().join("tui.json");
+    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_file);
+
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    // Open via :banner command
+    common::type_str(&mut app, ":banner").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    // Toggle startup banner with 't'
+    assert!(app.tui_config.show_feature_banner);
+    press(&mut app, ch('t')).await;
+    assert!(!app.tui_config.show_feature_banner);
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { show_on_startup: false })));
+
+    // Toggle back with 'T'
+    press(&mut app, ch('T')).await;
+    assert!(app.tui_config.show_feature_banner);
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { show_on_startup: true })));
+
+    // Press '1' jumps directly to Helm releases
+    press(&mut app, ch('1')).await;
+    assert!(app.modal.is_none());
+    assert!(matches!(app.active_view, ActiveView::Helm(_)));
+
+    // Re-open via :features
+    common::type_str(&mut app, ":features").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    // Dismiss with Esc
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(app.modal.is_none());
 
     std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
 }
