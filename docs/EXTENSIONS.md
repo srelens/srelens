@@ -38,7 +38,7 @@ any extension is enabled. Turning developer mode off disables all extensions.
 
 The app deliberately accepts a narrower surface than the developer broker:
 `k8s.listCustomResource` bindings with fixed, nonempty group/version/plural/kind
-and fixed resource scope. Only `context` and `namespace` are forwarded from the
+and fixed resource scope, plus explicitly granted `k8s.listEvents` readers. Only `context` and `namespace` are forwarded from the
 host view. Core-group resources, caller-supplied resource selectors, executable
 entry points and operations requiring consent are rejected. Reads remain subject
 to the selected cluster's RBAC; the extension receives no kubeconfig or token.
@@ -73,9 +73,11 @@ In either desktop design:
 
 1. Open **Settings → Extensions** and enable developer mode.
 2. Paste `examples/extensions/argocd.json` or `flux.json`, review the manifest,
-   then install and grant `k8s.listCustomResource`.
+   then install and grant `k8s.listCustomResource` (Flux also requests
+   `k8s.listEvents` for its dashboard).
 3. Choose a cluster and open an extension page. The new design also adds pages
-   beneath **Extensions** in the cluster sidebar; its routes pin the cluster.
+   beneath **Extensions → extension name** in the cluster sidebar, with nested
+   page groups; its routes pin the cluster.
    Classic opens pages inline in the manager with its own controls and theme.
 4. Open a Namespace's resource overview. Its **Extensions** section contains the
    declared detail view and an **Extension actions** menu, scoped to that namespace.
@@ -209,3 +211,33 @@ promised. The initial acceptance target is rebuilding representative supported
 extensions against the compatibility shim, then demonstrating their pages, resource
 reads, settings and guarded mutations inside the app. OpenLens API coverage must
 be tested against real legacy imports rather than inferred from Freelens branding.
+
+## Native dashboard and navigation contributions
+
+The Flux 0.2.0 example includes Overview, Kustomizations, Helm releases, Sources
+(Git repositories, Helm repositories, Helm charts, Buckets, OCI repositories),
+Image Automation (repositories, policies, update automations), and Notifications
+(alerts, providers, receivers). Both desktop designs render the same workspace
+using their own controls. Namespace and search filters are scoped to the open
+cluster; they are temporary view state, not persisted preferences.
+
+Pages may declare `group` to nest their navigation. Resource pages can declare
+`statusColumns` with zero-based `ready`, optional `suspended`, and optional
+`progressing` printer-column indices. Suspended takes precedence over progressing,
+which takes precedence over Ready. Missing/unknown Ready conditions remain Unknown.
+A `dashboard` declares `pages` referencing resource pages with status columns,
+and optional `events: { capability, apiGroups }`. Event summaries filter by the
+involved object's API group, so an unrelated kind with the same name is excluded.
+Failed reads retain their error and retry; they never become zero-count summaries.
+The events section uses the workspace namespace and search controls; dashboard
+counts reflect the namespace and are not changed by event search.
+
+Install the updated Flux example again to upgrade an existing installation and
+review its new event-read grant. The application does not silently replace an
+installed manifest or expand its grants. Flux controllers/CRDs must already exist
+on the selected cluster. API versions are declared by the manifest; unsupported
+versions produce an explicit error, not a claim that the cluster has no Flux.
+
+These are native declarative views, not execution of the Freelens extension's
+React bundle. Reconcile/suspend writes, arbitrary custom renderer code and the
+Freelens runtime remain separate platform work.

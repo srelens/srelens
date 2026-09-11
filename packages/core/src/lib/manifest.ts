@@ -420,6 +420,9 @@ export interface EventSummary {
   type: string;
   reason: string;
   object: string;
+  firstAge?: string;
+  objectApiVersion?: string;
+  source?: string;
   message: string;
   /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
    *  the backend renders once and which freezes (#405). */

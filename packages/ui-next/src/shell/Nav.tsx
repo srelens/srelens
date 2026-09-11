@@ -114,11 +114,19 @@ export function Nav({ contexts }: NavProps) {
       ...(ctx && extensions.data?.developerMode && extensions.data.plugins.some(p => p.enabled && p.manifest.contributions.pages.length)
         ? [{
             id: "extensions", label: "Extensions", icon: Icons.crds,
-            children: extensions.data.plugins.filter(p => p.enabled).flatMap(p =>
-              p.manifest.contributions.pages.map(page => ({
-                id: `route:${extensionRoute(ctx.name, p.manifest.id, page.id)}`,
-                label: page.title, icon: Icons.crds,
-              }))),
+            children: extensions.data.plugins.filter(p => p.enabled && p.manifest.contributions.pages.length).map(p => ({
+              id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: Icons.crds,
+              children: p.manifest.contributions.pages.flatMap((page, index, pages) => {
+                const leaf = (item: typeof page) => ({
+                  id: `route:${extensionRoute(ctx.name, p.manifest.id, item.id)}`,
+                  label: item.title, icon: Icons.crds,
+                });
+                if (!page.group) return [leaf(page)];
+                if (pages.findIndex(item => item.group === page.group) !== index) return [];
+                return [{ id: `extension:${p.manifest.id}:${page.group}`, label: page.group, icon: Icons.crds,
+                  children: pages.filter(item => item.group === page.group).map(leaf) }];
+              }),
+            })),
           }]
         : []),
       { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crdChildren },

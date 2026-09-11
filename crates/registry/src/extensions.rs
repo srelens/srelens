@@ -116,26 +116,38 @@ fn write(path: &Path, state: &Inventory) -> Result<(), String> {
     result.map_err(|e| format!("save extension inventory: {e}"))
 }
 fn validate_app(manifest: &Manifest, grants: &[String], core: Arc<Registry>) -> Result<(), String> {
-    let target = core
-        .get("k8s.listCustomResource")
-        .ok_or("custom-resource reader is unavailable")?;
-    if !target.annotations.read_only
-        || target.annotations.requires_confirm
-        || target.annotations.sensitive
-        || target.annotations.destructive
-    {
-        return Err(
-            "This app extension reader cannot dispatch a gated or mutating host operation".into(),
-        );
-    }
     for binding in &manifest.capabilities {
-        if binding.target != "k8s.listCustomResource"
-            || binding
-                .inputs
-                .iter()
-                .any(|key| key != "context" && key != "namespace")
+        if !matches!(
+            binding.target.as_str(),
+            "k8s.listCustomResource" | "k8s.listEvents"
+        ) || binding
+            .inputs
+            .iter()
+            .any(|key| key != "context" && key != "namespace")
         {
-            return Err("This app version supports only read-only custom-resource extensions with context/namespace inputs".into());
+            return Err("This app version supports only read-only custom-resource and event extensions with context/namespace inputs".into());
+        }
+        let target = core
+            .get(&binding.target)
+            .ok_or("extension reader is unavailable")?;
+        if !target.annotations.read_only
+            || target.annotations.requires_confirm
+            || target.annotations.sensitive
+            || target.annotations.destructive
+        {
+            return Err(
+                "This app extension reader cannot dispatch a gated or mutating host operation"
+                    .into(),
+            );
+        }
+        if binding.target == "k8s.listEvents" {
+            if !binding.arguments.is_empty()
+                || !binding.inputs.iter().any(|k| k == "context")
+                || !binding.inputs.iter().any(|k| k == "namespace")
+            {
+                return Err("Event extensions must accept the host context and namespace without bound arguments".into());
+            }
+            continue;
         }
         // Core resources, including Secrets, must not be disguised as custom resources.
         for key in ["group", "version", "plural", "kind"] {
@@ -171,6 +183,54 @@ fn validate_app(manifest: &Manifest, grants: &[String], core: Arc<Registry>) -> 
             && !binding.inputs.iter().any(|key| key == "namespace")
         {
             return Err("Namespaced extensions must accept the host namespace".into());
+        }
+    }
+    // Table surfaces have a resource-row contract; event readers are only valid
+    // in the explicitly typed dashboard event slot.
+    for name in manifest
+        .contributions
+        .pages
+        .iter()
+        .map(|p| &p.capability)
+        .chain(
+            manifest
+                .contributions
+                .detail_tabs
+                .iter()
+                .map(|p| &p.capability),
+        )
+        .chain(
+            manifest
+                .contributions
+                .row_actions
+                .iter()
+                .map(|p| &p.capability),
+        )
+    {
+        if !manifest
+            .capabilities
+            .iter()
+            .any(|b| &b.name == name && b.target == "k8s.listCustomResource")
+        {
+            return Err("Resource contributions must reference a custom-resource reader".into());
+        }
+    }
+    for page in &manifest.contributions.pages {
+        if let Some(status) = &page.status_columns {
+            let count = manifest
+                .capabilities
+                .iter()
+                .find(|b| b.name == page.capability)
+                .and_then(|b| b.arguments.get("printerColumns"))
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            if [Some(status.ready), status.suspended, status.progressing]
+                .into_iter()
+                .flatten()
+                .any(|i| i >= count)
+            {
+                return Err("Status columns must reference declared printer columns".into());
+            }
         }
     }
     let mut temp = Registry::new();
@@ -368,6 +428,23 @@ mod tests {
     fn manifest() -> String {
         include_str!("../../../examples/extensions/argocd.json").into()
     }
+    #[test]
+    fn events_are_an_explicit_read_only_grant() {
+        let core = Arc::new(crate::build_registry_with_paths(
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            vec![],
+        ));
+        let mut value: Value =
+            serde_json::from_str(include_str!("../../../examples/extensions/flux.json")).unwrap();
+        let parsed = Manifest::parse(&value.to_string()).unwrap();
+        let grants = vec!["k8s.listCustomResource".into(), "k8s.listEvents".into()];
+        assert!(validate_app(&parsed, &grants, core.clone()).is_ok());
+        assert!(validate_app(&parsed, &["k8s.listCustomResource".into()], core.clone()).is_err());
+        value["contributions"]["pages"][1]["capability"] = json!("events");
+        let invalid = Manifest::parse(&value.to_string()).unwrap();
+        assert!(validate_app(&invalid, &grants, core).is_err());
+    }
+
     #[tokio::test]
     async fn lifecycle_is_persisted_and_unsigned_extensions_require_developer_mode() {
         let dir = tempfile::tempdir().unwrap();

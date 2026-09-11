@@ -182,10 +182,9 @@ fn gitops_examples_bind_to_the_real_host_contract() {
     ] {
         let manifest = Manifest::parse(source).unwrap();
         let count = manifest.capabilities.len();
+        let grants = manifest.permissions.clone();
         let mut reg = Registry::new();
-        let _installed = host
-            .register(&mut reg, manifest, &["k8s.listCustomResource".into()])
-            .unwrap();
+        let _installed = host.register(&mut reg, manifest, &grants).unwrap();
         assert_eq!(reg.ids().len(), count);
         for cap in reg.entries() {
             assert!(cap.annotations.read_only);
@@ -299,4 +298,23 @@ fn core_kinds_use_an_explicit_empty_api_group() {
     value["contributions"]["detailTabs"] =
         json!([{"id":"detail","title":"Details","capability":"applications","forKinds":["/Pod"]}]);
     assert!(Manifest::parse(&value.to_string()).is_ok());
+}
+
+#[test]
+fn dashboard_references_are_validated() {
+    let mut value = manifest();
+    value["contributions"]["pages"][0]["group"] = json!("Workloads");
+    value["contributions"]["pages"][0]["statusColumns"] = json!({"ready":0});
+    value["contributions"]["pages"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "id":"overview", "title":"Overview", "capability":"applications",
+            "dashboard":{"pages":["applications"]}
+        }));
+    assert!(Manifest::parse(&value.to_string()).is_ok());
+    value["contributions"]["pages"][1]["dashboard"]["pages"] = json!(["missing"]);
+    assert!(Manifest::parse(&value.to_string()).is_err());
+    value["contributions"]["pages"][1]["dashboard"]["pages"] = json!(["overview"]);
+    assert!(Manifest::parse(&value.to_string()).is_err());
 }

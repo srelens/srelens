@@ -1,6 +1,8 @@
-import { parseExtensionRoute } from "@srelens/core";
+import { extensionRoute, parseExtensionRoute } from "@srelens/core";
 import { Button, Screen } from "@srelens/ui-kit";
-import { ExtensionResults, useExtensions } from "../extensions/Extensions";
+import { useExtensions } from "../extensions/Extensions";
+import { ExtensionWorkspace } from "../extensions/ExtensionWorkspace";
+import { openTab } from "../lib/tabsStore";
 import { useContexts } from "../lib/clusters";
 import { getContextLabel } from "../lib/marks";
 import type { RoutedScreenProps } from "../lib/routes";
@@ -37,9 +39,14 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             <Button onClick={inventory.reload}>Retry</Button>
           </div>
         ) : plugin && page ? (
-          <ExtensionResults
+          <ExtensionWorkspace
             plugin={plugin}
-            capability={page.capability}
+            page={page}
+            onPage={(id) =>
+              openTab(
+                extensionRoute(target.context, target.id, id, target.namespace),
+              )
+            }
             context={target.context}
             namespace={target.namespace}
           />

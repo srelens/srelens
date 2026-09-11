@@ -10,7 +10,8 @@ import { loadExpanded, resetView, setLink } from "../lib/workspace";
 // The CRD list is the one thing here that talks to a cluster. Mocked at the
 // module boundary — partially, so `RESOURCE_LABELS` and the rest of core stay
 // real and the tree is labelled the way the app labels it.
-const { listCrds } = vi.hoisted(() => ({ listCrds: vi.fn() }));
+const { listCrds, extensionState } = vi.hoisted(() => ({ listCrds: vi.fn(), extensionState: { data: undefined as any } }));
+vi.mock("../extensions/Extensions", () => ({ useExtensions: () => extensionState }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   listCrds,
@@ -42,6 +43,7 @@ beforeEach(() => {
   localStorage.clear();
   resetView();
   vi.clearAllMocks();
+  extensionState.data = undefined;
   listCrds.mockResolvedValue({ crds: [] });
 });
 
@@ -223,4 +225,22 @@ describe("Nav", () => {
     expect(screen.queryByRole("treeitem", { name: "Pods" })).toBeNull();
     expect(screen.getByRole("treeitem", { name: "Workloads" }).getAttribute("aria-expanded")).toBe("false");
   });
+});
+
+it("groups extension pages under their display name", async () => {
+  extensionState.data = { developerMode: true, plugins: [
+    { enabled: true, manifest: { id: "org.srelens.flux", name: "Flux", contributions: { pages: [
+      { id: "kustomizations", title: "Kustomizations" },
+      { id: "repositories", title: "Git repositories", group: "Sources" },
+    ] } } },
+  ] };
+  render(<Nav contexts={[PROD]} />);
+  await userEvent.click(await screen.findByRole("treeitem", { name: "Extensions" }));
+  await userEvent.click(await screen.findByRole("treeitem", { name: "Flux" }));
+  await userEvent.click(await screen.findByRole("treeitem", { name: "Kustomizations" }));
+  expect(tabFor("/extensions/prod-eu/org.srelens.flux/kustomizations/")?.sub).toBe("prod-eu");
+  expect(screen.queryByText("org.srelens.flux")).toBeNull();
+  await userEvent.click(screen.getByRole("treeitem", { name: "Sources" }));
+  await userEvent.click(screen.getByRole("treeitem", { name: "Git repositories" }));
+  expect(tabFor("/extensions/prod-eu/org.srelens.flux/repositories/")?.sub).toBe("prod-eu");
 });

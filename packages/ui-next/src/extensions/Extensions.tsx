@@ -1,29 +1,21 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import {
-  describeError,
   configureExtensions,
   contributionKind,
   EXTENSIONS_CHANGED,
   isTauri,
   listExtensions,
-  readExtension,
   type ExtensionChange,
   type ExtensionContribution,
   type InstalledExtension,
 } from "@srelens/core";
-import {
-  Button as KitButton,
-  Combobox as KitCombobox,
-  Tabs as KitTabs,
-} from "@srelens/ui-kit";
 import { useResource } from "../lib/useResource";
 
-const ExtensionControls = createContext({
-  Button: KitButton,
-  Combobox: KitCombobox,
-  Tabs: KitTabs,
-});
-export const ExtensionControlsProvider = ExtensionControls.Provider;
+import { ExtensionControls } from "./ExtensionControls";
+export { ExtensionControlsProvider } from "./ExtensionControls";
+import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
+export { ExtensionResults } from "./ExtensionResults";
+import { ExtensionWorkspace } from "./ExtensionWorkspace";
 
 export function useExtensions() {
   const [revision, setRevision] = useState(0);
@@ -43,159 +35,6 @@ export function useExtensions() {
             plugins: [],
           },
     [revision],
-  );
-}
-function ErrorNotice({
-  message,
-  retry,
-  cluster = false,
-  guidance,
-}: {
-  message?: string;
-  retry: () => void;
-  cluster?: boolean;
-  guidance?: { title: string; detail: string };
-}) {
-  const { Button } = useContext(ExtensionControls);
-  const error = describeError(message, {
-    domain: cluster ? "cluster" : "local",
-  });
-  return (
-    <div className="extension-error" role="alert">
-      <div>
-        <strong>{guidance?.title ?? error.title}</strong>
-        <p>{guidance?.detail ?? error.detail}</p>
-        {error.raw !== (guidance?.detail ?? error.detail) && (
-          <details>
-            <summary>Original error</summary>
-            <pre>{error.raw}</pre>
-          </details>
-        )}
-      </div>
-      <Button variant="secondary" onClick={retry}>
-        Retry
-      </Button>
-    </div>
-  );
-}
-export function ExtensionResults({
-  plugin,
-  capability,
-  context,
-  namespace = "",
-}: {
-  plugin: InstalledExtension;
-  capability: string;
-  context: string;
-  namespace?: string;
-}) {
-  const { Button } = useContext(ExtensionControls);
-  const data = useResource(
-    async () =>
-      context
-        ? readExtension(
-            plugin.manifest.id,
-            plugin.revision,
-            capability,
-            context,
-            namespace,
-          )
-        : null,
-    [plugin.manifest.id, plugin.revision, capability, context, namespace],
-  );
-  const binding = plugin.manifest.capabilities.find(
-    (b) => b.name === capability,
-  );
-  const columns = Array.isArray(binding?.arguments.printerColumns)
-    ? (binding.arguments.printerColumns as Array<{ name: string }>)
-    : [];
-  if (!context)
-    return (
-      <p className="extension-message">
-        Choose a cluster before opening an extension page.
-      </p>
-    );
-  if (data.status === "error") {
-    // A 404 identifies an unavailable endpoint, not why it is unavailable.
-    // Name the required API without claiming that discovery proved it absent.
-    const args = binding?.arguments;
-    const notFound =
-      /\bApiError:\s*404\b|\bcode:\s*404\b|\b404 page not found\b/i.test(
-        data.error ?? "",
-      );
-    const guidance =
-      notFound &&
-      typeof args?.group === "string" &&
-      typeof args.version === "string" &&
-      typeof args.plural === "string" &&
-      typeof args.kind === "string"
-        ? {
-            title: `${args.kind} API unavailable`,
-            detail: `This extension reads ${args.plural} from ${args.group}/${args.version}. Check that the selected cluster serves this API version. Installing an extension does not install its Kubernetes APIs.`,
-          }
-        : undefined;
-    return (
-      <ErrorNotice
-        cluster
-        message={data.error}
-        retry={data.reload}
-        guidance={guidance}
-      />
-    );
-  }
-  if (data.status === "loading")
-    return (
-      <p role="status" className="extension-message">
-        Loading extension resources…
-      </p>
-    );
-  return (
-    <section className="extension-results">
-      <div className="extension-toolbar">
-        <span>
-          {binding?.arguments.namespaced === false
-            ? "Cluster-scoped resources"
-            : namespace
-              ? `Namespace: ${namespace}`
-              : "All namespaces"}
-        </span>
-        <Button variant="secondary" onClick={data.reload}>
-          Refresh
-        </Button>
-      </div>
-      {data.data?.items.length ? (
-        <div className="extension-table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Namespace</th>
-                {columns.map((c, i) => (
-                  <th key={i}>{c.name}</th>
-                ))}
-                <th>Age</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.data.items.map((row) => (
-                <tr key={`${row.namespace}/${row.name}`}>
-                  <td>{row.name}</td>
-                  <td>{row.namespace || "—"}</td>
-                  {columns.map((_, i) => (
-                    <td key={i}>{row.columns?.[i] || "—"}</td>
-                  ))}
-                  <td>{row.age}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p className="extension-message">
-          No resources returned by this extension.
-        </p>
-      )}
-    </section>
   );
 }
 export function ExtensionManager({
@@ -455,34 +294,38 @@ export function ExtensionManager({
               placeholder="Choose a cluster"
             />
           </div>
-          <div className="extension-toolbar">
-            {enabled.flatMap((plugin) =>
-              plugin.manifest.contributions.pages.map((page) => (
-                <Button
-                  variant="secondary"
-                  key={`${plugin.manifest.id}/${page.id}`}
-                  disabled={!context}
-                  onClick={() =>
-                    onOpen
-                      ? onOpen(plugin, page, context)
-                      : setOpened({ id: plugin.manifest.id, page: page.id })
-                  }
-                >
-                  {page.title}
-                </Button>
-              )),
-            )}
-          </div>
+          {enabled.map((plugin) => (
+            <div key={plugin.manifest.id}>
+              <h3 className="extension-message">{plugin.manifest.name}</h3>
+              <div className="extension-toolbar">
+                {plugin.manifest.contributions.pages.map((page) => (
+                  <Button
+                    variant="secondary"
+                    key={page.id}
+                    disabled={!context}
+                    onClick={() =>
+                      onOpen
+                        ? onOpen(plugin, page, context)
+                        : setOpened({ id: plugin.manifest.id, page: page.id })
+                    }
+                  >
+                    {page.group ? `${page.group} · ${page.title}` : page.title}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          ))}
         </section>
       )}
       {selected && selectedPage && (
         <section>
           <h3 className="extension-message">{selectedPage.title}</h3>
-          <ExtensionResults
-            key={`${context}/${selected.manifest.id}/${selectedPage.id}`}
+          <ExtensionWorkspace
+            key={`${context}/${selected.manifest.id}`}
             plugin={selected}
-            capability={selectedPage.capability}
+            page={selectedPage}
             context={context}
+            onPage={(page) => setOpened({ id: selected.manifest.id, page })}
           />
         </section>
       )}

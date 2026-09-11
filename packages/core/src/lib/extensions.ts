@@ -5,6 +5,12 @@ export interface ExtensionContribution {
   title: string;
   capability: string;
   forKinds?: string[];
+  group?: string;
+  statusColumns?: { ready: number; suspended?: number; progressing?: number };
+  dashboard?: {
+    pages: string[];
+    events?: { capability: string; apiGroups: string[] };
+  };
 }
 export interface ExtensionManifest {
   id: string;
@@ -57,21 +63,28 @@ export async function configureExtensions(change: ExtensionChange) {
     window.dispatchEvent(new Event(EXTENSIONS_CHANGED));
   return state;
 }
-export const readExtension = (
+export interface ExtensionResourceResult {
+  items: Array<{
+    name: string;
+    namespace: string;
+    age: string;
+    columns: string[];
+  }>;
+}
+export const readExtension = <T = ExtensionResourceResult>(
   id: string,
   revision: number,
   capability: string,
   context: string,
   namespace = "",
 ) =>
-  invokeCapability<{
-    items: Array<{
-      name: string;
-      namespace: string;
-      age: string;
-      columns: string[];
-    }>;
-  }>("extensions.read", { id, revision, capability, context, namespace });
+  invokeCapability<T>("extensions.read", {
+    id,
+    revision,
+    capability,
+    context,
+    namespace,
+  });
 export function extensionRoute(
   context: string,
   id: string,

@@ -54,6 +54,42 @@ pub struct Page {
     pub id: String,
     pub title: String,
     pub capability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(
+        default,
+        rename = "statusColumns",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub status_columns: Option<StatusColumns>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dashboard: Option<Dashboard>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StatusColumns {
+    pub ready: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progressing: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Dashboard {
+    pub pages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<DashboardEvents>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DashboardEvents {
+    pub capability: String,
+    #[serde(rename = "apiGroups")]
+    pub api_groups: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -194,6 +230,57 @@ impl Manifest {
                 return Err(format!(
                     "invalid, duplicate or unresolved contribution: {id}"
                 ));
+            }
+        }
+        for page in &self.contributions.pages {
+            if page.group.as_ref().is_some_and(|group| !label(group)) {
+                return Err("invalid page group".into());
+            }
+            if let Some(status) = &page.status_columns {
+                if [Some(status.ready), status.suspended, status.progressing]
+                    .into_iter()
+                    .flatten()
+                    .any(|i| i >= 64)
+                {
+                    return Err("status column index must be below 64".into());
+                }
+            }
+            if let Some(dashboard) = &page.dashboard {
+                if dashboard.pages.is_empty() || dashboard.pages.len() > 12 {
+                    return Err("dashboard must reference 1–12 resource pages".into());
+                }
+                keys(dashboard.pages.iter().cloned())?;
+                for id in &dashboard.pages {
+                    if !self
+                        .contributions
+                        .pages
+                        .iter()
+                        .any(|p| &p.id == id && p.dashboard.is_none() && p.status_columns.is_some())
+                    {
+                        return Err(
+                            "dashboard must reference a resource page with status columns".into(),
+                        );
+                    }
+                }
+                if let Some(events) = &dashboard.events {
+                    if !self
+                        .capabilities
+                        .iter()
+                        .any(|c| c.name == events.capability && c.target == "k8s.listEvents")
+                        || events.api_groups.is_empty()
+                        || events.api_groups.len() > 32
+                        || events
+                            .api_groups
+                            .iter()
+                            .any(|g| !g.contains('.') || !g.split('.').all(identifier))
+                    {
+                        return Err(
+                            "dashboard events require an event reader and explicit API groups"
+                                .into(),
+                        );
+                    }
+                    keys(events.api_groups.iter().cloned())?;
+                }
             }
         }
         for tab in &self.contributions.detail_tabs {

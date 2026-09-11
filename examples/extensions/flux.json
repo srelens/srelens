@@ -1,11 +1,12 @@
 {
   "id": "org.srelens.flux",
   "name": "Flux",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "srelensApiVersion": "^0.1",
   "kind": "declarative",
   "permissions": [
-    "k8s.listCustomResource"
+    "k8s.listCustomResource",
+    "k8s.listEvents"
   ],
   "capabilities": [
     {
@@ -25,7 +26,17 @@
             "type": "string"
           },
           {
-            "name": "Revision",
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
             "jsonPath": ".status.lastAppliedRevision",
             "type": "string"
           }
@@ -51,9 +62,452 @@
             "name": "Ready",
             "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
             "type": "string"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
+            "jsonPath": ".status.lastAttemptedRevision",
+            "type": "string"
           }
         ]
       },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "gitrepositories",
+      "title": "List Git repositories",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "source.toolkit.fluxcd.io",
+        "version": "v1",
+        "plural": "gitrepositories",
+        "kind": "GitRepository",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
+            "jsonPath": ".status.artifact.revision",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "helmrepositories",
+      "title": "List Helm repositories",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "source.toolkit.fluxcd.io",
+        "version": "v1",
+        "plural": "helmrepositories",
+        "kind": "HelmRepository",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
+            "jsonPath": ".spec.url",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "helmcharts",
+      "title": "List Helm charts",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "source.toolkit.fluxcd.io",
+        "version": "v1",
+        "plural": "helmcharts",
+        "kind": "HelmChart",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
+            "jsonPath": ".status.artifact.revision",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "buckets",
+      "title": "List Buckets",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "source.toolkit.fluxcd.io",
+        "version": "v1",
+        "plural": "buckets",
+        "kind": "Bucket",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
+            "jsonPath": ".status.artifact.revision",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "ocirepositories",
+      "title": "List OCI repositories",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "source.toolkit.fluxcd.io",
+        "version": "v1beta2",
+        "plural": "ocirepositories",
+        "kind": "OCIRepository",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
+            "jsonPath": ".status.artifact.revision",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "imagerepositories",
+      "title": "List Image repositories",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "image.toolkit.fluxcd.io",
+        "version": "v1beta2",
+        "plural": "imagerepositories",
+        "kind": "ImageRepository",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
+            "jsonPath": ".spec.image",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "imagepolicies",
+      "title": "List Image policies",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "image.toolkit.fluxcd.io",
+        "version": "v1beta2",
+        "plural": "imagepolicies",
+        "kind": "ImagePolicy",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
+            "jsonPath": ".status.latestImage",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "imageupdateautomations",
+      "title": "List Image update automations",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "image.toolkit.fluxcd.io",
+        "version": "v1beta2",
+        "plural": "imageupdateautomations",
+        "kind": "ImageUpdateAutomation",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
+            "jsonPath": ".status.lastPushCommit",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "alerts",
+      "title": "List Alerts",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "notification.toolkit.fluxcd.io",
+        "version": "v1beta3",
+        "plural": "alerts",
+        "kind": "Alert",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
+            "jsonPath": ".spec.providerRef.name",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "providers",
+      "title": "List Providers",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "notification.toolkit.fluxcd.io",
+        "version": "v1beta3",
+        "plural": "providers",
+        "kind": "Provider",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
+            "jsonPath": ".spec.type",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "receivers",
+      "title": "List Receivers",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "notification.toolkit.fluxcd.io",
+        "version": "v1",
+        "plural": "receivers",
+        "kind": "Receiver",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Suspended",
+            "jsonPath": ".spec.suspend",
+            "type": "boolean"
+          },
+          {
+            "name": "Reconciling",
+            "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Details",
+            "jsonPath": ".spec.type",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "events",
+      "title": "List events",
+      "target": "k8s.listEvents",
+      "arguments": {},
       "inputs": [
         "context",
         "namespace"
@@ -63,14 +517,170 @@
   "contributions": {
     "pages": [
       {
+        "id": "overview",
+        "title": "Overview",
+        "capability": "kustomizations",
+        "dashboard": {
+          "pages": [
+            "kustomizations",
+            "helmreleases",
+            "gitrepositories",
+            "helmrepositories",
+            "helmcharts"
+          ],
+          "events": {
+            "capability": "events",
+            "apiGroups": [
+              "kustomize.toolkit.fluxcd.io",
+              "helm.toolkit.fluxcd.io",
+              "source.toolkit.fluxcd.io",
+              "image.toolkit.fluxcd.io",
+              "notification.toolkit.fluxcd.io"
+            ]
+          }
+        }
+      },
+      {
         "id": "kustomizations",
         "title": "Kustomizations",
-        "capability": "kustomizations"
+        "capability": "kustomizations",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        }
       },
       {
         "id": "helmreleases",
         "title": "Helm releases",
-        "capability": "helmreleases"
+        "capability": "helmreleases",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        },
+        "group": "Helm"
+      },
+      {
+        "id": "gitrepositories",
+        "title": "Git repositories",
+        "capability": "gitrepositories",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        },
+        "group": "Sources"
+      },
+      {
+        "id": "helmrepositories",
+        "title": "Helm repositories",
+        "capability": "helmrepositories",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        },
+        "group": "Sources"
+      },
+      {
+        "id": "helmcharts",
+        "title": "Helm charts",
+        "capability": "helmcharts",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        },
+        "group": "Sources"
+      },
+      {
+        "id": "buckets",
+        "title": "Buckets",
+        "capability": "buckets",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        },
+        "group": "Sources"
+      },
+      {
+        "id": "ocirepositories",
+        "title": "OCI repositories",
+        "capability": "ocirepositories",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        },
+        "group": "Sources"
+      },
+      {
+        "id": "imagerepositories",
+        "title": "Image repositories",
+        "capability": "imagerepositories",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        },
+        "group": "Image Automation"
+      },
+      {
+        "id": "imagepolicies",
+        "title": "Image policies",
+        "capability": "imagepolicies",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        },
+        "group": "Image Automation"
+      },
+      {
+        "id": "imageupdateautomations",
+        "title": "Image update automations",
+        "capability": "imageupdateautomations",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        },
+        "group": "Image Automation"
+      },
+      {
+        "id": "alerts",
+        "title": "Alerts",
+        "capability": "alerts",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        },
+        "group": "Notifications"
+      },
+      {
+        "id": "providers",
+        "title": "Providers",
+        "capability": "providers",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        },
+        "group": "Notifications"
+      },
+      {
+        "id": "receivers",
+        "title": "Receivers",
+        "capability": "receivers",
+        "statusColumns": {
+          "ready": 0,
+          "suspended": 1,
+          "progressing": 2
+        },
+        "group": "Notifications"
       }
     ],
     "detailTabs": [

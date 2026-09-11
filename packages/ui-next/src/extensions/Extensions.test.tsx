@@ -142,13 +142,12 @@ it("persists settings, disable and remove through the backend", async () => {
       enabled: false,
     }),
   );
-  await waitFor(() =>
-    expect(
-      (screen.getByRole("button", { name: "Remove" }) as HTMLButtonElement)
-        .disabled,
-    ).toBe(false),
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+  await waitFor(() => {
+    const remove = screen.getByRole("button", { name: "Remove" }) as HTMLButtonElement;
+    expect(remove.disabled).toBe(false);
+    // Reload can replace the inventory between two separate async lookups.
+    fireEvent.click(remove);
+  });
   await waitFor(() =>
     expect(configureExtensions).toHaveBeenCalledWith({
       action: "remove",

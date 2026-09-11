@@ -94,3 +94,65 @@
 .extension-error > button {
   flex-shrink: 0;
 }
+
+.extension-workspace {
+  min-width: 0;
+}
+.extension-workspace nav [aria-pressed="true"] {
+  color: var(--accent, var(--fl-color-accent));
+  box-shadow: inset 0 -2px currentColor;
+}
+.extension-search {
+  min-width: 10rem;
+  flex: 1;
+  padding: 0.4rem 0.6rem;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--rule, var(--fl-color-border));
+  border-radius: 4px;
+}
+.extension-summaries {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-summary {
+  padding: 16px;
+  border-right: 1px solid var(--rule, var(--fl-color-border));
+  min-width: 0;
+}
+.extension-summary ul {
+  padding: 0;
+  margin: 12px auto 0;
+  list-style: none;
+  width: max-content;
+}
+.extension-summary li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  line-height: 1.8;
+}
+.extension-summary li i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+.extension-donut {
+  width: 112px;
+  height: 112px;
+  margin: 12px auto;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+}
+.extension-donut > span {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--surface, var(--fl-color-bg, #202024));
+  color: var(--ink, var(--fl-color-text, #eee));
+  font-size: 1.5rem;
+}
