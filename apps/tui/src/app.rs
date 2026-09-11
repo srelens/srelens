@@ -2295,22 +2295,23 @@ impl App {
                 }
                 KeyCode::Enter => {
                     let trimmed = self.command_buffer.trim().trim_start_matches(':').trim();
-                    if trimmed.is_empty() {
-                        self.input_mode = InputMode::Normal;
-                        self.command_buffer.clear();
-                        self.command_suggestion_idx = 0;
-                        return;
-                    }
 
                     // Special contextual colon commands handled directly by execute_colon_command
-                    if trimmed == "save-ai" || trimmed == "export-ai"
-                        || (trimmed == "save" && matches!(self.active_view, ActiveView::Assistant))
-                        || trimmed == "clear-ai"
-                        || (trimmed == "clear" && matches!(self.active_view, ActiveView::Assistant))
-                        || trimmed == "tree" || trimmed == "lineage" || trimmed == "related"
-                        || trimmed == "actions" || trimmed == "act"
-                        || trimmed == "metrics" || trimmed == "metric"
-                        || trimmed == "reasons" || trimmed == "reason"
+                    if !trimmed.is_empty()
+                        && (trimmed == "save-ai"
+                            || trimmed == "export-ai"
+                            || (trimmed == "save" && matches!(self.active_view, ActiveView::Assistant))
+                            || trimmed == "clear-ai"
+                            || (trimmed == "clear" && matches!(self.active_view, ActiveView::Assistant))
+                            || trimmed == "tree"
+                            || trimmed == "lineage"
+                            || trimmed == "related"
+                            || trimmed == "actions"
+                            || trimmed == "act"
+                            || trimmed == "metrics"
+                            || trimmed == "metric"
+                            || trimmed == "reasons"
+                            || trimmed == "reason")
                     {
                         let cmd = self.command_buffer.clone();
                         self.input_mode = InputMode::Normal;
@@ -2332,7 +2333,7 @@ impl App {
                     self.command_suggestion_idx = 0;
                     if let Some(target) = target {
                         self.execute_command_target(target).await;
-                    } else {
+                    } else if !fallback_cmd.trim().trim_start_matches(':').trim().is_empty() {
                         self.execute_colon_command(&fallback_cmd).await;
                     }
                 }

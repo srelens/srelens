@@ -1281,6 +1281,67 @@ async fn command_enter_runs_the_command_and_unknown_commands_toast() {
 }
 
 #[tokio::test]
+async fn empty_command_enter_runs_highlighted_suggestion_and_arrow_selection() {
+    let (mut app, _rx) = common::app().await;
+
+    // 1. ':' + Esc returns to Normal with no view change
+    press(&mut app, ch(':')).await;
+    assert_eq!(app.input_mode, InputMode::Command);
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert_eq!(app.input_mode, InputMode::Normal);
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+
+    // 2. ':' with empty buffer + Enter on index 0 executes the first suggestion (themes)
+    press(&mut app, ch(':')).await;
+    assert_eq!(app.input_mode, InputMode::Command);
+    assert_eq!(app.command_suggestion_idx, 0);
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.input_mode, InputMode::Normal);
+    assert!(
+        matches!(app.modal, Some(Modal::ThemePicker { .. })),
+        "expected ThemePicker modal, got {:?}",
+        app.modal
+    );
+    // Dismiss theme modal
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(app.modal.is_none());
+
+    // 3. ':' + Down until highlighted suggestion is pods + Enter -> opens Pods
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "nodes").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::Nodes);
+
+    press(&mut app, ch(':')).await;
+    assert_eq!(app.input_mode, InputMode::Command);
+    assert_eq!(app.command_buffer, "");
+    let suggestions = command_suggestions_with_crds("", &app.crds);
+    let pods_idx = suggestions
+        .iter()
+        .position(|(def, _)| def.name == "pods")
+        .expect("pods must be in command suggestions");
+    for _ in 0..pods_idx {
+        press(&mut app, key(KeyCode::Down)).await;
+    }
+    assert_eq!(app.command_suggestion_idx, pods_idx);
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.input_mode, InputMode::Normal);
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+
+    // 4. Non-empty :po + Enter still opens pods
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "po").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+
+    // 5. Non-empty :zzzz + Enter still toasts unknown
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "zzzz").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(toast(&app).starts_with("Unknown command: 'zzzz'"));
+}
+
+#[tokio::test]
 async fn colon_commands_that_need_a_selection_warn_when_the_table_is_empty() {
     let (mut app, _rx) = common::app().await;
     for (cmd, expected) in [
