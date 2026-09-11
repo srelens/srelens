@@ -5,6 +5,16 @@
 - **Owners:** srelens core team
 - **Related issues:** #42 (design spike), #43 (renderer API surface), #44 (extension host sidecar + MCP bridging), #23 (MCP consent), #56 (AI assistant), #153 (topology surface)
 
+## Implementation status (2026-09-11)
+
+Native authoring **and** Freelens/OpenLens compatibility are both required.
+The first implementation is a declarative contract/broker prototype in
+`crates/plugin-host`; it executes no third-party code and is not yet loaded by
+application UIs. See [the current implementation and delivery plan](../EXTENSIONS.md)
+for runnable GitOps examples, limitations and the compatibility matrix.
+This stages the broker before executable runtimes; it does not remove the native
+subprocess or compatibility-runtime work below.
+
 ## 1. Context & problem
 
 srelens is a Tauri desktop app: a **Rust core** (`crates/kube`, Tauri commands), a **React/webview frontend** (`apps/desktop/src`), and an **MCP server** built directly from a single capability **`Registry`** (`srelens_capability::Registry` → `build_registry_with()` → `srelens_mcp::McpServer`). Today every backend capability is registered in one place (`capabilities.rs`) and is simultaneously available to the UI and to AI agents over MCP.

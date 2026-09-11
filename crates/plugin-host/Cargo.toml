@@ -1,0 +1,17 @@
+[package]
+name = "srelens-plugin-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+srelens-capability = { path = "../capability" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "0.8"
+semver = "1"
+
+[dev-dependencies]
+srelens-registry = { path = "../registry" }
+srelens-mcp = { path = "../mcp" }
+tokio = { version = "1", features = ["macros", "rt", "io-std"] }

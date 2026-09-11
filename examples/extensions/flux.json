@@ -1,0 +1,79 @@
+{
+  "id": "org.srelens.flux",
+  "name": "Flux",
+  "version": "0.1.0",
+  "srelensApiVersion": "^0.1",
+  "kind": "declarative",
+  "permissions": [
+    "k8s.listCustomResource"
+  ],
+  "capabilities": [
+    {
+      "name": "kustomizations",
+      "title": "List Kustomizations",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "kustomize.toolkit.fluxcd.io",
+        "version": "v1",
+        "plural": "kustomizations",
+        "kind": "Kustomization",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          },
+          {
+            "name": "Revision",
+            "jsonPath": ".status.lastAppliedRevision",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    },
+    {
+      "name": "helmreleases",
+      "title": "List Helm releases",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "helm.toolkit.fluxcd.io",
+        "version": "v2",
+        "plural": "helmreleases",
+        "kind": "HelmRelease",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Ready",
+            "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    }
+  ],
+  "contributions": {
+    "pages": [
+      {
+        "id": "kustomizations",
+        "title": "Kustomizations",
+        "capability": "kustomizations"
+      },
+      {
+        "id": "helmreleases",
+        "title": "Helm releases",
+        "capability": "helmreleases"
+      }
+    ],
+    "detailTabs": [],
+    "rowActions": []
+  }
+}

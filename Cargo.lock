@@ -6503,6 +6503,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "srelens-plugin-host"
+version = "0.12.0"
+dependencies = [
+ "schemars 0.8.22",
+ "semver",
+ "serde",
+ "serde_json",
+ "srelens-capability",
+ "srelens-mcp",
+ "srelens-registry",
+ "tokio",
+]
+
+[[package]]
 name = "srelens-registry"
 version = "0.12.0"
 dependencies = [
