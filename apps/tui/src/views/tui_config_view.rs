@@ -67,7 +67,7 @@ impl TuiConfigViewState {
         }
     }
 
-    pub fn adjust_current(&mut self, delta: i32, config: &mut TuiConfig) {
+    pub fn adjust_current(&mut self, delta: i32, config: &mut TuiConfig) -> Result<(), String> {
         match self.selected_field {
             0 => {
                 let current = config.command_popup_max_width as i32;
@@ -89,10 +89,10 @@ impl TuiConfigViewState {
             }
             _ => {}
         }
-        let _ = config.save();
+        config.save()
     }
 
-    pub fn cycle_current(&mut self, config: &mut TuiConfig) {
+    pub fn cycle_current(&mut self, config: &mut TuiConfig) -> Result<(), String> {
         match self.selected_field {
             0 => {
                 let current = config.command_popup_max_width;
@@ -110,12 +110,12 @@ impl TuiConfigViewState {
             }
             _ => {}
         }
-        let _ = config.save();
+        config.save()
     }
 
-    pub fn reset_defaults(&mut self, config: &mut TuiConfig) {
+    pub fn reset_defaults(&mut self, config: &mut TuiConfig) -> Result<(), String> {
         *config = TuiConfig::default();
-        let _ = config.save();
+        config.save()
     }
 }
 
@@ -159,7 +159,7 @@ pub fn render_tui_config_view(
             ),
         ]),
         Line::from(vec![Span::styled(
-            "Settings are saved automatically to ~/.config/srelens/tui.json and applied immediately.",
+            "Changes apply immediately and are saved automatically. Save failures are reported below.",
             Style::default().fg(Theme::dim()),
         )]),
     ];

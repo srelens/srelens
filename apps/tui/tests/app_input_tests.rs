@@ -32,6 +32,8 @@ use common::{ch, ctrl, key, shift, type_str};
 // Local helpers
 // ---------------------------------------------------------------------------
 
+static TUI_CONFIG_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn press(app: &mut App, k: KeyEvent) {
     app.handle_key_event(k).await;
 }
@@ -501,6 +503,33 @@ async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
     app.toast = None;
     app.handle_key_event(common::ch('r')).await;
     assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn failed_helm_refresh_keeps_rows_stale_and_blocks_rollback_until_success() {
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Helm(srelens_tui::views::helm_view::HelmViewState::new());
+    let release = srelens_kube::helm::HelmReleaseSummary {
+        name: "web".into(), namespace: "default".into(), revision: 3,
+        status: "deployed".into(), chart: "web".into(), chart_version: "1".into(),
+        app_version: "1".into(), updated: "today".into(),
+    };
+    app.handle_helm_releases_result("test-cluster", "default", Ok(vec![release.clone()]));
+    app.handle_helm_releases_result("test-cluster", "default", Err("access denied".into()));
+    let text = common::render_app(&mut app, 160, 30);
+    assert!(text.contains("stale") && text.contains("access denied") && text.contains("web"), "{text}");
+    press(&mut app, ch('r')).await;
+    assert!(app.modal.is_none());
+    // A confirmation opened before the refresh failed must be blocked too.
+    app.execute_modal_confirm("helm-rollback:web:default:2".into()).await;
+    assert!(app.toast.as_ref().unwrap().0.contains("Refresh Helm releases successfully"));
+    app.refresh_helm_releases();
+    if let ActiveView::Helm(helm) = &app.active_view { assert!(helm.error.is_some()); }
+    press(&mut app, ch('r')).await;
+    assert!(app.modal.is_none());
+    app.handle_helm_releases_result("test-cluster", "default", Ok(vec![release]));
+    press(&mut app, ch('r')).await;
+    assert!(matches!(app.modal, Some(Modal::Confirm { ref action_name, .. }) if action_name == "helm-rollback:web:default:2"));
 }
 
 #[tokio::test]
@@ -3454,6 +3483,7 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
 
 #[tokio::test]
 async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
+    let _config_guard = TUI_CONFIG_ENV_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let config_path = temp.path().join("tui.json");
     std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_path);
@@ -3562,6 +3592,7 @@ async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
 
 #[tokio::test]
 async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
+    let _config_guard = TUI_CONFIG_ENV_LOCK.lock().await;
     let tmp = tempfile::tempdir().unwrap();
     let config_file = tmp.path().join("tui.json");
     std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_file);
@@ -3583,6 +3614,21 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
     press(&mut app, ch('T')).await;
     assert!(app.tui_config.show_feature_banner);
     assert!(matches!(app.modal, Some(Modal::FeatureBanner { show_on_startup: true })));
+
+    // A directory cannot be overwritten as the settings file.
+    std::fs::remove_file(&config_file).unwrap();
+    std::fs::create_dir(&config_file).unwrap();
+    press(&mut app, ch('t')).await;
+    assert!(app.toast.as_ref().unwrap().0.contains("Failed to write"));
+    app.modal = None;
+    app.active_view = ActiveView::TuiConfig(Default::default());
+    for code in [KeyCode::Right, KeyCode::Enter, KeyCode::Char('r')] {
+        app.toast = None;
+        press(&mut app, key(code)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Failed to write"));
+    }
+    std::fs::remove_dir(&config_file).unwrap();
+    app.modal = Some(Modal::FeatureBanner { show_on_startup: false });
 
     // Press '1' jumps directly to Helm releases
     press(&mut app, ch('1')).await;
