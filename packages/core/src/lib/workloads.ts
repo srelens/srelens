@@ -31,7 +31,15 @@ export interface PodSummary {
 
 export interface NamespacesOutcome {
   namespaces?: string[];
+  summaries?: NamespaceSummary[];
   error?: string;
+}
+
+export interface NamespaceSummary {
+  name: string;
+  phase: string;
+  labels: Record<string, string>;
+  age: string;
 }
 
 export interface PodsOutcome {
@@ -71,8 +79,21 @@ export async function listNamespaces(
   invoke: Invoker = invokeCapability,
 ): Promise<NamespacesOutcome> {
   try {
-    const out = await invoke<{ namespaces: string[] }>("k8s.listNamespaces", { context });
-    return { namespaces: out.namespaces };
+    const out = await invoke<{ namespaces: string[]; summaries?: NamespaceSummary[] }>(
+      "k8s.listNamespaces",
+      { context },
+    );
+    const summaries =
+      out.summaries ??
+      out.namespaces.map((name) => ({
+        name,
+        // A legacy backend did not report phase at all. Keep that distinct
+        // from a real `Unknown` phase, which is an unhealthy cluster verdict.
+        phase: "-",
+        labels: {},
+        age: "-",
+      }));
+    return { namespaces: out.namespaces, summaries };
   } catch (e) {
     return { error: String(e) };
   }

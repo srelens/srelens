@@ -18,6 +18,7 @@ import {
   type JobSummary,
   type LimitRangeSummary,
   type NetworkPolicySummary,
+  type NamespaceSummary,
   type NodeSummary,
   type PodSummary,
   type PvSummary,
@@ -39,7 +40,7 @@ import {
   taintTooltip,
 } from "@srelens/core";
 import { AgeCell } from "../ageCell";
-import { Badge, StatusPill, type Column, type Tone } from "@srelens/ui-kit";
+import { Badge, StatusPill, Tooltip, type Column, type Tone } from "@srelens/ui-kit";
 
 export type PodRow = PodSummary & { cpu?: number; memory?: number };
 export type NodeRow = NodeSummary & { cpu?: number; memory?: number };
@@ -342,6 +343,62 @@ export const nodeColumns: Column<NodeRow>[] = [
     defaultHidden: true,
     render: (n) => <TaintTally row={n} />,
     getSortValue: (n) => taintSortValue(n.taintDetails),
+  },
+  { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
+];
+
+const AUTOMATIC_NAMESPACE_LABEL = "kubernetes.io/metadata.name";
+const VISIBLE_NAMESPACE_LABELS = 2;
+
+function namespaceLabelEntries(labels: Record<string, string>): [string, string][] {
+  return Object.entries(labels)
+    .filter(([key]) => key !== AUTOMATIC_NAMESPACE_LABEL)
+    .sort(([left], [right]) => left.localeCompare(right));
+}
+
+function namespaceLabelText(namespace: NamespaceSummary, separator: string): string {
+  return namespaceLabelEntries(namespace.labels)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(separator);
+}
+
+function NamespaceLabelChips({ namespace }: { namespace: NamespaceSummary }) {
+  const entries = namespaceLabelEntries(namespace.labels);
+  if (entries.length === 0) return "—";
+  const hidden = entries.length - VISIBLE_NAMESPACE_LABELS;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      {entries.slice(0, VISIBLE_NAMESPACE_LABELS).map(([key, value]) => (
+        <Badge key={key} tone="muted">{`${key}=${value}`}</Badge>
+      ))}
+      {hidden > 0 && (
+        <Badge tone="muted">
+          <Tooltip label={namespaceLabelText(namespace, ", ")}>{`+${hidden}`}</Tooltip>
+        </Badge>
+      )}
+    </span>
+  );
+}
+
+export const namespaceColumns: Column<NamespaceSummary>[] = [
+  { key: "name", header: "Name", sortable: true },
+  {
+    key: "phase",
+    header: "Status",
+    sortable: true,
+    filterable: true,
+    minWidth: 132,
+    render: (namespace) => (
+      <StatusPill status={namespace.phase} kind={phaseKind(namespace.phase)} />
+    ),
+  },
+  {
+    key: "labels",
+    header: "Labels",
+    sortable: false,
+    minWidth: 280,
+    render: (namespace) => <NamespaceLabelChips namespace={namespace} />,
+    getValue: (namespace) => namespaceLabelText(namespace, " "),
   },
   { key: "age", header: "Age", sortable: true, align: "end", getSortValue: ageSortValue },
 ];
