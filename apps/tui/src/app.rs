@@ -2342,7 +2342,14 @@ impl App {
                     if !suggestions.is_empty() {
                         let idx = self.command_suggestion_idx % suggestions.len();
                         self.command_buffer = suggestions[idx].0.name.clone();
-                        self.command_suggestion_idx = (idx + 1) % suggestions.len();
+                        // Completion changes the query and rebuilds the list.
+                        // Names and aliases can collide, so follow the selected
+                        // target (including its CRD group), not the old index.
+                        let target = &suggestions[idx].0.target;
+                        self.command_suggestion_idx = command_suggestions_with_crds(&self.command_buffer, &self.crds)
+                            .iter()
+                            .position(|(command, _)| &command.target == target)
+                            .unwrap_or(0);
                     }
                 }
                 KeyCode::BackTab => {
