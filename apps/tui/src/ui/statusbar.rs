@@ -86,8 +86,6 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                     let density = props.command_popup_density.unwrap_or_default();
                     let popup_area = command_popup_rect(area, suggs.len(), max_width, max_visible, density);
                     f.render_widget(Clear, popup_area);
-
-                    let is_large = density.is_large();
                     let inner_height = popup_area.height.saturating_sub(2);
                     let item_lines = density.item_height();
                     let max_fits = (inner_height / item_lines) as usize;
@@ -111,133 +109,264 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                             let is_selected = abs_i == selected_idx;
                             let prefix = if is_selected { "▶ " } else { "  " };
 
-                            if is_large {
-                                // 2-line spacious card layout with bold large typography
-                                let alias_str = if !cmd.aliases.is_empty() {
-                                    format!(" ({})", cmd.aliases.join(", "))
-                                } else {
-                                    String::new()
-                                };
-                                let cat_badge = format!("[{}]", cmd.category());
-                                let name_text = format!("{}{}{}", prefix, cmd.name.to_uppercase(), alias_str);
-
-                                let name_len = name_text.chars().count();
-                                let badge_len = cat_badge.chars().count();
-                                let spacer_len = popup_inner_w.saturating_sub(name_len + badge_len + 1).max(2);
-                                let spacer = " ".repeat(spacer_len);
-
-                                let line1 = Line::from(vec![
-                                    Span::styled(
-                                        name_text,
-                                        if is_selected {
-                                            Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
-                                        } else {
-                                            Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
-                                        },
-                                    ),
-                                    Span::raw(spacer),
-                                    Span::styled(
-                                        cat_badge,
-                                        if is_selected {
-                                            Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)
-                                        } else {
-                                            Style::default().fg(Theme::dim())
-                                        },
-                                    ),
-                                ]);
-
-                                let mut line2_spans = vec![
-                                    Span::raw("    "),
-                                    Span::styled(
-                                        cmd.description.clone(),
-                                        if is_selected {
-                                            Style::default().fg(Theme::fg())
-                                        } else {
-                                            Style::default().fg(Theme::dim())
-                                        },
-                                    ),
-                                ];
-
-                                let syntax = cmd.syntax_hint();
-                                if !syntax.is_empty() && popup_inner_w >= 65 {
-                                    line2_spans.push(Span::styled("  •  ", Style::default().fg(Theme::dim())));
-                                    line2_spans.push(Span::styled(
-                                        syntax.to_string(),
-                                        if is_selected {
-                                            Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)
-                                        } else {
-                                            Style::default().fg(Theme::yellow())
-                                        },
-                                    ));
-                                }
-
-                                let line2 = Line::from(line2_spans);
-
-                                ListItem::new(vec![line1, line2]).style(if is_selected {
-                                    Theme::selected_row()
-                                } else {
-                                    Style::default()
-                                })
-                            } else {
-                                // 1-line compact layout with rich column expansion
-                                let alias_str = if !cmd.aliases.is_empty() {
-                                    format!(" ({})", cmd.aliases.join(", "))
-                                } else {
-                                    String::new()
-                                };
-                                let name_col = format!("{}{}{}", prefix, cmd.name, alias_str);
-                                let pad_width = if popup_inner_w >= 90 { 26 } else { 20 };
-                                let padded_name = format!("{:<pad_width$}", name_col, pad_width = pad_width);
-
-                                let mut spans = vec![
-                                    Span::styled(
-                                        padded_name,
-                                        if is_selected {
-                                            Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
-                                        } else {
-                                            Style::default().fg(Theme::fg())
-                                        },
-                                    ),
-                                ];
-
-                                if popup_inner_w >= 70 {
-                                    spans.push(Span::styled(
-                                        format!("[{}] ", cmd.category()),
-                                        if is_selected {
-                                            Style::default().fg(Theme::accent())
-                                        } else {
-                                            Style::default().fg(Theme::dim())
-                                        },
-                                    ));
-                                }
-
-                                spans.push(Span::styled(
-                                    format!(" {}", cmd.description),
-                                    if is_selected {
-                                        Style::default().fg(Theme::fg())
+                            match density {
+                                CommandPopupDensity::ExtraLarge => {
+                                    // 3-line spacious card layout with maximum readability & detail
+                                    let alias_str = if !cmd.aliases.is_empty() {
+                                        format!(" ({})", cmd.aliases.join(", "))
                                     } else {
-                                        Style::default().fg(Theme::dim())
-                                    },
-                                ));
+                                        String::new()
+                                    };
+                                    let cat_badge = format!("[{}]", cmd.category());
+                                    let name_text = format!("{}{}{}", prefix, cmd.name.to_uppercase(), alias_str);
 
-                                let syntax = cmd.syntax_hint();
-                                if !syntax.is_empty() && popup_inner_w >= 95 {
-                                    spans.push(Span::styled("  |  ", Style::default().fg(Theme::dim())));
+                                    let name_len = name_text.chars().count();
+                                    let badge_len = cat_badge.chars().count();
+                                    let spacer_len = popup_inner_w.saturating_sub(name_len + badge_len + 1).max(2);
+                                    let spacer = " ".repeat(spacer_len);
+
+                                    let line1 = Line::from(vec![
+                                        Span::styled(
+                                            name_text,
+                                            if is_selected {
+                                                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                                            } else {
+                                                Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
+                                            },
+                                        ),
+                                        Span::raw(spacer),
+                                        Span::styled(
+                                            cat_badge,
+                                            if is_selected {
+                                                Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)
+                                            } else {
+                                                Style::default().fg(Theme::dim())
+                                            },
+                                        ),
+                                    ]);
+
+                                    let line2 = Line::from(vec![
+                                        Span::raw("    "),
+                                        Span::styled(
+                                            cmd.description.clone(),
+                                            if is_selected {
+                                                Style::default().fg(Theme::fg())
+                                            } else {
+                                                Style::default().fg(Theme::dim())
+                                            },
+                                        ),
+                                    ]);
+
+                                    let syntax = cmd.syntax_hint();
+                                    let mut line3_spans = vec![
+                                        Span::raw("    "),
+                                        Span::styled("Usage: ", Style::default().fg(Theme::dim())),
+                                        Span::styled(
+                                            if !syntax.is_empty() { syntax.to_string() } else { format!(":{}", cmd.name) },
+                                            if is_selected {
+                                                Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)
+                                            } else {
+                                                Style::default().fg(Theme::yellow())
+                                            },
+                                        ),
+                                    ];
+                                    if !cmd.aliases.is_empty() {
+                                        line3_spans.push(Span::styled("  |  Aliases: ", Style::default().fg(Theme::dim())));
+                                        line3_spans.push(Span::styled(
+                                            cmd.aliases.join(", "),
+                                            if is_selected {
+                                                Style::default().fg(Theme::fg())
+                                            } else {
+                                                Style::default().fg(Theme::dim())
+                                            },
+                                        ));
+                                    }
+                                    let line3 = Line::from(line3_spans);
+
+                                    ListItem::new(vec![line1, line2, line3]).style(if is_selected {
+                                        Theme::selected_row()
+                                    } else {
+                                        Style::default()
+                                    })
+                                }
+                                CommandPopupDensity::Large => {
+                                    // 2-line spacious card layout with bold large typography
+                                    let alias_str = if !cmd.aliases.is_empty() {
+                                        format!(" ({})", cmd.aliases.join(", "))
+                                    } else {
+                                        String::new()
+                                    };
+                                    let cat_badge = format!("[{}]", cmd.category());
+                                    let name_text = format!("{}{}{}", prefix, cmd.name.to_uppercase(), alias_str);
+
+                                    let name_len = name_text.chars().count();
+                                    let badge_len = cat_badge.chars().count();
+                                    let spacer_len = popup_inner_w.saturating_sub(name_len + badge_len + 1).max(2);
+                                    let spacer = " ".repeat(spacer_len);
+
+                                    let line1 = Line::from(vec![
+                                        Span::styled(
+                                            name_text,
+                                            if is_selected {
+                                                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                                            } else {
+                                                Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
+                                            },
+                                        ),
+                                        Span::raw(spacer),
+                                        Span::styled(
+                                            cat_badge,
+                                            if is_selected {
+                                                Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)
+                                            } else {
+                                                Style::default().fg(Theme::dim())
+                                            },
+                                        ),
+                                    ]);
+
+                                    let mut line2_spans = vec![
+                                        Span::raw("    "),
+                                        Span::styled(
+                                            cmd.description.clone(),
+                                            if is_selected {
+                                                Style::default().fg(Theme::fg())
+                                            } else {
+                                                Style::default().fg(Theme::dim())
+                                            },
+                                        ),
+                                    ];
+
+                                    let syntax = cmd.syntax_hint();
+                                    if !syntax.is_empty() && popup_inner_w >= 65 {
+                                        line2_spans.push(Span::styled("  •  ", Style::default().fg(Theme::dim())));
+                                        line2_spans.push(Span::styled(
+                                            syntax.to_string(),
+                                            if is_selected {
+                                                Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)
+                                            } else {
+                                                Style::default().fg(Theme::yellow())
+                                            },
+                                        ));
+                                    }
+
+                                    let line2 = Line::from(line2_spans);
+
+                                    ListItem::new(vec![line1, line2]).style(if is_selected {
+                                        Theme::selected_row()
+                                    } else {
+                                        Style::default()
+                                    })
+                                }
+                                CommandPopupDensity::Standard => {
+                                    // 1-line enriched layout with category badge and syntax hint
+                                    let alias_str = if !cmd.aliases.is_empty() {
+                                        format!(" ({})", cmd.aliases.join(", "))
+                                    } else {
+                                        String::new()
+                                    };
+                                    let name_col = format!("{}{}{}", prefix, cmd.name, alias_str);
+                                    let pad_width = if popup_inner_w >= 90 { 26 } else { 20 };
+                                    let padded_name = format!("{:<pad_width$}", name_col, pad_width = pad_width);
+
+                                    let mut spans = vec![
+                                        Span::styled(
+                                            padded_name,
+                                            if is_selected {
+                                                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                                            } else {
+                                                Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
+                                            },
+                                        ),
+                                    ];
+
+                                    if popup_inner_w >= 60 {
+                                        spans.push(Span::styled(
+                                            format!("[{}] ", cmd.category()),
+                                            if is_selected {
+                                                Style::default().fg(Theme::accent())
+                                            } else {
+                                                Style::default().fg(Theme::dim())
+                                            },
+                                        ));
+                                    }
+
                                     spans.push(Span::styled(
-                                        syntax.to_string(),
+                                        format!(" {}", cmd.description),
                                         if is_selected {
-                                            Style::default().fg(Theme::yellow())
+                                            Style::default().fg(Theme::fg())
                                         } else {
                                             Style::default().fg(Theme::dim())
                                         },
                                     ));
-                                }
 
-                                ListItem::new(Line::from(spans)).style(if is_selected {
-                                    Theme::selected_row()
-                                } else {
-                                    Style::default()
-                                })
+                                    let syntax = cmd.syntax_hint();
+                                    if !syntax.is_empty() && popup_inner_w >= 85 {
+                                        spans.push(Span::styled("  |  ", Style::default().fg(Theme::dim())));
+                                        spans.push(Span::styled(
+                                            syntax.to_string(),
+                                            if is_selected {
+                                                Style::default().fg(Theme::yellow())
+                                            } else {
+                                                Style::default().fg(Theme::dim())
+                                            },
+                                        ));
+                                    }
+
+                                    ListItem::new(Line::from(spans)).style(if is_selected {
+                                        Theme::selected_row()
+                                    } else {
+                                        Style::default()
+                                    })
+                                }
+                                CommandPopupDensity::Compact => {
+                                    // 1-line compact layout: clean, condensed
+                                    let alias_str = if !cmd.aliases.is_empty() {
+                                        format!(" ({})", cmd.aliases.join(", "))
+                                    } else {
+                                        String::new()
+                                    };
+                                    let name_col = format!("{}{}{}", prefix, cmd.name, alias_str);
+                                    let pad_width = if popup_inner_w >= 90 { 24 } else { 18 };
+                                    let padded_name = format!("{:<pad_width$}", name_col, pad_width = pad_width);
+
+                                    let mut spans = vec![
+                                        Span::styled(
+                                            padded_name,
+                                            if is_selected {
+                                                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                                            } else {
+                                                Style::default().fg(Theme::fg())
+                                            },
+                                        ),
+                                        Span::styled(
+                                            format!(" {}", cmd.description),
+                                            if is_selected {
+                                                Style::default().fg(Theme::fg())
+                                            } else {
+                                                Style::default().fg(Theme::dim())
+                                            },
+                                        ),
+                                    ];
+
+                                    let syntax = cmd.syntax_hint();
+                                    if !syntax.is_empty() && popup_inner_w >= 95 {
+                                        spans.push(Span::styled("  |  ", Style::default().fg(Theme::dim())));
+                                        spans.push(Span::styled(
+                                            syntax.to_string(),
+                                            if is_selected {
+                                                Style::default().fg(Theme::yellow())
+                                            } else {
+                                                Style::default().fg(Theme::dim())
+                                            },
+                                        ));
+                                    }
+
+                                    ListItem::new(Line::from(spans)).style(if is_selected {
+                                        Theme::selected_row()
+                                    } else {
+                                        Style::default()
+                                    })
+                                }
                             }
                         })
                         .collect();

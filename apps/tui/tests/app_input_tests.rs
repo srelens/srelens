@@ -3393,17 +3393,25 @@ async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
         assert_eq!(s.selected_field, 2);
     }
 
-    // Toggle density to Large with 'l'
+    // Step density to Standard with 'l'
+    press(&mut app, ch('l')).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Standard);
+
+    // Step to Large with 'l'
     press(&mut app, ch('l')).await;
     assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Large);
 
-    // Toggle back to Compact with Space
-    press(&mut app, ch(' ')).await;
-    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Compact);
+    // Step back to Standard with 'h'
+    press(&mut app, ch('h')).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Standard);
 
-    // Toggle to Large with Enter
-    press(&mut app, key(KeyCode::Enter)).await;
+    // Cycle forward with Space (Standard -> Large)
+    press(&mut app, ch(' ')).await;
     assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Large);
+
+    // Cycle forward with Enter (Large -> ExtraLarge)
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::ExtraLarge);
 
     // Reset defaults with 'r'
     press(&mut app, ch('r')).await;

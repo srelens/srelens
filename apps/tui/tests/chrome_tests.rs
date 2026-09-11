@@ -926,6 +926,10 @@ fn command_popup_geometry_respects_max_width_and_visible_rows() {
     // Large density mode: 5 items, max_visible 6 -> 5 items * 2 rows = 10 rows + 2 borders = 12 height
     let r5 = command_popup_rect(bar_area, 5, 65, 6, CommandPopupDensity::Large);
     assert_eq!(r5, Rect::new(2, 10, 65, 12));
+
+    // ExtraLarge density mode: 3 items, max_visible 6 -> 3 items * 3 rows = 9 rows + 2 borders = 11 height
+    let r6 = command_popup_rect(bar_area, 3, 65, 6, CommandPopupDensity::ExtraLarge);
+    assert_eq!(r6, Rect::new(2, 11, 65, 11));
 }
 
 #[test]
@@ -992,6 +996,40 @@ fn command_popup_rendering_large_density_mode() {
     assert!(
         rendered_text.contains("THEMES") || rendered_text.contains("WORKLOADS") || rendered_text.contains("PODS"),
         "large mode renders uppercase command names, got:\n{rendered_text}"
+    );
+}
+
+#[test]
+fn command_popup_rendering_extra_large_density_mode() {
+    let suggs = command_suggestions("");
+    assert!(suggs.len() >= 3, "empty query matches all commands");
+
+    let mode = InputMode::Command;
+    let mut props = status_props(&mode);
+    props.command_input = "";
+    props.suggestions = Some((&suggs, 0));
+    props.command_popup_max_width = Some(100);
+    props.command_popup_max_visible = Some(3);
+    props.command_popup_density = Some(CommandPopupDensity::ExtraLarge);
+
+    let lines = common::render_lines(120, 24, |f| {
+        render_statusbar(f, Rect::new(0, 22, 120, 2), props)
+    });
+
+    // With 3 visible items in ExtraLarge mode: 3 * 3 = 9 rows + 2 borders = 11 rows tall.
+    // Base bar at y=22 -> popup top at y = 22 - 11 = 11.
+    let popup_title_row = lines
+        .iter()
+        .position(|l| l.contains("Commands [1/"))
+        .expect("popup title present");
+    assert_eq!(popup_title_row, 11, "top border of extra large popup is at y=11");
+
+    // ExtraLarge mode renders 3 lines per item including Usage line
+    let content_lines = &lines[popup_title_row + 1..22];
+    let rendered_text = content_lines.join("\n");
+    assert!(
+        rendered_text.contains("Usage:"),
+        "extra large mode renders usage line, got:\n{rendered_text}"
     );
 }
 

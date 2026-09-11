@@ -2043,10 +2043,20 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     assert_eq!(config.command_popup_max_visible, 6);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
 
-    // Selected field 2: Text size / density toggle
+    // Selected field 2: Text size / density slider (1..=4)
+    state.adjust_current(1, &mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::Standard);
     state.adjust_current(1, &mut config);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Large);
     state.adjust_current(1, &mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::ExtraLarge);
+    state.adjust_current(1, &mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::ExtraLarge); // Clamped at 4
+    state.adjust_current(-1, &mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::Large);
+    state.cycle_current(&mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::ExtraLarge);
+    state.cycle_current(&mut config);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
 
     // Switch to field 1: Visible Rows (step 1, range 3..=20)

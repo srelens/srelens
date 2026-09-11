@@ -3893,7 +3893,7 @@ impl App {
                         cfg_state.adjust_current(1, &mut self.tui_config);
                     }
                     KeyCode::Enter | KeyCode::Char(' ') => {
-                        cfg_state.adjust_current(1, &mut self.tui_config);
+                        cfg_state.cycle_current(&mut self.tui_config);
                     }
                     KeyCode::Char('[') | KeyCode::Char('{') => {
                         cfg_state.adjust_current(-5, &mut self.tui_config);
