@@ -2454,3 +2454,30 @@ fn long_helm_errors_show_the_reason_and_recovery_with_and_without_stale_rows() {
         }
     }
 }
+
+#[test]
+fn oversized_helm_errors_preserve_recovery_and_stale_rows() {
+    use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+    for (width, height) in [(80, 12), (40, 12), (80, 8)] {
+        for stale in [false, true] {
+            let mut state = HelmViewState::new();
+            if stale {
+                state.set_releases(vec![HelmReleaseItem {
+                    name: "cached".into(), namespace: "ns".into(), revision: 3,
+                    status: "deployed".into(), chart: "web".into(), chart_version: "1".into(),
+                    app_version: "1".into(), updated: "today".into(),
+                }]);
+            }
+            state.set_error("Permission denied while listing Helm secrets. ".repeat(100));
+            let text = common::render_text(width, height, |f| render_helm_view(f, f.area(), &state));
+            let content = text.lines().map(|line| line.trim_matches('│')).collect::<Vec<_>>().join(" ");
+            let words = content.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(words.contains("Press R to retry."), "{text}");
+            assert!(words.contains("error truncated"), "{text}");
+            if stale {
+                assert!(words.contains("Rollback is disabled."), "{text}");
+                assert!(text.contains("cached"), "{text}");
+            }
+        }
+    }
+}

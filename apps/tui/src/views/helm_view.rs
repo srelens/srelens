@@ -154,22 +154,41 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
     }
 
     if let Some(ref err) = state.error {
-        let message = if state.releases.is_empty() {
-            format!("Failed to load Helm releases: {err}. Press R to retry.")
+        let stale = !state.releases.is_empty();
+        let message = if stale {
+            format!("Refresh failed; rows are stale: {err}")
         } else {
-            format!("Refresh failed; rows are stale: {err}. Press R to retry. Rollback is disabled.")
+            format!("Failed to load Helm releases: {err}")
         };
         let error = Paragraph::new(message)
             .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::red()));
-        if state.releases.is_empty() {
-            f.render_widget(error, inner);
-            return;
-        }
-        let error_height = error.line_count(inner.width).min(inner.height as usize) as u16;
-        let regions = Layout::vertical([Constraint::Length(error_height), Constraint::Min(0)]).split(inner);
+        let recovery = Paragraph::new(if stale {
+            "Press R to retry. Rollback is disabled."
+        } else {
+            "Press R to retry."
+        }).wrap(Wrap { trim: true }).style(Style::default().fg(Theme::red()));
+        let recovery_height = recovery.line_count(inner.width).min(inner.height as usize) as u16;
+        // Keep the table header, its margin and at least one cached release visible.
+        let table_height = if stale { 3.min(inner.height.saturating_sub(recovery_height)) } else { 0 };
+        let available = inner.height.saturating_sub(recovery_height + table_height);
+        let error_lines = error.line_count(inner.width);
+        let error_height = error_lines.min(available as usize) as u16;
+        let truncated = error_lines > error_height as usize && error_height > 0;
+        let marker_height = u16::from(truncated);
+        let regions = Layout::vertical([
+            Constraint::Length(error_height.saturating_sub(marker_height)),
+            Constraint::Length(marker_height),
+            Constraint::Length(recovery_height),
+            Constraint::Min(table_height),
+        ]).split(inner);
         f.render_widget(error, regions[0]);
-        inner = regions[1];
+        if truncated {
+            f.render_widget(Paragraph::new("… error truncated").style(Style::default().fg(Theme::red())), regions[1]);
+        }
+        f.render_widget(recovery, regions[2]);
+        if !stale { return; }
+        inner = regions[3];
     }
 
     if state.releases.is_empty() {
