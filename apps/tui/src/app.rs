@@ -2343,8 +2343,13 @@ impl App {
                         let idx = self.command_suggestion_idx % suggestions.len();
                         self.command_buffer = suggestions[idx].0.name.clone();
                         // Completion changes the query and rebuilds the list.
-                        // Its exact match is first; the old index is no longer valid.
-                        self.command_suggestion_idx = 0;
+                        // Names and aliases can collide, so follow the selected
+                        // target (including its CRD group), not the old index.
+                        let target = &suggestions[idx].0.target;
+                        self.command_suggestion_idx = command_suggestions_with_crds(&self.command_buffer, &self.crds)
+                            .iter()
+                            .position(|(command, _)| &command.target == target)
+                            .unwrap_or(0);
                     }
                 }
                 KeyCode::BackTab => {

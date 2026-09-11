@@ -15,7 +15,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 use srelens_kube::contexts::ContextDto;
 use srelens_tui::app::{ActiveView, App, SuspendAction};
-use srelens_tui::commands::{command_suggestions_with_crds, CrdMeta, PrinterColumn, ResourceKind};
+use srelens_tui::commands::{command_suggestions_with_crds, CommandTarget, CrdMeta, PrinterColumn, ResourceKind};
 use srelens_tui::CommandPopupDensity;
 use srelens_tui::event::AppEvent;
 use srelens_tui::ui::{ContainerAction, InputMode, Modal};
@@ -1302,6 +1302,38 @@ async fn command_tab_then_enter_executes_the_completed_command() {
         press(&mut app, key(KeyCode::Enter)).await;
         assert_eq!(table(&app).kind, ResourceKind::Services);
         assert_eq!(app.input_mode, InputMode::Normal);
+    }
+}
+
+#[tokio::test]
+async fn command_completion_preserves_crd_identity_across_alias_and_group_collisions() {
+    for group in ["management.cattle.io", "example.io"] {
+        let (mut app, _rx) = common::app().await;
+        app.crds = ["management.cattle.io", "example.io"].into_iter().map(|group| CrdMeta {
+            crd_name: format!("settings.{group}"),
+            group: group.into(), version: "v1".into(), kind: "Setting".into(),
+            plural: "settings".into(), singular: "setting".into(), namespaced: false,
+            short_names: vec![], printer_columns: vec![],
+        }).collect();
+        let expected = CommandTarget::CustomResource(app.crds.iter().find(|crd| crd.group == group).unwrap().clone());
+        press(&mut app, ch(':')).await;
+        type_str(&mut app, "sett").await;
+        let selected = command_suggestions_with_crds("sett", &app.crds).iter()
+            .position(|(cmd, _)| cmd.target == expected).unwrap();
+        for _ in 0..selected {
+            press(&mut app, key(KeyCode::Down)).await;
+        }
+        for _ in 0..2 {
+            press(&mut app, key(KeyCode::Tab)).await;
+            assert_eq!(app.command_buffer, "settings");
+            let suggestions = command_suggestions_with_crds(&app.command_buffer, &app.crds);
+            assert_eq!(suggestions[app.command_suggestion_idx].0.target, expected);
+        }
+        press(&mut app, key(KeyCode::Enter)).await;
+        assert_eq!(table(&app).kind, ResourceKind::CustomResource(match expected {
+            CommandTarget::CustomResource(crd) => crd,
+            _ => unreachable!(),
+        }));
     }
 }
 
