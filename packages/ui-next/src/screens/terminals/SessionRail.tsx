@@ -148,6 +148,8 @@ export interface SessionRailProps {
   onSelect: (id: number) => void;
   /** "New session" was picked, from the empty state. */
   onNewSession: () => void;
+  /** The screen is still usable, but the active cluster cannot start a shell. */
+  newSessionDisabled?: boolean;
 }
 
 /**
@@ -171,7 +173,7 @@ export interface SessionRailProps {
  * store precisely so a ticking display here does not churn its snapshot —
  * this component owns the clock the store deliberately does not.
  */
-export function SessionRail({ sessions, activeId, onSelect, onNewSession }: SessionRailProps) {
+export function SessionRail({ sessions, activeId, onSelect, onNewSession, newSessionDisabled = false }: SessionRailProps) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const tick = setInterval(() => setNow(Date.now()), IDLE_TICK_MS);
@@ -185,7 +187,7 @@ export function SessionRail({ sessions, activeId, onSelect, onNewSession }: Sess
         title="No sessions"
         hint="Open a shell into a pod, a node, or this machine."
         action={
-          <Button size="xs" onClick={onNewSession}>
+          <Button size="xs" onClick={onNewSession} disabled={newSessionDisabled}>
             New session
           </Button>
         }

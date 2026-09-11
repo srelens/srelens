@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { auditTail, describeError, type AuditEntry } from "@srelens/core";
+import { auditTail, describeError, readPromptIssues, type PromptIssue, type AuditEntry } from "@srelens/core";
 import { Button, LoadingState, Panel, Section, Table, toneColor, type Column, type Tone } from "@srelens/ui-kit";
-import { FailureState } from "../../lib/errorCopy";
+import { FailureAlert, FailureState } from "../../lib/errorCopy";
 
 /**
  * §23's `Audit` pane: every capability call an MCP-connected agent has made,
@@ -196,6 +196,19 @@ export function AuditPane() {
    * supersedes it instead of racing it.
    */
   const [nonce, setNonce] = useState(0);
+  const [issues, setIssues] = useState<PromptIssue[]>([]);
+  const [issuesError, setIssuesError] = useState<unknown>(null);
+  const [issuesLoading, setIssuesLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    setIssuesLoading(true);
+    readPromptIssues().then(rows => {
+      if (!cancelled) { setIssues(rows); setIssuesError(null); }
+    }).catch(error => {
+      if (!cancelled) { setIssues([]); setIssuesError(error); }
+    }).finally(() => { if (!cancelled) setIssuesLoading(false); });
+    return () => { cancelled = true; };
+  }, [nonce]);
 
   useEffect(() => {
     let cancelled = false;
@@ -238,12 +251,19 @@ export function AuditPane() {
         <Button
           variant="secondary"
           size="sm"
-          disabled={loading}
+          disabled={(loading || issuesLoading) && error === null && issuesError === null}
           onClick={() => setNonce((n) => n + 1)}
         >
-          {loading ? "Reading…" : "Refresh"}
+          {(loading || issuesLoading) && error === null && issuesError === null ? "Reading…" : "Refresh"}
         </Button>
       </div>
+      {issuesError !== null && <FailureAlert tone="sev" title="Prompt file diagnostics could not be read" error={issuesError} />}
+      {!issuesLoading && issues.length > 0 && <div className="mt-3 border-y border-rule py-2 text-[0.75rem]">
+        <p className="font-medium">{issues.length} prompt {issues.length === 1 ? "file" : "files"} could not be loaded</p>
+        <ul className="mt-1 space-y-1">{issues.map(issue => <li key={`${issue.file}:${issue.problem}`}>
+          <code className="block overflow-x-auto whitespace-nowrap">{issue.file}</code><span className="text-muted">{issue.problem}</span>
+        </li>)}</ul>
+      </div>}
       {loading ? (
         <LoadingState label="Reading the audit trail" />
       ) : error !== null ? (

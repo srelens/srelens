@@ -345,7 +345,7 @@ export function AgentPane() {
   const keyed = keyStatusRead.kind === "ready" ? keyStatusRead.value : null;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="settings-agent-groups flex flex-col">
       <Panel
         title="Providers"
         description="srelens's own agent talks directly to a provider with your API key. The key is written to the OS keychain and never read back — only whether one is set is shown here."

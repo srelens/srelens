@@ -667,6 +667,7 @@ describe("PodDetailsBody", () => {
       );
       render(<PodDetailsBody object={withVolumes} />);
       expect(screen.getByRole("heading", { name: "Pod Volumes" })).toBeDefined();
+      expect(document.querySelector('section[data-padded="false"]')).toBeDefined();
       expect(screen.getByText("data")).toBeDefined();
       expect(screen.getByText("Persistent Volume Claim")).toBeDefined();
       expect(screen.getByText("PersistentVolumeClaim/data-pvc")).toBeDefined();

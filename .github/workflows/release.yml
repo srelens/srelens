@@ -57,7 +57,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
       - name: Compute + commit next version
         id: compute
         shell: bash
@@ -205,6 +205,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Linux dependencies
         run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in ci.yml's backend job: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -224,7 +229,7 @@ jobs:
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
@@ -241,7 +246,7 @@ jobs:
       - name: Build the app binary
         run: cargo build -p srelens-desktop --features custom-protocol --profile ci-smoke
       - name: Create kind cluster
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           cluster_name: srelens-e2e
       - name: Full smoke suite through the real app
@@ -439,6 +444,11 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in ci.yml's backend job: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -490,7 +500,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
@@ -608,6 +618,334 @@ jobs:
           fi
           echo "OK: no $APPIMAGE_EXCLUDED_LIBS in the AppImage"
 
+  # The terminal UI (#443). `apps/tui` shipped in #433 but nothing released it:
+  # wanting the TUI meant cloning the repo and building it. It rides the SAME
+  # release tag as the desktop installers, so there is one Releases page rather
+  # than two, and so sign-artifacts — which signs every asset on the tag —
+  # covers these archives without knowing they exist.
+  #
+  # Split in two on purpose. This job only BUILDS, in parallel with the desktop
+  # matrix rather than behind it, and hands each archive on as a workflow
+  # artifact. tui-publish then attaches them in one go, which is also the only
+  # way to get a single SHA256SUMS spanning every target: six jobs appending to
+  # one asset would race and the file would list whichever legs won.
+  tui:
+    name: tui (${{ matrix.target }})
+    needs: version
+    if: ${{ always() && needs.version.result == 'success' && needs.version.outputs.release == 'true' }}
+    permissions:
+      contents: read
+    env:
+      # Same switch, same secrets, same fail-open rule as the desktop build:
+      # with anything less than the full set the macOS binaries ship unsigned
+      # rather than failing the release on a half-configured signing setup.
+      ENABLE_MAC_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `smoke` marks the legs whose binary this runner can actually
+          # execute. macOS runners are Apple Silicon, so the Intel build is
+          # cross-compiled and only Rosetta could run it — not something a
+          # release should depend on being installed.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            smoke: true
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+            smoke: true
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            smoke: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            smoke: true
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            smoke: true
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            smoke: false
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            smoke: true
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Same rule as the desktop build: on main the version job has already
+          # pushed the bump commit, so build that rather than the pre-bump sha.
+          ref: ${{ github.ref_name == 'main' && 'main' || github.sha }}
+
+      # musl is what makes this binary work on Alpine, on distroless images and
+      # on any host whose glibc is older than the runner's. Nothing under
+      # apps/tui links OpenSSL — the whole graph is rustls — so the static link
+      # needs no vendored C library. musl-gcc has to be named explicitly:
+      # without CC_<target> the `cc` crate builds ring's C against the host
+      # glibc toolchain and the link fails at the last step.
+      - name: Install musl tooling
+        if: ${{ endsWith(matrix.target, '-musl') }}
+        run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in ci.yml's backend job: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: tui-${{ matrix.target }}
+
+      # Every crate inherits [workspace.package].version, so without this the
+      # binary reports the committed placeholder: on dev the pre-release
+      # version is never committed at all, and `srelens-tui --version` would
+      # disagree with the release it was downloaded from. The smoke step below
+      # asserts they match, so a drift here fails the leg rather than shipping.
+      - name: Set build version
+        shell: bash
+        run: |
+          V="${{ needs.version.outputs.version }}"
+          node -e '
+            const fs=require("fs");const v=process.argv[1];
+            const sub=(p,re,to)=>{const s=fs.readFileSync(p,"utf8");if(!re.test(s))throw new Error("no version field in "+p);fs.writeFileSync(p,s.replace(re,to))};
+            sub("Cargo.toml",/^version = "[^"]+"/m,`version = "${v}"`);
+            sub("Cargo.lock",/(name = "srelens-[a-z-]+"\r?\nversion = ")[^"]+(")/g,`$1${v}$2`);
+          ' "$V"
+          echo "TUI build version: $V"
+
+      - name: Build
+        shell: bash
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          # Debug symbols are most of an unstripped Linux/macOS binary and
+          # nothing here symbolicates a user crash dump, so they are pure
+          # download weight. No-op on Windows, where MSVC keeps debug info in a
+          # separate .pdb that is never packaged.
+          RUSTFLAGS: "-C strip=symbols"
+        # --locked because the version stamp above rewrites Cargo.toml AND the
+        # matching Cargo.lock entries together; if it ever stops doing that,
+        # failing here is better than resolving a different dependency set into
+        # a release binary.
+        run: cargo build --release --locked -p srelens-tui --target ${{ matrix.target }}
+
+      # A stable release REQUIRES signing; only dev may fall open. This
+      # mirrors sign-artifacts, which refuses to cut a stable release without a
+      # GPG key, and for the same reason: fail-open is the right default for a
+      # daily pre-release and the wrong one for the artifact the install docs
+      # make a promise about. A deleted or expired secret would otherwise
+      # publish an unsigned binary under documentation saying it is signed, and
+      # the first person to find out would be a user hitting Gatekeeper.
+      - name: Require Apple signing for stable releases
+        if: runner.os == 'macOS' && github.ref_name == 'main' && env.ENABLE_MAC_SIGNING != 'true'
+        run: |
+          echo "::error::Apple signing secrets are not configured, so this stable release cannot be signed."
+          echo "Set APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD and APPLE_SIGNING_IDENTITY, then re-run." >&2
+          exit 1
+
+      # Sign and notarize with the same Developer ID certificate and the same
+      # App Store Connect key the desktop app uses. tauri-action does this for
+      # the .app; a bare binary has to be driven by hand.
+      #
+      # Both flags matter and neither is optional: notarization REJECTS a
+      # binary without the hardened runtime (--options runtime), and without a
+      # secure timestamp the signature stops validating when the certificate
+      # eventually expires.
+      #
+      # The ticket cannot be stapled. `stapler` attaches to .app, .dmg and
+      # .pkg only, and this ships as a tarball — so Gatekeeper resolves the
+      # notarization ONLINE on first run. That still matters: a quarantined
+      # binary that is merely signed is refused outright, while a notarized one
+      # is admitted. Nothing is stapled, so nothing here pretends otherwise.
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS' && env.ENABLE_MAC_SIGNING == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/srelens-tui"
+
+          # A dedicated keychain, deleted at the end of the step: importing into
+          # the login keychain would leave the certificate on a runner image
+          # that is reused within the job.
+          KEYCHAIN="$RUNNER_TEMP/tui-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # Without this, codesign blocks on an interactive "allow access?"
+          # prompt that no one is there to answer, and the job hangs until it
+          # times out rather than failing.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          # `list-keychains`, plural: the singular spelling is widely copied around
+          # but is not a subcommand security(1) defines.
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+
+          codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" "$BIN"
+          # --strict so a malformed signature fails here rather than on a user's
+          # Mac; the notarization submission below would reject it anyway, but
+          # this says so in one line instead of after a round trip to Apple.
+          codesign --verify --strict --verbose=2 "$BIN"
+
+          # notarytool takes an archive, never a loose executable. This zip is
+          # a submission vehicle only — the release still ships the tarball
+          # built below, whose binary is this same signed file.
+          ditto -c -k --keepParent "$BIN" "$RUNNER_TEMP/notarize.zip"
+          printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/api.p8"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/api.p8" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait --timeout 30m
+          rm -f "$RUNNER_TEMP/api.p8" "$RUNNER_TEMP/notarize.zip"
+          security delete-keychain "$KEYCHAIN"
+          echo "Signed and notarized $BIN"
+
+      # Say plainly when a macOS build is going out unsigned, so an expired or
+      # removed secret shows up in the log instead of being discovered by a
+      # user hitting a Gatekeeper wall.
+      # Only reachable on dev now that stable hard-fails above.
+      - name: Note unsigned macOS build
+        if: runner.os == 'macOS' && env.ENABLE_MAC_SIGNING != 'true'
+        run: echo "::warning::Apple signing secrets are not configured — this macOS pre-release binary ships unsigned and unnotarized."
+
+      # A binary that cannot start is worse than no binary, and a
+      # cross-compiled leg can produce one that links but does not run. Assert
+      # it executes AND that it agrees with the version being released.
+      - name: Smoke test the binary
+        if: matrix.smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/srelens-tui"
+          [ "${{ runner.os }}" = "Windows" ] && BIN="$BIN.exe"
+          OUT="$("$BIN" --version)"
+          echo "$OUT"
+          case "$OUT" in
+            *"${{ needs.version.outputs.version }}"*) ;;
+            *) echo "::error::--version says '$OUT', expected ${{ needs.version.outputs.version }}" >&2; exit 1 ;;
+          esac
+          "$BIN" --help > /dev/null
+          # On macOS the binary has just been signed; check the signature is
+          # intact on the very file about to be archived. `codesign --verify`
+          # on an unsigned binary fails, so this only runs when signing was on.
+          if [ "${{ runner.os }}" = "macOS" ] && [ "$ENABLE_MAC_SIGNING" = "true" ]; then
+            codesign --verify --strict "$BIN"
+            echo "signature verified on the packaged binary"
+          fi
+
+      # A statically linked binary is the whole point of the musl leg, so prove
+      # it rather than assuming: a dynamic one would fail on the Alpine hosts
+      # this target exists for.
+      - name: Assert the musl build is static
+        if: ${{ endsWith(matrix.target, '-musl') }}
+        run: |
+          BIN="target/${{ matrix.target }}/release/srelens-tui"
+          if file "$BIN" | grep -q "dynamically linked"; then
+            echo "::error::the musl build is dynamically linked, which defeats the target"
+            file "$BIN"
+            exit 1
+          fi
+          file "$BIN"
+
+      # Files sit at the archive root, so `tar xzf` drops `srelens-tui` straight
+      # into the working directory and the user can move it onto PATH without
+      # navigating a wrapper folder.
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="srelens-tui-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          mkdir -p "dist/$NAME"
+          cp "target/${{ matrix.target }}/release/srelens-tui" "dist/$NAME/"
+          cp LICENSE "dist/$NAME/"
+          tar -czf "dist/$NAME.tar.gz" -C "dist/$NAME" .
+          rm -rf "dist/$NAME"
+          ls -l dist
+
+      # Windows ships a .zip, never a bare .exe: scripts/perf/size-baseline.mjs
+      # classifies any .exe as a desktop installer, so a loose binary would be
+      # folded into the installer size-regression budget and compared against
+      # the Tauri setup executable.
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "srelens-tui-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/srelens-tui.exe" "dist/$name/"
+          Copy-Item LICENSE "dist/$name/"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
+          Remove-Item -Recurse -Force "dist/$name"
+          Get-ChildItem dist
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tui-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Attach every TUI archive to the release at once, with one checksum file
+  # covering all of them. Needs `build` because that job is what CREATES the
+  # release (tauri-action) — uploading to a tag that does not exist yet fails,
+  # and on main the release is still a draft here, which `gh release upload`
+  # handles.
+  tui-publish:
+    needs: [version, build, tui]
+    if: ${{ always() && needs.build.result == 'success' && needs.tui.result == 'success' && needs.version.outputs.release == 'true' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: tui-*
+          merge-multiple: true
+          path: dist
+      - name: Checksum and upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="srelens-v${{ needs.version.outputs.version }}"
+          SUMS="srelens-tui-${{ needs.version.outputs.version }}-SHA256SUMS.txt"
+          cd dist
+          # Every leg is required, so count the archives rather than trusting
+          # that six jobs each uploaded one: a silently missing target is the
+          # failure this is here to catch.
+          count=$(ls -1 srelens-tui-*.tar.gz srelens-tui-*.zip 2>/dev/null | wc -l)
+          if [ "$count" -ne 7 ]; then
+            echo "::error::expected 7 TUI archives, found $count"
+            ls -l
+            exit 1
+          fi
+          # Named for the release so it cannot collide with a checksum file for
+          # the desktop installers if one is ever added to the same tag.
+          sha256sum srelens-tui-*.tar.gz srelens-tui-*.zip > "$SUMS"
+          cat "$SUMS"
+          gh release upload "$TAG" --repo "${{ github.repository }}" \
+            srelens-tui-*.tar.gz srelens-tui-*.zip "$SUMS" --clobber
+
   # Dev only: fill the pre-release body with a recent-commit list and keep the
   # Releases page tidy. Stable (main) notes come from the version job.
   release-notes:
@@ -657,8 +995,8 @@ jobs:
   #   dev           -> the permanent `dev-channel` pre-release, giving dev builds
   #                    a stable manifest URL for this build's assets.
   updater-manifest:
-    needs: [version, build]
-    if: ${{ always() && needs.build.result == 'success' && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
+    needs: [version, build, release-notes]
+    if: ${{ always() && needs.build.result == 'success' && (github.ref_name == 'main' || needs.release-notes.result == 'success') && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -681,6 +1019,12 @@ jobs:
           if ! ls sigs/*.sig >/dev/null 2>&1; then
             echo "No .sig files on $REL_TAG — updater signing key not configured yet; skipping manifest."
             exit 0
+          fi
+          # Dev notes are published by release-notes, not the version job.
+          # Read them only after that job completes so the manifest cannot race it.
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            NOTES="$(gh release view "$REL_TAG" --repo "$REPO" --json body --jq '.body')"
+            export NOTES
           fi
           node .github/scripts/compose-latest.cjs
           if [ "${{ github.ref_name }}" = "main" ]; then
@@ -713,7 +1057,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
       - name: Compare installer sizes against the previous release
         env:
           # Authenticates the Releases API reads (the anonymous rate limit is
@@ -771,8 +1115,11 @@ jobs:
   # trades availability for a guarantee dev users have not asked for. The docs
   # scope the promise to stable accordingly.
   sign-artifacts:
-    needs: [version, build, updater-manifest]
-    if: ${{ always() && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
+    # tui-publish included so the TUI archives are already attached to the tag
+    # when this runs. Without it the two race, and whether the TUI downloads
+    # carry a .asc comes down to which job finished first.
+    needs: [version, build, updater-manifest, tui-publish]
+    if: ${{ always() && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && needs.tui-publish.result == 'success' && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -918,9 +1265,11 @@ jobs:
   publish-release:
     # size-baseline included so an over-budget installer never goes public: a
     # failed check leaves the release as an invisible draft to inspect, exactly
-    # like a failed build or a missing updater manifest.
-    needs: [version, build, updater-manifest, sign-artifacts, size-baseline]
-    if: ${{ always() && github.ref_name == 'main' && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && needs.sign-artifacts.result == 'success' && needs.size-baseline.result == 'success' && needs.version.outputs.release == 'true' }}
+    # like a failed build or a missing updater manifest. tui-publish likewise:
+    # a stable release missing a platform's TUI archive, or whose checksum
+    # file does not cover all six, stays a draft.
+    needs: [version, build, updater-manifest, sign-artifacts, size-baseline, tui-publish]
+    if: ${{ always() && github.ref_name == 'main' && needs.build.result == 'success' && needs.updater-manifest.result == 'success' && needs.sign-artifacts.result == 'success' && needs.size-baseline.result == 'success' && needs.tui-publish.result == 'success' && needs.version.outputs.release == 'true' }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -947,11 +1296,40 @@ jobs:
   # BY HAND for an already-released version. Welded to this pipeline, a failed
   # AUR push could only be retried by cutting another release — which is how AUR
   # sat at 0.2.0 while four stable releases came and went.
+  # Homebrew formula for the TUI (#451). Stable only, for the same reason AUR
+  # is: a tap carries one version per formula, and a dev pre-release version
+  # is not what someone typing `brew install` is asking for.
+  #
+  # Needs tui-publish as well as publish-release — the formula is rendered
+  # from the release's own SHA256SUMS, so it cannot be built before the
+  # archives are attached.
+  homebrew:
+    needs: [version, tui-publish, publish-release]
+    # `!cancelled()` first, and it is load-bearing. Without a status function
+    # GitHub applies an implicit `success()`, which is false whenever ANY job in
+    # the transitive `needs` chain was skipped -- and release-notes, upstream of
+    # updater-manifest and publish-release, is skipped on main by design. v0.11.0
+    # published and neither the tap nor AUR heard about it. The conditions that
+    # follow are the ones that actually decide.
+    if: ${{ !cancelled() && github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/homebrew-publish.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
+
   aur:
     # Also needs publish-release: updpkgsums fetches the release assets over
     # plain HTTPS, which only works once the release is out of draft.
     needs: [version, build, publish-release]
-    if: ${{ github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
+    # `!cancelled()` first, and it is load-bearing. Without a status function
+    # GitHub applies an implicit `success()`, which is false whenever ANY job in
+    # the transitive `needs` chain was skipped -- and release-notes, upstream of
+    # updater-manifest and publish-release, is skipped on main by design. v0.11.0
+    # published and neither the tap nor AUR heard about it. The conditions that
+    # follow are the ones that actually decide.
+    if: ${{ !cancelled() && github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
     # The called workflow declares `contents: read` for itself; the AUR push
     # authenticates with its own SSH deploy key, not GITHUB_TOKEN. Repeated
     # here because a reusable workflow cannot be granted more than its caller

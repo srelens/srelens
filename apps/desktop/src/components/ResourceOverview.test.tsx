@@ -158,6 +158,34 @@ describe("ObjectDetail (Pod)", () => {
     expect(screen.getByText("beta.kubernetes.io/arch")).toBeDefined();
   });
 
+  describe("a Node's capacity", () => {
+    it("formats Ki memory values as Gi", () => {
+      const node: K8sObject = {
+        metadata: { name: "worker-1", creationTimestamp: "2026-01-01T00:00:00Z" },
+        spec: {},
+        status: {
+          capacity: { cpu: "40", memory: "32345036Ki", pods: "110" },
+          allocatable: { cpu: "40", memory: "32242636Ki", pods: "110" },
+        },
+      };
+      render(<ObjectDetail kind="Node" obj={node} now={NOW} />);
+      expect(screen.getByText("30.7Gi / 30.8Gi")).toBeDefined();
+    });
+
+    it("shows Gi values unchanged", () => {
+      const node: K8sObject = {
+        metadata: { name: "worker-1", creationTimestamp: "2026-01-01T00:00:00Z" },
+        spec: {},
+        status: {
+          capacity: { cpu: "8", memory: "32Gi", pods: "110" },
+          allocatable: { cpu: "7800m", memory: "30Gi", pods: "110" },
+        },
+      };
+      render(<ObjectDetail kind="Node" obj={node} now={NOW} />);
+      expect(screen.getByText("30Gi / 32Gi")).toBeDefined();
+    });
+  });
+
   /**
    * #426 — the classic half of the Node detail page's Taints section. The
    * ui-next half is `screens/detail/NodeBody.test.tsx`; both read the same

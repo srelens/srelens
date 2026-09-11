@@ -10,7 +10,13 @@ export { Breadcrumb, type BreadcrumbProps } from "./Breadcrumb";
 export { Button, type ButtonProps, type ButtonSize, type ButtonVariant } from "./Button";
 export { Checkbox, type CheckboxProps } from "./Checkbox";
 export { ClusterRail, type ClusterRailItem, type ClusterRailMarker, type ClusterRailProps } from "./ClusterRail";
-export { CodeEditor, documentDiagnostics, yamlDiagnostics, type CodeEditorProps } from "./CodeEditor";
+export {
+  CodeEditor,
+  documentDiagnostics,
+  yamlDiagnostics,
+  type CodeEditorProps,
+  type EditorDiagnostic,
+} from "./CodeEditor";
 export { ColumnPicker, type ColumnOption, type ColumnPickerProps } from "./ColumnPicker";
 export { Combobox, type ComboboxOption, type ComboboxProps } from "./Combobox";
 export { ConfirmDialog, type ConfirmDialogProps } from "./ConfirmDialog";
@@ -77,7 +83,7 @@ export { StatusRow, type StatusRowProps } from "./StatusRow";
 export { SubHead, type SubHeadProps, type SubHeadVariant } from "./SubHead";
 export { SurfaceToast, type SurfaceToastProps } from "./SurfaceToast";
 export { Switch, type SwitchProps } from "./Switch";
-export { Table, computeVisibleRange, filterTableData, nextSort, type Column, type TableProps, type TableSelection, type TableSort } from "./Table";
+export { Table, computeVisibleRange, filterTableData, tableFilterError, nextSort, type Column, type TableProps, type TableSelection, type TableSort } from "./Table";
 export { Tabs, type TabItem, type TabsProps, type TabsVariant } from "./Tabs";
 export { TabStrip, type StripTab, type TabStripProps } from "./TabStrip";
 export { TextInput, type TextInputProps } from "./TextInput";

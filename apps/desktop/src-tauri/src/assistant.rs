@@ -351,6 +351,9 @@ impl Drop for TempDir {
 fn create_private_dir(base: &std::path::Path, prefix: &str) -> Result<std::path::PathBuf, String> {
     for _ in 0..8 {
         let path = base.join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        // Only the Unix branch below mutates it; on Windows the `mut` is
+        // unused and rustc says so on every build.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {

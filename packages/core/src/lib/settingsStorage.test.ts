@@ -21,6 +21,7 @@ describe("desktop settings storage", () => {
 
   afterEach(() => {
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
+    vi.unstubAllGlobals();
   });
 
   it("imports known localStorage values once and clears them after the file write", async () => {
@@ -54,6 +55,49 @@ describe("desktop settings storage", () => {
     expect(localStorage.getItem("freelens.contextOrder")).toBeNull();
     expect(localStorage.getItem("fl-theme")).toBeNull();
     expect(localStorage.getItem("unrelated")).toBe("keep me");
+  });
+
+  it("migrates new-design context marks before switching to the file store", async () => {
+    const marks = { prod: { color: "var(--mark-teal)", icon: "server" } };
+    localStorage.setItem("srelens.next.marks", JSON.stringify(marks));
+    invokeCapability
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        localStorageMigrated: false,
+        values: {},
+      })
+      .mockResolvedValueOnce({ saved: true });
+
+    const { initializeSettingsStorage, settingsStorage } = await import("./settingsStorage");
+    await initializeSettingsStorage();
+
+    expect(invokeCapability).toHaveBeenNthCalledWith(2, "settings.set", {
+      values: { "srelens.next.marks": marks },
+      localStorageMigrated: true,
+    });
+    expect(settingsStorage.getItem("srelens.next.marks")).toBe(JSON.stringify(marks));
+    expect(localStorage.getItem("srelens.next.marks")).toBeNull();
+  });
+
+  it("runs the saved-marks follow-up after the original migration already completed", async () => {
+    const marks = { prod: { color: "var(--mark-teal)", icon: "server" } };
+    localStorage.setItem("srelens.next.marks", JSON.stringify(marks));
+    invokeCapability
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        localStorageMigrated: true,
+        values: { "srelens.uiScale": 130 },
+      })
+      .mockResolvedValueOnce({ saved: true });
+
+    const { initializeSettingsStorage, settingsStorage } = await import("./settingsStorage");
+    await initializeSettingsStorage();
+
+    expect(invokeCapability).toHaveBeenNthCalledWith(2, "settings.set", {
+      values: { "srelens.next.marks": marks },
+    });
+    expect(settingsStorage.getItem("srelens.next.marks")).toBe(JSON.stringify(marks));
+    expect(localStorage.getItem("srelens.next.marks")).toBeNull();
   });
 
   it("uses the file as source of truth after migration", async () => {
@@ -111,7 +155,7 @@ describe("desktop settings storage", () => {
     await initializeSettingsStorage();
 
     expect(localStorage.getItem("srelens.uiScale")).toBe("125");
-    expect(settingsStorage.getItem("srelens.uiScale")).toBe("125");
+    expect(settingsStorage.getItem("srelens.uiScale")).toBeNull();
     expect(error).toHaveBeenCalled();
     error.mockRestore();
   });
@@ -194,16 +238,51 @@ describe("desktop settings storage", () => {
     warn.mockRestore();
   });
 
-  it("keeps the storage-shaped localStorage fallback in web mode", async () => {
+  it("loads web settings from the account backend and writes through without local copies", async () => {
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
-    vi.resetModules();
-    const { initializeSettingsStorage, settingsStorage } = await import("./settingsStorage");
-
+    const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ values: { "srelens.uiScale": 125, "srelens.settingsMigrated": true } }) });
+    vi.stubGlobal("fetch", fetch);
+    const { initializeSettingsStorage, settingsStorage, flushSettingsWrites } = await import("./settingsStorage");
     await initializeSettingsStorage();
-    settingsStorage.setItem("theme", "dark");
-    expect(settingsStorage.getItem("theme")).toBe("dark");
-    settingsStorage.removeItem("theme");
-    expect(settingsStorage.getItem("theme")).toBeNull();
+    expect(settingsStorage.getItem("srelens.uiScale")).toBe("125");
+    settingsStorage.setItem("srelens.uiScale", "140");
+    settingsStorage.removeItem("srelens.uiScale");
+    await flushSettingsWrites();
+    expect(fetch).toHaveBeenCalledWith("/api/settings", expect.objectContaining({ credentials: "same-origin" }));
+    expect(fetch).toHaveBeenCalledWith("/api/settings/srelens.uiScale", expect.objectContaining({ method: "PUT", body: "140" }));
+    expect(fetch).toHaveBeenCalledWith("/api/settings/srelens.uiScale", expect.objectContaining({ method: "DELETE" }));
+    expect(localStorage.getItem("srelens.uiScale")).toBeNull();
     expect(invokeCapability).not.toHaveBeenCalled();
   });
+  it("imports newly covered settings even after the original migration completed", async () => {
+    localStorage.setItem("srelens.design", "next");
+    localStorage.setItem("srelens.next.appearance", '{"theme":"paper"}');
+    invokeCapability.mockResolvedValueOnce({schemaVersion: 1, localStorageMigrated: true, values: {}}).mockResolvedValue({saved:true});
+    const { initializeSettingsStorage, settingsStorage } = await import("./settingsStorage");
+    await initializeSettingsStorage();
+    expect(invokeCapability).toHaveBeenCalledWith("settings.set", { values: { "srelens.design": "next", "srelens.next.appearance": {theme:"paper"} } });
+    expect(settingsStorage.getItem("srelens.design")).toBe("next");
+    expect(localStorage.getItem("srelens.design")).toBeNull();
+  });
+  it("does not create local preferences when backend initialization fails", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    invokeCapability.mockRejectedValue(new Error("backend unavailable"));
+    const { initializeSettingsStorage, settingsStorage } = await import("./settingsStorage");
+    await initializeSettingsStorage();
+    expect(() => settingsStorage.setItem("srelens.uiScale", "140")).toThrow(/backend/i);
+    expect(localStorage.getItem("srelens.uiScale")).toBeNull();
+    error.mockRestore();
+  });
+});
+
+it("reports a rejected backend save to callers that must wait before reloading", async () => {
+  vi.resetModules(); localStorage.clear(); tauriWindow();
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  invokeCapability.mockReset().mockResolvedValueOnce({schemaVersion:1, localStorageMigrated:true, values:{}}).mockRejectedValue(new Error("disk full"));
+  const { initializeSettingsStorage, settingsStorage, flushSettingsWrites } = await import("./settingsStorage");
+  await initializeSettingsStorage();
+  settingsStorage.setItem("srelens.design", "next");
+  await expect(flushSettingsWrites({throwOnError:true})).rejects.toThrow("disk full");
+  expect(localStorage.getItem("srelens.design")).toBeNull();
+  error.mockRestore(); Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 });

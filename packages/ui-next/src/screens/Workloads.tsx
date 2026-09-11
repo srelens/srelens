@@ -1,3 +1,4 @@
+import { ContextLabel } from "../lib/contextLabel";
 import { useEffect, useMemo, useState } from "react";
 import {
   ageSortValue,
@@ -13,6 +14,7 @@ import {
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
 import {
+  Button,
   ColumnPicker,
   FilterBar,
   LiveSignal,
@@ -22,6 +24,7 @@ import {
   Table,
   Tabs,
   filterTableData,
+  tableFilterError,
   type Column,
   type ContextMenuItem,
   type StatusKind,
@@ -30,7 +33,7 @@ import {
 import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
-import { detailRoute } from "../lib/detailRoute";
+import { detailRoute, newRoute } from "../lib/detailRoute";
 import { FailureAlert } from "../lib/errorCopy";
 import {
   cronJobVerdict,
@@ -46,13 +49,14 @@ import { withRowAffordances } from "../lib/kinds/rowAffordances";
 import type { ListRow } from "../lib/kinds/types";
 import { useResourceList, type ResourceList } from "../lib/resourceList";
 import { describe } from "../lib/routes";
-import { openTab } from "../lib/tabsStore";
+import { openTab, useTabs } from "../lib/tabsStore";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { useRowMenu } from "./ResourceMenu";
 import {
   NamespaceErrorAlert,
   NamespacePicker,
   NoClusterScreen,
+  PausedClusterScreen,
   StaleSelectionAlert,
   columnOptionsFor,
   emptyTableCopy,
@@ -244,10 +248,14 @@ const UNION_COLUMNS: Column<WorkloadRow>[] = [
  */
 export function Workloads({ route }: { route: string }) {
   const context = useActiveContext();
+  const { workspace } = useTabs();
   const title = describe(route, context?.name).title;
 
   if (!context) {
     return <NoClusterScreen title={title} noun="workloads" />;
+  }
+  if (workspace.pausedClusters?.includes(context.stableId)) {
+    return <PausedClusterScreen title={title} noun="workloads" context={context} />;
   }
 
   return <WorkloadList route={route} title={title} context={context} />;
@@ -400,12 +408,23 @@ function WorkloadList({
     [columns, ask],
   );
 
-  const { tabId, sort, filter, filterKey, setFilter, setSort, setFilterKey } = useResourceTabView(route, columns);
+  const {
+    tabId,
+    sort,
+    filter,
+    filterKey,
+    regex,
+    setFilter,
+    setSort,
+    setFilterKey,
+    setRegex,
+  } = useResourceTabView(route, columns);
 
   const filtered = useMemo(
-    () => filterTableData(segmented, columns, filter, filterKey),
-    [segmented, columns, filter, filterKey],
+    () => filterTableData(segmented, columns, filter, filterKey, regex),
+    [segmented, columns, filter, filterKey, regex],
   );
+  const invalidFilter = tableFilterError(filter, regex) !== null;
 
   function onToggleColumn(key: string) {
     toggleColumnVisibility({ key, storageKey: "workloads", hidden, filterKey, tabId });
@@ -427,7 +446,7 @@ function WorkloadList({
   return (
     <Screen
       title={title}
-      eyebrow={name}
+      eyebrow={<ContextLabel context={context} />}
       fill
       actions={
         <>
@@ -441,12 +460,22 @@ function WorkloadList({
             onToggle={onToggleColumn}
             pinnedKey={NAME_KEY}
           />
+          <Button
+            variant="secondary"
+            title={`Create a resource on ${name} from a template`}
+            onClick={() => openTab(newRoute(name), { clusterName: name })}
+          >
+            New
+          </Button>
         </>
       }
     >
       <FilterBar
         value={filter}
         onValueChange={setFilter}
+        regex={regex}
+        onRegexChange={setRegex}
+        invalid={invalidFilter}
         label={`Filter ${lower}`}
         placeholder={`Filter ${lower}…`}
       >

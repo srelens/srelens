@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/agent", "crates/capability", "crates/mcp", "crates/kube", "crates/streams", "crates/server", "crates/registry", "crates/llm", "apps/desktop/src-tauri"]
+members = ["crates/agent", "crates/capability", "crates/mcp", "crates/kube", "crates/streams", "crates/server", "crates/registry", "crates/llm", "apps/desktop/src-tauri", "apps/tui"]
 
 [workspace.package]
 edition = "2021"
-version = "0.8.0"
+version = "0.12.0"
 license = "MIT"
 
 # Fast-feedback profile for the CI WebDriver smoke job (issue #30): dev

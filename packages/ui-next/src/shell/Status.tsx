@@ -1,3 +1,4 @@
+import { useMark } from "../lib/marks";
 import { useSyncExternalStore } from "react";
 import {
   getForwards,
@@ -11,7 +12,7 @@ import { useConsole } from "../console";
 import { getHelmOps, subscribeHelmOps } from "../lib/helmOps";
 import { useInfo } from "../lib/probe";
 import { getSessions, subscribeSessions } from "../lib/sessions";
-import { openTab, useActiveCluster } from "../lib/tabsStore";
+import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { useWorkspaceSealed } from "./LockGate";
 // The words and their tones live beside `LinkState` rather than here: the
 // overview rail reads the same link and must say the same thing about it.
@@ -82,6 +83,7 @@ import { LINK_TONE, LINK_WORD, useWorkspaceView } from "../lib/workspace";
  */
 export function Status({ contexts }: { contexts: ClusterContext[] }) {
   const activeId = useActiveCluster();
+  const { workspace } = useTabs();
   const sealed = useWorkspaceSealed();
   const info = useInfo(activeId);
   const { links } = useWorkspaceView();
@@ -93,9 +95,9 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   // Found rather than assumed: the active id is persisted and the context list
   // is whatever the machine has now, so an id can outlive the context it named.
   const ctx = contexts.find((c) => c.stableId === activeId);
-  // Nothing has probed yet, or there is nothing to probe. Either way the link
-  // is not up, and "Disconnected" is the honest reading of that.
-  const state = (activeId ? links[activeId]?.state : undefined) ?? "disconnected";
+  // Absence of a probe is not evidence of a failed connection.
+  const state = activeId ? links[activeId]?.state : undefined;
+  const paused = activeId !== null && (workspace.pausedClusters ?? []).includes(activeId);
   // Split rather than counted blind. A tunnel that gave up is still in the
   // store — it stays on the forwards screen until its reader dismisses it —
   // and counting it here would report a dead tunnel as one of the ones
@@ -124,6 +126,7 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   //
   // Derived here, in the component body, and never inside a snapshot getter —
   // see the note above about identity and "Maximum update depth exceeded".
+  const mark = useMark(ctx?.stableId ?? "", ctx?.name ?? "");
   const clusterOps = ctx ? helmOps.filter((o) => o.context === ctx.name) : [];
   // In flight means `running` and nothing else. A `done` operation has stopped
   // changing the cluster and a `failed` one has stopped trying; both stay
@@ -136,9 +139,9 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   const segments: StatusSegment[] = [
     {
       id: "ctx",
-      label: ctx?.name ?? "No cluster",
+      label: ctx ? mark.name : "No cluster",
       dot: true,
-      tone: LINK_TONE[state],
+      tone: paused || state === undefined ? "muted" : LINK_TONE[state],
       // Pressable only when there is a cluster to open. A "No cluster" button
       // that opens an overview of nothing is a dead end dressed as a way out.
       onSelect: ctx ? () => openTab("/overview", { clusterName: ctx.name }) : undefined,
@@ -153,7 +156,7 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
   }
   // Pulsing only while connecting: the dot is animated for a readout that is
   // still changing, not for one that merely happens to be current.
-  segments.push({ id: "link", label: LINK_WORD[state], pulse: state === "connecting" });
+  segments.push({ id: "link", label: paused ? "Paused" : state === undefined ? "Not checked" : LINK_WORD[state], pulse: !paused && state === "connecting" });
 
   const end: StatusSegment[] = [];
   // Only when there is one, and this is the exception to the rule the version

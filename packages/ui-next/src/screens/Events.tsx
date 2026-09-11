@@ -1,3 +1,4 @@
+import { ContextLabel } from "../lib/contextLabel";
 import { useEffect, useMemo, useState } from "react";
 import {
   eventVerdict,
@@ -19,6 +20,7 @@ import {
   Table,
   Tabs,
   filterTableData,
+  tableFilterError,
   type TabItem,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
@@ -37,13 +39,14 @@ import {
 } from "../lib/kinds/events";
 import { useResourceList } from "../lib/resourceList";
 import { describe } from "../lib/routes";
-import { openTab } from "../lib/tabsStore";
+import { openTab, useTabs } from "../lib/tabsStore";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { ReasonRail } from "./events/ReasonRail";
 import {
   NamespaceErrorAlert,
   NamespacePicker,
   NoClusterScreen,
+  PausedClusterScreen,
   StaleSelectionAlert,
   columnOptionsFor,
   emptyTableCopy,
@@ -120,10 +123,14 @@ const GROUP_BY_CAUSE = "What do these warning events have in common?";
  */
 export function Events({ route }: { route: string }) {
   const context = useActiveContext();
+  const { workspace } = useTabs();
   const title = describe(route, context?.name).title;
 
   if (!context) {
     return <NoClusterScreen title={title} noun="events" />;
+  }
+  if (workspace.pausedClusters?.includes(context.stableId)) {
+    return <PausedClusterScreen title={title} noun="events" context={context} />;
   }
 
   return <EventList route={route} title={title} context={context} />;
@@ -173,10 +180,17 @@ function EventList({
 
   // Sort, filter text and filter column live on this route's own tab, so they
   // survive a restart with it — see `useResourceTabView`'s own comment.
-  const { tabId, sort, filter, filterKey, setFilter, setSort, setFilterKey } = useResourceTabView(
-    route,
-    columns,
-  );
+  const {
+    tabId,
+    sort,
+    filter,
+    filterKey,
+    regex,
+    setFilter,
+    setSort,
+    setFilterKey,
+    setRegex,
+  } = useResourceTabView(route, columns);
 
   // The segment narrows the rows on screen and nothing else: it never touches
   // the watch above, so switching segments cannot re-list. Component state
@@ -205,9 +219,10 @@ function EventList({
     [columns, filterKey],
   );
   const filtered = useMemo(
-    () => filterTableData(segmented, searchColumns, filter, filterKey),
-    [segmented, searchColumns, filter, filterKey],
+    () => filterTableData(segmented, searchColumns, filter, filterKey, regex),
+    [segmented, searchColumns, filter, filterKey, regex],
   );
+  const invalidFilter = tableFilterError(filter, regex) !== null;
 
   // Both counts are of what is ON SCREEN, per §8 — a header that counted the
   // loaded set would disagree with the rows under it the moment anyone typed.
@@ -249,7 +264,7 @@ function EventList({
   return (
     <Screen
       title={title}
-      eyebrow={name}
+      eyebrow={<ContextLabel context={context} />}
       fill
       actions={
         <>
@@ -318,6 +333,9 @@ function EventList({
         <FilterBar
           value={filter}
           onValueChange={setFilter}
+          regex={regex}
+          onRegexChange={setRegex}
+          invalid={invalidFilter}
           label={`Filter ${lower}`}
           // Verbatim from §8. The label above is what NAMES the field; this only
           // says what it matches.

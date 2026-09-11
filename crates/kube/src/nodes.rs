@@ -57,6 +57,10 @@ pub struct NodeSummary {
     /// rebuilt when a watch event arrives — so it goes stale (#405).
     pub created: Option<String>,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
     /// `status.allocatable.cpu`, converted to millicores — the unit metrics-server uses.
     #[serde(rename = "allocatableCpuMillicores")]
     pub allocatable_cpu_millicores: i64,
@@ -80,7 +84,7 @@ pub struct ListNodesOut {
     pub nodes: Vec<NodeSummary>,
 }
 
-fn summarise(node: Node) -> NodeSummary {
+pub fn summarise(node: Node) -> NodeSummary {
     let name = node.metadata.name.clone().unwrap_or_default();
     let status = node
         .status
@@ -174,6 +178,7 @@ fn summarise(node: Node) -> NodeSummary {
         roles,
         created: crate::creation_rfc3339(node.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(node.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(node.metadata.creation_timestamp.as_ref()),
         allocatable_cpu_millicores,
         allocatable_memory_mib,
         allocatable_pods,

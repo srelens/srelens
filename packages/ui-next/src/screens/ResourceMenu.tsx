@@ -26,6 +26,7 @@ import { ROW_ACTION_LABEL } from "../lib/kinds/rowActions";
 import type { KindActions, ListRow } from "../lib/kinds/types";
 import { startPodSession } from "../lib/sessions";
 import { openTab } from "../lib/tabsStore";
+import { isContextPaused, useDismissOnPause } from "../lib/pausedContext";
 import { NewForwardDialog } from "./forwards/NewForwardDialog";
 import { logsRoute } from "./Logs";
 
@@ -35,6 +36,9 @@ export interface UseRowMenuArgs {
   /** The Kubernetes kind this list is showing, e.g. "Pod", "CronJob". */
   kind: string;
   actions: KindActions;
+  /** The API group, for a custom kind only — see `KindDescriptor.group`. Edit
+   *  carries it, so a CRD that reuses a built-in kind's name opens ITS object. */
+  group?: string;
 }
 
 /** What a picked entry is waiting to do, once the confirm is taken. */
@@ -139,7 +143,7 @@ interface ShellPick {
  * `danger`, and Run now skips `pending` entirely — it is a call, not a
  * mutation of anything already running.
  */
-export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
+export function useRowMenu({ context, kind, actions, group }: UseRowMenuArgs): {
   items: (row: ListRow) => ContextMenuItem[];
   dialog: ReactNode;
 } {
@@ -161,6 +165,11 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
    * a question with its own fields, not a `Pending` variant.
    */
   const [shellPick, setShellPick] = useState<ShellPick | null>(null);
+  const targetPaused = useDismissOnPause(pending?.context ?? forwarding?.context ?? shellPick?.context, () => {
+    setPending(null);
+    setForwarding(null);
+    setShellPick(null);
+  });
   const [shellBusy, setShellBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -244,7 +253,9 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
     // `getObject` is in flight, and a shell opened on one cluster's container
     // list must not attach to another cluster's pod of the same name.
     const target = context;
+    if (isContextPaused(target)) return;
     const result = await getObject(target, kind, namespace || null, row.name);
+    if (isContextPaused(target)) return;
     if (result.error || !result.object) {
       notify.error(`Couldn't open a shell in ${row.name}`, describeError(result.error ?? "Pod not found").detail);
       return;
@@ -272,6 +283,7 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
    *  `/terminals`, worth showing rather than hiding behind a tab that never
    *  opens. */
   async function launchShell(row: ListRow, namespace: string, container: string, target: string) {
+    if (isContextPaused(target)) return;
     await startPodSession({ context: target, namespace, pod: row.name, container });
     openTab("/terminals", { clusterName: target });
   }
@@ -285,7 +297,7 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
   }
 
   async function confirm() {
-    if (!pending) return;
+    if (!pending || isContextPaused(pending.context)) return;
     const { row, context: target } = pending;
     const ns = row.namespace ?? "";
 
@@ -378,7 +390,13 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
       // under `openTab`'s dedupe, so a name alone collapsed `default/api` and
       // `staging/api` — and a Pod `api` and a Deployment `api` — onto one tab,
       // and the second pick focused the first resource. See {@link editRoute}.
-      onPick: () => openTab(editRoute(kind, row.namespace ?? null, row.name), { clusterName: context }),
+      // The CLUSTER is in it too, because the editor pins the cluster it was
+      // opened on, and a pinned editor for another cluster's same-named
+      // resource must not be the tab this pick lands on.
+      onPick: () =>
+        openTab(editRoute(kind, row.namespace ?? null, row.name, { cluster: context, group }), {
+          clusterName: context,
+        }),
     });
     list.push({
       label: ROW_ACTION_LABEL.copy,
@@ -426,7 +444,7 @@ export function useRowMenu({ context, kind, actions }: UseRowMenuArgs): {
     return list;
   }
 
-  const dialog = pending ? (
+  const dialog = targetPaused ? null : pending ? (
     <PendingDialog
       pending={pending}
       kind={kind}

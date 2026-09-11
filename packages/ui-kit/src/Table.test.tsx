@@ -3,7 +3,14 @@ import { join } from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { act, render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Table, filterTableData, computeVisibleRange, rowPitch, type Column } from "./Table";
+import {
+  Table,
+  filterTableData,
+  tableFilterError,
+  computeVisibleRange,
+  rowPitch,
+  type Column,
+} from "./Table";
 
 /**
  * Compact ages as seconds, standing in for core's `ageSeconds`, which the kit
@@ -405,6 +412,9 @@ describe("Table", () => {
     );
     const selected = screen.getByText("web-1").closest("tr");
     expect(selected?.getAttribute("aria-selected")).toBe("true");
+    expect(selected?.getAttribute("data-state")).toBe("selected");
+    const css = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+    expect(css).toMatch(/\.tbl tbody tr\[data-state="selected"\]\s*\{\s*background: var\(--accent-wash\)/);
   });
 
   it("shows empty text when there is no data", () => {
@@ -603,6 +613,21 @@ describe("Table", () => {
     expect(filterTableData(data, columns, "web-2", "name")).toEqual([data[1]]);
   });
 
+  it("filters raw cell values with case-insensitive regular expressions", () => {
+    expect(filterTableData(data, columns, "^WEB-1$", null, true)).toEqual([data[0]]);
+    expect(filterTableData(data, columns, "(running|pending)", "phase", true)).toEqual(data);
+    expect(filterTableData(data, columns, "-\\d+$", "name", true)).toEqual(data);
+    expect(filterTableData(data, columns, "^(?!.*web-2)", "name", true)).toEqual([data[0]]);
+  });
+
+  it("treats an invalid or empty regular expression as no filter", () => {
+    expect(filterTableData(data, columns, "^web-(", null, true)).toBe(data);
+    expect(filterTableData(data, columns, "  ", null, true)).toBe(data);
+    expect(tableFilterError("^web-(", true)).toBe("Invalid regular expression");
+    expect(tableFilterError("^web-(a|b)", true)).toBeNull();
+    expect(tableFilterError("[", false)).toBeNull();
+  });
+
   it("resizes a column with the keyboard and resets it on double click", () => {
     render(<Table columns={columns} data={data} getRowKey={(r) => r.name} />);
     const handle = screen.getByRole("separator", { name: "Resize Name column" });
@@ -682,6 +707,11 @@ describe("Table", () => {
  * is a browser fact, measured in one (see the task report), and no assertion
  * here can stand in for it.
  */
+it("lets header cells own stickiness without a second sticky row-group", () => {
+  const { container } = render(<Table columns={[{ key: "name", header: "Name" }]} data={[{ name: "worker" }]} getRowKey={row => row.name} />);
+  expect(container.querySelector("thead")?.classList.contains("sticky")).toBe(false);
+});
+
 describe("Table sticky columns", () => {
   const cols: Column<{ name: string }>[] = [
     { key: "name", header: "Name" },

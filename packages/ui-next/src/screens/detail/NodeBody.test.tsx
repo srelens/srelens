@@ -68,9 +68,28 @@ describe("NodeDetailsBody", () => {
       expect(screen.getByText("110 / 110")).toBeDefined();
     });
 
+    it("formats Ki memory values as Gi", () => {
+      render(
+        <NodeDetailsBody
+          object={node(
+            {},
+            {
+              capacity: { cpu: "40", memory: "32345036Ki", pods: "110" },
+              allocatable: { cpu: "40", memory: "32242636Ki", pods: "110" },
+            },
+          )}
+        />,
+      );
+      expect(screen.getByText("30.7Gi / 30.8Gi")).toBeDefined();
+    });
+
     it("shows a node with no capacity reported as blank fractions, not an error", () => {
       render(<NodeDetailsBody object={node({})} />);
-      expect(screen.getAllByText("/")).toHaveLength(3);
+      // CPU and Pods render as " / " (normalised to "/"); Memory goes through
+      // formatStorageSize, which turns an empty string into "—", so its row
+      // reads "— / —" and does not match the bare slash.
+      expect(screen.getAllByText("/")).toHaveLength(2);
+      expect(screen.getByText("— / —")).toBeDefined();
     });
   });
 

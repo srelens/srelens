@@ -1,14 +1,15 @@
 //! Workload-listing capabilities backed by kube-rs: `k8s.listNamespaces` and
 //! `k8s.listPods` for a connected context.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use srelens_capability::{Annotations, Capability, CapabilityError};
 use k8s_openapi::api::core::v1::{Namespace, Pod};
 use kube::api::ListParams;
 use kube::Api;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
@@ -18,9 +19,21 @@ pub struct ListNamespacesIn {
     pub context: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct NamespaceSummary {
+    pub name: String,
+    pub phase: String,
+    pub labels: BTreeMap<String, String>,
+    pub age: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ListNamespacesOut {
+    /// Kept for the namespace selector and for compatibility with existing
+    /// consumers of this capability.
     pub namespaces: Vec<String>,
+    /// Rich rows for the Namespaces resource list.
+    pub summaries: Vec<NamespaceSummary>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -43,6 +56,10 @@ pub struct PodSummary {
     /// stale (#405). Prefer this; `age` stays for callers that have no clock.
     pub created: Option<String>,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
     /// Container image(s) the pod runs, e.g. `acme/checkout-api:118a7e`.
     /// A pod with several containers joins them as `"img-a, img-b"`; a pod
     /// with no containers (or no status yet) is `""`.
@@ -61,6 +78,21 @@ pub struct PodSummary {
     /// is waiting.
     #[serde(rename = "waitingReason")]
     pub waiting_reason: String,
+    /// Pod IP address from `status.podIP`.
+    #[serde(rename = "podIp", default)]
+    pub pod_ip: String,
+    /// CPU requested in millicores across all containers
+    #[serde(rename = "cpuReqMillicores", default)]
+    pub cpu_req_millicores: i64,
+    /// CPU limit in millicores across all containers
+    #[serde(rename = "cpuLimMillicores", default)]
+    pub cpu_lim_millicores: i64,
+    /// Memory requested in MiB across all containers
+    #[serde(rename = "memReqMiB", default)]
+    pub mem_req_mib: i64,
+    /// Memory limit in MiB across all containers
+    #[serde(rename = "memLimMiB", default)]
+    pub mem_lim_mib: i64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -72,7 +104,21 @@ fn handler_err(e: impl ToString) -> CapabilityError {
     CapabilityError::Handler(e.to_string())
 }
 
-/// `k8s.listNamespaces` — list namespace names in a connected context.
+pub(crate) fn summarise_namespace(namespace: Namespace) -> NamespaceSummary {
+    let phase = namespace
+        .status
+        .as_ref()
+        .and_then(|status| status.phase.clone())
+        .unwrap_or_else(|| "Unknown".into());
+    NamespaceSummary {
+        name: namespace.metadata.name.clone().unwrap_or_default(),
+        phase,
+        labels: namespace.metadata.labels.clone().unwrap_or_default(),
+        age: crate::humanize_age(namespace.metadata.creation_timestamp.as_ref()),
+    }
+}
+
+/// `k8s.listNamespaces` — list namespace names and summaries in a connected context.
 pub fn list_namespaces_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListNamespacesIn, ListNamespacesOut, _, _>(
         "k8s.listNamespaces",
@@ -86,16 +132,27 @@ pub fn list_namespaces_capability(cache: Arc<ClientCache>) -> Capability {
                     .await
                     .map_err(CapabilityError::Handler)?;
                 let api: Api<Namespace> = Api::all(client);
-                let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("list namespaces timed out".into()))?
-                    .map_err(handler_err)?;
-                let namespaces = list
+                let list =
+                    tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+                        .await
+                        .map_err(|_| CapabilityError::Handler("list namespaces timed out".into()))?
+                        .map_err(handler_err)?;
+                let summaries: Vec<_> = list
                     .items
                     .into_iter()
-                    .filter_map(|ns| ns.metadata.name)
+                    .map(summarise_namespace)
+                    // Preserve the old selector contract: Kubernetes objects
+                    // without a name never became namespace options.
+                    .filter(|summary| !summary.name.is_empty())
                     .collect();
-                Ok(ListNamespacesOut { namespaces })
+                let namespaces = summaries
+                    .iter()
+                    .map(|summary| summary.name.clone())
+                    .collect();
+                Ok(ListNamespacesOut {
+                    namespaces,
+                    summaries,
+                })
             }
         },
     )
@@ -152,6 +209,36 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         })
         .unwrap_or_default();
 
+    let pod_ip = pod
+        .status
+        .as_ref()
+        .and_then(|s| s.pod_ip.clone())
+        .unwrap_or_default();
+
+    let (mut req_cpu, mut lim_cpu, mut req_mem, mut lim_mem) = (0i64, 0i64, 0i64, 0i64);
+    if let Some(spec) = pod.spec.as_ref() {
+        for c in &spec.containers {
+            if let Some(resources) = &c.resources {
+                if let Some(reqs) = &resources.requests {
+                    if let Some(q) = reqs.get("cpu") {
+                        req_cpu += crate::metrics::cpu_millicores(&q.0);
+                    }
+                    if let Some(q) = reqs.get("memory") {
+                        req_mem += crate::metrics::mem_mib(&q.0);
+                    }
+                }
+                if let Some(lims) = &resources.limits {
+                    if let Some(q) = lims.get("cpu") {
+                        lim_cpu += crate::metrics::cpu_millicores(&q.0);
+                    }
+                    if let Some(q) = lims.get("memory") {
+                        lim_mem += crate::metrics::mem_mib(&q.0);
+                    }
+                }
+            }
+        }
+    }
+
     PodSummary {
         name,
         namespace,
@@ -161,9 +248,58 @@ pub(crate) fn summarise_pod(pod: Pod) -> PodSummary {
         node,
         created: crate::creation_rfc3339(pod.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(pod.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(pod.metadata.creation_timestamp.as_ref()),
         image,
         waiting_reason,
+        pod_ip,
+        cpu_req_millicores: req_cpu,
+        cpu_lim_millicores: lim_cpu,
+        mem_req_mib: req_mem,
+        mem_lim_mib: lim_mem,
     }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PodsOnNodeIn {
+    pub context: String,
+    pub node: String,
+}
+
+fn pods_on_node_params(node: &str) -> Result<ListParams, CapabilityError> {
+    if node.trim().is_empty() {
+        return Err(CapabilityError::InvalidInput(
+            "node must not be empty".into(),
+        ));
+    }
+    Ok(ListParams::default().fields(&format!("spec.nodeName={node}")))
+}
+
+/// `k8s.podsOnNode` — list pods scheduled on one node, across namespaces.
+pub fn pods_on_node_capability(cache: Arc<ClientCache>) -> Capability {
+    Capability::typed::<PodsOnNodeIn, ListPodsOut, _, _>(
+        "k8s.podsOnNode",
+        "list pods scheduled on a node across all namespaces",
+        Annotations::READ_ONLY,
+        move |input: PodsOnNodeIn| {
+            let cache = cache.clone();
+            async move {
+                let params = pods_on_node_params(&input.node)?;
+                let client = cache
+                    .get(&input.context)
+                    .await
+                    .map_err(CapabilityError::Handler)?;
+                // A node is cluster-scoped and can host pods from every
+                // namespace, so this query must use the all-namespaces API.
+                let api: Api<Pod> = Api::all(client);
+                let list = tokio::time::timeout(request_timeout(), api.list(&params))
+                    .await
+                    .map_err(|_| CapabilityError::Handler("list pods on node timed out".into()))?
+                    .map_err(handler_err)?;
+                let pods = list.items.into_iter().map(summarise_pod).collect();
+                Ok(ListPodsOut { pods })
+            }
+        },
+    )
 }
 
 /// `k8s.listPods` — list pods in a namespace of a connected context.
@@ -398,9 +534,47 @@ pub fn pods_for_selector_capability(cache: Arc<ClientCache>) -> Capability {
 mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::{
-        ContainerState, ContainerStateRunning, ContainerStateWaiting, ContainerStatus, PodSpec,
-        PodStatus,
+        ContainerState, ContainerStateRunning, ContainerStateWaiting, ContainerStatus,
+        NamespaceStatus, PodSpec, PodStatus,
     };
+
+    #[test]
+    fn summarises_namespace_phase_labels_and_age_without_a_timestamp() {
+        let labels = BTreeMap::from([
+            ("env".to_string(), "prod".to_string()),
+            ("team".to_string(), "sre".to_string()),
+        ]);
+        let namespace = Namespace {
+            metadata: kube::core::ObjectMeta {
+                name: Some("monitoring".into()),
+                labels: Some(labels.clone()),
+                ..Default::default()
+            },
+            status: Some(NamespaceStatus {
+                phase: Some("Active".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            summarise_namespace(namespace),
+            NamespaceSummary {
+                name: "monitoring".into(),
+                phase: "Active".into(),
+                labels,
+                age: "-".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn summarises_an_unsettled_namespace_without_inventing_metadata() {
+        let summary = summarise_namespace(Namespace::default());
+        assert_eq!(summary.name, "");
+        assert_eq!(summary.phase, "Unknown");
+        assert!(summary.labels.is_empty());
+    }
 
     #[test]
     fn capabilities_have_expected_ids() {
@@ -411,7 +585,45 @@ mod tests {
             "k8s.listNamespaces"
         );
         assert_eq!(list_pods_capability(cache.clone()).id, "k8s.listPods");
-        assert_eq!(pods_for_selector_capability(cache).id, "k8s.podsForSelector");
+        assert_eq!(
+            pods_for_selector_capability(cache.clone()).id,
+            "k8s.podsForSelector"
+        );
+        assert_eq!(pods_on_node_capability(cache).id, "k8s.podsOnNode");
+    }
+
+    #[test]
+    fn pods_on_node_uses_the_supported_node_field_selector() {
+        let params = pods_on_node_params("worker-2").unwrap();
+        assert_eq!(
+            params.field_selector.as_deref(),
+            Some("spec.nodeName=worker-2")
+        );
+        assert!(pods_on_node_params("").is_err());
+        assert!(pods_on_node_params("   ").is_err());
+    }
+
+    #[test]
+    fn pod_summary_carries_the_creation_timestamp_for_live_ages() {
+        let pod = Pod {
+            metadata: kube::core::ObjectMeta {
+                name: Some("web-1".into()),
+                namespace: Some("default".into()),
+                creation_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                    "2026-08-20T00:00:00Z".parse().unwrap(),
+                )),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let summary = summarise_pod(pod);
+        assert_eq!(summary.created.as_deref(), Some("2026-08-20T00:00:00Z"));
+    }
+
+    #[test]
+    fn pod_summary_marks_an_unknown_creation_timestamp_as_absent() {
+        let summary = summarise_pod(Pod::default());
+        assert_eq!(summary.created, None);
     }
 
     #[test]

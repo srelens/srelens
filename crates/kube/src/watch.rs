@@ -11,7 +11,7 @@ use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, Event as CoreEvent, LimitRange, PersistentVolume, PersistentVolumeClaim, Pod,
+    ConfigMap, Event as CoreEvent, LimitRange, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod,
     ResourceQuota, Secret, Service, ServiceAccount,
 };
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -28,6 +28,7 @@ use crate::cronjobs::{summarise as summarise_cronjob, CronJobSummary};
 use crate::daemonsets::{summarise as summarise_daemonset, DaemonSetSummary};
 use crate::endpointslices::{summarise as summarise_endpointslice, EndpointSliceSummary};
 use crate::ingresses::{summarise as summarise_ingress, IngressSummary};
+use crate::nodes::{summarise as summarise_node, NodeSummary};
 use crate::limitranges::{summarise as summarise_limitrange, LimitRangeSummary};
 use crate::networkpolicies::{summarise as summarise_networkpolicy, NetworkPolicySummary};
 use crate::persistentvolumes::{summarise as summarise_pv, PvSummary};
@@ -722,6 +723,82 @@ where
     .await
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, schemars::JsonSchema)]
+pub struct NamespaceSummary {
+    pub name: String,
+    pub status: String,
+    pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+}
+
+pub fn summarise_namespace(ns: Namespace) -> NamespaceSummary {
+    let name = ns.metadata.name.clone().unwrap_or_default();
+    let status = ns
+        .status
+        .as_ref()
+        .and_then(|s| s.phase.clone())
+        .unwrap_or_else(|| "Active".to_string());
+    let age = crate::humanize_age(ns.metadata.creation_timestamp.as_ref());
+    let created_at = crate::creation_timestamp_iso(ns.metadata.creation_timestamp.as_ref());
+    NamespaceSummary {
+        name,
+        status,
+        age,
+        created_at,
+    }
+}
+
+/// Watch cluster Nodes (cluster-scoped; namespace ignored).
+pub async fn watch_nodes<F, G>(
+    cache: Arc<ClientCache>,
+    context: String,
+    _namespace: String,
+    on_update: F,
+    on_status: G,
+) -> Result<(), String>
+where
+    F: FnMut(Vec<NodeSummary>) + Send,
+    G: FnMut(WatchStatus) + Send,
+{
+    let client = cache.get(&context).await?;
+    let api: Api<Node> = Api::all(client);
+    watch_typed(
+        api,
+        summarise_node,
+        |n: &NodeSummary| n.name.clone(),
+        on_update,
+        on_status,
+    )
+    .await
+}
+
+/// Watch cluster Namespaces (cluster-scoped; namespace ignored).
+pub async fn watch_namespaces<F, G>(
+    cache: Arc<ClientCache>,
+    context: String,
+    _namespace: String,
+    on_update: F,
+    on_status: G,
+) -> Result<(), String>
+where
+    F: FnMut(Vec<NamespaceSummary>) + Send,
+    G: FnMut(WatchStatus) + Send,
+{
+    let client = cache.get(&context).await?;
+    let api: Api<Namespace> = Api::all(client);
+    watch_typed(
+        api,
+        summarise_namespace,
+        |n: &NamespaceSummary| n.name.clone(),
+        on_update,
+        on_status,
+    )
+    .await
+}
+
 /// Classify a watcher event as an object change. `Apply`/`Delete` always are.
 /// `Init`/`InitApply` never are — they are just the replay of the current list
 /// building up in memory, with nothing yet to report. `InitDone` — which
@@ -865,9 +942,217 @@ where
     Ok(())
 }
 
+/// Target custom resource to watch dynamically.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CustomWatchTarget {
+    pub group: String,
+    pub version: String,
+    pub kind: String,
+    pub plural: String,
+    pub namespaced: bool,
+}
+
+pub(crate) fn dynamic_object_key(obj: &kube::api::DynamicObject) -> String {
+    let name = obj.metadata.name.as_deref().unwrap_or("");
+    match obj.metadata.namespace.as_deref() {
+        Some(ns) if !ns.is_empty() => format!("{ns}/{name}"),
+        _ => name.to_string(),
+    }
+}
+
+pub(crate) fn dynamic_value_key(val: &serde_json::Value) -> String {
+    let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let ns = val.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+    if !ns.is_empty() {
+        format!("{ns}/{name}")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Put a DynamicObject together as a table-ready JSON value with metadata,
+/// age, createdAt, type meta, spec and status.
+pub fn dynamic_object_to_value(item: &kube::api::DynamicObject) -> serde_json::Value {
+    let mut val = item.data.clone();
+    if let Ok(meta_val) = serde_json::to_value(&item.metadata) {
+        if let Some(obj) = val.as_object_mut() {
+            obj.insert("metadata".to_string(), meta_val);
+            if let Some(n) = &item.metadata.name {
+                obj.insert("name".to_string(), serde_json::Value::String(n.clone()));
+            }
+            if let Some(ns_name) = &item.metadata.namespace {
+                obj.insert("namespace".to_string(), serde_json::Value::String(ns_name.clone()));
+            }
+            if let Some(ts) = &item.metadata.creation_timestamp {
+                let age = crate::humanize_age(Some(ts));
+                obj.insert("age".to_string(), serde_json::Value::String(age));
+                obj.insert(
+                    "createdAt".to_string(),
+                    serde_json::Value::String(crate::creation_timestamp_iso(Some(ts))),
+                );
+            }
+            if let Some(types) = item.types.as_ref() {
+                if let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(types) {
+                    obj.extend(fields);
+                }
+            }
+        }
+    }
+    val
+}
+
+/// Watch instances of a custom resource dynamically. Emits snapshots of
+/// table-ready `serde_json::Value` objects on changes.
+pub async fn watch_custom_resource<F, G>(
+    cache: Arc<ClientCache>,
+    context: String,
+    namespace: String,
+    target: CustomWatchTarget,
+    mut on_update: F,
+    mut on_status: G,
+) -> Result<(), String>
+where
+    F: FnMut(Vec<serde_json::Value>) + Send,
+    G: FnMut(WatchStatus) + Send,
+{
+    let client = cache.get(&context).await?;
+    let ar = crate::crds::custom_api_resource(
+        &target.group,
+        &target.version,
+        &target.kind,
+        &target.plural,
+    );
+    let api: Api<kube::api::DynamicObject> = if target.namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, &namespace, &ar)
+    } else {
+        Api::all_with(client, &ar)
+    };
+
+    let mut state: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut stream = kube::runtime::watcher(api, Config::default()).boxed();
+    let mut reconnecting = false;
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(event) => {
+                if reconnecting {
+                    reconnecting = false;
+                    on_status(WatchStatus::Live);
+                }
+                let mapped = match event {
+                    Event::Init => WatchEvent::Init,
+                    Event::InitApply(obj) => WatchEvent::InitApply(dynamic_object_to_value(&obj)),
+                    Event::InitDone => WatchEvent::InitDone,
+                    Event::Apply(obj) => WatchEvent::Apply(dynamic_object_to_value(&obj)),
+                    Event::Delete(obj) => WatchEvent::Delete(dynamic_object_key(&obj)),
+                };
+                if reduce(&mut state, &dynamic_value_key, mapped) {
+                    on_update(snapshot(&state));
+                }
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if is_permanent_watch_error(&msg) {
+                    return Err(msg);
+                }
+                if !reconnecting {
+                    reconnecting = true;
+                    on_status(WatchStatus::Reconnecting);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_resource_keys_and_values_reduce_consistently() {
+        use kube::api::{DynamicObject, ObjectMeta, TypeMeta};
+        use serde_json::json;
+
+        let obj = DynamicObject {
+            types: Some(TypeMeta {
+                api_version: "external-secrets.io/v1beta1".into(),
+                kind: "SecretStore".into(),
+            }),
+            metadata: ObjectMeta {
+                name: Some("vault-backend".into()),
+                namespace: Some("prod".into()),
+                creation_timestamp: None,
+                ..Default::default()
+            },
+            data: json!({
+                "spec": { "controller": "dev" },
+                "status": { "conditions": [{ "type": "Ready", "status": "True" }] }
+            }),
+        };
+
+        // Keying matches between DynamicObject and converted Value
+        assert_eq!(dynamic_object_key(&obj), "prod/vault-backend");
+        let val = dynamic_object_to_value(&obj);
+        assert_eq!(dynamic_value_key(&val), "prod/vault-backend");
+        assert_eq!(val["name"], "vault-backend");
+        assert_eq!(val["namespace"], "prod");
+        assert_eq!(val["kind"], "SecretStore");
+        assert_eq!(val["apiVersion"], "external-secrets.io/v1beta1");
+        assert_eq!(val["status"]["conditions"][0]["status"], "True");
+
+        // Cluster-scoped object gets un-prefixed name key
+        let cluster_obj = DynamicObject {
+            types: None,
+            metadata: ObjectMeta {
+                name: Some("global-store".into()),
+                namespace: None,
+                ..Default::default()
+            },
+            data: json!({}),
+        };
+        assert_eq!(dynamic_object_key(&cluster_obj), "global-store");
+        let cluster_val = dynamic_object_to_value(&cluster_obj);
+        assert_eq!(dynamic_value_key(&cluster_val), "global-store");
+
+        // Reducer applies Init, InitApply, InitDone, Apply, Delete on Value state
+        let mut state = BTreeMap::new();
+        assert!(!reduce(&mut state, &dynamic_value_key, WatchEvent::Init));
+        assert!(!reduce(&mut state, &dynamic_value_key, WatchEvent::InitApply(val.clone())));
+        assert!(reduce(&mut state, &dynamic_value_key, WatchEvent::InitDone));
+        assert_eq!(state.len(), 1);
+
+        let mut updated = val.clone();
+        updated["status"]["conditions"][0]["status"] = json!("False");
+        assert!(reduce(&mut state, &dynamic_value_key, WatchEvent::Apply(updated)));
+        assert_eq!(state.get("prod/vault-backend").unwrap()["status"]["conditions"][0]["status"], "False");
+
+        assert!(reduce(&mut state, &dynamic_value_key, WatchEvent::Delete("prod/vault-backend".into())));
+        assert!(state.is_empty());
+    }
+
+    #[tokio::test]
+    async fn watch_custom_resource_surfaces_a_client_error_for_invalid_context() {
+        let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent/kubeconfig"));
+        let target = CustomWatchTarget {
+            group: "external-secrets.io".into(),
+            version: "v1beta1".into(),
+            kind: "SecretStore".into(),
+            plural: "secretstores".into(),
+            namespaced: true,
+        };
+        let err = watch_custom_resource(
+            cache,
+            "no-such-context".into(),
+            "default".into(),
+            target,
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.is_empty(), "client failure must be surfaced as an error string");
+    }
 
     fn pod(name: &str, phase: &str) -> PodSummary {
         PodSummary {
@@ -879,8 +1164,14 @@ mod tests {
             node: "n".into(),
             created: None,
             age: "1m".into(),
+            created_at: String::new(),
             image: "nginx:1.27".into(),
             waiting_reason: String::new(),
+            pod_ip: "10.244.0.1".into(),
+            cpu_req_millicores: 0,
+            cpu_lim_millicores: 0,
+            mem_req_mib: 0,
+            mem_lim_mib: 0,
         }
     }
 

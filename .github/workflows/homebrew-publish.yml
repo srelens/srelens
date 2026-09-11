@@ -1,0 +1,181 @@
+name: Publish Homebrew
+
+# Pushes the srelens-tui formula to the tap. Called by the release workflow
+# after a stable release goes public, and runnable BY HAND for any already
+# published version.
+#
+# Split out for the same reason `aur-publish.yml` is: welded to the release
+# pipeline, a failed push could only be retried by cutting another release,
+# which is how AUR sat four versions behind before it was separated.
+#
+# A tap carries exactly ONE version of a formula — `brew install` gets whatever
+# it currently points at — so this takes a single version rather than a list.
+# There is no back-catalogue to fill in.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version to publish, without a leading v (e.g. 1.2.3)'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published version to push to the tap, without a leading v. Defaults to the newest stable release.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# One branch in one repository, so two runs would race on `git push`.
+concurrency:
+  group: homebrew-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish Homebrew (srelens-tui)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The tap lives in its own repository, which GITHUB_TOKEN cannot write
+      # to. Until someone creates it and sets the token, this skips rather than
+      # failing: a release should not go red because a distribution channel is
+      # not set up yet. Same rule the AUR publish already follows.
+      - name: Skip when the tap isn't set up
+        id: gate
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'srelens/homebrew-tap' }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "HOMEBREW_TAP_TOKEN not set — skipping the Homebrew publish."
+            echo "See packaging/homebrew/README.md for what it needs."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # BOTH halves of the promise, not just the token. Setting up a tap is
+          # two steps by two different means — a secret here, a repository over
+          # there — so the state where one exists and the other does not is the
+          # normal middle of setting it up, not a mistake. Cloning a repository
+          # that is not there yet would fail the release for it.
+          #
+          # Only a VERIFIED 404 counts as "not set up yet". An expired token, a
+          # revoked grant, a rate limit or a network blip all make this command
+          # fail too, and treating those as absence would report "the tap is not
+          # ready" — a fact about the tap — on the strength of not having been
+          # able to look. The formula would then go stale behind a green run.
+          probe=$(GH_TOKEN="$TOKEN" gh api "repos/${TAP_REPO}" 2>&1) && status=0 || status=$?
+          if [ "$status" -ne 0 ]; then
+            if printf '%s' "$probe" | grep -q 'HTTP 404'; then
+              # A warning rather than silence: once the token is configured
+              # somebody is expecting a publish, so a skip should say why.
+              echo "::warning::${TAP_REPO} does not exist yet — skipping the Homebrew publish. See packaging/homebrew/README.md."
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::could not check ${TAP_REPO}, so whether it is ready is unknown — not skipping on a guess. Fix the cause and re-run this workflow; it is dispatchable for any published version."
+            printf '%s\n' "$probe" >&2
+            exit 1
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: steps.gate.outputs.publish == 'true'
+        with:
+          node-version-file: .nvmrc
+
+      # A manual run may omit the version, meaning "whatever the newest stable
+      # release is". Resolved here rather than defaulted in the input, so the
+      # log records which version was chosen.
+      - name: Resolve version
+        id: resolve
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${INPUT_VERSION:-}"
+          if [ -z "$VERSION" ]; then
+            TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name // empty')
+            VERSION="${TAG#srelens-v}"
+            echo "No version given — using the newest stable release: ${TAG:-<none>}"
+          fi
+          VERSION="${VERSION#v}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'${VERSION}' is not a stable X.Y.Z version. A dev pre-release is not what someone typing 'brew install' is asking for."
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Publishing srelens-tui ${VERSION}"
+
+      # Rendering reads the release's own SHA256SUMS, so a release that is
+      # missing the TUI archives fails here with that said plainly, rather than
+      # producing a formula that 404s on a user's machine.
+      - name: Render the formula
+        id: render
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p _tap/Formula
+          node packaging/homebrew/render.mjs "$VERSION" --out _tap/Formula/srelens-tui.rb
+          echo "--- rendered formula ---"
+          cat _tap/Formula/srelens-tui.rb
+
+      - name: Push to the tap
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO || 'srelens/homebrew-tap' }}
+        run: |
+          set -euo pipefail
+          # The token is written to a credential file rather than into the
+          # remote URL: a URL with a secret in it ends up in `git remote -v`,
+          # in error messages, and in the run log the first time a command
+          # fails.
+          CREDENTIALS=/tmp/homebrew-tap-credentials
+          install -m 600 /dev/null "$CREDENTIALS"
+          printf 'https://x-access-token:%s@github.com\n' "$TOKEN" > "$CREDENTIALS"
+          git config --global credential.helper "store --file=$CREDENTIALS"
+          git config --global user.name "srelens release"
+          git config --global user.email "noreply@github.com"
+
+          git clone --depth 1 "https://github.com/${TAP_REPO}.git" tap
+          mkdir -p tap/Formula
+          cp _tap/Formula/srelens-tui.rb tap/Formula/srelens-tui.rb
+          cd tap
+
+          # Staged BEFORE the comparison, and compared against the index.
+          # `git diff` only looks at tracked files, so on the very first publish
+          # — when the tap has no Formula/srelens-tui.rb yet — the freshly
+          # copied file is untracked, the diff is empty, and this would report
+          # "already carries" and exit without publishing anything. That is the
+          # one run where being wrong matters most: the install command has just
+          # been advertised and nothing is behind it.
+          git add Formula/srelens-tui.rb
+
+          # Nothing to do is a success, not a failure: re-running the publish
+          # for a version already on the tap should be a no-op rather than an
+          # empty commit or a red run.
+          if git diff --cached --quiet; then
+            echo "The tap already carries srelens-tui ${VERSION} — nothing to push."
+            exit 0
+          fi
+
+          git commit -m "srelens-tui ${VERSION}"
+          git push
+          echo "Pushed srelens-tui ${VERSION} to ${TAP_REPO}."
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f /tmp/homebrew-tap-credentials

@@ -1,4 +1,4 @@
-import { isApplePlatform, isTauri, K8S_KIND, type ResourceKind } from "@srelens/core";
+import { settingsStorage, flushSettingsWrites, isApplePlatform, isTauri, K8S_KIND, type ResourceKind } from "@srelens/core";
 // theme.ts imports only settingsStorage, so this does not drag the classic
 // stylesheet into the new design's chunk.
 import { applyTheme, getInitialTheme, resolvedThemeMode } from "./ui/theme";
@@ -6,8 +6,7 @@ import { applyTheme, getInitialTheme, resolvedThemeMode } from "./ui/theme";
 /**
  * Which design the app renders.
  *
- * Read synchronously before React mounts, so it lives in localStorage rather
- * than the settings store, which is async. It describes the person using the
+ * Read from the settings mirror loaded before React mounts. It describes the person using the
  * app, not the cluster they are looking at, so it is not scoped to a context
  * or a workspace.
  *
@@ -24,7 +23,7 @@ export function loadDesign(): Design {
     // Anything unrecognised means classic. A preference written by a future
     // version must never leave someone on a design that does not exist, since
     // a blank window has no way back to Settings.
-    return localStorage.getItem(DESIGN_KEY) === "next" ? "next" : "classic";
+    return settingsStorage.getItem(DESIGN_KEY) === "next" ? "next" : "classic";
   } catch {
     // Storage throws in some privacy modes; a preference is not worth failing
     // to boot over.
@@ -35,7 +34,7 @@ export function loadDesign(): Design {
 /** Persist the choice. Returns false if storage refused it. */
 export function saveDesign(design: Design): boolean {
   try {
-    localStorage.setItem(DESIGN_KEY, design);
+    settingsStorage.setItem(DESIGN_KEY, design);
     return true;
   } catch {
     // Restricted or private storage. The caller must not reload on this: the
@@ -104,6 +103,11 @@ export async function switchDesign(design: Design): Promise<SwitchResult> {
     // lives in the classic tree, so a failure while leaving the new design
     // would have been invisible, and the button would have looked inert.
     return { ok: false, reason: "This device would not let srelens save the preference." };
+  }
+  try {
+    await flushSettingsWrites({ throwOnError: true });
+  } catch {
+    return { ok: false, reason: "The settings backend could not save the design preference." };
   }
   if (design === "classic" && isTauri() && drawsOwnChrome()) {
     try {
@@ -287,6 +291,7 @@ export function toggleNextDesignTheme(): void {
  * so they cannot drift. A screen is added here in the PR that ports it.
  */
 export const PORTED_SCREENS: ReadonlyArray<{ route: string; name: string }> = [
+  { route: "/", name: "Home" },
   { route: "/applog", name: "Application log" },
   { route: "/notes", name: "Release notes" },
   // The full view of the one agent run this window holds — the transcript,
@@ -336,6 +341,13 @@ export const PORTED_SCREENS: ReadonlyArray<{ route: string; name: string }> = [
   // managed kubectl, helm and krew under ~/.srelens/bin, and what the active
   // context's exec-auth needs on PATH.
   { route: "/toolbox", name: "Toolbox" },
+  // One namespace at a time: how traffic reaches a workload, from the joins
+  // the cluster can prove — an Ingress route, a Service selector, a controller
+  // owning its revisions. Listed after toolbox because it is the newest, and
+  // narrower than its name suggests: the design draws service-to-service calls
+  // and external systems too, and Kubernetes reports neither.
+  { route: "/topology", name: "Topology" },
+
   // Every cluster srelens can see at once, rather than one of them: the file
   // each context was read from, which credential it uses, and what the last
   // reachability probe said. Reached from the cluster rail's

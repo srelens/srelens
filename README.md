@@ -118,6 +118,21 @@ Download the latest release for your platform from
 | macOS | `.dmg` for Apple Silicon and Intel | Developer ID signed and notarized |
 | Linux | `.AppImage`, `.deb`, `.rpm` | AppImage supports the in-app updater |
 | Windows | `.exe`, `.msi` | Windows may show a SmartScreen prompt while code signing remains on the roadmap |
+| Terminal UI | `srelens-tui-<version>-<target>.tar.gz` / `.zip`, or the one-liners below | A single binary for Linux (glibc and static musl), macOS and Windows, on x86-64 and arm64; macOS builds on a stable release are signed and notarized |
+
+The terminal UI also installs in one line. Linux:
+
+```bash
+( f="$(mktemp)" && trap 'rm -f "$f"' EXIT &&
+  curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o "$f" &&
+  sh "$f" )
+```
+
+macOS:
+
+```bash
+brew install srelens/tap/srelens-tui
+```
 
 See the [installation guide](docs/INSTALL.md) for platform-specific installation,
 first-launch, updating, verification, and uninstall instructions.
@@ -188,7 +203,7 @@ Example stdio configuration:
 ### Prerequisites
 
 - [Rust](https://rustup.rs) stable
-- [Node.js](https://nodejs.org) 22+
+- [Node.js](https://nodejs.org) 26 (development default; Node 24 LTS is also supported). Run `nvm install && nvm use` to use the version in `.nvmrc`.
 - [pnpm](https://pnpm.io) 9+
 - [Tauri v2 system dependencies](https://v2.tauri.app/start/prerequisites/)
 - A reachable Kubernetes cluster for cluster-dependent workflows

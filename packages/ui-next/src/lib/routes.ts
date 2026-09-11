@@ -1,6 +1,6 @@
 import type { ComponentType } from "react";
 import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
-import { parseDetailRoute, parseEditRoute } from "./detailRoute";
+import { parseDetailRoute, parseEditRoute, parseNewRoute } from "./detailRoute";
 import { Agent } from "../screens/Agent";
 import { AppLog } from "../screens/AppLog";
 import { Connect } from "../screens/Connect";
@@ -9,12 +9,15 @@ import { Events } from "../screens/Events";
 import { Forwards } from "../screens/Forwards";
 import { Helm } from "../screens/Helm";
 import { Logs, parseLogsRoute } from "../screens/Logs";
+import { Home } from "../screens/Home";
 import { Overview } from "../screens/Overview";
 import { ReleaseNotes } from "../screens/ReleaseNotes";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
+import { EditResource } from "../screens/Edit";
 import { Settings } from "../screens/Settings";
 import { Terminals } from "../screens/Terminals";
 import { Toolbox } from "../screens/Toolbox";
+import { Topology } from "../screens/Topology";
 import { Workloads } from "../screens/Workloads";
 
 /**
@@ -55,6 +58,7 @@ export function isBuiltInKind(slug: string): slug is ResourceKind {
  */
 const APP_SCOPED: Record<string, Omit<RouteInfo, "route" | "sub">> =
   Object.assign(Object.create(null), {
+    "/": { title: "Home", kind: "control", pinned: true },
     "/applog": { title: "Application log", kind: "applog" },
     "/notes": { title: "Release notes", kind: "notes" },
     "/settings": { title: "Settings", kind: "settings" },
@@ -66,7 +70,6 @@ const APP_SCOPED: Record<string, Omit<RouteInfo, "route" | "sub">> =
 /** Routes whose tab names the cluster it is looking at. */
 const CLUSTER_SCOPED: Record<string, Omit<RouteInfo, "route" | "sub">> =
   Object.assign(Object.create(null), {
-    "/": { title: "Control room", kind: "control", pinned: true },
     "/incidents": { title: "Incidents", kind: "incidents" },
     "/agent": { title: "Agent", kind: "agent" },
     "/resources": { title: "Workloads", kind: "workloads" },
@@ -149,6 +152,9 @@ export function describe(route: string, clusterName?: string): RouteInfo {
     const where = edit.namespace === null ? edit.name : `${edit.namespace}/${edit.name}`;
     return { route, title: `Edit ${where}`, sub, kind: "edit" };
   }
+  // `/new/<cluster>` — the create half, on a named cluster. The cluster is
+  // not in the title: it is the tab's own label, as on every other tab.
+  if (parseNewRoute(route)) return { route, title: "New resource", sub, kind: "edit" };
   // The legacy one-segment `/edit/<name>`. Nothing mints it any more; the shape
   // survives here only so a tab a previous session persisted can still name
   // itself in the strip, exactly as `/resources/<name>/logs|shell|forward` does
@@ -181,6 +187,27 @@ export function describe(route: string, clusterName?: string): RouteInfo {
   const cluster = CLUSTER_SCOPED[route];
   if (cluster) return { route, ...cluster, sub };
   return { route, title: route.replace(/^\//, "") || "Untitled", sub, kind: "control" };
+}
+
+/** Extra identity for a document-tab hover card, decoded by the route parsers. */
+export function tabDetail(route: string): string | undefined {
+  const parts = parseEditRoute(route) ?? parseDetailRoute(route) ?? parseLogsRoute(route);
+  if (!parts) return undefined;
+  const kind = "group" in parts && parts.group ? `${parts.group}/${parts.kind}` : parts.kind;
+  return `${kind} · ${parts.namespace ?? "Cluster-scoped"}`;
+}
+
+/** Whether a route follows a cluster rather than being an app-level screen. */
+export function isClusterScopedRoute(route: string): boolean {
+  // `describe` is already the one exhaustive parser for route shapes. Passing
+  // a sentinel lets its `sub` answer this without duplicating dynamic routes.
+  const sentinel = "__cluster_scope__";
+  return describe(route, sentinel).sub === sentinel;
+}
+
+/** These screens own controls for work that survives their component lifetime. */
+export function keepsManagementWhenPaused(route: string): boolean {
+  return route === "/agent" || route === "/forwards" || route === "/terminals";
 }
 
 /**
@@ -257,6 +284,7 @@ export type ScreenComponent = ComponentType<RoutedScreenProps>;
  * here and nothing else; a route with no entry renders the Placeholder.
  */
 const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(null), {
+  "/": Home,
   "/applog": AppLog,
   "/notes": ReleaseNotes,
   // The full view of the one agent run this window holds — the console dock
@@ -264,6 +292,11 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
   // never a second conversation.
   "/agent": Agent,
   "/resources": Workloads,
+  // The editor's create half. The row menu's `Edit` reaches the same screen
+  // through `parseEditRoute` in `screenFor` — one screen, two shapes, as
+  // `/logs` is. Without these two the menu opened a correctly titled tab
+  // onto the Placeholder, which is what "Edit does nothing" was.
+  "/new": EditResource,
   "/events": Events,
   "/overview": Overview,
   // The bare route. Its deeper `/logs/<kind>/<namespace>/<name>` shape reaches
@@ -289,6 +322,11 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
   "/helm": Helm,
   // App-scoped: the managed kubectl, helm and krew are the machine's, and the
   // exec-auth rail is the only part of it that looks at a context at all.
+  // Cluster-scoped: how traffic reaches a workload in ONE namespace, which is
+  // why the screen carries a namespace picker rather than reading the tab.
+  // Four lanes, all of them joins the cluster can prove — see
+  // crates/kube/src/topology.rs for the three the design has that it cannot.
+  "/topology": Topology,
   "/toolbox": Toolbox,
   // App-scoped, and about every cluster at once rather than one: which contexts
   // srelens can see, the file each was read from, and what the last probe said.
@@ -333,6 +371,14 @@ export function screenFor(route: string): ScreenComponent | null {
   // were just another kind slug. Matched by parse rather than by adding a
   // second `/k/` entry to `PREFIXED`, which cannot tell the two apart at all.
   if (parseDetailRoute(route)) return ResourceDetailScreen;
+  // The editor's edit half, by the same means and for the same reason: a
+  // whole subject or nothing, so `/edit/` on its own and the legacy
+  // one-segment `/edit/<name>` stay a Placeholder rather than an editor with
+  // no resource in it.
+  if (parseEditRoute(route)) return EditResource;
+  // And its create half on a named cluster, `/new/<cluster>`; the bare
+  // `/new` is in `SCREENS`.
+  if (parseNewRoute(route)) return EditResource;
   // A logs subject route, for the same reason and by the same means: matched
   // by parse rather than by a `/logs/` prefix entry, so `/logs/` on its own —
   // and anything else under the prefix that is not a whole subject — stays a

@@ -1,7 +1,10 @@
-import { Alert, Button, EmptyState, LoadingState, MultiSelect, Screen, Spinner, type Column, type TableSort } from "@srelens/ui-kit";
+import { ContextLabel } from "../lib/contextLabel";
+import type { ClusterContext } from "@srelens/core";
+import { Alert, Button, Combobox, EmptyState, LoadingState, MultiSelect, Screen, Spinner, type Column, type TableSort } from "@srelens/ui-kit";
 import { useContextsError, useContextsStatus } from "../lib/clusters";
 import { toggleColumn } from "../lib/columnPrefs";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
+import { reconnectCluster } from "../lib/openCluster";
 import { setTabView, useTabs, useTabView } from "../lib/tabsStore";
 
 /**
@@ -76,6 +79,20 @@ export function NoClusterScreen({ title, noun }: { title: string; noun: string }
   );
 }
 
+/** A paused cluster keeps its place while every resource reader is stopped. */
+export function PausedClusterScreen({ title, noun, context }: { title: string; noun: string; context: ClusterContext }) {
+  return (
+    <Screen title={title} eyebrow={<ContextLabel context={context} />} fill>
+      <EmptyState
+        title={`${context.name} is paused`}
+        hint={`Reconnect this cluster to resume listing ${noun}.`}
+        action={<Button variant="primary" onClick={() => reconnectCluster(context)}>Reconnect</Button>}
+        className="flex-1"
+      />
+    </Screen>
+  );
+}
+
 /**
  * The namespace picker's two states: a disabled, spinning stand-in while
  * `namespaces` is still `null`, and the real picker once it has answered.
@@ -108,6 +125,51 @@ export function NamespacePicker({
       onChange={onChange}
       allLabel="All namespaces"
       ariaLabel="Namespaces"
+    />
+  );
+}
+
+/**
+ * The same picker, for a screen that needs exactly ONE namespace rather than a
+ * set — the editor's create half writes into one.
+ *
+ * Beside `NamespacePicker` and not written at the call site, for that
+ * component's own reason: the loading state is the part that drifts. A bare
+ * `Combobox options={(namespaces ?? []).map(...)}` is an empty dropdown that
+ * reads as "this cluster has no namespaces" for as long as the listing takes.
+ *
+ * `Combobox`, not `Select`: a cluster with sixty namespaces is a wall in a
+ * native dropdown, and this is the control the rest of the app already opens
+ * for the same list — searchable, height-capped, one look.
+ */
+export function NamespaceChoice({
+  namespaces,
+  value,
+  onChange,
+}: {
+  namespaces: string[] | null;
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  if (namespaces === null) {
+    return (
+      <Button variant="secondary" className="justify-between gap-1.5" disabled aria-label="Namespace">
+        <Spinner label="Loading namespaces" />
+        Loading namespaces…
+      </Button>
+    );
+  }
+  return (
+    <Combobox
+      // A namespace typed into the draft before the listing arrived, or one
+      // that has since gone, is still what the manifest says — so it gets a
+      // row rather than falling back to the placeholder.
+      options={(namespaces.includes(value) ? namespaces : [value, ...namespaces]).map((ns) => ({ value: ns }))}
+      value={value}
+      onValueChange={onChange}
+      ariaLabel="Namespace"
+      searchPlaceholder="Find a namespace…"
+      className="min-w-44"
     />
   );
 }
@@ -189,9 +251,11 @@ export interface ResourceListTabView {
   sort: TableSort | null;
   filter: string;
   filterKey: string | null;
+  regex: boolean;
   setFilter: (value: string) => void;
   setSort: (next: TableSort | null) => void;
   setFilterKey: (key: string | null) => void;
+  setRegex: (on: boolean) => void;
 }
 
 /**
@@ -216,14 +280,17 @@ export function useResourceTabView<T>(route: string, columns: readonly Column<T>
   const sort = view.sort ?? null;
   const filter = view.filter ?? "";
   const filterKey = view.filterKey && columns.some((column) => column.key === view.filterKey) ? view.filterKey : null;
+  const regex = view.regex ?? false;
   return {
     tabId,
     sort,
     filter,
     filterKey,
+    regex,
     setFilter: (value) => setTabView(tabId, { filter: value }),
     setSort: (next) => setTabView(tabId, { sort: next }),
     setFilterKey: (key) => setTabView(tabId, { filterKey: key }),
+    setRegex: (on) => setTabView(tabId, { regex: on }),
   };
 }
 

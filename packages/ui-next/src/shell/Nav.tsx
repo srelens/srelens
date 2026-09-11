@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { symbolFor } from "../lib/markSymbols";
+import { useMemo, useState } from "react";
 import { listCrds, type ClusterContext, type CrdRef } from "@srelens/core";
 import { Mark, ResourceTree, Sidebar, StatusPill, type ResourceNode, type StatusKind } from "@srelens/ui-kit";
+import { saveNavigationWidth, setNavigationWidth, useNavigationWidth } from "../lib/navigationWidth";
 import { Icons } from "../lib/icons";
 import { useMark } from "../lib/marks";
 import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
-import { crdNodes, glyph, INVESTIGATE, kindNodes, NAV_GROUPS, routeForNode } from "../lib/tree";
+import { crdNodes, glyph, INVESTIGATE, kindNodes, routeForNode } from "../lib/tree";
 import { useResource } from "../lib/useResource";
-import { seedExpandedOnce, toggleExpanded, useWorkspaceView, type LinkState } from "../lib/workspace";
+import { toggleExpanded, useWorkspaceView, type LinkState } from "../lib/workspace";
 
 /** The one leaf the "Custom resources" group holds when discovery has failed. */
 const CRD_ERROR_ID = "crd-error";
@@ -26,12 +28,6 @@ const LINK: Record<LinkState, { word: string; kind: StatusKind }> = {
 
 /** Before anything has probed the cluster there is nothing to claim about it. */
 const UNKNOWN = { word: "Unknown", kind: "neutral" } as const;
-
-/**
- * The groups that stand open the first time a window is used: everything the
- * tree builds with children, minus the two that ask to start shut.
- */
-const DEFAULT_EXPANDED = [...NAV_GROUPS.map((g) => g.id), "investigate"];
 
 /**
  * The id of the node the active tab is on, or `undefined` when the tab is on
@@ -68,14 +64,8 @@ function nodeForRoute(nodes: ResourceNode[], crds: CrdRef[], route: string): str
  * browsing, and browsing twenty kinds should not leave twenty tabs behind —
  * `openTab` promotes the preview as soon as the row is opened for real.
  *
- * And the folds are stored, not defaulted. The kit's tree takes `expanded` as
- * the whole truth when it is given at all, so an empty list would mean every
- * group shut on first launch; the workspace view is therefore seeded, once
- * ever for the window's lifetime (`seedExpandedOnce`, in `workspace.ts`) with
- * the groups that should stand open. Once ever rather than once per mount,
- * because "the user closed all six" is a state the sidebar has to be able to
- * stay in across a remount, and a per-mount guard cannot tell that state apart
- * from "nothing has opened anything yet" — both leave `expanded` empty.
+ * Groups start collapsed. Their open state is saved per stable cluster ID,
+ * so switching contexts or restarting restores that cluster's own choices.
  */
 export function Nav({ contexts }: NavProps) {
   const activeCluster = useActiveCluster();
@@ -86,20 +76,21 @@ export function Nav({ contexts }: NavProps) {
 
   // Subscribes the sidebar to the strip: which row is highlighted is a fact
   // about the active tab, and that changes from a dozen places that are not here.
-  const { tabs, activeId } = useTabs();
+  const { tabs, activeId, workspace } = useTabs();
   const route = tabs.find((t) => t.id === activeId)?.route ?? "/";
 
   const name = ctx?.name;
+  const paused = ctx !== null && (workspace.pausedClusters ?? []).includes(ctx.stableId);
   const discovery = useResource<CrdRef[]>(
     async () => {
-      if (!name) return [];
+      if (!name || paused) return [];
       const out = await listCrds(name);
       // `listCrds` reports failure in the result rather than by rejecting, and
       // an empty tree is not the same news as "we were not allowed to look".
       if (out.error) throw new Error(out.error);
       return out.crds ?? [];
     },
-    [name],
+    [name, paused],
   );
   const crds = useMemo(() => discovery.data ?? [], [discovery.data]);
 
@@ -128,14 +119,17 @@ export function Nav({ contexts }: NavProps) {
     [crds, crdChildren],
   );
 
-  useEffect(() => {
-    seedExpandedOnce(DEFAULT_EXPANDED);
-  }, []);
+  const link = ctx
+    ? (paused ? { word: "Paused", kind: "neutral" as const } : view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN)
+    : UNKNOWN;
 
-  const link = ctx ? (view.links[ctx.stableId] ? LINK[view.links[ctx.stableId].state] : UNKNOWN) : UNKNOWN;
+  const navigationWidth = useNavigationWidth();
 
   return (
     <Sidebar
+      width={navigationWidth}
+      onResize={setNavigationWidth}
+      onWidthChange={saveNavigationWidth}
       label="Cluster navigation"
       query={query}
       onQueryChange={setQuery}
@@ -151,10 +145,10 @@ export function Nav({ contexts }: NavProps) {
               size="sm"
               decorative
               withBadge={mark.withText}
-              icon={mark.mark === "icon" && mark.icon ? glyph(mark.icon) : undefined}
+              icon={mark.mark === "icon" && mark.icon ? symbolFor(mark.icon) : undefined}
               imageSrc={mark.mark === "image" ? mark.imageSrc : undefined}
             />
-            <span className="min-w-0 flex-1 truncate text-[0.8125rem] font-medium">{ctx.name}</span>
+            <span className="min-w-0 flex-1 truncate text-[0.8125rem] font-medium">{mark.name}</span>
             <StatusPill status={link.word} kind={link.kind} />
           </div>
         )
@@ -182,8 +176,8 @@ export function Nav({ contexts }: NavProps) {
             // The strip scrolls, so accumulating is affordable.
             if (next) openTab(next, { clusterName: ctx.name });
           }}
-          expanded={view.expanded}
-          onExpandedChange={toggleExpanded}
+          expanded={view.expanded[ctx.stableId] ?? []}
+          onExpandedChange={(id) => toggleExpanded(ctx.stableId, id)}
           query={query}
         />
       )}

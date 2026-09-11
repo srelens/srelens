@@ -1192,6 +1192,20 @@ describe("Helm — the namespace selector", () => {
     expect(screen.getByText("Clear the filter to see all 5.")).toBeTruthy();
   });
 
+  it("applies regex mode to Helm releases and stores the mode on its tab", async () => {
+    open();
+    await ready();
+    const input = screen.getByRole("searchbox", { name: "Filter releases" });
+
+    await userEvent.type(input, "^(redis-session|payments)$");
+    await waitFor(() => expect(drawn()).toEqual([]));
+    await userEvent.click(screen.getByRole("button", { name: "Use regular expression" }));
+    await waitFor(() =>
+      expect(drawn()).toEqual(["payments/payments", "checkout/redis-session"]),
+    );
+    expect(store.currentWorkspace().tabs.find((tab) => tab.route === ROUTE)?.view?.regex).toBe(true);
+  });
+
   it("follows the namespace a restricted credential is scoped to", async () => {
     useNamespaceOptions.mockReturnValue({ namespaces: ["payments"], scope: "payments", error: "" });
 
@@ -1240,7 +1254,7 @@ describe("Helm — the namespace selector", () => {
     expect(screen.getByText("deleted-ns no longer exist on this cluster.")).toBeTruthy();
 
     await userEvent.click(screen.getByRole("button", { name: "Show all namespaces" }));
-    await waitFor(() => expect(getView().namespaces.prod).toBeUndefined());
+    await waitFor(() => expect(getView().namespaces.prod).toEqual([]));
     await waitFor(() => expect(drawn()).toHaveLength(5));
   });
 });

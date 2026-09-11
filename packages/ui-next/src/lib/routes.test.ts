@@ -6,6 +6,8 @@ import { describe as suite, it, expect } from "vitest";
 import {
   describe,
   isBuiltInKind,
+  isClusterScopedRoute,
+  keepsManagementWhenPaused,
   screenFor,
   type RoutedScreenProps,
   type ScreenComponent,
@@ -21,6 +23,7 @@ import { Forwards } from "../screens/Forwards";
 import { Logs, logsRoute } from "../screens/Logs";
 import { ResourceDetailScreen, Resources } from "../screens/Resources";
 import { Settings } from "../screens/Settings";
+import { Topology } from "../screens/Topology";
 import { Terminals } from "../screens/Terminals";
 import { Helm } from "../screens/Helm";
 import { Toolbox } from "../screens/Toolbox";
@@ -46,7 +49,7 @@ suite("isBuiltInKind", () => {
 suite("describe", () => {
   it("names the home route and pins it", () => {
     const info = describe("/", "prod-eu");
-    expect(info).toMatchObject({ route: "/", title: "Control room", kind: "control", pinned: true });
+    expect(info).toMatchObject({ route: "/", title: "Home", kind: "control", pinned: true });
   });
 
   it("uses the real cluster name as the sub for cluster-scoped routes", () => {
@@ -56,7 +59,7 @@ suite("describe", () => {
   });
 
   it("gives app-scoped routes no sub at all", () => {
-    for (const route of ["/applog", "/notes", "/settings", "/connections", "/connect", "/toolbox"]) {
+    for (const route of ["/", "/applog", "/notes", "/settings", "/connections", "/connect", "/toolbox"]) {
       expect(describe(route, "staging-1").sub, route).toBeUndefined();
     }
   });
@@ -146,6 +149,16 @@ suite("describe", () => {
       sub: "c",
     });
     expect(describe("/edit/Deployment/staging/api", "c").title).toBe("Edit staging/api");
+    // The shape `editRoute` mints now, with the cluster in front; the title
+    // does not repeat the cluster, which is the tab's own label.
+    expect(describe("/edit/prod/Deployment/staging/api", "c")).toMatchObject({
+      title: "Edit staging/api",
+      kind: "edit",
+      sub: "c",
+    });
+    expect(describe("/edit/prod/acme.io%2FDeployment/staging/api", "c").title).toBe("Edit staging/api");
+    // The create half on a named cluster, beside the bare `/new` in the table.
+    expect(describe("/new/prod", "c")).toMatchObject({ title: "New resource", kind: "edit", sub: "c" });
     // Cluster-scoped: there is no namespace to name.
     expect(describe("/edit/Node/-/worker-1", "c")).toMatchObject({ title: "Edit worker-1", kind: "edit" });
     // Percent-encoded on the way in, so the title is the decoded name.
@@ -213,6 +226,21 @@ suite("describe", () => {
     // /k/ branch's RESOURCE_LABELS lookup must still resolve it — this pins
     // that against a regression, not against screenFor's routing.
     expect(describe("/k/events", "c")).toMatchObject({ title: "Events", kind: "workloads" });
+  });
+});
+
+suite("isClusterScopedRoute", () => {
+  it("keeps run and stream management available while pausing cluster readers", () => {
+    for (const route of ["/agent", "/forwards", "/terminals"]) expect(keepsManagementWhenPaused(route)).toBe(true);
+    for (const route of ["/overview", "/helm", "/k/pods"]) expect(keepsManagementWhenPaused(route)).toBe(false);
+  });
+  it("distinguishes cluster-following routes from app screens", () => {
+    for (const route of ["/overview", "/helm", "/forwards", "/terminals", "/k/pods", "/k/Pod/default/web", "/edit/Pod/default/web"]) {
+      expect(isClusterScopedRoute(route), route).toBe(true);
+    }
+    for (const route of ["/", "/settings", "/connections", "/notes"]) {
+      expect(isClusterScopedRoute(route), route).toBe(false);
+    }
   });
 });
 
@@ -336,8 +364,14 @@ suite("screenFor", () => {
     expect(screenFor("/settings")).toBe(Settings);
   });
 
+  it("resolves the topology screen", () => {
+    // Registered in the PR that built it. Until then the sidebar entry and
+    // the tab title both existed and opened the Placeholder.
+    expect(screenFor("/topology")).toBe(Topology);
+  });
+
   it("gives a route with no screen a placeholder", () => {
-    for (const route of ["/", "/incidents", "/topology"]) {
+    for (const route of ["/incidents"]) {
       expect(screenFor(route), route).toBeNull();
     }
   });
@@ -380,7 +414,7 @@ suite("screenFor", () => {
   it("still refuses a route with no screen", () => {
     // `/k/` on its own names no kind, so it is not a route: a prefix that
     // matched itself would render the list screen with an empty slug.
-    for (const route of ["/topology", "/k/", "/logs/", "constructor"]) {
+    for (const route of ["/k/", "/logs/", "constructor"]) {
       expect(screenFor(route), route).toBeNull();
     }
   });
@@ -440,4 +474,14 @@ suite("ScreenComponent", () => {
     };
     expect(plain).toBeTypeOf("function");
   });
+});
+
+it("registers the app landing page", () => { expect(screenFor("/")?.name).toBe("Home"); });
+
+it("describes resource identity for tab hints without guessing a namespace", async () => {
+  const {tabDetail}=await import("./routes");
+  expect(tabDetail("/edit/prod/ConfigMap/monitoring/config")).toBe("ConfigMap · monitoring");
+  expect(tabDetail("/k/Node/-/node-1")).toBe("Node · Cluster-scoped");
+  expect(tabDetail("/logs/Pod/default/app")).toBe("Pod · default");
+  expect(tabDetail("/overview")).toBeUndefined();
 });

@@ -60,6 +60,259 @@ just Linux — is being enabled; see
 > "Windows protected your PC" prompt. Click **More info → Run anyway** to
 > proceed. Signed installers will remove this step in a future release.
 
+## Terminal UI (`srelens-tui`)
+
+The terminal UI ships as one self-contained binary, separate from the desktop
+app and with nothing to install. Every release carries an archive per platform:
+
+| Platform | Asset |
+| --- | --- |
+| Linux x86-64 | `srelens-tui-<version>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux x86-64, static | `srelens-tui-<version>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 | `srelens-tui-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux arm64, static | `srelens-tui-<version>-aarch64-unknown-linux-musl.tar.gz` |
+| macOS Apple Silicon | `srelens-tui-<version>-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `srelens-tui-<version>-x86_64-apple-darwin.tar.gz` |
+| Windows x86-64 | `srelens-tui-<version>-x86_64-pc-windows-msvc.zip` |
+
+Take the **musl** build if your distribution is Alpine, or if the glibc build
+reports a version error — it is statically linked and depends on nothing on the
+host. Otherwise prefer the glibc build.
+
+**On Linux, the install script** is the shortest path. Download it, then
+run it:
+
+```bash
+( f="$(mktemp)" && trap 'rm -f "$f"' EXIT &&
+  curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o "$f" &&
+  sh "$f" )
+```
+
+`mktemp` rather than a fixed name, and chained rather than three lines.
+
+The fixed name was the worse of the two: run from a directory another account
+can write to — `/tmp`, a shared build dir — that account can pre-create
+`srelens-install.sh` as a symlink, and `curl -o` follows it and truncates
+whatever it points at, with your privileges. Under `sudo` that is any file on
+the machine. `mktemp` creates the file exclusively, so there is nothing to
+aim at.
+
+The chaining matters because unchained, a failed download leaves the previous
+file to be run. And the cleanup is a `trap` in a subshell rather than a
+trailing `; rm -f`, because a command after `;` sets the status of the whole
+line — a failed install followed by a successful `rm` would report 0, the
+same way the pipeline did. The subshell exits with the install's status, and
+the trap removes the file on the way out whether it worked or not.
+
+Two steps rather than `curl … | sh` for a reason worth knowing: a pipeline
+reports the status of its *last* command. If the download fails — a 404, a
+TLS error, an outage — `sh` reads an empty script, does nothing, and exits
+0, so the whole line succeeds having installed nothing. Anything automated
+around it then carries on as though `srelens-tui` were there.
+
+```
+curl … | sh                       -> pipeline exit=0   (installed nothing)
+curl … -o f && sh f               -> chain exit=22
+```
+
+It still works piped, if you would rather. It just cannot tell you when it
+did not run.
+
+It picks the right architecture, always takes the static musl build so no
+distribution's glibc version matters, checks the download against the
+release's published SHA-256 before installing anything, and puts the binary
+in `/usr/local/bin` when that is writable and safe, or `~/.local/bin`
+otherwise.
+
+On Alpine, install `acl` first (`apk add acl`): the script checks whether the
+destination carries an extended ACL, and BusyBox `ls` cannot report one —
+rather than proceed without knowing, it stops and says so. Add `attr` too if you are
+replacing an existing copy **under `sudo`**, since it also checks for extended
+attributes it could not put back if the new binary had to be rolled back. An
+ordinary `~/.local/bin` update does not need it.
+It never invokes `sudo` on your behalf — run the whole line under `sudo` if
+you want it system-wide from an unprivileged shell.
+
+`--version <x.y.z>` installs a specific release. Same shape as above, with
+the option after the script:
+
+```bash
+( f="$(mktemp)" && trap 'rm -f "$f"' EXIT &&
+  curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o "$f" &&
+  sh "$f" --version 0.9.0 )
+```
+
+Piped, options cannot simply be appended — everything after `sh` belongs to
+the shell, which would reject `--version` as its own flag — so they go
+after `-s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh \
+  | sh -s -- --version 0.9.0
+```
+
+Those two destinations are the only ones. There is no flag for naming
+another: making an arbitrary caller-chosen directory safe against someone
+with a local account is not something a shell script can do honestly, so it
+does not pretend to. To put the binary elsewhere, unpack the tarball by hand
+as shown below.
+
+Downloading it first also means you can read it before running it; it is
+short, and
+[`packaging/install/install.sh`](../packaging/install/install.sh) is the file
+that URL serves.
+
+A copy installed this way is yours rather than a package manager's, so
+`srelens-tui update` will replace it in place.
+
+**Homebrew** is the shortest path on macOS, and works on Linux too:
+
+```bash
+brew install srelens/tap/srelens-tui
+```
+
+It installs the same prebuilt archive listed above rather than compiling,
+and `brew upgrade srelens-tui` moves it forward. Homebrew then owns the
+copy, so `srelens-tui update` will decline to replace it and point you back
+at `brew` — writing over a file Homebrew tracks would leave its database
+describing a version that is no longer there.
+
+**Or by hand, on Linux and macOS.** Extract and put it on your `PATH`:
+
+```bash
+tar -xzf srelens-tui-<version>-<target>.tar.gz
+chmod +x srelens-tui
+sudo mv srelens-tui /usr/local/bin/
+srelens-tui --version
+```
+
+**Windows.** Extract the `.zip` and move `srelens-tui.exe` somewhere on your
+`PATH`, then run `srelens-tui --version` in a terminal. Windows may warn that
+the file came from the internet, for the same reason the desktop installer
+does: code signing is on the roadmap ([#32]).
+
+The macOS builds on a **stable** release are signed with the same Apple
+Developer ID as the desktop app and notarized with the same account, so
+Gatekeeper admits them — a stable release cannot be cut without them, the same
+rule that governs the GPG signatures below. Dev-channel pre-releases are built
+even when those credentials are unavailable, so treat an unsigned macOS binary
+there as a pre-release that skipped signing rather than as evidence of
+tampering. The
+notarization ticket is **not stapled** — Apple only staples to `.app`, `.dmg`
+and `.pkg`, and this ships as a tarball — so the first run of a quarantined
+copy is checked against Apple online. If that first run happens offline and
+macOS refuses the binary, either reconnect and try again or clear the
+quarantine flag yourself:
+
+```bash
+xattr -d com.apple.quarantine ./srelens-tui
+```
+
+Most people never see this at all: extracting a `.tar.gz` with `tar` in a
+terminal does not mark the contents as quarantined in the first place.
+
+**Checking the download.** Each release lists the SHA-256 of every TUI archive
+in `srelens-tui-<version>-SHA256SUMS.txt`. Download it next to the archive and
+check the one file you took. The tool differs per platform — `sha256sum` is GNU
+coreutils, so it is absent on a stock macOS and on Windows.
+
+Linux:
+
+```bash
+sha256sum -c --ignore-missing srelens-tui-<version>-SHA256SUMS.txt
+```
+
+macOS (`shasum` ships with the system; `-c -` reads the one line you pass it,
+and `--ignore-missing` does not exist here):
+
+```bash
+grep "srelens-tui-<version>-<target>.tar.gz$" \
+  srelens-tui-<version>-SHA256SUMS.txt | shasum -a 256 -c -
+```
+
+Windows (PowerShell):
+
+```powershell
+$archive = "srelens-tui-<version>-x86_64-pc-windows-msvc.zip"
+$expected = (Select-String -Path "srelens-tui-<version>-SHA256SUMS.txt" -Pattern ([regex]::Escape($archive))).Line.Split(" ")[0]
+$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+if ($expected -eq $actual) { "OK" } else { "MISMATCH — do not run this file" }
+```
+
+That proves the file arrived intact, not who built it. For that, the archives
+carry detached GPG signatures like every other release asset — see
+[Verifying a download](#verifying-a-download) below, which applies to them
+unchanged.
+
+**Keeping it current.** The binary updates itself:
+
+```bash
+srelens-tui update --check   # what is available, without changing anything
+srelens-tui update           # download it and replace this binary
+```
+
+It only ever replaces the binary you ran it from. Before writing anything it
+checks the download against the SHA-256 the release published, so a corrupted
+or truncated archive is refused and the copy you already have is left alone.
+The last step is a rename, so an interrupted update cannot leave a
+half-written binary on your `PATH`.
+
+> **What that check does and does not prove.** It proves the file arrived
+> intact. It does not prove who built it: the checksum file lives on the same
+> release as the archive, so anyone able to replace one could replace both.
+> Verifying the GPG signature against a pinned key would close that, and is
+> tracked in [#448]. If that distinction matters to you, install by hand and
+> check the signature as described under
+> [Verifying a download](#verifying-a-download).
+
+[#448]: https://github.com/srelens/srelens/issues/448
+
+**Channels.** The same two the desktop app offers under Settings → Updates:
+
+```bash
+srelens-tui update --channel stable   # released versions
+srelens-tui update --channel dev      # rolling pre-releases, cut daily
+```
+
+Without the flag it stays on the channel your binary came from — a
+pre-release version means a dev build, anything else means stable — so
+updating never moves you between channels by accident. Pass the flag to
+switch; the choice is not remembered, so the next plain `update` goes back to
+following the binary you are then running.
+
+Two cases where it declines rather than acting, both on purpose:
+
+- **A package manager owns the binary.** If it lives somewhere Homebrew, your
+  distribution, Scoop, winget or Nix put it, srelens says so and names the
+  tool to use instead — writing over those files would leave the manager's
+  database describing a version that is no longer there.
+- **You cannot write to the directory.** A copy in `/usr/local/bin` usually
+  needs elevation. It says which directory refused rather than failing with a
+  bare permission error.
+
+A musl build updates to a musl build, since that binary exists precisely
+because the host cannot run the glibc one.
+
+Run `srelens-tui --help` for the full set of flags. `srelens-tui info` lists
+the contexts found in your kubeconfig with the cluster and server each names —
+it reads the file and does not contact any cluster, so it tells you what is
+configured, not what is reachable. `srelens-tui toolbox` reports whether
+`kubectl`, `helm` and `krew` are on your `PATH`.
+
+> **Windows: anything that looks for another program on your `PATH` may not
+> find it.** Executable lookup is Unix-shaped in several places — it shells out
+> to `which`, which Windows does not have, and the in-process fallback matches
+> a bare program name without consulting `PATHEXT`, so it never sees
+> `kubectl.exe` or `helm.exe`. What that affects: `srelens-tui toolbox` reports
+> every tool as missing, Helm operations may report Helm as absent, and the
+> Cursor AI provider may not find its binary. Browsing clusters, logs, YAML and
+> everything else that talks to the API server is unaffected. Tracked in
+> [#445].
+
+[#445]: https://github.com/srelens/srelens/issues/445
+
+[#32]: https://github.com/srelens/srelens/issues/32
+
 ## Verifying a download
 
 > **srelens 0.6.0 and earlier are unsigned.** Release signing begins with

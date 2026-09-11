@@ -60,6 +60,17 @@ describe("storage that refuses", () => {
 });
 
 describe("parseStoredState", () => {
+  it("restores legacy Control room tabs as app-wide Home without changing identity or saved work", () => {
+    const state = valid();
+    const home = state.workspaces[0].tabs[0];
+    home.title = "Control room";
+    home.sub = "old-prod";
+    const parsed = parseStoredState(JSON.stringify({ version: STORAGE_VERSION, ...state }))!;
+    expect(parsed.workspaces[0].tabs[0]).toEqual({ id: home.id, route: "/", title: "Home", kind: "control", pinned: true });
+    expect(parsed.workspaces[0].tabs[1]).toEqual(state.workspaces[0].tabs[1]);
+    expect(parsed.workspaces[0].activeId).toBe(state.workspaces[0].activeId);
+  });
+
   it("round-trips a state written by saveTabsState", () => {
     const storage = memory();
     const state = valid();
@@ -117,9 +128,21 @@ describe("parseStoredState", () => {
     expect(parseStoredState(raw)?.workspaces[0].activeCluster).toBeUndefined();
   });
 
+  it("restores pauses only for clusters that remain in the workspace", () => {
+    const s = defaultState([ctx("a"), ctx("b")]);
+    s.workspaces[0].pausedClusters = ["a"];
+    const raw = JSON.stringify({ version: STORAGE_VERSION, ...s }).replace('["a"]', '["a","gone",7]');
+    expect(parseStoredState(raw)?.workspaces[0].pausedClusters).toEqual(["a"]);
+  });
+
   it("keeps a tab's sort through a save and a load", () => {
     const s = valid();
-    s.workspaces[0].tabs[1].view = { sort: { key: "restarts", direction: "desc" }, filter: "crash", filterKey: "status" };
+    s.workspaces[0].tabs[1].view = {
+      sort: { key: "restarts", direction: "desc" },
+      filter: "crash",
+      filterKey: "status",
+      regex: true,
+    };
     const storage = memory();
     saveTabsState(s, storage);
     const parsed = parseStoredState(storage.getItem(STORAGE_KEY));
@@ -127,6 +150,17 @@ describe("parseStoredState", () => {
       sort: { key: "restarts", direction: "desc" },
       filter: "crash",
       filterKey: "status",
+      regex: true,
+    });
+  });
+
+  it("drops a non-boolean regex mode without losing the rest of the view", () => {
+    const s = valid();
+    s.workspaces[0].tabs[1].view = { filter: "crash" };
+    const doc = JSON.parse(JSON.stringify({ version: 1, ...s }));
+    doc.workspaces[0].tabs[1].view.regex = "yes";
+    expect(parseStoredState(JSON.stringify(doc))!.workspaces[0].tabs[1].view).toEqual({
+      filter: "crash",
     });
   });
 

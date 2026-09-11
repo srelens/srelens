@@ -7,6 +7,7 @@ import {
   listServices,
   listReplicaSets,
   podsForSelector,
+  podsOnNode,
   podMetrics,
   deletePod,
   evictPod,
@@ -20,9 +21,43 @@ describe("listNamespaces", () => {
     expect(outcome.namespaces).toEqual(["default", "kube-system"]);
   });
 
+  it("preserves typed namespace summaries for the resource list", async () => {
+    const summaries = [
+      {
+        name: "legacy-billing",
+        phase: "Terminating",
+        labels: { env: "prod", team: "payments" },
+        age: "17m",
+      },
+    ];
+    const invoke = vi.fn().mockResolvedValue({
+      namespaces: ["legacy-billing"],
+      summaries,
+    });
+
+    const outcome = await listNamespaces("prod", invoke);
+
+    expect(outcome.namespaces).toEqual(["legacy-billing"]);
+    expect(outcome.summaries).toEqual(summaries);
+  });
+
+  it("synthesises resource rows from names returned by an older backend", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      namespaces: ["default", "kube-system"],
+    });
+
+    const outcome = await listNamespaces("kind-dev", invoke);
+
+    expect(outcome.summaries).toEqual([
+      { name: "default", phase: "-", labels: {}, age: "-" },
+      { name: "kube-system", phase: "-", labels: {}, age: "-" },
+    ]);
+  });
+
   it("normalises errors", async () => {
     const outcome = await listNamespaces("x", () => Promise.reject(new Error("forbidden")));
     expect(outcome.namespaces).toBeUndefined();
+    expect(outcome.summaries).toBeUndefined();
     expect(outcome.error).toContain("forbidden");
   });
 });
@@ -226,6 +261,27 @@ describe("podsForSelector", () => {
 
   it("normalises errors", async () => {
     const outcome = await podsForSelector("x", "default", {}, [], () =>
+      Promise.reject(new Error("forbidden")),
+    );
+    expect(outcome.pods).toBeUndefined();
+    expect(outcome.error).toContain("forbidden");
+  });
+});
+
+describe("podsOnNode", () => {
+  it("passes context and node and returns timestamped pods", async () => {
+    const pods = [{ name: "web-1", namespace: "default", created: "2026-08-20T00:00:00Z" }];
+    const invoke = vi.fn().mockResolvedValue({ pods });
+    const outcome = await podsOnNode("kind-dev", "worker-2", invoke);
+    expect(invoke).toHaveBeenCalledWith("k8s.podsOnNode", {
+      context: "kind-dev",
+      node: "worker-2",
+    });
+    expect(outcome.pods).toEqual(pods);
+  });
+
+  it("normalises errors", async () => {
+    const outcome = await podsOnNode("x", "worker-2", () =>
       Promise.reject(new Error("forbidden")),
     );
     expect(outcome.pods).toBeUndefined();

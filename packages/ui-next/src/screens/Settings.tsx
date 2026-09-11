@@ -2,6 +2,8 @@ import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from "rea
 import { isTauri } from "@srelens/core";
 import { Screen } from "@srelens/ui-kit";
 import type { RoutedScreenProps } from "../lib/routes";
+import { ApplicationLogsPane, KubernetesPane, WorkspacePane } from "./settings/PreferencePanes";
+import { UpdatesPane } from "./settings/UpdatesPane";
 import { AgentAccess } from "./settings/AgentAccess";
 import { AgentPane } from "./settings/AgentPane";
 import { AppearancePane } from "./settings/AppearancePane";
@@ -10,62 +12,11 @@ import { McpServer } from "./settings/McpServer";
 import { SecurityPane } from "./settings/SecurityPane";
 import { AccessibilityPane, ClustersPane, ShortcutsPane } from "./settings/SmallPanes";
 
-/**
- * §23's `/settings`: a 196px nav rail on the left, and one section's panes
- * beside it.
- *
- * **The shell only. Every pane is its own file** — the six of them were built
- * and reviewed one at a time, and each carries the record of what §23 asked
- * for, what srelens can actually do, and which issue holds the difference.
- * This file adds no copy about any of them; the one sentence it does own is
- * about a section it does not draw, below.
- *
- * **`Deep links` is not here, and the reason this file used to give was
- * false.** It said `srelens://` "exists nowhere in this repo — no scheme
- * registered in `tauri.conf.json`, no handler in the desktop, no parser in
- * core". All three claims are wrong, and the feature is shipped END TO END:
- *
- * - the scheme — `apps/desktop/src-tauri/tauri.conf.json:37-43`
- * - the parser — `parseDeepLink` and `dedupeDeepLinkTargets`
- *   (`packages/core/src/lib/deepLink.ts:66,103`), with their own suite
- * - the handler — `apps/desktop/src-tauri/src/deep_link.rs`, 103 lines, wired
- *   at `lib.rs:284,292,335,440`
- * - the frontend — `apps/desktop/src/App.tsx:240,297,328` drains the queue,
- *   validates each target against the live contexts and opens it
- *
- * **The true reason it is excluded is that the last of those five is
- * classic's.** `App.tsx` is the CLASSIC tree; `main.tsx` mounts either it or
- * `NextApp`, never both, and nothing in this package or in `NextApp` calls
- * `take_pending_deep_links` or `parseDeepLink`. So while the new design is the
- * one running, a `srelens://` link is queued by the backend (up to
- * `MAX_PENDING_LINKS`) and NOTHING opens it. §23's pane leads with "A link in a
- * browser, chat message, runbook or alert opens the exact thing it refers to",
- * and drawing that here would be this migration's signature defect one more
- * time — a pane documenting, in the design where they do not work, a set of
- * links that work in the other one.
- *
- * The grammar itself is drawable truthfully today, so the pane is a small job
- * once the drain moves into this tree; both belong in #370 together, and in
- * that order. `Settings.test.tsx` asserts the absence, and — because a comment
- * cannot fail — also asserts that no file in this package has begun consuming
- * deep links: whoever wires the drain fails that test and adds the pane in the
- * same commit.
- *
- * **`Security` is not drawn on the web** — see {@link SECTIONS}.
- *
- * **The nav is a vertical tablist, hand-rolled.** The kit's `Tabs` is
- * horizontal by construction: three skins that are all rows, `ArrowLeft` and
- * `ArrowRight`, and no orientation. Adding a fourth mode to it for one call
- * site would be a second layout inside a component whose whole shape is a
- * strip; the roving tabindex and the arrow contract are copied from it
- * verbatim instead, because a `role="tablist"` that promises assistive
- * technology arrow keys it does not have is worse than a run of buttons.
- */
-
+/** Settings use the new design's stores and shared core commands. */
 /** §23's rail width for this screen, and this screen's alone (§A.1's table). */
 const NAV_WIDTH = 196;
 
-type SectionId = "agent" | "security" | "appearance" | "accessibility" | "shortcuts" | "clusters";
+type SectionId = "agent" | "security" | "appearance" | "accessibility" | "shortcuts" | "workspace" | "kubernetes" | "logs" | "updates" | "clusters";
 
 /**
  * §23's nav, in §23's order, minus `Deep links`.
@@ -122,6 +73,10 @@ const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true
   { id: "appearance", label: "Appearance" },
   { id: "accessibility", label: "Accessibility" },
   { id: "shortcuts", label: "Shortcuts" },
+  { id: "workspace", label: "Workspace" },
+  { id: "kubernetes", label: "Kubernetes" },
+  { id: "logs", label: "Application logs" },
+  { id: "updates", label: "Updates", desktopOnly: true },
   { id: "clusters", label: "Clusters" },
 ];
 
@@ -142,14 +97,20 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
   const desktop = isTauri();
   const visible = SECTIONS.filter((s) => !s.desktopOnly || desktop);
 
+  const [updatesOpened, setUpdatesOpened] = useState(false);
   const [active, setActive] = useState<SectionId>(SECTIONS[0].id);
   const headId = useId();
   const tabBase = useId();
   const tabId = (id: SectionId) => `${tabBase}-${id}`;
   const refs = useRef(new Map<SectionId, HTMLButtonElement>());
 
-  function focus(id: SectionId) {
+  function select(id: SectionId) {
+    if (id === "updates") setUpdatesOpened(true);
     setActive(id);
+  }
+
+  function focus(id: SectionId) {
+    select(id);
     // Selection follows focus, as it does in the kit's own `Tabs`: the panes
     // are already mounted-on-demand and cheap to switch, and this is what tabs
     // whose panels are not expensive are expected to do.
@@ -196,7 +157,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
         // `AgentAccess` genuinely does stay: it calls `gatedCapabilityIds` and
         // `isTauri` and no backend command at all.
         return (
-          <div className="flex flex-col gap-4">
+          <div className="settings-agent flex flex-col">
             <AgentAccess />
             {desktop ? (
               <>
@@ -211,7 +172,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
                  the whole point is that nothing is asked to. */
               <p
                 data-testid="no-agent-server"
-                className="text-[0.75rem] leading-relaxed text-muted"
+                className="px-3 py-3 text-[0.75rem] leading-relaxed text-muted"
               >
                 The agent, the MCP server and its audit trail live in the srelens desktop app.
                 Provider keys, model lists, the agent CLIs, starting the loopback server and
@@ -229,6 +190,14 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
         return <AccessibilityPane />;
       case "shortcuts":
         return <ShortcutsPane />;
+      case "workspace":
+        return <WorkspacePane />;
+      case "kubernetes":
+        return <KubernetesPane />;
+      case "logs":
+        return <ApplicationLogsPane />;
+      case "updates":
+        return null;
       case "clusters":
         return <ClustersPane />;
     }
@@ -279,7 +248,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
                     if (node) refs.current.set(section.id, node);
                     else refs.current.delete(section.id);
                   }}
-                  onClick={() => setActive(section.id)}
+                  onClick={() => select(section.id)}
                 >
                   {section.label}
                 </button>
@@ -317,9 +286,12 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
           // The one Tab stop into the pane's own content, so a reader arrowing
           // to a section can Tab straight into it.
           tabIndex={0}
-          className="scroll min-h-0 min-w-0 flex-1 p-3"
+          className={`scroll min-h-0 min-w-0 flex-1${active === "updates" || active === "clusters" || active === "agent" ? "" : " p-3"}`}
         >
           {pane(active)}
+          {desktop && updatesOpened && (
+            <div hidden={active !== "updates"}><UpdatesPane /></div>
+          )}
         </div>
       </div>
     </Screen>

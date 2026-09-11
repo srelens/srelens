@@ -141,9 +141,8 @@ export interface LogSubjectPod {
  * One entry per TARGET, not per pod. A pod running two containers can have one
  * corpse and one healthy process, and `podLogs` fetches a previous buffer per
  * container; an entry per pod would offer the live container's buffer under
- * the dead one's name. Only followed containers appear: an init container's
- * status carries a `lastState` like any other and is not something this stream
- * has a target for.
+ * the dead one's name. Init containers use the same last-state semantics,
+ * read from `initContainerStatuses`.
  *
  * Presence is what makes a buffer readable — a container that has terminated
  * once has a previous instance, whatever else its status did or did not carry.
@@ -268,14 +267,14 @@ export async function resolveLogSubject(
 
   const raw = scope.pods.flatMap((pod, i) =>
     podContainerChoices(objects[i].object)
-      .filter((c) => c.kind === "app")
+      .filter((c) => c.kind !== "ephemeral")
       // The object's index rides along: the previous-instance facts below are
       // read off the very same object, and looking the pod up again by name
       // would be a second index over a list already in hand.
       .map((c) => ({ pod, container: c.name, object: i })),
   );
 
-  // Every in-scope pod answered, but none of them had an app container to
+  // Every in-scope pod answered, but none of them had an app or init container to
   // follow — as unfollowable as no pods at all, and "resolved" with an empty
   // target list would say otherwise. Gate on what a caller can actually use.
   if (raw.length === 0) {
@@ -312,7 +311,8 @@ export async function resolveLogSubject(
   // target order, and only for followed containers: a corpse the screen has no
   // target to draw is a buffer it could never show.
   const previous: PreviousInstance[] = raw.flatMap(({ pod, container, object }) => {
-    const statuses = asArray(asRecord(asRecord(objects[object].object).status).containerStatuses);
+    const podStatus = asRecord(asRecord(objects[object].object).status);
+    const statuses = [...asArray(podStatus.containerStatuses), ...asArray(podStatus.initContainerStatuses)];
     const status = statuses.find((s) => asRecord(s).name === container);
     const termination = terminationOf(status);
     return termination === undefined ? [] : [{ pod, container, ...termination }];

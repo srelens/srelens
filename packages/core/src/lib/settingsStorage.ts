@@ -1,27 +1,30 @@
-import { invokeCapability } from "../transport/transport";
-import { isTauri } from "../transport/platform";
-
-interface SettingsGetOutput {
-  schemaVersion: number;
-  localStorageMigrated: boolean;
-  values: Record<string, unknown>;
-}
-
-interface SettingsSetInput {
-  values?: Record<string, unknown>;
-  remove?: string[];
-  localStorageMigrated?: boolean;
-}
+import { readBackendSettings, writeBackendSettings, type SettingsSetInput } from "../transport/settingsTransport";
 
 // Every desktop preference that existed before the file store. Keeping this
 // list explicit prevents a broad localStorage sweep from importing unrelated
 // WebView/application data.
+const NEXT_MARKS_KEY = "srelens.next.marks";
 const MIGRATION_KEYS = [
   "srelens.requestTimeoutSecs",
   "srelens.clusterNamespaces",
   "srelens.defaultNamespace",
   "srelens.workspaceLayout",
   "srelens.contextProfiles",
+  NEXT_MARKS_KEY,
+  "srelens.design",
+  "srelens.restoreSession",
+  "srelens.openTabs",
+  "srelens.onboarded",
+  "srelens.releaseNotes",
+  "srelens.next.appearance",
+  "srelens.next.workspaces",
+  "srelens.next.columns",
+  "srelens.next.recentLogs",
+  "srelens.next.peekWidth",
+  "srelens.next.sectionFolds",
+  "srelens.next.namespaces",
+  "srelens.next.ambiguousContextProfiles",
+  "srelens.next.ambiguousContextOrder",
   "srelens.kubeconfigFiles",
   "srelens.hiddenColumns",
   "srelens.contextOrder",
@@ -39,7 +42,9 @@ const LEGACY_ALIASES: Record<string, string[]> = {
 };
 
 const values = new Map<string, unknown>();
-let fileBacked = false;
+let backendReady = false;
+let initializationAttempted = false;
+let lastWriteError: unknown;
 let writes: Promise<void> = Promise.resolve();
 
 function decode(raw: string): unknown {
@@ -63,116 +68,102 @@ function aliasesFor(key: string): string[] {
 function enqueue(input: SettingsSetInput): void {
   writes = writes
     .then(async () => {
-      await invokeCapability("settings.set", input);
+      await writeBackendSettings(input);
+      lastWriteError = undefined;
     })
     .catch((error) => {
+      lastWriteError = error;
       // Persistence remains best-effort at synchronous call sites, as it was
       // with localStorage, but failures are no longer silent.
       console.error("could not persist settings", error);
     });
 }
 
-/**
- * Load the desktop file before React initializes synchronous settings state.
- * On the first successful load, import known localStorage keys in one atomic
- * write and only then remove the old copies.
- */
+/** Load the backend before React initializes synchronous settings state. */
 export async function initializeSettingsStorage(): Promise<void> {
-  if (!isTauri()) return;
+  initializationAttempted = true;
+  backendReady = false;
+  values.clear();
   try {
-    const loaded = await invokeCapability<SettingsGetOutput>("settings.get", {});
-    values.clear();
+    const loaded = await readBackendSettings();
     Object.entries(loaded.values).forEach(([key, value]) => values.set(key, value));
+    backendReady = true;
 
-    if (!loaded.localStorageMigrated) {
-      const migrated: Record<string, unknown> = {};
-      // Reading the OLD store is optional work: a WebView with localStorage
-      // disabled throws from getItem, and letting that escape would abandon
-      // the file backend we just loaded successfully — falling back to the
-      // very storage that is unavailable, so nothing could persist at all.
-      let scanned = true;
-      try {
-        for (const key of MIGRATION_KEYS) {
-          if (values.has(key)) continue;
-          for (const candidate of [key, ...aliasesFor(key)]) {
-            const raw = localStorage.getItem(candidate);
-            if (raw === null) continue;
-            migrated[key] =
-              key === "fl-theme-v2" &&
-              candidate === "fl-theme" &&
-              (raw === "light" || raw === "dark")
-                ? { name: "slate", mode: raw }
-                : decode(raw);
-            break;
-          }
-        }
-      } catch (error) {
-        // The scan is all-or-nothing on purpose. Committing the migrated flag
-        // after a partial read would retire the one-time import for good, so a
-        // transient storage failure would strand the legacy preferences
-        // permanently. Leave the flag unset and retry on the next launch.
-        scanned = false;
-        console.warn("localStorage unreadable; deferring migration to a later launch", error);
-      }
-
-      if (scanned) {
-        await invokeCapability("settings.set", {
-          values: migrated,
-          localStorageMigrated: true,
-        } satisfies SettingsSetInput);
-        Object.entries(migrated).forEach(([key, value]) => values.set(key, value));
-
-        // Only reached once the import is committed, so a failed or deferred
-        // migration always leaves its localStorage data intact for the retry.
-        try {
-          for (const key of MIGRATION_KEYS) {
-            localStorage.removeItem(key);
-            for (const alias of aliasesFor(key)) localStorage.removeItem(alias);
-          }
-        } catch (error) {
-          console.warn(
-            "durable settings migrated but old localStorage could not be cleared",
-            error,
-          );
+    // Scan the explicit allowlist on upgrades too: earlier releases omitted
+    // new-design preferences. Backend values always win over old local copies.
+    const migrated: Record<string, unknown> = {};
+    let scanned = true;
+    try {
+      for (const key of MIGRATION_KEYS) {
+        if (values.has(key)) continue;
+        for (const candidate of [key, ...aliasesFor(key)]) {
+          const raw = localStorage.getItem(candidate);
+          if (raw === null) continue;
+          migrated[key] = key === "fl-theme-v2" && candidate === "fl-theme" && (raw === "light" || raw === "dark")
+            ? { name: "slate", mode: raw } : decode(raw);
+          break;
         }
       }
+    } catch (error) {
+      scanned = false;
+      console.warn("localStorage unreadable; deferring migration to a later launch", error);
     }
-    fileBacked = true;
+    if (!scanned) return;
+    try {
+      if (!loaded.localStorageMigrated || Object.keys(migrated).length > 0) {
+        await writeBackendSettings({ values: migrated, ...(!loaded.localStorageMigrated ? { localStorageMigrated: true } : {}) });
+        Object.entries(migrated).forEach(([key, value]) => values.set(key, value));
+      }
+    } catch (error) {
+      console.error("could not migrate legacy settings; keeping the backend active and legacy copies intact", error);
+      return;
+    }
+    // Remove copies only after the backend accepted the import. Clearing stale
+    // copies of existing backend keys also prevents resurrection after a reset.
+    try {
+      for (const key of MIGRATION_KEYS) {
+        localStorage.removeItem(key);
+        for (const alias of aliasesFor(key)) localStorage.removeItem(alias);
+      }
+    } catch (error) {
+      console.warn("durable settings migrated but old localStorage could not be cleared", error);
+    }
   } catch (error) {
-    // A corrupt/unwritable file must not prevent the app from opening.
-    fileBacked = false;
-    console.error("could not initialize durable settings; using localStorage", error);
+    console.error("could not initialize settings backend; settings writes are unavailable", error);
   }
 }
 
 /** Storage-shaped synchronous facade used by the existing settings helpers. */
 export const settingsStorage = {
   getItem(key: string): string | null {
-    if (!fileBacked) return localStorage.getItem(key);
+    if (!initializationAttempted) return localStorage.getItem(key);
     return values.has(key) ? encode(values.get(key)) : null;
   },
 
   setItem(key: string, raw: string): void {
-    if (!fileBacked) {
+    if (!initializationAttempted) {
       localStorage.setItem(key, raw);
       return;
     }
+    if (!backendReady) throw new Error("Settings backend is unavailable");
     const value = decode(raw);
     values.set(key, value);
     enqueue({ values: { [key]: value } });
   },
 
   removeItem(key: string): void {
-    if (!fileBacked) {
+    if (!initializationAttempted) {
       localStorage.removeItem(key);
       return;
     }
+    if (!backendReady) throw new Error("Settings backend is unavailable");
     values.delete(key);
     enqueue({ remove: [key] });
   },
 };
 
 /** Test seam for callers that need to observe queued write completion. */
-export async function flushSettingsWrites(): Promise<void> {
+export async function flushSettingsWrites(options: { throwOnError?: boolean } = {}): Promise<void> {
   await writes;
+  if (options.throwOnError && lastWriteError) throw lastWriteError;
 }

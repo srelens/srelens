@@ -32,6 +32,10 @@ pub struct StatefulSetSummary {
     /// rebuilt when a watch event arrives — so it goes stale (#405).
     pub created: Option<String>,
     pub age: String,
+    /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
+    /// age live at render time. Empty when the resource carries none.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -58,6 +62,7 @@ pub(crate) fn summarise(sts: StatefulSet) -> StatefulSetSummary {
         service,
         created: crate::creation_rfc3339(sts.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(sts.metadata.creation_timestamp.as_ref()),
+        created_at: crate::creation_timestamp_iso(sts.metadata.creation_timestamp.as_ref()),
     }
 }
 
