@@ -1319,6 +1319,25 @@ jobs:
       version: ${{ needs.version.outputs.version }}
     secrets: inherit
 
+  # Same gate as homebrew. winget is a public catalogue of stable software,
+  # and unlike every other channel here the outcome is not ours to decide: the
+  # submission is a pull request into microsoft/winget-pkgs that moderation
+  # approves on its own schedule, so this run finishing green means "asked",
+  # not "published".
+  winget:
+    needs: [version, tui-publish, publish-release]
+    # `!cancelled()` first, as for homebrew and aur above: without a status
+    # function the implicit `success()` is false whenever any job in the
+    # transitive `needs` chain was skipped, and release-notes is skipped on
+    # main by design. The conditions that follow are the ones that decide.
+    if: ${{ !cancelled() && github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/winget-publish.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
+
   aur:
     # Also needs publish-release: updpkgsums fetches the release assets over
     # plain HTTPS, which only works once the release is out of draft.
