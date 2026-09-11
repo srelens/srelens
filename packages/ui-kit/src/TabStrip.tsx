@@ -174,7 +174,8 @@ export function TabStrip({
   // The tab to land on once the caller has actually removed the one being
   // closed. Held in a ref rather than state: nothing renders differently for
   // it, and it must survive the render that the close causes.
-  const pending = useRef<{ closed: string; next: string } | null>(null);
+  const pending = useRef<{ closed: string; next: string; pointer: boolean } | null>(null);
+  const restoringPointerFocus = useRef(false);
 
   const edges = useTabStripScroll(listRef, tabs.map(t => t.id).join("|"));
   const dragId = useRef<string | null>(null);
@@ -243,10 +244,12 @@ export function TabStrip({
     const node = refs.current.get(move.next);
     if (!node) return;
     setFocusedId(move.next);
+    restoringPointerFocus.current = move.pointer;
     node.focus();
+    restoringPointerFocus.current = false;
   }, [tabs]);
 
-  function requestClose(tab: StripTab) {
+  function requestClose(tab: StripTab, pointer = false) {
     // Pinned is the user saying "not this one", and a pinned tab shows no close
     // button — so Delete must not be the way around it.
     if (!onClose || tab.pinned) return;
@@ -255,7 +258,7 @@ export function TabStrip({
     // Only when the strip is where the focus already is: closing a tab from a
     // menu somewhere else should not pull the focus back here.
     const holdsFocus = listRef.current?.contains(document.activeElement) ?? false;
-    pending.current = holdsFocus && neighbour ? { closed: tab.id, next: neighbour.id } : null;
+    pending.current = holdsFocus && neighbour ? { closed: tab.id, next: neighbour.id, pointer } : null;
     onClose(tab.id);
   }
 
@@ -382,7 +385,7 @@ export function TabStrip({
               // that did not go through a window accelerator. It is a shortcut
               // now rather than the sole route, which is what made it a fault.
               onAuxClick={(event) => {
-                if (event.button === 1) requestClose(tab);
+                if (event.button === 1) requestClose(tab, true);
               }}
             >
               {tab.icon && (
@@ -418,7 +421,7 @@ export function TabStrip({
                       // the tab's own handler otherwise — and closing a tab you
                       // were not on should not first switch you to it.
                       event.stopPropagation();
-                      requestClose(tab);
+                      requestClose(tab, event.detail > 0);
                     }}
                   >
                     <CloseGlyph />
@@ -428,8 +431,13 @@ export function TabStrip({
             </div>
           );
 
-          const hinted = <Tooltip key={tab.id} side="bottom" disabled={dragging} label={<div className="tab-tooltip">
-            <strong>{tab.title}</strong>
+          const hinted = <Tooltip key={tab.id} side="bottom" disabled={dragging}
+            onFocus={event => {
+              // Closing with the pointer restores the tab stop, but is not a
+              // request to display the neighbouring tab's keyboard hint.
+              if (restoringPointerFocus.current) event.preventDefault();
+            }} label={<div className="tab-tooltip">
+            <div>{tab.title}</div>
             {filled(tab.context ?? tab.sub) && <div>{tab.context ?? tab.sub}</div>}
             {filled(tab.detail) && <div>{tab.detail}</div>}
           </div>}>{node}</Tooltip>;

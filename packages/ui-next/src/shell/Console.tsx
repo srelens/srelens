@@ -22,6 +22,7 @@ import {
 import { AgentPicker } from "../screens/agent/AgentPicker";
 import { LOADING, type Read } from "../lib/read";
 import { contextLabelFor } from "../lib/agentSuggestions";
+import { useContextLabel } from "../lib/contextLabel";
 import { askContextFor, runKeyFor } from "../lib/askContext";
 import { useNamespaces } from "../lib/workspace";
 import { readImageFile } from "../lib/pastedImages";
@@ -270,7 +271,8 @@ export function Console({ fullView }: { fullView?: boolean }) {
   const askAbout = shown?.about ?? about;
   const askCluster = askAbout.cluster || context;
   const askPaused = contexts.some(c => c.name === askCluster && workspace.pausedClusters?.includes(c.stableId));
-  const askScope = shown ? contextLabelFor(shown.route, shown.about.cluster) : scope;
+  const shownClusterLabel = useContextLabel(shown?.about.cluster ?? "", contexts.find(c => c.name === shown?.about.cluster)?.stableId);
+  const askScope = shown ? contextLabelFor(shown.route, shownClusterLabel) : scope;
 
   const deps = useMemo<CommandDeps>(
     () => ({

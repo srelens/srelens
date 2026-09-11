@@ -432,11 +432,25 @@ describe("TabStrip with nothing open", () => {
 });
 
 describe("tab navigation enhancements", () => {
+  it("does not open a neighbour's tooltip when a pointer close transfers focus", async () => {
+    function Harness() {
+      const [tabs, setTabs] = useState<StripTab[]>([{ id: "home", title: "Home", pinned: true }, { id: "pods", title: "Pods" }]);
+      return <TabStrip tabs={tabs} activeId="pods" onSelect={() => {}} onClose={id => setTabs(rest => rest.filter(t => t.id !== id))} />;
+    }
+    render(<Harness />);
+    await userEvent.click(screen.getByRole("button", { name: "Close Pods" }));
+    expect(document.activeElement).toBe(tab("Home"));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    await userEvent.hover(tab("Home"));
+    expect(await screen.findByRole("tooltip")).toBeDefined();
+  });
   it("shows full identity on keyboard focus and dismisses it with Escape", async () => {
-    setup({ tabs: [{ id: "one", title: "ConfigMaps", sub: "short", context: "long-cluster-context", detail: "ConfigMap · monitoring" }] });
+    const title = "production-monitoring-collector-configuration";
+    setup({ tabs: [{ id: "one", title, sub: "short", context: "long-cluster-context", detail: "ConfigMap · monitoring" }] });
     await userEvent.tab();
     expect((await screen.findByRole("tooltip")).textContent).toContain("long-cluster-context");
     expect(screen.getByRole("tooltip").textContent).toContain("ConfigMap · monitoring");
+    expect(screen.getByRole("tooltip").textContent).toContain(title);
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("tooltip")).toBeNull();
   });

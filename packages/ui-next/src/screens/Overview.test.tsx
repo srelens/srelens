@@ -481,7 +481,7 @@ describe("Overview — the nodes table", () => {
   it("empties the table and says why when the node list is refused", async () => {
     core.listNodes.mockResolvedValue({ error: "nodes is forbidden" });
     open();
-    await waitFor(() => expect(screen.getByText(/nodes is forbidden/)).toBeTruthy());
+    await waitFor(() => expect(within(screen.getByRole("heading", { name: "Nodes" }).closest("section")!).getByText(/nodes is forbidden/)).toBeTruthy());
     // One refused list is one empty section: the namespace count is untouched.
     expect(value("Namespaces")).toBe("4");
   });
@@ -1167,7 +1167,7 @@ describe("Overview — the rail's object counts", () => {
   });
 });
 
-describe("Overview — the rail's incidents and fleet", () => {
+describe("Overview — the rail's incidents and node versions", () => {
   it("names the incidents section rather than leaving a hole", async () => {
     open();
     const incidents = await waitFor(() => section("Open incidents"));
@@ -1180,25 +1180,37 @@ describe("Overview — the rail's incidents and fleet", () => {
     expect(incidents.textContent).not.toMatch(/SEV-\d/);
   });
 
-  it("counts this cluster's pods in the fleet, whatever else is in the workspace", async () => {
-    core.podCount.mockResolvedValue({ counts: { running: 30, total: 33 } });
+  it("shows versions from this cluster without querying other workspace clusters", async () => {
+    const other = { ...CTX, name: "other", stableId: "other" };
+    setContexts([CTX, other]);
+    store.setState(defaultState([CTX, other]));
+    core.listNodes.mockResolvedValue({ nodes: [aNode("n1"), aNode("n2"), aNode("n3", { version: "v1.32.5" })] });
     open();
-
-    const fleet = await waitFor(() => section("Fleet"));
-    expect(fleet.hasAttribute("data-band")).toBe(true);
-    await waitFor(() => expect(fleet.textContent).toContain("30/33 running"));
-    expect(within(fleet).getByText("prod-eu")).toBeTruthy();
-    expect(core.podCount).toHaveBeenCalledWith("prod-eu");
+    const versions = await waitFor(() => section("Node versions"));
+    await waitFor(() => expect(versions.textContent).toContain("v1.31.4"));
+    expect(within(versions).getByText("2 nodes")).toBeTruthy();
+    expect(within(versions).getByText("v1.32.5")).toBeTruthy();
+    expect(within(versions).getByText("1 node")).toBeTruthy();
+    expect(screen.queryByText("Fleet")).toBeNull();
+    expect(core.podCount).not.toHaveBeenCalled();
+    expect(core.listNodes.mock.calls.map(([context]) => context)).toEqual([CTX.name]);
   });
 
-  it("keeps the rest of the screen when the fleet cannot answer", async () => {
-    core.podCount.mockResolvedValue({ error: "pod count timed out" });
+  it("shows a node-read failure instead of reporting no versions", async () => {
+    core.listNodes.mockResolvedValue({ error: "node list denied" });
     open();
+    const versions = await waitFor(() => section("Node versions"));
+    await waitFor(() => expect(within(versions).getByRole("button", { name: "Retry" })).toBeTruthy());
+    expect(versions.textContent).not.toContain("No nodes");
+    core.listNodes.mockResolvedValue({ nodes: [aNode("n1", {version:""})] });
+    await userEvent.click(within(versions).getByRole("button", {name:"Retry"}));
+    await waitFor(() => expect(within(versions).getByText("Not reported")).toBeTruthy());
+  });
 
-    await waitFor(() => expect(section("Fleet").textContent).toContain("Unreachable"));
-    // Fleet is a courtesy; the overview is about this cluster.
-    expect(value("Nodes")).toBe("3");
-    expect(rowFor("n1")).toBeTruthy();
+  it("reports an empty current cluster", async () => {
+    core.listNodes.mockResolvedValue({ nodes: [] });
+    open();
+    await waitFor(() => expect(section("Node versions").textContent).toContain("No nodes"));
   });
 });
 
@@ -1243,7 +1255,7 @@ describe("Overview — a flat surface, not a stack of cards", () => {
       "Control plane",
       "Objects by kind",
       "Open incidents",
-      "Fleet",
+      "Node versions",
     ]);
     for (const host of [leftColumn()!, railBody()!]) {
       expect([...host.children].every((el) => el.matches("section.section"))).toBe(true);
@@ -1296,33 +1308,24 @@ describe("Overview — a flat surface, not a stack of cards", () => {
     expect(unpadded("Not ready")).toBe("false");
     expect(unpadded("Objects by kind")).toBe("false");
     // Headings are flush; only the fact content retains a reading gutter.
-    for (const title of ["Control plane", "Fleet"]) {
+    for (const title of ["Control plane", "Node versions"]) {
       expect(unpadded(title)).toBe("false");
       expect(section(title).querySelector(".px-3 > .kv")).not.toBeNull();
     }
   });
 
-  it("heads the left column with the cluster and its server version", async () => {
+  it("keeps the server version in Control plane without a duplicate cluster heading", async () => {
     await probed("v1.31.4");
     open();
 
-    // §7's `prod-eu · v1.31.4`, level with the rail's own head. The version is
-    // the probe's — the same reading the rail's `Version` row takes, not a
-    // second call.
-    await waitFor(() =>
-      expect(document.querySelector('[data-slot="main-head"]')?.textContent).toBe(
-        "prod-eu · v1.31.4",
-      ),
-    );
+    await waitFor(() => expect(within(section("Control plane")).getByText("v1.31.4")).toBeTruthy());
+    expect(document.querySelector('[data-slot="main-head"]')).toBeNull();
   });
 
-  it("heads it with the name alone until something has probed the cluster", async () => {
+  it("does not reserve a duplicate heading before the cluster has been probed", async () => {
     open();
-    // Not "prod-eu · " — a separator with nothing after it reads as a fact
-    // that failed to load rather than as one nobody has asked for yet.
-    await waitFor(() =>
-      expect(document.querySelector('[data-slot="main-head"]')?.textContent).toBe("prod-eu"),
-    );
+    await waitFor(() => expect(rowFor("n1")).toBeTruthy());
+    expect(document.querySelector('[data-slot="main-head"]')).toBeNull();
   });
 });
 
@@ -1503,6 +1506,9 @@ describe("Overview — a nodes band that stays a summary", () => {
   it("marks the two node actions with the design's glyphs", async () => {
     open();
     await waitFor(() => expect(rowFor("n1")).toBeTruthy());
+    // Natural table sizing must reserve room for both buttons and overflow;
+    // otherwise the overflow trigger wraps and doubles every node's height.
+    expect(within(rowFor("n1")).getByRole("group", { name: "Actions for n1" }).className).toContain("w-max");
 
     // A crossed circle on Cordon, a wave on Drain. From `lib/icons` — the
     // app's vocabulary — because the kit takes no icon-set dependency.

@@ -274,7 +274,7 @@ describe("node columns", () => {
     expect(nodeColumns.some((c) => c.key === "namespace")).toBe(false);
   });
 
-  it("formats CPU and memory exactly as pods do — the same two readings must not drift", () => {
+  it("shows node CPU in cores while preserving memory units", () => {
     const cpu = nodeColumns.find((c) => c.key === "cpu")!;
     const memory = nodeColumns.find((c) => c.key === "memory")!;
     const node = {
@@ -283,7 +283,12 @@ describe("node columns", () => {
     };
     const withCpu = { ...node, cpu: 2410 };
     const withMemory = { ...node, memory: 3174 };
-    expect(cpu.render!(withCpu)).toBe("2 410m");
+    expect(cpu.render!(withCpu)).toBe("2.41 cores");
+    expect(cpu.render!({ ...node, cpu: 10399 })).toBe("10.4 cores");
+    expect(cpu.render!({ ...node, cpu: 964 })).toBe("0.964 cores");
+    expect(cpu.render!({ ...node, cpu: 1000 })).toBe("1 core");
+    expect(cpu.render!({ ...node, cpu: 0 })).toBe("0 cores");
+    expect(cpu.render!(node)).toBe("—");
     expect(memory.render!(withMemory)).toBe("3.1 Gi");
   });
 });

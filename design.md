@@ -18,6 +18,27 @@ pair, not proof that every screen is accessible.
 
 ## Theme and mode contract
 
+### Cluster overview refinements (2026-09-10)
+
+- Overview information belongs to the current cluster. Node-version counts
+  reuse its loaded node list; no Fleet queries run against other contexts.
+- Node actions reserve their intrinsic width so the overflow menu stays on
+  the same row as Cordon/Uncordon and Drain.
+- The node list displays CPU usage in cores, with up to three decimal places
+  below one core and two above it; sorting still uses raw millicores.
+- The overview has one title strip. Server version remains in Control plane.
+  Compact tab hints retain the full title alongside context/detail so truncated
+  resource names remain readable, with each identifier horizontally scrollable.
+- Context labels in resource headers, tab hints and the assistant prompt prefer
+  the saved short name, falling back to the display name. Requests and stored
+  tab identities continue to use the original kubeconfig context name.
+- The collapsed assistant prompt hides overflow within its one-line strip;
+  focus opens the full editor, which retains scrolling for longer prompts.
+
+Verified in a local browser harness with long node names, mixed versions,
+sub-core CPU usage, dark theme, and tab hover. This complements component tests;
+it does not replace native webview validation.
+
 | Axis | Supported values | Contract |
 | --- | --- | --- |
 | Theme | Light, Paper, Dark, Midnight, High contrast | Same information hierarchy and interaction model in every theme. |

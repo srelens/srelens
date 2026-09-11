@@ -1509,6 +1509,10 @@ it("shows saved display names on tabs while retaining the real context for opera
   act(() => store.openTab("/k/pods", { clusterName: "prod" }));
   expect(screen.getByRole("tab", { name: /Pods · Production Europe/ })).toBeDefined();
   expect(store.currentWorkspace().tabs.find(tab => tab.route === "/k/pods")?.sub).toBe("prod");
+  act(() => { screen.getByRole("tab", { name: /Pods · Production Europe/ }).focus(); });
+  expect((await screen.findByRole("tooltip")).textContent).toContain("PE");
+  expect(screen.getByRole("tooltip").textContent).not.toContain("prod");
+  expect(await screen.findByPlaceholderText("Ask about PE / pods")).toBeDefined();
   act(() => setMark("prod", { ...defaultMark("prod"), name: "Production East" }));
   expect(screen.getByRole("tab", { name: /Pods · Production East/ })).toBeDefined();
 });

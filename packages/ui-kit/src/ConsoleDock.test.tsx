@@ -93,6 +93,14 @@ describe("ConsoleDock", () => {
     expect(screen.getByRole("textbox", { name: "Console prompt" })).toBeDefined();
   });
 
+  it("hides scrollbars in the collapsed prompt while leaving the expanded editor scrollable", () => {
+    const view = setup({ open: false });
+    expect(screen.getByRole("textbox").classList.contains("overflow-hidden")).toBe(true);
+    view.unmount();
+    setup({ open: true });
+    expect(screen.getByRole("textbox").classList.contains("overflow-hidden")).toBe(false);
+  });
+
   it("shows no output region when collapsed", () => {
     setup({ open: false });
     expect(screen.queryByRole("log")).toBeNull();

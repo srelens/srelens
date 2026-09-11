@@ -61,6 +61,12 @@ export function formatCpu(value: number): string {
   return `${rounded < 0 ? "-" : ""}${grouped}m`;
 }
 
+/** Node usage is easier to compare in cores; retain millicore precision below one core. */
+export function formatNodeCpu(value: number): string {
+  const cores = Number((value / 1000).toFixed(Math.abs(value) < 1000 ? 3 : 2));
+  return `${cores} ${cores === 1 ? "core" : "cores"}`;
+}
+
 /**
  * Memory in Mi: a bare number under 1024 Mi ("412 Mi"), scaled to Gi with one
  * decimal place at or above it ("3.1 Gi") — the design shows both, and a
@@ -322,7 +328,7 @@ export const nodeColumns: Column<NodeRow>[] = [
     ),
   },
   { key: "roles", header: "Roles" },
-  { key: "cpu", header: "CPU", sortable: true, align: "end", render: (n) => metric(n.cpu, formatCpu), getSortValue: (n) => metricSort(n.cpu) },
+  { key: "cpu", header: "CPU", sortable: true, align: "end", render: (n) => metric(n.cpu, formatNodeCpu), getSortValue: (n) => metricSort(n.cpu) },
   { key: "memory", header: "Memory", sortable: true, align: "end", render: (n) => metric(n.memory, formatMemory), getSortValue: (n) => metricSort(n.memory) },
   { key: "version", header: "Version" },
   {

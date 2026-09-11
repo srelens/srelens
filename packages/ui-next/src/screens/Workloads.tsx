@@ -1,3 +1,4 @@
+import { ContextLabel } from "../lib/contextLabel";
 import { useEffect, useMemo, useState } from "react";
 import {
   ageSortValue,
@@ -440,7 +441,7 @@ function WorkloadList({
   return (
     <Screen
       title={title}
-      eyebrow={name}
+      eyebrow={<ContextLabel context={context} />}
       fill
       actions={
         <>
