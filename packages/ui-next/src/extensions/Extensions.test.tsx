@@ -33,7 +33,7 @@ const plugin = {
   settings: {},
 } as any;
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
     developerMode: false,
@@ -291,3 +291,52 @@ it("registers cluster-pinned extension routes with a real screen", async () => {
   expect(isClusterScopedRoute(route)).toBe(true);
   expect(screenFor("/extensions/")).toBeNull();
 });
+
+it("explains a missing extension API and keeps the server error collapsed", async () => {
+  const installed = structuredClone(plugin);
+  Object.assign(installed.manifest.capabilities[0].arguments, {
+    group: "argoproj.io",
+    version: "v1alpha1",
+    plural: "applications",
+    kind: "Application",
+  });
+  const raw =
+    'ApiError: 404 page not found : Failed to parse error data (Status { code: 404, message: "404 page not found" })';
+  vi.mocked(readExtension)
+    .mockRejectedValueOnce(new Error(raw))
+    .mockResolvedValueOnce({ items: [] });
+  render(
+    <ExtensionResults plugin={installed} capability="list" context="M01" />,
+  );
+  expect(await screen.findByText("Application API unavailable")).toBeTruthy();
+  expect(screen.getByRole("alert").textContent).toContain(
+    "argoproj.io/v1alpha1",
+  );
+  expect(screen.getByRole("alert").textContent).toContain(
+    "does not install its Kubernetes APIs",
+  );
+  expect(screen.getByText(raw).closest("details")?.hasAttribute("open")).toBe(
+    false,
+  );
+  expect(
+    screen.queryByText("No resources returned by this extension."),
+  ).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(
+    await screen.findByText("No resources returned by this extension."),
+  ).toBeTruthy();
+});
+it.each(["ApiError: Forbidden (code: 403)", "list custom resource timed out"])(
+  "does not turn %s into an API absence",
+  async (message) => {
+    vi.mocked(readExtension).mockRejectedValueOnce(new Error(message));
+    render(
+      <ExtensionResults plugin={plugin} capability="list" context="M01" />,
+    );
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.queryByText(/API unavailable/)).toBeNull();
+    expect(
+      screen.queryByText(/does not install its Kubernetes APIs/),
+    ).toBeNull();
+  },
+);

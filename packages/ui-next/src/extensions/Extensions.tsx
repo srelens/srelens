@@ -49,10 +49,12 @@ function ErrorNotice({
   message,
   retry,
   cluster = false,
+  guidance,
 }: {
   message?: string;
   retry: () => void;
   cluster?: boolean;
+  guidance?: { title: string; detail: string };
 }) {
   const { Button } = useContext(ExtensionControls);
   const error = describeError(message, {
@@ -61,9 +63,9 @@ function ErrorNotice({
   return (
     <div className="extension-error" role="alert">
       <div>
-        <strong>{error.title}</strong>
-        <p>{error.detail}</p>
-        {error.raw !== error.detail && (
+        <strong>{guidance?.title ?? error.title}</strong>
+        <p>{guidance?.detail ?? error.detail}</p>
+        {error.raw !== (guidance?.detail ?? error.detail) && (
           <details>
             <summary>Original error</summary>
             <pre>{error.raw}</pre>
@@ -113,8 +115,34 @@ export function ExtensionResults({
         Choose a cluster before opening an extension page.
       </p>
     );
-  if (data.status === "error")
-    return <ErrorNotice cluster message={data.error} retry={data.reload} />;
+  if (data.status === "error") {
+    // A 404 identifies an unavailable endpoint, not why it is unavailable.
+    // Name the required API without claiming that discovery proved it absent.
+    const args = binding?.arguments;
+    const notFound =
+      /\bApiError:\s*404\b|\bcode:\s*404\b|\b404 page not found\b/i.test(
+        data.error ?? "",
+      );
+    const guidance =
+      notFound &&
+      typeof args?.group === "string" &&
+      typeof args.version === "string" &&
+      typeof args.plural === "string" &&
+      typeof args.kind === "string"
+        ? {
+            title: `${args.kind} API unavailable`,
+            detail: `This extension reads ${args.plural} from ${args.group}/${args.version}. Check that the selected cluster serves this API version. Installing an extension does not install its Kubernetes APIs.`,
+          }
+        : undefined;
+    return (
+      <ErrorNotice
+        cluster
+        message={data.error}
+        retry={data.reload}
+        guidance={guidance}
+      />
+    );
+  }
   if (data.status === "loading")
     return (
       <p role="status" className="extension-message">
