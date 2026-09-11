@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::{Constraint, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::Span,
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
     Frame,
 };
 use serde::{Deserialize, Serialize};
@@ -143,7 +143,7 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
         .border_style(Style::default().fg(Theme::border()))
         .title(Span::styled(title, Theme::title()));
 
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
     f.render_widget(block, area);
 
     if state.is_loading {
@@ -154,10 +154,15 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
     }
 
     if let Some(ref err) = state.error {
-        let error_msg = Paragraph::new(format!("⚠ Failed to load Helm releases: {}", err))
-            .style(Style::default().fg(Theme::red()));
-        f.render_widget(error_msg, inner);
-        return;
+        let message = if state.releases.is_empty() {
+            format!("Failed to load Helm releases: {err}. Press R to retry.")
+        } else {
+            format!("Refresh failed; rows are stale: {err}. Press R to retry. Rollback is disabled.")
+        };
+        let regions = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(inner);
+        f.render_widget(Paragraph::new(message).wrap(Wrap { trim: true }).style(Style::default().fg(Theme::red())), regions[0]);
+        if state.releases.is_empty() { return; }
+        inner = regions[1];
     }
 
     if state.releases.is_empty() {

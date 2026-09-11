@@ -2048,58 +2048,58 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     assert!(config.show_feature_banner);
 
     // Selected field 3: Startup Feature Banner toggle
-    state.adjust_current(1, &mut config);
+    let _ = state.adjust_current(1, &mut config);
     assert!(!config.show_feature_banner);
-    state.cycle_current(&mut config);
+    let _ = state.cycle_current(&mut config);
     assert!(config.show_feature_banner);
 
     // Switch to field 2: Text size / density slider (1..=4)
     state.select_prev_field();
     assert_eq!(state.selected_field, 2);
 
-    state.adjust_current(1, &mut config);
+    let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Standard);
-    state.adjust_current(1, &mut config);
+    let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Large);
-    state.adjust_current(1, &mut config);
+    let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.command_popup_density, CommandPopupDensity::ExtraLarge);
-    state.adjust_current(1, &mut config);
+    let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.command_popup_density, CommandPopupDensity::ExtraLarge); // Clamped at 4
-    state.adjust_current(-1, &mut config);
+    let _ = state.adjust_current(-1, &mut config);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Large);
-    state.cycle_current(&mut config);
+    let _ = state.cycle_current(&mut config);
     assert_eq!(config.command_popup_density, CommandPopupDensity::ExtraLarge);
-    state.cycle_current(&mut config);
+    let _ = state.cycle_current(&mut config);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
 
     // Switch to field 1: Visible Rows (step 1, range 3..=20)
     state.select_prev_field();
     assert_eq!(state.selected_field, 1);
 
-    state.adjust_current(1, &mut config);
+    let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.command_popup_max_visible, 7);
 
-    state.adjust_current(-3, &mut config);
+    let _ = state.adjust_current(-3, &mut config);
     assert_eq!(config.command_popup_max_visible, 4);
 
-    state.adjust_current(-10, &mut config);
+    let _ = state.adjust_current(-10, &mut config);
     assert_eq!(config.command_popup_max_visible, 3); // Clamped at 3
 
     // Switch to field 0: Width (step 5, range 40..=200)
     state.select_prev_field();
     assert_eq!(state.selected_field, 0);
 
-    state.adjust_current(2, &mut config);
+    let _ = state.adjust_current(2, &mut config);
     assert_eq!(config.command_popup_max_width, 75);
 
-    state.adjust_current(50, &mut config);
+    let _ = state.adjust_current(50, &mut config);
     assert_eq!(config.command_popup_max_width, 200); // Clamped at 200
 
-    state.adjust_current(-50, &mut config);
+    let _ = state.adjust_current(-50, &mut config);
     assert_eq!(config.command_popup_max_width, 40); // Clamped at 40
 
     // Reset defaults
-    state.reset_defaults(&mut config);
+    let _ = state.reset_defaults(&mut config);
     assert_eq!(config.command_popup_max_width, 65);
     assert_eq!(config.command_popup_max_visible, 6);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);

@@ -757,7 +757,7 @@ fn render_manifest_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         String::new()
     };
 
-    let title = format!(" Rendered Kubernetes Manifests (YAML) (<c> Copy  </> Search){} ", search_badge);
+    let title = format!(" Rendered Kubernetes Manifests (YAML) (<y> Copy  </> Search){} ", search_badge);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(Theme::border_type())
@@ -839,7 +839,7 @@ fn render_notes_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         String::new()
     };
 
-    let title = format!(" Chart Release Notes (NOTES.txt) (<c> Copy  </> Search){} ", search_badge);
+    let title = format!(" Chart Release Notes (NOTES.txt) (<y> Copy  </> Search){} ", search_badge);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(Theme::border_type())
@@ -896,8 +896,8 @@ fn render_bottom_hints(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         HelmDetailTab::Overview => "<Tab> Switch Tab  <1-5> Jump Tab  <Esc> Back to Releases",
         HelmDetailTab::ValuesDiff => "<Tab> Switch Tab  <m> Toggle Diff Mode  </> Search  <n/N> Next/Prev  <j/k> Scroll  <g/G> Top/Bottom  <Esc> Back",
         HelmDetailTab::Revisions => "<Tab> Switch Tab  <j/k> Select Rev  <r> Rollback to Selected  <Enter>/<v> View  <Esc> Back",
-        HelmDetailTab::Manifest => "<Tab> Switch Tab  <j/k> Scroll  <g/G> Top/Bottom  <c> Copy  </> Search  <n/N> Next/Prev  <Esc> Back",
-        HelmDetailTab::Notes => "<Tab> Switch Tab  <j/k> Scroll  <g/G> Top/Bottom  <c> Copy  </> Search  <n/N> Next/Prev  <Esc> Back",
+        HelmDetailTab::Manifest => "<Tab> Switch Tab  <j/k> Scroll  <g/G> Top/Bottom  <y> Copy  </> Search  <n/N> Next/Prev  <Esc> Back",
+        HelmDetailTab::Notes => "<Tab> Switch Tab  <j/k> Scroll  <g/G> Top/Bottom  <y> Copy  </> Search  <n/N> Next/Prev  <Esc> Back",
     };
 
     let p = Paragraph::new(format!(" {}", hints))

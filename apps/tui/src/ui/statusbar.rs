@@ -43,8 +43,8 @@ pub fn command_popup_rect(
 ) -> Rect {
     let visible_count = item_count.min(max_visible);
     let item_h = density.item_height();
-    let content_height = (visible_count as u16) * item_h;
-    let popup_height = content_height + 2;
+    let content_height = visible_count.min(u16::MAX as usize) as u16;
+    let popup_height = content_height.saturating_mul(item_h).saturating_add(2).min(area.y);
     let popup_width = area.width.saturating_sub(4).min(max_width);
     Rect {
         x: area.x + 2,
@@ -84,7 +84,11 @@ pub fn render_statusbar(f: &mut Frame, area: Rect, props: StatusBarProps) {
                     let max_width = props.command_popup_max_width.unwrap_or(65);
                     let max_visible = props.command_popup_max_visible.unwrap_or(6);
                     let density = props.command_popup_density.unwrap_or_default();
+                    let density = if area.y.saturating_sub(2) < density.item_height() {
+                        CommandPopupDensity::Compact
+                    } else { density };
                     let popup_area = command_popup_rect(area, suggs.len(), max_width, max_visible, density);
+                    if popup_area.height < 3 || popup_area.width < 3 { return; }
                     f.render_widget(Clear, popup_area);
                     let inner_height = popup_area.height.saturating_sub(2);
                     let item_lines = density.item_height();
