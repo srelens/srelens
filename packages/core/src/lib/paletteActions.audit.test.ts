@@ -6,6 +6,7 @@ import { paletteActionCapabilityIds } from "./paletteActions";
 // list small and justified — the whole point is that new mutating capabilities
 // fail CI until they are either palette-registered or excluded here.
 const EXCLUDED: Record<string, string> = {
+  "extensions.configure": "extension lifecycle and permissions are managed in Settings → Extensions",
   "k8s.applyManifest": "reached via the manifest editor, not a one-click palette action",
   "k8s.updateConfigData": "ConfigMap/Secret data edits happen in the ResourceOverview drawer, which needs a key/value patch beyond a bare resource ref",
   "k8s.deleteContext": "kubeconfig management lives in Settings",

@@ -35,20 +35,22 @@ export interface CapabilityFacts {
 export const CAPABILITY_CATALOG: readonly CapabilityFacts[] = catalog;
 
 /**
- * The two ids the catalog carries that a WEB registry does not register.
+ * The host-owned ids the catalog carries that a WEB registry does not register.
  *
  * The committed catalog projects `build_registry()` — the desktop/MCP registry,
- * which includes the durable desktop settings surface. A web server builds its
+ * which includes durable desktop settings and local extension inventory. A web server builds its
  * registry through `build_registry_with_paths`, which passes no settings path,
  * because web settings are per-user SQLite rows rather than a file on the host;
  * `web_registry_omits_host_desktop_settings` (`crates/registry/src/lib.rs`)
- * pins exactly these two ids as the difference.
+ * pins those host-owned ids as the difference.
  *
  * Named here so a count shown to a reader is a count of what THEIR build
  * registers. Off by one is a small error, and shipping a small error while
  * fixing a large one is how the large one came to be.
  */
-export const HOST_ONLY_CAPABILITY_IDS: readonly string[] = ["settings.get", "settings.set"];
+export const HOST_ONLY_CAPABILITY_IDS: readonly string[] = [
+  "settings.get", "settings.set", "extensions.list", "extensions.configure", "extensions.read", "extensions.freelensRead",
+];
 
 /**
  * Every capability that cannot run without a confirmation, sorted by id.

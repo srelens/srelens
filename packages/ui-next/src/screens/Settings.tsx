@@ -1,5 +1,9 @@
+import { getContextLabel } from "../lib/marks";
+import { ExtensionManager } from "../extensions/Extensions";
+import { useContexts } from "../lib/clusters";
+import { openTab } from "../lib/tabsStore";
 import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { isTauri } from "@srelens/core";
+import { extensionRoute, isTauri } from "@srelens/core";
 import { Screen } from "@srelens/ui-kit";
 import type { RoutedScreenProps } from "../lib/routes";
 import { ApplicationLogsPane, KubernetesPane, WorkspacePane } from "./settings/PreferencePanes";
@@ -16,7 +20,7 @@ import { AccessibilityPane, ClustersPane, ShortcutsPane } from "./settings/Small
 /** §23's rail width for this screen, and this screen's alone (§A.1's table). */
 const NAV_WIDTH = 196;
 
-type SectionId = "agent" | "security" | "appearance" | "accessibility" | "shortcuts" | "workspace" | "kubernetes" | "logs" | "updates" | "clusters";
+type SectionId = "extensions" | "agent" | "security" | "appearance" | "accessibility" | "shortcuts" | "workspace" | "kubernetes" | "logs" | "updates" | "clusters";
 
 /**
  * §23's nav, in §23's order, minus `Deep links`.
@@ -78,6 +82,7 @@ const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true
   { id: "logs", label: "Application logs" },
   { id: "updates", label: "Updates", desktopOnly: true },
   { id: "clusters", label: "Clusters" },
+  { id: "extensions", label: "Extensions", desktopOnly: true },
 ];
 
 /**
@@ -95,6 +100,7 @@ export type SettingsProps = RoutedScreenProps;
 
 export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps) {
   const desktop = isTauri();
+  const contexts = useContexts();
   const visible = SECTIONS.filter((s) => !s.desktopOnly || desktop);
 
   const [updatesOpened, setUpdatesOpened] = useState(false);
@@ -198,6 +204,8 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
         return <ApplicationLogsPane />;
       case "updates":
         return null;
+      case "extensions":
+        return <ExtensionManager contexts={contexts.map(c => ({name: c.name, label: getContextLabel(c.stableId, c.name)}))} onOpen={(plugin, page, context) => openTab(extensionRoute(context, plugin.manifest.id, page.id), { clusterName: context })} />;
       case "clusters":
         return <ClustersPane />;
     }
@@ -286,7 +294,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
           // The one Tab stop into the pane's own content, so a reader arrowing
           // to a section can Tab straight into it.
           tabIndex={0}
-          className={`scroll min-h-0 min-w-0 flex-1${active === "updates" || active === "clusters" || active === "agent" ? "" : " p-3"}`}
+          className={`scroll min-h-0 min-w-0 flex-1${active === "extensions" || active === "updates" || active === "clusters" || active === "agent" ? "" : " p-3"}`}
         >
           {pane(active)}
           {desktop && updatesOpened && (

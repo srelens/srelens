@@ -7,7 +7,7 @@
     "tauri": "pnpm --filter @srelens/desktop tauri",
     "build": "pnpm --filter @srelens/desktop build",
     "typecheck": "pnpm -r typecheck",
-    "test": "vitest run --coverage",
+    "test": "node packages/lens-compat/build.mjs && vitest run --coverage && pnpm --filter @srelens/lens-compat test",
     "test:packages": "pnpm -r test"
   },
   "devDependencies": {

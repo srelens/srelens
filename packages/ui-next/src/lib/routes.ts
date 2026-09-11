@@ -1,3 +1,5 @@
+import { parseExtensionRoute } from "@srelens/core";
+import { ExtensionPage } from "../screens/ExtensionPage";
 import type { ComponentType } from "react";
 import { K8S_KIND, RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
 import { parseDetailRoute, parseEditRoute, parseNewRoute } from "./detailRoute";
@@ -117,6 +119,8 @@ function decodedSegment(raw: string): string {
  * passed in by whoever knows it; the mock hard-coded "prod-eu".
  */
 export function describe(route: string, clusterName?: string): RouteInfo {
+  const extension = parseExtensionRoute(route);
+  if (extension) return { route, title: extension.page, sub: extension.context, kind: "resource" };
   const sub = clusterName || undefined;
   if (route.startsWith("/resources/")) {
     const [, , rawName, suffix] = route.split("/");
@@ -199,6 +203,7 @@ export function tabDetail(route: string): string | undefined {
 
 /** Whether a route follows a cluster rather than being an app-level screen. */
 export function isClusterScopedRoute(route: string): boolean {
+  if (parseExtensionRoute(route)) return true;
   // `describe` is already the one exhaustive parser for route shapes. Passing
   // a sentinel lets its `sub` answer this without duplicating dynamic routes.
   const sentinel = "__cluster_scope__";
@@ -360,6 +365,7 @@ const SCREENS: Record<string, ScreenComponent> = Object.assign(Object.create(nul
 const PREFIXED: ReadonlyArray<[string, ScreenComponent]> = [["/k/", Resources]];
 
 export function screenFor(route: string): ScreenComponent | null {
+  if (parseExtensionRoute(route)) return ExtensionPage;
   // `hasOwnProperty.call` as well as the null prototype: the table is the one
   // thing standing between an arbitrary route string and something rendered as
   // a component, and it costs nothing to say so twice.

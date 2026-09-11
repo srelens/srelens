@@ -1,3 +1,4 @@
+import { ExtensionResourceSlot } from "../../extensions/Extensions";
 import { useId, type ReactNode } from "react";
 import {
   ageFromTimestamp,
@@ -335,6 +336,7 @@ export function ResourceTabView({ context, kind, namespace, name }: ResourceTabV
             the other exists. A provider renders no element, so the run of
             sections beneath is unbroken. */}
         <SectionMemory kind={kind}>{pane}</SectionMemory>
+        {active === PANE_DETAILS && <ExtensionResourceSlot context={context} kind={kind} namespace={namespace} name={name} />}
       </div>
     </section>
   );

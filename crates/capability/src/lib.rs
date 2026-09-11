@@ -92,6 +92,11 @@ impl Registry {
         self.caps.insert(cap.id.clone(), cap);
     }
 
+    /// Remove a capability from this registry snapshot.
+    pub fn unregister(&mut self, id: &str) -> Option<Capability> {
+        self.caps.remove(id)
+    }
+
     pub fn ids(&self) -> Vec<&str> {
         self.caps.keys().map(String::as_str).collect()
     }

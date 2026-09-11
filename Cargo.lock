@@ -6503,9 +6503,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "srelens-plugin-host"
+version = "0.12.0"
+dependencies = [
+ "flate2",
+ "schemars 0.8.22",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "srelens-capability",
+ "srelens-mcp",
+ "srelens-registry",
+ "tar",
+ "tokio",
+]
+
+[[package]]
 name = "srelens-registry"
 version = "0.12.0"
 dependencies = [
+ "base64 0.22.1",
  "dirs",
  "libc",
  "reqwest 0.13.4",
@@ -6515,6 +6533,7 @@ dependencies = [
  "srelens-capability",
  "srelens-kube",
  "srelens-mcp",
+ "srelens-plugin-host",
  "tempfile",
  "tokio",
 ]

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+srelens-plugin-host = { path = "../plugin-host" }
 srelens-capability = { path = "../capability" }
 srelens-kube = { path = "../kube" }
 # `kind_resolver` returns `dyn srelens_mcp::resources::KindResolver`, so this is
@@ -17,13 +18,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "0.8"
 dirs = "6"
+base64 = "0.22"
 # Blocking HTTP for toolbox downloads (run inside spawn_blocking). rustls with
 # NO auto crypto-provider: the workspace standardises on ring via kube-client;
 # a second provider (aws-lc-rs) causes a runtime "could not determine
 # CryptoProvider" panic. Mirrors apps/desktop/src-tauri/Cargo.toml.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
 libc = "0.2"
+tempfile = "3"
+tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
-tempfile = "3"

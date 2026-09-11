@@ -37,6 +37,12 @@ pub struct EventSummary {
     pub type_: String,
     pub reason: String,
     pub object: String,
+    #[serde(rename = "objectApiVersion")]
+    pub object_api_version: String,
+    pub source: String,
+    #[serde(rename = "firstAge")]
+    pub first_age: String,
+
     pub message: String,
     /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
     /// `age` below is rendered once, when this summary is built, and only
@@ -82,6 +88,9 @@ pub(crate) fn summarise(ev: Event) -> EventSummary {
         type_: ev.type_.clone().unwrap_or_default(),
         reason: ev.reason.clone().unwrap_or_default(),
         object,
+        first_age: crate::humanize_age(ev.first_timestamp.as_ref().or(ev.metadata.creation_timestamp.as_ref())),
+        object_api_version: ev.involved_object.api_version.clone().unwrap_or_default(),
+        source: ev.reporting_component.clone().or_else(|| ev.source.as_ref().and_then(|s| s.component.clone())).unwrap_or_default(),
         message: ev.message.clone().unwrap_or_default(),
         created,
         age,
@@ -132,6 +141,18 @@ pub fn list_events_capability(cache: Arc<ClientCache>) -> Capability {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn extension_event_metadata_preserves_api_identity_and_source() {
+        let ev: Event = serde_json::from_value(serde_json::json!({
+            "metadata":{"name":"ready","namespace":"flux-system"},
+            "involvedObject":{"apiVersion":"source.toolkit.fluxcd.io/v1","kind":"GitRepository","name":"apps"},
+            "source":{"component":"source-controller"}
+        })).unwrap();
+        let value = serde_json::to_value(summarise(ev)).unwrap();
+        assert_eq!(value["objectApiVersion"], "source.toolkit.fluxcd.io/v1");
+        assert_eq!(value["source"], "source-controller");
+    }
 
     #[test]
     fn capability_has_expected_id() {

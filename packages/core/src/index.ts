@@ -103,3 +103,4 @@ export * from "./lib/workloads";
 export type { ToolStatus } from "./lib/chat";
 
 export * from "./lib/contextAppearance";
+export * from "./lib/extensions";

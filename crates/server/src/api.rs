@@ -26,6 +26,10 @@ use crate::AppState;
 /// per-context temp kubeconfigs and stay allowed. Read-only toolbox
 /// capabilities (status/diagnoseContext/searchPlugins) stay allowed.
 pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
+    "extensions.configure",
+    "extensions.list",
+    "extensions.read",
+    "extensions.freelensRead",
     "k8s.deleteContext",
     "k8s.helmRepoAdd",
     "k8s.helmRepoUpdate",
@@ -424,6 +428,15 @@ mod tests {
         let (status, body) = post("/api/capability/k8s.deleteContext", Body::empty()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], json!("capability not available in web mode"));
+    }
+
+    #[tokio::test]
+    async fn local_extension_inventory_and_execution_are_denied_on_web() {
+        for id in ["extensions.list", "extensions.configure", "extensions.read", "extensions.freelensRead"] {
+            let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
+            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+        }
     }
 
     #[tokio::test]

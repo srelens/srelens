@@ -23,11 +23,13 @@ COPY apps/desktop/package.json apps/desktop/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/ui-kit/package.json packages/ui-kit/package.json
 COPY packages/ui-next/package.json packages/ui-next/package.json
+COPY packages/lens-compat/package.json packages/lens-compat/package.json
 RUN pnpm install --frozen-lockfile
 # Sources after install, so a source-only change does not re-run install.
 COPY packages/core packages/core
 COPY packages/ui-kit packages/ui-kit
 COPY packages/ui-next packages/ui-next
+COPY packages/lens-compat packages/lens-compat
 COPY apps/desktop apps/desktop
 RUN pnpm --filter @srelens/desktop build
 
@@ -39,6 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config perl make && rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates crates
+COPY examples/extensions examples/extensions
 COPY apps/desktop/src-tauri apps/desktop/src-tauri
 # apps/tui is a workspace member too, and cargo loads every member's manifest
 # even when a single package is being built -- with an explicit [[bin]] path

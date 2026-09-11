@@ -5,7 +5,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.tsx",
-    "./styles": "./src/styles/next.css"
+    "./styles": "./src/styles/next.css",
+    "./extensions": "./src/extensions/Extensions.tsx",
+    "./extensions/styles": "./src/extensions/extensions.css"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -16,7 +18,8 @@
     "@srelens/ui-kit": "workspace:*",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
-    "lucide-react": "^1.22.0"
+    "lucide-react": "^1.22.0",
+    "@srelens/lens-compat": "workspace:*"
   },
   "peerDependencies": {
     "react": "^19.0.0",

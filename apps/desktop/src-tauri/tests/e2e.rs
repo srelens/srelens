@@ -175,6 +175,10 @@ impl Harness {
 /// A capability registered later with no case here fails the coverage
 /// assertion at the end of `full_capability_suite`.
 const EXCLUDED: &[(&str, &str)] = &[
+    ("extensions.freelensRead", "requires the audited upstream archive and Flux APIs; registry tests verify discovery, object reads, event filtering and revocation with an injected core"),
+    ("extensions.list", "desktop-local inventory; registry lifecycle tests use an isolated temporary store"),
+    ("extensions.configure", "developer-mode grants and atomic persistence are exercised with an isolated temporary store"),
+    ("extensions.read", "requires an installed extension and GitOps CRDs; registry tests exercise the real binding against an injected core handler"),
     (
         "toolbox.installKubectl",
         "downloads a real ~50MB binary from dl.k8s.io; kubectl is already provided by the \

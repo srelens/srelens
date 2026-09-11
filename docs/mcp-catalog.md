@@ -5,7 +5,7 @@
 
 Everything this server exposes over MCP, generated from the live registry so it cannot drift. Written for someone wiring an agent to srelens; the narrative reference is [MCP.md](MCP.md).
 
-## Tools (94)
+## Tools (98)
 
 Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
@@ -145,17 +145,21 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `toolbox.removePlugin` | remove an installed krew plugin |
 | `toolbox.upgradePlugin` | upgrade an installed krew plugin |
 
-### Server — read-only (2)
+### Server — read-only (5)
 
 | Tool | Summary |
 | --- | --- |
+| `extensions.freelensRead` | Read Flux custom resources for an enabled, audited Freelens renderer |
+| `extensions.list` | List installed declarative extensions and developer-mode state |
+| `extensions.read` | Read a declared custom-resource contribution from an enabled extension |
 | `ping` | health check; echoes the input back as { pong: <input> } |
 | `settings.get` | read durable desktop settings; omit key to return the complete map |
 
-### Server — needs confirmation (1)
+### Server — needs confirmation (2)
 
 | Tool | Summary |
 | --- | --- |
+| `extensions.configure` | Install, enable, remove or configure local extensions; requires approval |
 | `settings.set` | atomically write or remove durable desktop settings |
 
 ## Prompts (4)

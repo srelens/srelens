@@ -1,3 +1,5 @@
+import { useExtensions } from "../extensions/Extensions";
+import { extensionRoute } from "@srelens/core";
 import { symbolFor } from "../lib/markSymbols";
 import { useMemo, useState } from "react";
 import { listCrds, type ClusterContext, type CrdRef } from "@srelens/core";
@@ -68,6 +70,7 @@ function nodeForRoute(nodes: ResourceNode[], crds: CrdRef[], route: string): str
  * so switching contexts or restarting restores that cluster's own choices.
  */
 export function Nav({ contexts }: NavProps) {
+  const extensions = useExtensions();
   const activeCluster = useActiveCluster();
   const ctx = contexts.find((c) => c.stableId === activeCluster) ?? null;
   const view = useWorkspaceView();
@@ -108,6 +111,24 @@ export function Nav({ contexts }: NavProps) {
   const nodes = useMemo<ResourceNode[]>(
     () => [
       ...kindNodes(),
+      ...(ctx && extensions.data?.developerMode && extensions.data.plugins.some(p => p.enabled && p.manifest.contributions.pages.length)
+        ? [{
+            id: "extensions", label: "Extensions", icon: Icons.crds,
+            children: extensions.data.plugins.filter(p => p.enabled && p.manifest.contributions.pages.length).map(p => ({
+              id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: Icons.crds,
+              children: p.manifest.contributions.pages.flatMap((page, index, pages) => {
+                const leaf = (item: typeof page) => ({
+                  id: `route:${extensionRoute(ctx.name, p.manifest.id, item.id)}`,
+                  label: item.title, icon: Icons.crds,
+                });
+                if (!page.group) return [leaf(page)];
+                if (pages.findIndex(item => item.group === page.group) !== index) return [];
+                return [{ id: `extension:${p.manifest.id}:${page.group}`, label: page.group, icon: Icons.crds,
+                  children: pages.filter(item => item.group === page.group).map(leaf) }];
+              }),
+            })),
+          }]
+        : []),
       { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crdChildren },
       {
         id: "investigate",
@@ -116,7 +137,7 @@ export function Nav({ contexts }: NavProps) {
         children: INVESTIGATE.map((i) => ({ id: `route:${i.route}`, label: i.label, icon: glyph(i.id) })),
       },
     ],
-    [crds, crdChildren],
+    [crds, crdChildren, ctx, extensions.data],
   );
 
   const link = ctx

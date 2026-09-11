@@ -1,0 +1,253 @@
+/* Declarative extensions use flush regions in both desktop designs. */
+.extension-manager,
+.extension-results {
+  min-width: 0;
+}
+.extension-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-toolbar > strong {
+  margin-right: auto;
+}
+.extension-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.extension-install {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-install textarea {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--rule, var(--fl-color-border));
+  border-radius: 4px;
+  background: var(--surface, var(--fl-color-surface));
+  color: inherit;
+  font-family: var(--font-mono);
+  resize: vertical;
+}
+.extension-installed {
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-message {
+  padding: 10px 12px;
+}
+.extension-error,
+.extension-warning {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-error {
+  color: var(--sev, var(--fl-color-danger));
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.extension-warning {
+  color: var(--warn, var(--fl-color-warning));
+}
+.extension-table-scroll {
+  overflow: auto;
+}
+.extension-results table {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: nowrap;
+}
+.extension-results th,
+.extension-results td {
+  padding: 7px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-results th {
+  font-weight: 600;
+  background: var(--surface, var(--fl-color-surface));
+}
+
+.extension-banner {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+  font-size: 0.75rem;
+}
+
+.extension-error pre {
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre;
+}
+
+.extension-error > div {
+  min-width: 0;
+  flex: 1;
+}
+.extension-error > button {
+  flex-shrink: 0;
+}
+
+.extension-workspace {
+  min-width: 0;
+}
+.extension-workspace nav [aria-pressed="true"] {
+  color: var(--accent, var(--fl-color-accent));
+  box-shadow: inset 0 -2px currentColor;
+}
+.extension-search {
+  min-width: 10rem;
+  flex: 1;
+  padding: 0.4rem 0.6rem;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--rule, var(--fl-color-border));
+  border-radius: 4px;
+}
+.extension-summaries {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-summary {
+  padding: 16px;
+  border-right: 1px solid var(--rule, var(--fl-color-border));
+  min-width: 0;
+}
+.extension-summary ul {
+  padding: 0;
+  margin: 12px auto 0;
+  list-style: none;
+  width: max-content;
+}
+.extension-summary li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  line-height: 1.8;
+}
+.extension-summary li i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+.extension-donut {
+  width: 112px;
+  height: 112px;
+  margin: 12px auto;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+}
+.extension-donut > span {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--surface, var(--fl-color-bg, #202024));
+  color: var(--ink, var(--fl-color-text, #eee));
+  font-size: 1.5rem;
+}
+
+/* Match the host's resource-table density, including compact/comfortable mode. */
+.extension-workspace,
+.extension-results {
+  font-family: inherit;
+  font-size: var(--text-body, 0.8125rem);
+}
+.extension-navigation {
+  gap: 2px;
+  padding: 0 8px;
+  min-height: 32px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+.extension-navigation > button {
+  flex-shrink: 0;
+  align-self: stretch;
+  border-radius: 0;
+  padding: 6px 10px;
+  font-size: inherit;
+  font-weight: 500;
+}
+.extension-subnavigation {
+  background: var(--surface-sunk, var(--fl-color-bg));
+}
+.extension-filters {
+  padding: 6px 10px;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+.extension-filters > button {
+  flex-shrink: 0;
+}
+.extension-search {
+  font: inherit;
+  min-width: 4rem;
+  width: 0;
+  height: 28px;
+  box-sizing: border-box;
+  padding: 3px 8px;
+}
+.extension-results th {
+  font-size: var(--text-meta, 0.6875rem);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-faint, var(--fl-color-text-muted));
+  padding: 5px 10px;
+}
+.extension-results td {
+  font-size: var(--text-body, 0.8125rem);
+  padding: var(--pad-y, 0.2rem) 10px;
+  height: var(--row-h, 27px);
+  box-sizing: border-box;
+  font-variant-numeric: tabular-nums;
+}
+.extension-results td:last-child,
+.extension-results th:last-child {
+  text-align: right;
+}
+.extension-results tbody tr:hover {
+  background: var(--surface-sunk, var(--fl-color-surface-alt));
+}
+.extension-value,
+.extension-resource-name {
+  display: inline-block;
+  max-width: 32ch;
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.extension-value[data-tone="ready"] {
+  color: var(--ok, var(--fl-color-success));
+}
+.extension-value[data-tone="warning"] {
+  color: var(--warn, var(--fl-color-warning));
+}
+.extension-value[data-tone="muted"],
+.extension-namespace {
+  color: var(--ink-muted, var(--fl-color-text-muted));
+}
+.extension-value[data-tone="ready"]::before,
+.extension-value[data-tone="warning"]::before {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+.freelens-view { display:flex; flex-direction:column; height:100%; min-height:0; overflow:hidden; }
+.freelens-view iframe { display:block; border:0; width:100%; flex:1; min-height:0; }

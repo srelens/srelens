@@ -5,6 +5,17 @@
 - **Owners:** srelens core team
 - **Related issues:** #42 (design spike), #43 (renderer API surface), #44 (extension host sidecar + MCP bridging), #23 (MCP consent), #56 (AI assistant), #153 (topology surface)
 
+## Implementation status (2026-09-11)
+
+Native authoring **and** Freelens/OpenLens compatibility are both required.
+The implementation provides the declarative contract/broker in
+`crates/plugin-host` and backend-owned local installation, settings and read-only
+contributions in both desktop UIs. It executes no third-party code; signed package
+distribution and the Freelens/OpenLens runtime remain pending. See [the current implementation and delivery plan](../EXTENSIONS.md)
+for runnable GitOps examples, limitations and the compatibility matrix.
+This stages the broker before executable runtimes; it does not remove the native
+subprocess or compatibility-runtime work below.
+
 ## 1. Context & problem
 
 srelens is a Tauri desktop app: a **Rust core** (`crates/kube`, Tauri commands), a **React/webview frontend** (`apps/desktop/src`), and an **MCP server** built directly from a single capability **`Registry`** (`srelens_capability::Registry` → `build_registry_with()` → `srelens_mcp::McpServer`). Today every backend capability is registered in one place (`capabilities.rs`) and is simultaneously available to the UI and to AI agents over MCP.
@@ -197,3 +208,13 @@ Each reference plugin simultaneously validates a backend capability set, a front
 - Watch/subscription semantics over the broker (backpressure, teardown on disable).
 - Marketplace hosting/ownership and the plugin review process.
 - Whether multi-window (#150) implies per-window or shared plugin instances.
+
+## Implementation note: first Freelens renderer target
+
+The initial compatibility implementation runs the audited FluxCD 5.3.1 renderer
+archive in the browser sandbox through `@srelens/lens-compat`, with an isolated
+React 17 stack and a read-only `extensions.freelensRead` backend bridge. Its Node
+main entry has no required runtime work and is not executed. This is a bounded
+renderer target, not the generic Node extension host proposed above. See
+[the shipped compatibility contract](../EXTENSIONS.md#run-the-freelens-fluxcd-archive)
+for supported APIs, installation, integrity restrictions and limitations.

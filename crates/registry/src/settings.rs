@@ -132,7 +132,7 @@ impl FileSettingsStore {
 /// read-modify-write across processes. Mirrors `vault::transition_lock`. The
 /// lock lives beside the document rather than on it, so the atomic rename
 /// never swaps the file the lock is held on.
-fn write_lock(path: &Path) -> Result<fs::File, String> {
+pub(crate) fn write_lock(path: &Path) -> Result<fs::File, String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", path.display()))?;

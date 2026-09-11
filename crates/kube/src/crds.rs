@@ -332,6 +332,9 @@ pub fn list_crds_capability(cache: Arc<ClientCache>) -> Capability {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ListCustomIn {
+    /// Include full CRD objects for isolated extension renderers.
+    #[serde(default, rename = "includeObjects")]
+    pub include_objects: bool,
     pub context: String,
     pub group: String,
     pub version: String,
@@ -367,6 +370,8 @@ pub struct CustomRow {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ListCustomOut {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objects: Option<Vec<serde_json::Value>>,
     pub items: Vec<CustomRow>,
 }
 
@@ -406,6 +411,7 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                     .await
                     .map_err(|_| CapabilityError::Handler("list custom resource timed out".into()))?
                     .map_err(handler_err)?;
+                let objects = input.include_objects.then(|| list.items.iter().map(whole_object).collect());
                 let columns = input.printer_columns;
                 let items = list
                     .items
@@ -430,7 +436,7 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                         }
                     })
                     .collect();
-                Ok(ListCustomOut { items })
+                Ok(ListCustomOut { items, objects })
             }
         },
     )
@@ -718,5 +724,18 @@ mod tests {
         let ar = custom_api_resource("gateway.networking.k8s.io", "v1", "Gateway", "gateways");
         assert_eq!(ar.api_version, "gateway.networking.k8s.io/v1");
         assert_eq!(ar.plural, "gateways");
+    }
+}
+
+#[cfg(test)]
+mod object_payload_tests {
+    #[test]
+    fn raw_objects_are_opt_in_in_the_callers_payload() {
+        let mut payload = serde_json::json!({"context":"test","group":"source.toolkit.fluxcd.io","version":"v1","plural":"gitrepositories","kind":"GitRepository","namespaced":true});
+        let input: super::ListCustomIn = serde_json::from_value(payload.clone()).unwrap();
+        assert!(!input.include_objects);
+        payload["includeObjects"] = serde_json::json!(true);
+        let input: super::ListCustomIn = serde_json::from_value(payload).unwrap();
+        assert!(input.include_objects);
     }
 }
