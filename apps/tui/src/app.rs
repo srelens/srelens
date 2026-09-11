@@ -44,6 +44,7 @@ pub enum ActiveView {
     Toolbox(ToolboxViewState),
     Assistant,
     Settings(SettingsViewState),
+    TuiConfig(TuiConfigViewState),
     Tree(tree_view::TreeViewState),
     NodeInspector(node_inspector_view::NodeInspectorState),
     Topology(topology_view::TopologyViewState),
@@ -92,6 +93,7 @@ pub struct App {
     pub connection_attempt_start: std::time::Instant,
     pub cluster_unreachable: bool,
     pub ai_settings: crate::ai_config::AiSettings,
+    pub tui_config: crate::tui_config::TuiConfig,
     pub assistant_state: AssistantViewState,
     pub assistant_states: HashMap<String, AssistantViewState>,
     pub pod_metrics_tick_counter: usize,
@@ -216,6 +218,8 @@ impl App {
             active_namespace.clone()
         };
 
+        let tui_config = crate::tui_config::TuiConfig::load();
+
         let mut app = Self {
             active_context: active_context.clone(),
             active_namespace,
@@ -256,6 +260,7 @@ impl App {
             connection_attempt_start: Instant::now(),
             cluster_unreachable: false,
             ai_settings: crate::ai_config::AiSettings::load(),
+            tui_config,
             assistant_state: AssistantViewState::for_context(&active_context),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -1522,6 +1527,66 @@ impl App {
         // 2. Interactive Dialog Modal Open
         if let Some(modal) = self.modal.clone() {
             match modal {
+                Modal::FeatureBanner { .. } => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+                        return;
+                    }
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                            self.modal = None;
+                        }
+                        KeyCode::Char('t') | KeyCode::Char('T') => {
+                            self.tui_config.show_feature_banner = !self.tui_config.show_feature_banner;
+                            let _ = self.tui_config.save();
+                            let is_enabled = self.tui_config.show_feature_banner;
+                            self.modal = Some(Modal::FeatureBanner { show_on_startup: is_enabled });
+                            if is_enabled {
+                                self.set_toast("Startup feature banner: Enabled".to_string(), Theme::status_ok());
+                            } else {
+                                self.set_toast("Startup feature banner: Disabled".to_string(), Theme::status_warn());
+                            }
+                        }
+                        KeyCode::Char(':') => {
+                            self.modal = None;
+                            self.input_mode = InputMode::Command;
+                            self.command_buffer.clear();
+                        }
+                        KeyCode::Char('/') => {
+                            self.modal = None;
+                            self.input_mode = InputMode::Filter;
+                            self.filter_buffer.clear();
+                        }
+                        KeyCode::Char('1') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::HelmReleases).await;
+                        }
+                        KeyCode::Char('2') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Overview).await;
+                        }
+                        KeyCode::Char('3') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::GpuInfo).await;
+                        }
+                        KeyCode::Char('4') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Workloads).await;
+                        }
+                        KeyCode::Char('5') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Assistant).await;
+                        }
+                        KeyCode::Char('6') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Settings).await;
+                        }
+                        KeyCode::Char('7') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::TuiConfig).await;
+                        }
+                        _ => {}
+                    }
+                }
                 Modal::Confirm { action_name, .. } => {
                     match key.code {
                         KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -2390,6 +2455,16 @@ impl App {
                     self.command_buffer.clear();
                     return;
                 }
+            }
+            self.handle_view_key_event(key).await;
+            return;
+        }
+
+        if matches!(self.active_view, ActiveView::TuiConfig(_)) {
+            if key.code == KeyCode::Char(':') {
+                self.input_mode = InputMode::Command;
+                self.command_buffer.clear();
+                return;
             }
             self.handle_view_key_event(key).await;
             return;
@@ -3862,6 +3937,39 @@ impl App {
                     }
                 }
             }
+            ActiveView::TuiConfig(cfg_state) => {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        if let Some(prev) = self.nav_stack.pop() {
+                            self.active_view = prev;
+                        } else {
+                            self.switch_view_to_kind(ResourceKind::Pods).await;
+                        }
+                    }
+                    KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => cfg_state.select_next_field(),
+                    KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => cfg_state.select_prev_field(),
+                    KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('-') => {
+                        cfg_state.adjust_current(-1, &mut self.tui_config);
+                    }
+                    KeyCode::Char('l') | KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => {
+                        cfg_state.adjust_current(1, &mut self.tui_config);
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        cfg_state.cycle_current(&mut self.tui_config);
+                    }
+                    KeyCode::Char('[') | KeyCode::Char('{') => {
+                        cfg_state.adjust_current(-5, &mut self.tui_config);
+                    }
+                    KeyCode::Char(']') | KeyCode::Char('}') => {
+                        cfg_state.adjust_current(5, &mut self.tui_config);
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('d') => {
+                        cfg_state.reset_defaults(&mut self.tui_config);
+                        self.set_toast("Reset TUI settings to defaults".to_string(), Theme::status_ok());
+                    }
+                    _ => {}
+                }
+            }
             ActiveView::Tree(tree) => {
                     match key.code {
                         KeyCode::Char('j') | KeyCode::Down => tree.select_next(),
@@ -5161,6 +5269,11 @@ impl App {
                     self.set_toast(format!("Unknown theme '{}'. Try :themes to pick.", theme_name), Theme::status_warn());
                 }
             }
+            CommandTarget::FeatureBanner => {
+                self.modal = Some(Modal::FeatureBanner {
+                    show_on_startup: self.tui_config.show_feature_banner,
+                });
+            }
             CommandTarget::OpenUrl(_) => {}
         }
     }
@@ -5377,6 +5490,7 @@ impl App {
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
             ResourceKind::Assistant => ActiveView::Assistant,
             ResourceKind::Settings => ActiveView::Settings(SettingsViewState::new()),
+            ResourceKind::TuiConfig => ActiveView::TuiConfig(TuiConfigViewState::new()),
             ResourceKind::Topology => {
                 let namespaces = if self.active_namespace.is_empty() {
                     vec![]
@@ -7589,6 +7703,7 @@ impl App {
             ActiveView::Toolbox(_) => "Toolbox",
             ActiveView::Assistant => "AI Assistant",
             ActiveView::Settings(_) => "AI Settings",
+            ActiveView::TuiConfig(_) => "TUI Configuration",
             ActiveView::Tree(_) => "Resource Relationship Tree",
             ActiveView::NodeInspector(_) => "Node & GPU Hardware Inspector",
             ActiveView::Topology(_) => "Workload & Traffic Topology Flow",
@@ -7669,6 +7784,7 @@ impl App {
             ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
             ActiveView::Assistant => render_assistant_view(f, chunks[1], &self.assistant_state, &self.ai_settings),
             ActiveView::Settings(s) => render_settings_view(f, chunks[1], s),
+            ActiveView::TuiConfig(s) => render_tui_config_view(f, chunks[1], s, &self.tui_config),
             ActiveView::Tree(tree) => render_tree_view(f, chunks[1], tree),
             ActiveView::NodeInspector(ni) => render_node_inspector_view(f, chunks[1], ni),
             ActiveView::Topology(topo) => topology_view::render_topology_view(f, chunks[1], topo),
@@ -8058,6 +8174,14 @@ impl App {
                 ("<:>", "Cmd"),
                 ("<?>", "Help"),
             ][..]),
+            ActiveView::TuiConfig(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<j/k>", "Select"),
+                ("<h/l>", "Adjust"),
+                ("<r>", "Reset"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
             ActiveView::Toolbox(_) => Some(&[
                 ("<:>", "Cmd"),
                 ("<c>", "CopyPath"),
@@ -8081,6 +8205,9 @@ impl App {
                 suggestions: suggestions_prop,
                 close_pf_button: close_pf_button_data.as_ref().map(|(l, s)| (l.as_str(), *s)),
                 close_pf_rect: Some(&self.close_pf_button_rect),
+                command_popup_max_width: Some(self.tui_config.command_popup_max_width),
+                command_popup_max_visible: Some(self.tui_config.command_popup_max_visible),
+                command_popup_density: Some(self.tui_config.command_popup_density),
             },
         );
 

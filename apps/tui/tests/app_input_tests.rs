@@ -16,6 +16,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use srelens_kube::contexts::ContextDto;
 use srelens_tui::app::{ActiveView, App, SuspendAction};
 use srelens_tui::commands::{command_suggestions_with_crds, CrdMeta, PrinterColumn, ResourceKind};
+use srelens_tui::CommandPopupDensity;
 use srelens_tui::event::AppEvent;
 use srelens_tui::ui::{ContainerAction, InputMode, Modal};
 use srelens_tui::views::metrics_panel_view::MetricsTimeRange;
@@ -3333,3 +3334,151 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
     }
 }
 
+#[tokio::test]
+async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("tui.json");
+    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_path);
+
+    let (tx, _rx) = unbounded_channel();
+    let mut app = App::new(
+        Some("test-ctx".into()),
+        Some("default".into()),
+        false,
+        None,
+        vec![],
+        tx,
+    )
+    .await
+    .expect("app");
+
+    // Initial state: pods table
+    assert!(matches!(app.active_view, ActiveView::Table(_)));
+
+    // Open :config
+    press(&mut app, ch(':')).await;
+    assert_eq!(app.input_mode, InputMode::Command);
+    type_str(&mut app, "config").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    // Active view is now TuiConfig
+    assert!(matches!(app.active_view, ActiveView::TuiConfig(_)));
+
+    // Initial config values
+    assert_eq!(app.tui_config.command_popup_max_width, 65);
+    assert_eq!(app.tui_config.command_popup_max_visible, 6);
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Compact);
+
+    // Adjust width (+5 with 'l')
+    press(&mut app, ch('l')).await;
+    assert_eq!(app.tui_config.command_popup_max_width, 70);
+
+    // Adjust width (-5 with 'h')
+    press(&mut app, ch('h')).await;
+    assert_eq!(app.tui_config.command_popup_max_width, 65);
+
+    // Switch to visible rows field with 'j'
+    press(&mut app, ch('j')).await;
+    if let ActiveView::TuiConfig(ref s) = app.active_view {
+        assert_eq!(s.selected_field, 1);
+    }
+
+    // Adjust visible rows (+1 with '+')
+    press(&mut app, ch('+')).await;
+    assert_eq!(app.tui_config.command_popup_max_visible, 7);
+
+    // Switch to text size/density field with 'j'
+    press(&mut app, ch('j')).await;
+    if let ActiveView::TuiConfig(ref s) = app.active_view {
+        assert_eq!(s.selected_field, 2);
+    }
+
+    // Step density to Standard with 'l'
+    press(&mut app, ch('l')).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Standard);
+
+    // Step to Large with 'l'
+    press(&mut app, ch('l')).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Large);
+
+    // Step back to Standard with 'h'
+    press(&mut app, ch('h')).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Standard);
+
+    // Cycle forward with Space (Standard -> Large)
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Large);
+
+    // Cycle forward with Enter (Large -> ExtraLarge)
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::ExtraLarge);
+
+    // Switch to startup banner field with 'j'
+    press(&mut app, ch('j')).await;
+    if let ActiveView::TuiConfig(ref s) = app.active_view {
+        assert_eq!(s.selected_field, 3);
+    }
+
+    // Toggle startup banner with Space
+    assert!(app.tui_config.show_feature_banner);
+    press(&mut app, ch(' ')).await;
+    assert!(!app.tui_config.show_feature_banner);
+
+    // Toggle back with Enter
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.tui_config.show_feature_banner);
+
+    // Reset defaults with 'r'
+    press(&mut app, ch('r')).await;
+    assert_eq!(app.tui_config.command_popup_max_width, 65);
+    assert_eq!(app.tui_config.command_popup_max_visible, 6);
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Compact);
+    assert!(app.tui_config.show_feature_banner);
+
+    // Press Esc pops back to table view
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Table(_)));
+
+    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
+}
+
+#[tokio::test]
+async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_file = tmp.path().join("tui.json");
+    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_file);
+
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    // Open via :banner command
+    common::type_str(&mut app, ":banner").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    // Toggle startup banner with 't'
+    assert!(app.tui_config.show_feature_banner);
+    press(&mut app, ch('t')).await;
+    assert!(!app.tui_config.show_feature_banner);
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { show_on_startup: false })));
+
+    // Toggle back with 'T'
+    press(&mut app, ch('T')).await;
+    assert!(app.tui_config.show_feature_banner);
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { show_on_startup: true })));
+
+    // Press '1' jumps directly to Helm releases
+    press(&mut app, ch('1')).await;
+    assert!(app.modal.is_none());
+    assert!(matches!(app.active_view, ActiveView::Helm(_)));
+
+    // Re-open via :features
+    common::type_str(&mut app, ":features").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    // Dismiss with Esc
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(app.modal.is_none());
+
+    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
+}

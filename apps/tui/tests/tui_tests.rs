@@ -191,6 +191,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -288,6 +289,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -397,6 +399,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -580,6 +583,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -795,6 +799,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -992,6 +997,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -1133,6 +1139,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -1457,6 +1464,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -1587,6 +1595,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -1684,6 +1693,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -1773,6 +1783,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -1903,6 +1914,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -2037,6 +2049,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("data-processing-prod-eu-dus1"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -2196,6 +2209,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod-eu"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -2301,6 +2315,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::new(),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -2712,6 +2727,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -2835,6 +2851,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -3065,6 +3082,7 @@ mod tests {
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
             close_pf_button_rect: std::cell::RefCell::new(None),
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -3182,6 +3200,7 @@ mod tests {
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
             close_pf_button_rect: std::cell::RefCell::new(None),
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("shop"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -3296,6 +3315,7 @@ mod tests {
             cluster_unreachable: false,
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -3505,6 +3525,7 @@ mod tests {
             cluster_unreachable: false,
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -3707,6 +3728,7 @@ mod tests {
             cluster_unreachable: false,
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -4552,6 +4574,7 @@ mod tests {
             cluster_unreachable: false,
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -4746,6 +4769,7 @@ mod tests {
             cluster_unreachable: false,
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -4978,6 +5002,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -5116,6 +5141,7 @@ mod tests {
             connection_attempt_start: std::time::Instant::now(),
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -5535,7 +5561,7 @@ mod tests {
         );
         assert_eq!(
             resolve_command(":config"),
-            Some(CommandTarget::Resource(ResourceKind::Settings))
+            Some(CommandTarget::Resource(ResourceKind::TuiConfig))
         );
 
         // 2. Test command resolution when CRD is present
@@ -5555,14 +5581,14 @@ mod tests {
             Some(CommandTarget::CustomResource(setting_crd.clone()))
         );
 
-        // :ai-settings and :config must still resolve to AI Settings
+        // :ai-settings resolves to AI Settings, :config resolves to TuiConfig
         assert_eq!(
             resolve_command_with_crds(":ai-settings", &crds),
             Some(CommandTarget::Resource(ResourceKind::Settings))
         );
         assert_eq!(
             resolve_command_with_crds(":config", &crds),
-            Some(CommandTarget::Resource(ResourceKind::Settings))
+            Some(CommandTarget::Resource(ResourceKind::TuiConfig))
         );
 
         // 3. Test suggestions scoring & ranking
@@ -5942,6 +5968,7 @@ mod tests {
             cluster_unreachable: false,
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -6137,6 +6164,7 @@ mod tests {
             cluster_unreachable: false,
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -6279,6 +6307,7 @@ mod tests {
             cluster_unreachable: false,
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
@@ -6449,6 +6478,7 @@ mod tests {
             cluster_unreachable: false,
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
+            tui_config: srelens_tui::TuiConfig::default(),
             assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
