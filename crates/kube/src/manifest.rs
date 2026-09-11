@@ -326,6 +326,10 @@ pub struct ListResourceIn {
 pub struct ResourceRow {
     pub name: String,
     pub namespace: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
     /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
     /// age live at render time. Empty when the resource carries none.
@@ -371,6 +375,7 @@ pub fn list_resource_capability(cache: Arc<ClientCache>) -> Capability {
                     .map(|o| ResourceRow {
                         name: o.metadata.name.unwrap_or_default(),
                         namespace: o.metadata.namespace.unwrap_or_default(),
+                        created: crate::creation_rfc3339(o.metadata.creation_timestamp.as_ref()),
                         age: crate::humanize_age(o.metadata.creation_timestamp.as_ref()),
                         created_at: crate::creation_timestamp_iso(o.metadata.creation_timestamp.as_ref()),
                     })

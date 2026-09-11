@@ -7,6 +7,9 @@ export interface StatefulSetSummary {
   ready: string;
   updated: number;
   service: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -19,6 +22,9 @@ export interface DaemonSetSummary {
   ready: number;
   upToDate: number;
   available: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -31,6 +37,9 @@ export interface JobSummary {
   failed: number;
   duration: string;
   owner: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -42,6 +51,9 @@ export interface CronJobSummary {
   suspended: boolean;
   active: number;
   lastSchedule: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -139,6 +151,9 @@ export interface ResourceQuotaSummary {
   name: string;
   namespace: string;
   resources: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -147,6 +162,9 @@ export interface LimitRangeSummary {
   name: string;
   namespace: string;
   limits: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 

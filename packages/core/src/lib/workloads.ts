@@ -58,6 +58,9 @@ export interface DeploymentSummary {
   ready: string;
   upToDate: number;
   available: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -70,6 +73,9 @@ export interface ServiceSummary {
    *  empty when there is none, `<pending>` while a LoadBalancer waits. */
   externalIP: string;
   ports: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -153,6 +159,9 @@ export interface ReplicaSetSummary {
   desired: number;
   ready: number;
   current: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 

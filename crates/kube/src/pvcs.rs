@@ -33,6 +33,10 @@ pub struct PvcSummary {
     pub storage_class: String,
     /// Bound PersistentVolume name, empty until bound.
     pub volume: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
     /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
     /// age live at render time. Empty when the resource carries none.
@@ -74,6 +78,7 @@ pub(crate) fn summarise(pvc: PersistentVolumeClaim) -> PvcSummary {
         access_modes,
         storage_class,
         volume,
+        created: crate::creation_rfc3339(pvc.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(pvc.metadata.creation_timestamp.as_ref()),
         created_at: crate::creation_timestamp_iso(pvc.metadata.creation_timestamp.as_ref()),
     }

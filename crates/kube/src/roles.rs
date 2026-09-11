@@ -25,6 +25,10 @@ pub struct RoleSummary {
     pub namespace: String,
     /// Number of policy rules.
     pub rules: i32,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
     /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
     /// age live at render time. Empty when the resource carries none.
@@ -42,6 +46,7 @@ pub(crate) fn summarise(role: Role) -> RoleSummary {
         name: role.metadata.name.clone().unwrap_or_default(),
         namespace: role.metadata.namespace.clone().unwrap_or_default(),
         rules: role.rules.as_ref().map_or(0, |r| r.len()) as i32,
+        created: crate::creation_rfc3339(role.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(role.metadata.creation_timestamp.as_ref()),
         created_at: crate::creation_timestamp_iso(role.metadata.creation_timestamp.as_ref()),
     }
@@ -83,6 +88,10 @@ pub struct ClusterRoleSummary {
     pub name: String,
     /// Number of policy rules.
     pub rules: i32,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
     /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
     /// age live at render time. Empty when the resource carries none.
@@ -99,6 +108,7 @@ pub(crate) fn summarise_cluster(role: ClusterRole) -> ClusterRoleSummary {
     ClusterRoleSummary {
         name: role.metadata.name.clone().unwrap_or_default(),
         rules: role.rules.as_ref().map_or(0, |r| r.len()) as i32,
+        created: crate::creation_rfc3339(role.metadata.creation_timestamp.as_ref()),
         age: crate::humanize_age(role.metadata.creation_timestamp.as_ref()),
         created_at: crate::creation_timestamp_iso(role.metadata.creation_timestamp.as_ref()),
     }

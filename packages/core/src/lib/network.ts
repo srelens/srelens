@@ -8,6 +8,9 @@ export interface IngressSummary {
   hosts: string;
   address: string;
   ports: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -20,6 +23,9 @@ export interface EndpointSliceSummary {
   endpoints: string;
   ports: string;
   service: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -31,6 +37,9 @@ export interface NetworkPolicySummary {
   ingress: number;
   egress: number;
   policyTypes: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 

@@ -38,6 +38,10 @@ pub struct EventSummary {
     pub reason: String,
     pub object: String,
     pub message: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
     /// Raw ISO 8601 timestamp `age` derives from, so UIs can recompute the
     /// age live at render time. Empty when the resource carries none.
@@ -58,6 +62,9 @@ pub(crate) fn summarise(ev: Event) -> EventSummary {
         ev.involved_object.kind.clone().unwrap_or_default(),
         ev.involved_object.name.clone().unwrap_or_default()
     );
+    // An Event's age is when it LAST fired, not when it was created —
+    // carry the same source so the live age keeps that meaning (#405).
+    let created = crate::creation_rfc3339(ev.last_timestamp.as_ref());
     let age = crate::humanize_age(ev.last_timestamp.as_ref());
     let created_at = crate::creation_timestamp_iso(ev.last_timestamp.as_ref());
     let namespace = ev.metadata.namespace.clone().unwrap_or_default();
@@ -76,6 +83,7 @@ pub(crate) fn summarise(ev: Event) -> EventSummary {
         reason: ev.reason.clone().unwrap_or_default(),
         object,
         message: ev.message.clone().unwrap_or_default(),
+        created,
         age,
         created_at,
         count: ev.count.unwrap_or(1),
