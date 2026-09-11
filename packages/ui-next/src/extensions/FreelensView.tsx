@@ -100,10 +100,17 @@ export function FreelensView({
     window.addEventListener("message", message);
     const getTheme = () => {
       const css = getComputedStyle(document.documentElement);
-      return ["--ink", "--surface", "--line", "--accent", "--muted"]
+      const tokens = [
+        ["--ink", "--ink", "--fl-color-text", "#29272d"],
+        ["--surface", "--surface", "--fl-color-surface", "#f8f8fa"],
+        ["--line", "--rule", "--fl-color-border", "#dedde3"],
+        ["--accent", "--accent", "--fl-color-accent", "#a33460"],
+        ["--muted", "--ink-muted", "--fl-color-text-muted", "#777"],
+      ];
+      return tokens
         .map(
-          (name) =>
-            `${name}:${css.getPropertyValue(name === "--line" ? "--rule" : name === "--muted" ? "--ink-muted" : name).trim() || { "--ink": "#29272d", "--surface": "#f8f8fa", "--line": "#dedde3", "--accent": "#a33460", "--muted": "#777" }[name]}`,
+          ([name, native, classic, fallback]) =>
+            `${name}:${css.getPropertyValue(native).trim() || css.getPropertyValue(classic).trim() || fallback}`,
         )
         .join(";");
     };
@@ -116,7 +123,7 @@ export function FreelensView({
     );
     observer.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ["class", "style", "data-theme"],
+      attributeFilter: ["class", "style", "data-theme", "data-accent"],
     });
     const script = `${runtime}\nconst pending=new Map();let sequence=0;let initialized=false;addEventListener('message',event=>{if(event.source!==parent)return;const data=event.data;if(data.type==='theme'){document.documentElement.style.cssText=data.style;}else if(data.type==='initialize'&&!initialized){initialized=true;try{FreelensRuntime.mount({...data,request:request=>new Promise((resolve,reject)=>{const id=sequence++;pending.set(id,{resolve,reject});parent.postMessage({type:'read',sequence:id,request},'*');})});}catch(error){parent.postMessage({type:'error',error:String(error)},'*');}}else if(data.type==='result'){const item=pending.get(data.sequence);if(item){pending.delete(data.sequence);data.error?item.reject(new Error(data.error)):item.resolve(data.result);}}});parent.postMessage({type:'ready'},'*');`;
     const html = `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'"><style>${styles}:root{${theme}}</style><div id="root"></div><script>${script.replace(/<\/script/gi, "<\\/script")}</script>`;

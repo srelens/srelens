@@ -102,3 +102,30 @@ it("only reports absence after successful discovery and never connects without a
   ).toBeTruthy();
   expect(URL.createObjectURL).not.toHaveBeenCalled();
 });
+it("uses classic theme tokens when the new design stylesheet is absent", async () => {
+  const original = window.getComputedStyle;
+  const styles = {
+    getPropertyValue: (name: string) =>
+      (
+        ({ "--fl-color-text": "#ddd", "--fl-color-surface": "#222" }) as Record<
+          string,
+          string
+        >
+      )[name] ?? "",
+  } as CSSStyleDeclaration;
+  window.getComputedStyle = () => styles;
+  try {
+    render(<FreelensView plugin={plugin} context="staging" />);
+    await screen.findByTitle("Freelens FluxCD");
+    const blob = vi.mocked(URL.createObjectURL).mock.calls[0][0] as Blob;
+    const html = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = reject;
+      reader.readAsText(blob);
+    });
+    expect(html).toContain("--ink:#ddd;--surface:#222");
+  } finally {
+    window.getComputedStyle = original;
+  }
+});
