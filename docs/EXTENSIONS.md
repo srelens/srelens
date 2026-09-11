@@ -11,7 +11,7 @@ The platform has two authoring paths over one host:
   APIs and UI registrations to the native layer. This is a required platform
   feature, not a replacement for native authoring.
 
-## What this first implementation provides
+## What is implemented
 
 `crates/plugin-host` provides the native API 0.1 contract and a runnable
 **declarative host prototype**. A manifest binds existing host capabilities to
@@ -29,14 +29,65 @@ refresh discovery; an older snapshot may still list a revoked tool, but cannot
 execute it. Do not advertise live tool-list updates until that lifecycle wiring
 exists.
 
-This is **not yet an app installer or a Freelens runtime**. The desktop/web UIs do
-not load these manifests. Contribution descriptors are validated but not rendered.
+Both desktop designs now load local declarative manifests through **Settings →
+Extensions**. The backend owns installation, grants, enable/disable, updates,
+removal and per-extension JSON settings. Developer mode is off by default;
+unsigned installs require enabling it and reviewing the requested capability
+before granting permission. An unsigned-extension notice remains visible while
+any extension is enabled. Turning developer mode off disables all extensions.
+
+The app deliberately accepts a narrower surface than the developer broker:
+`k8s.listCustomResource` bindings with fixed, nonempty group/version/plural/kind
+and fixed resource scope. Only `context` and `namespace` are forwarded from the
+host view. Core-group resources, caller-supplied resource selectors, executable
+entry points and operations requiring consent are rejected. Reads remain subject
+to the selected cluster's RBAC; the extension receives no kubeconfig or token.
+
+The inventory lives next to the desktop settings file, using the settings path
+with its extension replaced by `extensions.json`. Saves use a private temporary
+file, sync and atomic replacement under a cross-process lock. Updating an ID
+preserves its settings and assigns a new revision. Every read checks the durable
+inventory and revision, so disabled/removed/replaced installations cannot be
+invoked through an old registry instance. Already admitted reads may finish.
+No preference or installation is persisted in browser storage. Stored extension
+settings are JSON data; this declarative version does not interpolate settings
+into capability arguments.
+
+The application exposes `extensions.list`, `extensions.configure` and
+`extensions.read` through the shared capability registry and MCP. Configure is
+mutating and uses the normal MCP consent gate. App-installed operations currently
+use the `extensions.read` facade with installation ID, revision, operation and
+context; individual `plugin/...` tool discovery remains a developer-harness
+feature. The app facade refuses a host reader with stronger consent annotations.
+All three capabilities are unavailable on the multi-user web host until per-user
+extension state is implemented.
+
 No third-party code, subprocess, iframe, download, npm install or lifecycle script
-is executed. Code-bearing and `lens-compat` manifests are rejected explicitly.
-Signing, durable installation/grants/settings and OS sandboxing belong to the next
-host stages below; the developer harness does not claim those protections.
+is executed. `lens-compat` packages still fail explicitly. Signed distribution,
+executable runtimes, sandboxing and the Freelens/OpenLens adapter remain later
+stages; local developer-mode support does not claim those protections.
 
 ## Try a native extension
+
+In either desktop design:
+
+1. Open **Settings → Extensions** and enable developer mode.
+2. Paste `examples/extensions/argocd.json` or `flux.json`, review the manifest,
+   then install and grant `k8s.listCustomResource`.
+3. Choose a cluster and open an extension page. The new design also adds pages
+   beneath **Extensions** in the cluster sidebar; its routes pin the cluster.
+   Classic opens pages inline in the manager with its own controls and theme.
+4. Open a Namespace's resource overview. Its **Extensions** section contains the
+   declared detail view and an **Extension actions** menu, scoped to that namespace.
+5. Disable/remove the extension to remove its contributions, or install the same
+   ID again to update it. Open views refresh against the new revision. JSON
+   settings are preserved across updates and restarts, and deleted on removal.
+
+Installation and inventory discovery do not contact clusters. Page reads happen
+when opened; namespace detail contributions read only the selected resource's
+cluster and namespace. Refresh explicitly repeats a read. These are read-only
+lists; native Sync/Reconcile actions and arbitrary custom renderers are not part
+of this stage.
 
 The examples use the existing CRD reader. They do not install CRDs or connect to
 any cluster merely by validating the manifest.
@@ -98,14 +149,14 @@ supported in API 0.1.
 
 ## Delivery plan and exit checks
 
-Each stage is a separate reviewable PR; #163 stays open until both authoring paths
+The current PR includes the broker and local declarative app lifecycle. #163 stays open until both authoring paths
 work end-to-end.
 
-1. **Native contract and broker (this PR):** executable manifest examples,
+1. **Native contract and broker (implemented):** executable manifest examples,
    collision/permission/input validation, revocation and real MCP consent tests.
-2. **Application lifecycle and declarative UI:** backend-owned install inventory,
+2. **Application lifecycle and declarative UI (local desktop implemented):** backend-owned install inventory,
    grants and per-extension settings; atomic save/update/remove; developer mode
-   off by default for unsigned local manifests; signed distributed packages;
+   off by default for unsigned local manifests; signed distributed packages remain pending;
    enable/disable and contribution removal in both classic and new UI. One sample
    must visibly add a page, detail tab and menu action without editing app source.
    Cluster identity belongs in extension routes and broker calls. Web instances

@@ -1,0 +1,96 @@
+/* Declarative extensions use flush regions in both desktop designs. */
+.extension-manager,
+.extension-results {
+  min-width: 0;
+}
+.extension-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-toolbar > strong {
+  margin-right: auto;
+}
+.extension-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.extension-install {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-install textarea {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--rule, var(--fl-color-border));
+  border-radius: 4px;
+  background: var(--surface, var(--fl-color-surface));
+  color: inherit;
+  font-family: var(--font-mono);
+  resize: vertical;
+}
+.extension-installed {
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-message {
+  padding: 10px 12px;
+}
+.extension-error,
+.extension-warning {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-error {
+  color: var(--sev, var(--fl-color-danger));
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.extension-warning {
+  color: var(--warn, var(--fl-color-warning));
+}
+.extension-table-scroll {
+  overflow: auto;
+}
+.extension-results table {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: nowrap;
+}
+.extension-results th,
+.extension-results td {
+  padding: 7px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-results th {
+  font-weight: 600;
+  background: var(--surface, var(--fl-color-surface));
+}
+
+.extension-banner {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+  font-size: 0.75rem;
+}
+
+.extension-error pre {
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre;
+}
+
+.extension-error > div {
+  min-width: 0;
+  flex: 1;
+}
+.extension-error > button {
+  flex-shrink: 0;
+}

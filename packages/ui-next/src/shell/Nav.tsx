@@ -1,3 +1,5 @@
+import { useExtensions } from "../extensions/Extensions";
+import { extensionRoute } from "@srelens/core";
 import { symbolFor } from "../lib/markSymbols";
 import { useMemo, useState } from "react";
 import { listCrds, type ClusterContext, type CrdRef } from "@srelens/core";
@@ -68,6 +70,7 @@ function nodeForRoute(nodes: ResourceNode[], crds: CrdRef[], route: string): str
  * so switching contexts or restarting restores that cluster's own choices.
  */
 export function Nav({ contexts }: NavProps) {
+  const extensions = useExtensions();
   const activeCluster = useActiveCluster();
   const ctx = contexts.find((c) => c.stableId === activeCluster) ?? null;
   const view = useWorkspaceView();
@@ -108,6 +111,16 @@ export function Nav({ contexts }: NavProps) {
   const nodes = useMemo<ResourceNode[]>(
     () => [
       ...kindNodes(),
+      ...(ctx && extensions.data?.developerMode && extensions.data.plugins.some(p => p.enabled && p.manifest.contributions.pages.length)
+        ? [{
+            id: "extensions", label: "Extensions", icon: Icons.crds,
+            children: extensions.data.plugins.filter(p => p.enabled).flatMap(p =>
+              p.manifest.contributions.pages.map(page => ({
+                id: `route:${extensionRoute(ctx.name, p.manifest.id, page.id)}`,
+                label: page.title, icon: Icons.crds,
+              }))),
+          }]
+        : []),
       { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crdChildren },
       {
         id: "investigate",
@@ -116,7 +129,7 @@ export function Nav({ contexts }: NavProps) {
         children: INVESTIGATE.map((i) => ({ id: `route:${i.route}`, label: i.label, icon: glyph(i.id) })),
       },
     ],
-    [crds, crdChildren],
+    [crds, crdChildren, ctx, extensions.data],
   );
 
   const link = ctx

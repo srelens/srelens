@@ -1,3 +1,4 @@
+import { ExtensionWarning } from "../extensions/Extensions";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   cleanErrorMessage,
@@ -535,6 +536,7 @@ export function Window({
           pushes its own new-tab and overflow controls off the window, which
           is where the user meets it. */}
       <div data-slot="screen-column" className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <ExtensionWarning />
         {active && (
           <TabStrip
             tabs={tabs.map(tab => {

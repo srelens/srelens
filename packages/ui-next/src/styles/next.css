@@ -2,6 +2,7 @@
    adds only what belongs to its shell and screens. Re-exported under ui-next's
    own "./styles" so the app entry keeps importing exactly one stylesheet. */
 @import "@srelens/ui-kit/styles";
+@import "../extensions/extensions.css";
 
 /* ui-next's own components sit outside the app's source tree too, so they need
    the same declaration; the kit's `@source` covers only the kit. (#317 review) */

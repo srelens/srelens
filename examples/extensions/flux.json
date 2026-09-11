@@ -73,7 +73,25 @@
         "capability": "helmreleases"
       }
     ],
-    "detailTabs": [],
-    "rowActions": []
+    "detailTabs": [
+      {
+        "id": "namespace-resources",
+        "title": "Flux",
+        "capability": "kustomizations",
+        "forKinds": [
+          "/Namespace"
+        ]
+      }
+    ],
+    "rowActions": [
+      {
+        "id": "inspect-namespace",
+        "title": "Inspect Flux resources",
+        "capability": "kustomizations",
+        "forKinds": [
+          "/Namespace"
+        ]
+      }
+    ]
   }
 }

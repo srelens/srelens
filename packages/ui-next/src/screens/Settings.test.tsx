@@ -78,10 +78,11 @@ const DESKTOP_SECTIONS = [
   "Application logs",
   "Updates",
   "Clusters",
+  "Extensions",
 ];
 
 /** The same nav where no vault command can answer. */
-const WEB_SECTIONS = DESKTOP_SECTIONS.filter((s) => s !== "Security" && s !== "Updates");
+const WEB_SECTIONS = DESKTOP_SECTIONS.filter((s) => s !== "Security" && s !== "Updates" && s !== "Extensions");
 
 function paint(props: { onLocked?: () => void } = {}) {
   const onSwitchToClassic = vi.fn();
@@ -256,11 +257,11 @@ describe("Settings", () => {
     expect(sections()[1]).toBe("Security");
     expect(document.activeElement?.textContent).toBe("Security");
     await user.keyboard("{End}");
-    expect(document.activeElement?.textContent).toBe("Clusters");
+    expect(document.activeElement?.textContent).toBe("Extensions");
     await user.keyboard("{ArrowDown}");
     expect(document.activeElement?.textContent).toBe("Agent & MCP");
     await user.keyboard("{ArrowUp}");
-    expect(document.activeElement?.textContent).toBe("Clusters");
+    expect(document.activeElement?.textContent).toBe("Extensions");
     await user.keyboard("{Home}");
     expect(document.activeElement?.textContent).toBe("Agent & MCP");
   });

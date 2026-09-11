@@ -45,7 +45,25 @@
         "capability": "applications"
       }
     ],
-    "detailTabs": [],
-    "rowActions": []
+    "detailTabs": [
+      {
+        "id": "namespace-resources",
+        "title": "Argo CD",
+        "capability": "applications",
+        "forKinds": [
+          "/Namespace"
+        ]
+      }
+    ],
+    "rowActions": [
+      {
+        "id": "inspect-namespace",
+        "title": "Inspect Argo CD resources",
+        "capability": "applications",
+        "forKinds": [
+          "/Namespace"
+        ]
+      }
+    ]
   }
 }

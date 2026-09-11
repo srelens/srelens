@@ -6529,6 +6529,7 @@ dependencies = [
  "srelens-capability",
  "srelens-kube",
  "srelens-mcp",
+ "srelens-plugin-host",
  "tempfile",
  "tokio",
 ]

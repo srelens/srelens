@@ -1,5 +1,23 @@
 [
   {
+    "id": "extensions.configure",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true
+  },
+  {
+    "id": "extensions.list",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
+    "id": "extensions.read",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
     "id": "k8s.applyManifest",
     "readOnly": false,
     "destructive": false,

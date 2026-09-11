@@ -8,9 +8,10 @@
 ## Implementation status (2026-09-11)
 
 Native authoring **and** Freelens/OpenLens compatibility are both required.
-The first implementation is a declarative contract/broker prototype in
-`crates/plugin-host`; it executes no third-party code and is not yet loaded by
-application UIs. See [the current implementation and delivery plan](../EXTENSIONS.md)
+The implementation provides the declarative contract/broker in
+`crates/plugin-host` and backend-owned local installation, settings and read-only
+contributions in both desktop UIs. It executes no third-party code; signed package
+distribution and the Freelens/OpenLens runtime remain pending. See [the current implementation and delivery plan](../EXTENSIONS.md)
 for runnable GitOps examples, limitations and the compatibility matrix.
 This stages the broker before executable runtimes; it does not remove the native
 subprocess or compatibility-runtime work below.
