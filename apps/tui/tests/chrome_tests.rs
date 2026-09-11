@@ -2429,3 +2429,28 @@ fn feature_banner_stays_inside_small_preview_regions() {
         }
     }
 }
+
+#[test]
+fn long_helm_errors_show_the_reason_and_recovery_with_and_without_stale_rows() {
+    use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+    for stale in [false, true] {
+        let mut state = HelmViewState::new();
+        if stale {
+            state.set_releases(vec![HelmReleaseItem {
+                name: "cached-release".into(), namespace: "default".into(), revision: 3,
+                status: "deployed".into(), chart: "web".into(), chart_version: "1".into(),
+                app_version: "1".into(), updated: "today".into(),
+            }]);
+        }
+        state.set_error(format!("{} permission denied", "Unable to list Helm release secrets in the selected Kubernetes namespace. ".repeat(3)));
+        let text = common::render_text(80, 24, |f| render_helm_view(f, f.area(), &state));
+        let content = text.lines().map(|line| line.trim_matches('│')).collect::<Vec<_>>().join(" ");
+        let words = content.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("permission denied"), "{text}");
+        assert!(words.contains("Press R to retry."), "{text}");
+        if stale {
+            assert!(words.contains("Rollback is disabled."), "{text}");
+            assert!(text.contains("cached-release"), "{text}");
+        }
+    }
+}

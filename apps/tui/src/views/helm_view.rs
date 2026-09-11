@@ -159,9 +159,16 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
         } else {
             format!("Refresh failed; rows are stale: {err}. Press R to retry. Rollback is disabled.")
         };
-        let regions = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(inner);
-        f.render_widget(Paragraph::new(message).wrap(Wrap { trim: true }).style(Style::default().fg(Theme::red())), regions[0]);
-        if state.releases.is_empty() { return; }
+        let error = Paragraph::new(message)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Theme::red()));
+        if state.releases.is_empty() {
+            f.render_widget(error, inner);
+            return;
+        }
+        let error_height = error.line_count(inner.width).min(inner.height as usize) as u16;
+        let regions = Layout::vertical([Constraint::Length(error_height), Constraint::Min(0)]).split(inner);
+        f.render_widget(error, regions[0]);
         inner = regions[1];
     }
 
