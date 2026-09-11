@@ -1,3 +1,4 @@
+import { ContextLabel } from "../lib/contextLabel";
 import { useEffect, useMemo, useState } from "react";
 import {
   listCrds,
@@ -19,6 +20,7 @@ import {
   SideRail,
   Table,
   filterTableData,
+  tableFilterError,
   type Column,
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
@@ -32,7 +34,7 @@ import { rowKey, type KindDescriptor, type ListRow } from "../lib/kinds/types";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
 import { useResourceList } from "../lib/resourceList";
 import { describe, isBuiltInKind } from "../lib/routes";
-import { openTab } from "../lib/tabsStore";
+import { openTab, useTabs } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
@@ -45,6 +47,7 @@ import {
   NamespaceErrorAlert,
   NamespacePicker,
   NoClusterScreen,
+  PausedClusterScreen,
   StaleSelectionAlert,
   columnOptionsFor,
   defaultHiddenKeys,
@@ -78,6 +81,7 @@ const CRD_RAIL_WIDTH = 264;
  */
 export function Resources({ route }: { route: string }) {
   const context = useActiveContext();
+  const { workspace } = useTabs();
   const slug = route.slice("/k/".length);
   // The tab strip already knows what this route is called; asking `describe`
   // keeps the screen's title and the tab's title the same string.
@@ -85,6 +89,9 @@ export function Resources({ route }: { route: string }) {
 
   if (!context) {
     return <NoClusterScreen title={title} noun="resources" />;
+  }
+  if (workspace.pausedClusters?.includes(context.stableId)) {
+    return <PausedClusterScreen title={title} noun="resources" context={context} />;
   }
 
   return <KindList route={route} slug={slug} title={title} context={context} />;
@@ -194,7 +201,17 @@ function KindList({
   // Sort, filter text and filter column live on the tab — see
   // `useResourceTabView`'s own comment for why, and why `filterKey` is
   // derived rather than merely cleared when this screen hides a column.
-  const { tabId, sort, filter, filterKey, setFilter, setSort, setFilterKey } = useResourceTabView(route, columns);
+  const {
+    tabId,
+    sort,
+    filter,
+    filterKey,
+    regex,
+    setFilter,
+    setSort,
+    setFilterKey,
+    setRegex,
+  } = useResourceTabView(route, columns);
 
   const rows = useMemo(
     () =>
@@ -204,9 +221,10 @@ function KindList({
     [list.rows, clusterScoped, selection],
   );
   const filtered = useMemo(
-    () => filterTableData(rows, columns, filter, filterKey),
-    [rows, columns, filter, filterKey],
+    () => filterTableData(rows, columns, filter, filterKey, regex),
+    [rows, columns, filter, filterKey, regex],
   );
+  const invalidFilter = tableFilterError(filter, regex) !== null;
 
   // Called unconditionally — same reason every hook above it is: the guard
   // for "no descriptor yet" is a `return` below, not a skip, and a hook
@@ -321,7 +339,7 @@ function KindList({
 
   if (!descriptor) {
     return (
-      <Screen title={title} eyebrow={name} fill>
+      <Screen title={title} eyebrow={<ContextLabel context={context} />} fill>
         {!builtIn && discovery.status === "loading" ? (
           <LoadingState label={`Looking for ${slug}`} />
         ) : discovery.status === "error" ? (
@@ -467,7 +485,7 @@ function KindList({
   return (
     <Screen
       title={title}
-      eyebrow={name}
+      eyebrow={<ContextLabel context={context} />}
       fill
       actions={
         <>
@@ -497,8 +515,21 @@ function KindList({
       <FilterBar
         value={filter}
         onValueChange={setFilter}
+        regex={regex}
+        onRegexChange={setRegex}
+        invalid={invalidFilter}
         label={`Filter ${lower}`}
         placeholder={`Filter ${lower}…`}
+        leading={showRows && (
+          <ResourceBulk
+            selected={selected}
+            kind={lower}
+            descriptor={descriptor}
+            context={name}
+            rows={filtered}
+            onDone={() => setSelected(new Set())}
+          />
+        )}
       >
         {!clusterScoped && (
           <NamespacePicker
@@ -528,19 +559,6 @@ function KindList({
         // anyone. The table runs flush to the panel, so the alert carries
         // its own inset rather than borrowing the container's.
         <FailureAlert title={`These ${lower} are stale`} error={list.error} className="mx-3 mt-3 mb-3" />
-      )}
-      {showRows && (
-        // Same reason as the alert above: selection actions that scroll out
-        // of reach while the selection persists are worse than a warning
-        // nobody sees.
-        <ResourceBulk
-          selected={selected}
-          kind={lower}
-          descriptor={descriptor}
-          context={name}
-          rows={filtered}
-          onDone={() => setSelected(new Set())}
-        />
       )}
       {crd ? (
         // The rail is the whole of what a custom resource's list adds. It is
@@ -613,7 +631,7 @@ export function ResourceDetailScreen({ route }: { route: string }) {
     // a throw: a route string can arrive from a persisted session, and a tab
     // that says what is wrong with it is worth more than a blank surface.
     return (
-      <Screen title={title} eyebrow={context.name} fill>
+      <Screen title={title} eyebrow={<ContextLabel context={context} />} fill>
         <ErrorState
           title={`${route} does not name a resource`}
           detail="A resource tab's route is /k/<kind>/<namespace>/<name>. Close this tab and open the resource from its list."

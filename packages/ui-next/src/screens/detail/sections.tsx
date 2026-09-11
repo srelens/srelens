@@ -5,19 +5,22 @@
  * before it was written once, and every copy had drifted from the others by
  * the time they were compared. (#331)
  *
- * The file was `ConditionsSection.tsx` while it held one block. It holds seven
+ * The file was `ConditionsSection.tsx` while it held one block. It holds eight
  * now — `StringList`, `LabelsSection`, `AnnotationsSection`,
  * `AnnotationsToggle`, `AnnotationLines`, `ConditionsSection` and
- * `RelatedPodsSection`, the same seven `sections.test.tsx` sweeps for exactly
+ * `RelatedPodsSection`, and `NodePodsSection`, the same eight
+ * `sections.test.tsx` sweeps for exactly
  * one definition of — so it is named for what it is: this design's shared
  * detail sections.
  */
 import { useState } from "react";
 import {
+  ageSortValue,
   conditionKindWithReason,
   plural,
   podMetrics,
   podsForSelector,
+  podsOnNode,
   podStatus,
   type Condition,
   type PodMetric,
@@ -35,7 +38,10 @@ import {
 import { Section } from "./Section";
 import { SectionFailure, useSectionList } from "./sectionList";
 import { formatCpu, formatMemory } from "../../lib/kinds/columns";
+import { AgeCell } from "../../lib/ageCell";
 import type { WorkloadSelector } from "../../lib/workloadSelector";
+import { detailRoute } from "../../lib/detailRoute";
+import { currentWorkspace, openTab, setTabView } from "../../lib/tabsStore";
 
 /**
  * A formatted list, one item per line — a pod's IPs, an owner reference, a
@@ -405,6 +411,77 @@ export function RelatedPodsSection({
         <SectionFailure error={state.error} />
       ) : (
         <Table columns={RELATED_POD_COLUMNS} data={state.data ?? []} getRowKey={(p) => p.name} emptyText="No pods" />
+      )}
+    </Section>
+  );
+}
+
+const NODE_POD_LIMIT = 12;
+
+const NODE_POD_COLUMNS: Column<PodSummary>[] = [
+  { key: "name", header: "Pod", render: (pod) => <span className="font-mono">{pod.name}</span> },
+  {
+    key: "namespace",
+    header: "Namespace",
+    render: (pod) => <span className="font-mono">{pod.namespace || "—"}</span>,
+  },
+  {
+    key: "age",
+    header: "Age",
+    sortable: true,
+    align: "end",
+    render: (pod) => <AgeCell created={pod.created} age={pod.age} />,
+    getSortValue: ageSortValue,
+  },
+];
+
+/** Pods scheduled on a Node, queried by `spec.nodeName` across namespaces. */
+export function NodePodsSection({ context, node }: { context: string; node: string }) {
+  const state = useSectionList<PodSummary[]>(true, [context, node], async () => {
+    const out = await podsOnNode(context, node);
+    if (out.error) return { error: out.error };
+    const pods = [...(out.pods ?? [])].sort(
+      (a, b) => a.namespace.localeCompare(b.namespace) || a.name.localeCompare(b.name),
+    );
+    return { data: pods };
+  });
+  const all = state.data ?? [];
+  const rows = all.slice(0, NODE_POD_LIMIT);
+  const openPod = (pod: PodSummary) =>
+    openTab(detailRoute("Pod", pod.namespace, pod.name), { clusterName: context });
+  const viewAll = () => {
+    openTab("/k/pods", { clusterName: context });
+    setTabView(currentWorkspace().activeId, { filter: node, filterKey: "node" });
+  };
+
+  return (
+    <Section title={state.status === "ready" ? `Pods (${all.length})` : "Pods"} id="Pods">
+      {state.status === "loading" ? (
+        <LoadingState label={`Loading pods on ${node}`} />
+      ) : state.status === "error" ? (
+        <SectionFailure error={state.error} />
+      ) : (
+        <>
+          <Table
+            columns={NODE_POD_COLUMNS}
+            data={rows}
+            getRowKey={(pod) => `${pod.namespace}/${pod.name}`}
+            emptyText="No pods on this node"
+            onRowClick={openPod}
+            onRowActivate={openPod}
+          />
+          {all.length > NODE_POD_LIMIT && (
+            <div className="mt-2 flex justify-end">
+              <Button
+                size="xs"
+                onClick={viewAll}
+                aria-label={`View all ${all.length} pods on ${node}`}
+              >
+                View all
+              </Button>
+            </div>
+          )}
+        </>
       )}
     </Section>
   );

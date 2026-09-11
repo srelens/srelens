@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { settingsStorage } from "@srelens/core";
+import { avatarColor, avatarInitials, migrateRecordKeys, loadContextProfiles, saveContextProfiles, settingsStorage, unprefixedName, type ClusterContext, type ContextProfile, type ContextProfiles } from "@srelens/core";
 import type { MarkAppearance } from "@srelens/ui-kit";
 import type { Storage } from "./tabsPersist";
 
@@ -17,33 +17,13 @@ import type { Storage } from "./tabsPersist";
  * injectable so tests need a Map and no platform.
  */
 export const MARKS_KEY = "srelens.next.marks";
+const AMBIGUOUS_PROFILES_KEY = "srelens.next.ambiguousContextProfiles";
 
-/**
- * `prod-eu` → `PE`, `staging` → `ST`.
- *
- * The first letter of each of the first two parts, or the first two letters
- * when there is only one part, so that a single-word name is still told apart
- * from its neighbours. Capped at what {@link MarkAppearance.short} can draw.
- */
-export function initials(name: string): string {
-  const parts = name.split(/[-_ ]+/).filter(Boolean);
-  if (parts.length === 0) return "";
-  const letters = parts.length === 1 ? parts[0].slice(0, 2) : parts[0][0] + parts[1][0];
-  return letters.toUpperCase().slice(0, 3);
-}
+/** Same deterministic initials and colours as the classic design. */
+export const initials = avatarInitials;
 
-/**
- * What a cluster looks like before anyone has customised it.
- *
- * The indigo of the mark palette rather than `var(--accent)`, which is what
- * this used to be: the accent moves with the accent axis, so an uncustomised
- * mark changed colour for anyone who preferred a blue accent, and — because
- * the editor's swatches are radios compared by value — the palette then had
- * nothing checked and no tab stop at all until a colour was picked. The mark
- * tokens are identity rather than meaning and move with nothing.
- */
 export function defaultMark(name: string): MarkAppearance {
-  return { name, short: initials(name), color: "var(--mark-indigo)", mark: "text", withText: true };
+  return { name, short: initials(name), color: avatarColor(name), mark: "text", withText: true };
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -84,6 +64,44 @@ export function parseStoredMarks(raw: string | null): Record<string, MarkAppeara
 }
 
 let marks: Record<string, MarkAppearance> = {};
+let profiles: ContextProfiles = {};
+let ambiguousProfileKeys = new Set<string>();
+let profileInventoryComplete = true;
+const contextNames = new Map<string, string>();
+const LEGACY_ICONS = new Set(["cluster", "cloud", "shield", "database", "globe"]);
+
+function withProfile(stableId: string, name: string, base: MarkAppearance): MarkAppearance {
+  const profile = profiles[stableId] ?? (profileInventoryComplete && !ambiguousProfileKeys.has(name) ? profiles[name] : undefined);
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) return base;
+  const mark = { ...defaultMark(name) };
+  if (typeof profile.displayName === "string") mark.name = profile.displayName;
+  if (typeof profile.shortName === "string") mark.short = profile.shortName;
+  if (typeof profile.color === "string" && profile.color) mark.color = profile.color;
+  if (profile.logo === "initials") mark.mark = "text";
+  else if (profile.logo === "custom") { mark.mark = "image"; mark.imageSrc = profile.logoUrl; }
+  else if (profile.logo && LEGACY_ICONS.has(profile.logo)) {
+    mark.mark = "icon"; mark.icon = profile.markIcon || profile.logo;
+  }
+  if (profile.logo) mark.withText = profile.showShortName ?? (typeof profile.shortName === "string" && !!profile.shortName.trim());
+  return mark;
+}
+
+function sharedProfile(stableId: string, mark: MarkAppearance, previousDefaultName?: string): ContextProfile {
+  const contextName = contextNames.get(stableId) ?? mark.name;
+  const defaultNames = previousDefaultName && previousDefaultName !== contextName
+    ? [contextName, previousDefaultName]
+    : [contextName];
+  const legacyIcon = mark.icon && LEGACY_ICONS.has(mark.icon) ? mark.icon as ContextProfile["logo"] : "cluster";
+  return {
+    displayName: defaultNames.includes(mark.name) ? undefined : mark.name,
+    shortName: defaultNames.some(name => mark.short === initials(name)) ? undefined : mark.short,
+    color: mark.color,
+    logo: mark.mark === "text" ? "initials" : mark.mark === "image" ? "custom" : legacyIcon,
+    logoUrl: mark.imageSrc,
+    markIcon: mark.mark === "icon" && !LEGACY_ICONS.has(mark.icon ?? "") ? mark.icon : undefined,
+    showShortName: mark.withText,
+  };
+}
 const listeners = new Set<() => void>();
 
 /**
@@ -123,7 +141,16 @@ export function loadMarks(storage: Storage = settingsStorage): void {
   } catch (error) {
     console.error("could not read the saved cluster marks", error);
   }
+  profileInventoryComplete = true;
   marks = next;
+  profiles = loadContextProfiles(storage);
+  try {
+    const saved = JSON.parse(storage.getItem(AMBIGUOUS_PROFILES_KEY) ?? "[]") as unknown;
+    ambiguousProfileKeys = new Set(Array.isArray(saved) ? saved.filter(isString) : []);
+  } catch {
+    ambiguousProfileKeys = new Set();
+  }
+  contextNames.clear();
   emit();
 }
 
@@ -137,44 +164,55 @@ function save(storage: Storage) {
   }
 }
 
-/**
- * The cluster's mark: the stored appearance if there is one, and otherwise a
- * default seeded from the name the kubeconfig gives the context.
- *
- * A stored mark comes back exactly as stored, `name` included. That name is a
- * display name the operator typed, not a cache of the context's. This used to
- * overwrite it with the `name` argument on the way out, which made the editor's
- * name field inert: every keystroke was stored and then reverted on the very
- * next read (#325 review). `short` is not re-derived either, for the same
- * reason — an edit nobody asked to undo should not be undone.
- *
- * So a cluster renamed in the kubeconfig follows that rename only while nobody
- * has customised it, which is the case the rename mattered for; once someone
- * has named it themselves, that is its name.
- */
+/** Display labels match classic: trim custom names and fall back when blank. */
 export function getMark(stableId: string, name: string): MarkAppearance {
-  // Keyed on both, because the unstored answer depends on the name. A stored
-  // mark ignores it, and every key then hands back that same one object.
-  const key = `${stableId}\u0000${name}`;
+  return readMark(stableId, name, false);
+}
+
+/** Prefer an explicitly configured short name; otherwise retain the display name. */
+export function getContextLabel(stableId: string, name: string): string {
+  const profile = profiles[stableId] ?? (profileInventoryComplete && !ambiguousProfileKeys.has(name) ? profiles[name] : undefined);
+  const short = profile?.shortName ?? marks[stableId]?.short;
+  return (typeof short === "string" && short.trim()) || getMark(stableId, name).name;
+}
+
+function readMark(stableId: string, name: string, editing: boolean): MarkAppearance {
+  // Raw editor values and display labels each need a stable snapshot. The
+  // fallback also depends on the current kubeconfig name.
+  contextNames.set(stableId, name);
+  const key = `${editing}\u0000${stableId}\u0000${name}`;
   const cached = snapshots.get(key);
   if (cached) return cached;
-  const mark = marks[stableId] ?? defaultMark(name);
+  const saved = withProfile(stableId, name, marks[stableId] ?? defaultMark(name));
+  const mark = editing
+    ? saved
+    : { ...saved, name: saved.name.trim() || name, short: saved.short.trim() ? saved.short : initials(name) };
   snapshots.set(key, mark);
   return mark;
 }
 
 /** Give a cluster this appearance, and keep it. */
 export function setMark(stableId: string, mark: MarkAppearance, storage: Storage = settingsStorage): void {
-  marks = { ...marks, [stableId]: mark };
+  profiles = { ...profiles, [stableId]: { ...profiles[stableId], ...sharedProfile(stableId, mark) } };
+  // Canonical profiles are already keyed by stable ID. Remove the imported
+  // copy so resetting in classic cannot resurrect an older new-design mark.
+  const { [stableId]: _old, ...rest } = marks;
+  marks = rest;
+  saveContextProfiles(profiles, storage);
   emit();
   save(storage);
 }
 
-/** Forget a cluster's appearance, putting it back to {@link defaultMark}. */
+/** Forget a cluster's appearance in both designs. */
 export function resetMark(stableId: string, storage: Storage = settingsStorage): void {
-  if (!(stableId in marks)) return;
-  const { [stableId]: _dropped, ...rest } = marks;
+  const name = contextNames.get(stableId);
+  const next = { ...profiles };
+  delete next[stableId];
+  if (name) delete next[name];
+  profiles = next;
+  const { [stableId]: _old, ...rest } = marks;
   marks = rest;
+  saveContextProfiles(profiles, storage);
   emit();
   save(storage);
 }
@@ -186,4 +224,68 @@ export function useMark(stableId: string, name: string): MarkAppearance {
     () => getMark(stableId, name),
     () => getMark(stableId, name),
   );
+}
+
+/** Keep raw input in editors so clearing a name or typing spaces is not undone. */
+export function useEditableMark(stableId: string, name: string): MarkAppearance {
+  return useSyncExternalStore(
+    subscribe,
+    () => readMark(stableId, name, true),
+    () => readMark(stableId, name, true),
+  );
+}
+
+/** Migrate old name-keyed profiles and import customisations from the new UI. */
+export function rememberContextMarks(contexts: readonly ClusterContext[], storage: Storage = settingsStorage, complete = true): void {
+  const completenessChanged = profileInventoryComplete !== complete;
+  profileInventoryComplete = complete;
+  const ids = new Set(contexts.map(context => context.stableId));
+  let ambiguityChanged = false;
+  for (const key of Object.keys(profiles)) {
+    if (ids.has(key) || ambiguousProfileKeys.has(key)) continue;
+    const exact = contexts.filter(context => context.name === key);
+    const candidates = exact.length > 0
+      ? exact
+      : contexts.filter(context => unprefixedName(context.name) === key);
+    if (candidates.length > 1) {
+      ambiguousProfileKeys.add(key);
+      ambiguityChanged = true;
+    }
+  }
+
+  const migratable = { ...profiles };
+  for (const key of ambiguousProfileKeys) {
+    if (!ids.has(key)) delete migratable[key];
+  }
+  const migration = complete ? migrateRecordKeys(migratable, contexts) : { migrated: migratable, changed: false };
+  const nextProfiles = migration.migrated;
+  for (const key of ambiguousProfileKeys) {
+    if (!ids.has(key) && key in profiles) nextProfiles[key] = profiles[key];
+  }
+  profiles = nextProfiles;
+  let changed = migration.changed;
+  for (const context of contexts) {
+    contextNames.set(context.stableId, context.name);
+    const old = marks[context.stableId];
+    if (!old) continue;
+    profiles = {
+      ...profiles,
+      [context.stableId]: {
+        ...sharedProfile(context.stableId, old, unprefixedName(context.name)),
+        ...profiles[context.stableId],
+      },
+    };
+    const { [context.stableId]: _old, ...rest } = marks;
+    marks = rest;
+    changed = true;
+  }
+  if (ambiguityChanged) {
+    try {
+      storage.setItem(AMBIGUOUS_PROFILES_KEY, JSON.stringify([...ambiguousProfileKeys]));
+    } catch (error) {
+      console.error("could not persist ambiguous context profile keys", error);
+    }
+  }
+  if (changed) { saveContextProfiles(profiles, storage); save(storage); }
+  if (changed || ambiguityChanged || completenessChanged) emit();
 }

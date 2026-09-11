@@ -380,15 +380,9 @@ fn alt(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
 }
 
-/// Type into the assistant composer. A leading `c` on an empty input is the
-/// "copy the last answer" shortcut rather than a character, so the first
-/// character is seeded directly when it would be swallowed.
+/// Type into the assistant composer.
 async fn compose(app: &mut App, text: &str) {
-    for (i, c) in text.chars().enumerate() {
-        if i == 0 && c == 'c' && app.assistant_state.input.is_empty() {
-            app.assistant_state.input.push('c');
-            continue;
-        }
+    for c in text.chars() {
         app.handle_key_event(common::ch(c)).await;
     }
 }
@@ -751,22 +745,36 @@ async fn log_lines_and_status_markers_for_the_open_log_stream_are_appended() {
 async fn every_table_kind_renders_its_own_key_hints() {
     let (mut app, _rx) = common::app().await;
     app.pod_count = 7;
+    let secret_store_crd = ResourceKind::CustomResource(CrdMeta {
+        crd_name: "secretstores.external-secrets.io".to_string(),
+        group: "external-secrets.io".to_string(),
+        version: "v1beta1".to_string(),
+        kind: "SecretStore".to_string(),
+        plural: "secretstores".to_string(),
+        singular: "secretstore".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+    });
     let cases: Vec<(ResourceKind, &str)> = vec![
         (ResourceKind::Workloads, "Segment"),
         (ResourceKind::Pods, "PortForward"),
         (ResourceKind::Deployments, "Restart"),
         (ResourceKind::StatefulSets, "Scale"),
         (ResourceKind::DaemonSets, "Scale"),
+        (ResourceKind::Jobs, "Logs"),
+        (ResourceKind::CronJobs, "Describe"),
         (ResourceKind::Services, "Endpoints"),
         (ResourceKind::Ingresses, "Edit"),
         (ResourceKind::Namespaces, "Pods"),
         (ResourceKind::Events, "Triage"),
         (ResourceKind::Nodes, "Inspect"),
         (ResourceKind::ConfigMaps, "Help"),
+        (secret_store_crd.clone(), "Describe"),
     ];
     for (kind, hint) in cases {
         let title = kind.display_name().to_string();
-        app.active_view = ActiveView::Table(table_with(kind, vec![pod("web-0", "default")]));
+        app.active_view = ActiveView::Table(table_with(kind.clone(), vec![pod("web-0", "default")]));
         let screen = wide(&mut app);
         assert!(
             screen.contains(&title),
@@ -776,6 +784,17 @@ async fn every_table_kind_renders_its_own_key_hints() {
             screen.contains(hint),
             "{title} shows hint {hint}:\n{screen}"
         );
+
+        // Non-pod/non-workload resources must not advertise pod or workload actions
+        if matches!(kind, ResourceKind::ConfigMaps | ResourceKind::CustomResource(_)) {
+            for excluded in ["PortForward", "Shell", "Restart", "Scale"] {
+                assert!(
+                    !screen.contains(excluded),
+                    "{title} unexpectedly contains {excluded}:\n{screen}"
+                );
+            }
+        }
+
         let screen = narrow(&mut app);
         assert!(
             screen.contains(&title),
@@ -952,14 +971,18 @@ async fn the_node_inspector_renders_loading_error_and_detail_states() {
     app.active_view = ActiveView::NodeInspector(NodeInspectorState::new("gpu-1".into()));
     let screen = wide(&mut app);
     assert!(screen.contains("Node Inspector: gpu-1"), "{screen}");
-    assert!(screen.contains("Cordon"), "{screen}");
-    assert!(screen.contains("PodDesc"), "{screen}");
+    assert!(screen.contains("Cmd"), "{screen}");
 
     let mut failed = NodeInspectorState::new("gpu-1".into());
     failed.set_error("node not found".into());
     app.active_view = ActiveView::NodeInspector(failed);
     let screen = wide(&mut app);
     assert!(screen.contains("Node Inspector Error: gpu-1"), "{screen}");
+
+    app.active_view = ActiveView::NodeInspector(inspector_with_details("gpu-1", false));
+    let screen = wide(&mut app);
+    assert!(screen.contains("Cordon"), "{screen}");
+    assert!(screen.contains("Pod Describe"), "{screen}");
 
     app.active_view = ActiveView::NodeInspector(inspector_with_details("gpu-1", true));
     let screen = wide(&mut app);
@@ -1274,7 +1297,7 @@ async fn mouse_in_the_assistant_toggles_tool_chips_and_selects_text() {
         "assistant keeps its own selection"
     );
 
-    app.handle_key_event(common::ch('c')).await;
+    app.handle_key_event(common::ctrl('c')).await;
     assert_eq!(toast(&app), "✓ Copied selection to clipboard");
 
     // Re-select, then click outside the viewport to clear.
@@ -1811,18 +1834,38 @@ async fn assistant_editing_keys_shape_the_input_buffer() {
     app.handle_key_event(common::ch('c')).await;
     assert_eq!(app.assistant_state.input, "cc");
 
-    // 'c' on an empty input copies the last assistant answer.
+    // 'c' on an empty input types 'c' even when an assistant message exists (no accidental copy).
     app.assistant_state.input.clear();
     app.assistant_state
         .add_assistant_message("the answer".into());
     app.handle_key_event(common::ch('c')).await;
+    assert_eq!(app.assistant_state.input, "c");
+
+    // Ctrl+c copies the last assistant answer.
+    app.assistant_state.input.clear();
+    app.handle_key_event(common::ctrl('c')).await;
     assert_eq!(toast(&app), "✓ Copied assistant answer to clipboard");
     assert_eq!(app.assistant_state.input, "");
 
-    // ... but with text in the buffer it is still typing.
+    // Typing and cursor navigation (Left, Right, Home, End, Delete)
     common::type_str(&mut app, "ab").await;
     app.handle_key_event(common::ch('c')).await;
     assert_eq!(app.assistant_state.input, "abc");
+    // Left arrow moves cursor before 'c'
+    app.handle_key_event(common::key(KeyCode::Left)).await;
+    app.handle_key_event(common::ch('X')).await;
+    assert_eq!(app.assistant_state.input, "abXc");
+    // Home moves to start
+    app.handle_key_event(common::key(KeyCode::Home)).await;
+    app.handle_key_event(common::ch('Z')).await;
+    assert_eq!(app.assistant_state.input, "ZabXc");
+    // Delete removes 'a' (the character at cursor)
+    app.handle_key_event(common::key(KeyCode::Delete)).await;
+    assert_eq!(app.assistant_state.input, "ZbXc");
+    // End moves to end
+    app.handle_key_event(common::key(KeyCode::End)).await;
+    app.handle_key_event(common::ch('!')).await;
+    assert_eq!(app.assistant_state.input, "ZbXc!");
 
     // Ctrl+t toggles the tool chip expansion, Ctrl+l clears the conversation.
     let expanded = app.assistant_state.expand_tools;
@@ -2240,10 +2283,18 @@ async fn node_inspector_keys_navigate_pods_and_offer_node_actions() {
     assert_eq!(ni.selected_pod_idx, 0);
 
     app.handle_key_event(common::ch('s')).await;
-    assert_eq!(
-        toast(&app),
-        "Node debug command: kubectl debug node/gpu-1 -it --image=busybox"
-    );
+    assert!(matches!(
+        &app.requires_terminal_suspend,
+        Some(SuspendAction::PodShell { .. })
+    ));
+    app.requires_terminal_suspend = None;
+
+    app.handle_key_event(common::ch('S')).await;
+    assert!(matches!(
+        &app.requires_terminal_suspend,
+        Some(SuspendAction::NodeShell { node }) if node == "gpu-1"
+    ));
+    app.requires_terminal_suspend = None;
 
     app.handle_key_event(common::ch('c')).await;
     common::type_str(&mut app, "confirm").await;
@@ -2784,6 +2835,82 @@ async fn switching_to_a_crd_uses_cached_instances_and_discovered_columns() {
     );
 }
 
+#[tokio::test]
+async fn crd_live_watch_channel_management_and_stream_updates() {
+    let (mut app, _rx) = common::app().await;
+    app.active_context = "test-cluster".into();
+    app.active_namespace = "default".into();
+
+    let crd = CrdMeta {
+        crd_name: "secretstores.external-secrets.io".into(),
+        group: "external-secrets.io".into(),
+        version: "v1beta1".into(),
+        kind: "SecretStore".into(),
+        plural: "secretstores".into(),
+        singular: "secretstore".into(),
+        namespaced: true,
+        short_names: vec!["ss".into()],
+        printer_columns: vec![
+            PrinterColumn {
+                name: "READY".into(),
+                json_path: ".status.conditions[?(@.type==\"Ready\")].status".into(),
+                col_type: "string".into(),
+                priority: 0,
+                description: None,
+            },
+        ],
+    };
+    app.crds.push(crd.clone());
+
+    // 1. Switching to CRD view starts the watch on the proper channel
+    app.switch_view_to_crd(crd.clone()).await;
+    let expected_ch = "watch:test-cluster:default:secretstores.external-secrets.io";
+    assert_eq!(app.current_watch_channel.as_deref(), Some(expected_ch));
+    assert!(app.active_watch_channels.contains(expected_ch));
+    assert!(app.active_watch_pool.contains(&expected_ch.to_string()));
+
+    // 2. Stream event updates the table live and caches the items
+    let payload = json!([
+        {
+            "name": "vault",
+            "namespace": "default",
+            "metadata": { "name": "vault", "namespace": "default" },
+            "status": {
+                "conditions": [{ "type": "Ready", "status": "True" }]
+            }
+        }
+    ]);
+    app.handle_stream_event(expected_ch.to_string(), payload);
+
+    let ActiveView::Table(t) = &app.active_view else { panic!("expected table") };
+    assert!(!t.is_loading);
+    assert_eq!(t.raw_items.len(), 1);
+    assert_eq!(t.raw_items[0]["name"], "vault");
+
+    // Informer cache also updated
+    assert_eq!(
+        app.resource_cache.get(&("test-cluster".into(), "default".into(), "secretstores.external-secrets.io".into())).unwrap().len(),
+        1
+    );
+
+    // 3. Switching namespace switches the CRD watch channel
+    app.switch_namespace("prod".into()).await;
+    let prod_ch = "watch:test-cluster:prod:secretstores.external-secrets.io";
+    assert_eq!(app.current_watch_channel.as_deref(), Some(prod_ch));
+    assert!(app.active_watch_channels.contains(prod_ch));
+
+    // 4. Cluster-scoped CRD watches with empty namespace
+    let mut cluster_crd = crd.clone();
+    cluster_crd.crd_name = "clustersecretstores.external-secrets.io".into();
+    cluster_crd.kind = "ClusterSecretStore".into();
+    cluster_crd.plural = "clustersecretstores".into();
+    cluster_crd.namespaced = false;
+    app.switch_view_to_crd(cluster_crd).await;
+    let cluster_ch = "watch:test-cluster::clustersecretstores.external-secrets.io";
+    assert_eq!(app.current_watch_channel.as_deref(), Some(cluster_ch));
+    assert!(app.active_watch_channels.contains(cluster_ch));
+}
+
 // ---------------------------------------------------------------------------
 // Containers, logs, shells
 // ---------------------------------------------------------------------------
@@ -2849,7 +2976,7 @@ async fn a_single_or_unknown_container_pod_goes_straight_to_logs_or_shell() {
 
     app.prompt_pod_shell("solo".into(), None).await;
     match &app.requires_terminal_suspend {
-        Some(SuspendAction::PodShell { pod, container }) => {
+        Some(SuspendAction::PodShell { pod, container, .. }) => {
             assert_eq!(pod, "solo");
             assert_eq!(container.as_deref(), Some("only"));
         }

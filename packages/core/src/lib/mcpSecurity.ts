@@ -175,10 +175,15 @@ export interface PromptIssue {
   problem: string;
 }
 
+/** Read prompt diagnostics without hiding a transport failure as an empty list. */
+export async function readPromptIssues(): Promise<PromptIssue[]> {
+  return invoke<PromptIssue[]>("mcp_prompt_issues");
+}
+
 /** Returns [] rather than throwing: no prompts directory is not an error. */
 export async function promptIssues(): Promise<PromptIssue[]> {
   try {
-    return await invoke<PromptIssue[]>("mcp_prompt_issues");
+    return await readPromptIssues();
   } catch {
     return [];
   }

@@ -24,7 +24,9 @@ use srelens_tui::views::overview_view::{
     render_overview_view, ClusterOverviewData, OverviewViewState,
 };
 use srelens_tui::views::settings_view::{render_settings_view, SettingField, SettingsViewState};
+use srelens_tui::views::tui_config_view::{render_tui_config_view, TuiConfigViewState};
 use srelens_tui::views::yaml_view::{render_yaml_view, YamlViewState};
+use srelens_tui::{CommandPopupDensity, TuiConfig};
 
 /// Render one frame and hand back the raw buffer, for the few assertions that
 /// need a cell's style rather than its text.
@@ -333,7 +335,7 @@ fn node_inspector_gpu_model_falls_back_to_a_generic_label() {
 #[test]
 fn node_inspector_footer_lists_every_shortcut_with_the_cordon_hint() {
     let state = node_state(node_details("node-1"));
-    let lines = common::render_lines(180, 40, |f| render_node_inspector_view(f, f.area(), &state));
+    let lines = common::render_lines(200, 40, |f| render_node_inspector_view(f, f.area(), &state));
     let footer = lines.last().unwrap();
     for hint in [
         "<↑/↓>:Select Pod",
@@ -346,6 +348,7 @@ fn node_inspector_footer_lists_every_shortcut_with_the_cordon_hint() {
         "<x>:Actions",
         "<c>:Cordon",
         "<s>:Shell",
+        "<S>:Node Debug",
         "<r>:Refresh",
         "<Esc>:Back",
     ] {
@@ -629,8 +632,7 @@ fn node_inspector_pods_table_lists_pods_and_marks_the_selected_one() {
     assert!(small.contains("128 MiB"), "{small}");
 
     let long = &lines[row_of(&lines, "a-very-long-pod-name")];
-    assert!(long.contains("a-very-long-pod-name-that-…"), "{long}");
-    assert!(!long.contains("truncated"), "{long}");
+    assert!(long.contains("a-very-long-pod-name-that-will-be-truncated"), "{long}");
 
     let buf = render_buffer(160, 40, |f| render_node_inspector_view(f, f.area(), &state));
     let sel_row = row_of(&lines, "trainer") as u16;
@@ -2016,3 +2018,139 @@ fn yaml_view_empty_document_renders_a_bare_frame() {
         "no numbered rows: {lines:?}"
     );
 }
+
+// ───────────────────────────── tui config view ─────────────────────────────
+
+#[test]
+fn tui_config_view_state_field_navigation_and_adjustments() {
+    let mut state = TuiConfigViewState::new();
+    assert_eq!(state.selected_field, 0);
+
+    state.select_next_field();
+    assert_eq!(state.selected_field, 1);
+
+    state.select_next_field();
+    assert_eq!(state.selected_field, 2);
+
+    state.select_next_field();
+    assert_eq!(state.selected_field, 3);
+
+    state.select_next_field();
+    assert_eq!(state.selected_field, 0);
+
+    state.select_prev_field();
+    assert_eq!(state.selected_field, 3);
+
+    let mut config = TuiConfig::default();
+    assert_eq!(config.command_popup_max_width, 65);
+    assert_eq!(config.command_popup_max_visible, 6);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
+    assert!(config.show_feature_banner);
+
+    // Selected field 3: Startup Feature Banner toggle
+    state.adjust_current(1, &mut config);
+    assert!(!config.show_feature_banner);
+    state.cycle_current(&mut config);
+    assert!(config.show_feature_banner);
+
+    // Switch to field 2: Text size / density slider (1..=4)
+    state.select_prev_field();
+    assert_eq!(state.selected_field, 2);
+
+    state.adjust_current(1, &mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::Standard);
+    state.adjust_current(1, &mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::Large);
+    state.adjust_current(1, &mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::ExtraLarge);
+    state.adjust_current(1, &mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::ExtraLarge); // Clamped at 4
+    state.adjust_current(-1, &mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::Large);
+    state.cycle_current(&mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::ExtraLarge);
+    state.cycle_current(&mut config);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
+
+    // Switch to field 1: Visible Rows (step 1, range 3..=20)
+    state.select_prev_field();
+    assert_eq!(state.selected_field, 1);
+
+    state.adjust_current(1, &mut config);
+    assert_eq!(config.command_popup_max_visible, 7);
+
+    state.adjust_current(-3, &mut config);
+    assert_eq!(config.command_popup_max_visible, 4);
+
+    state.adjust_current(-10, &mut config);
+    assert_eq!(config.command_popup_max_visible, 3); // Clamped at 3
+
+    // Switch to field 0: Width (step 5, range 40..=200)
+    state.select_prev_field();
+    assert_eq!(state.selected_field, 0);
+
+    state.adjust_current(2, &mut config);
+    assert_eq!(config.command_popup_max_width, 75);
+
+    state.adjust_current(50, &mut config);
+    assert_eq!(config.command_popup_max_width, 200); // Clamped at 200
+
+    state.adjust_current(-50, &mut config);
+    assert_eq!(config.command_popup_max_width, 40); // Clamped at 40
+
+    // Reset defaults
+    state.reset_defaults(&mut config);
+    assert_eq!(config.command_popup_max_width, 65);
+    assert_eq!(config.command_popup_max_visible, 6);
+    assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
+    assert!(config.show_feature_banner);
+}
+
+#[test]
+fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
+    let state = TuiConfigViewState::new();
+    let config = TuiConfig {
+        command_popup_max_width: 80,
+        command_popup_max_visible: 8,
+        command_popup_density: CommandPopupDensity::Compact,
+        show_feature_banner: true,
+    };
+
+    // Wide render (120x30)
+    let lines = common::render_lines(120, 30, |f| {
+        render_tui_config_view(f, f.area(), &state, &config)
+    });
+    let full = lines.join("\n");
+
+    assert!(full.contains("TUI Configuration"), "has title");
+    assert!(full.contains("Command Popup Max Width"), "has width setting card");
+    assert!(full.contains("Command Popup Max Visible Rows"), "has rows setting card");
+    assert!(full.contains("Command Popup Text Size"), "has text size setting card");
+    assert!(full.contains("Startup Feature Banner"), "has startup banner setting card");
+    assert!(full.contains("80 cols"), "shows configured width");
+    assert!(full.contains("8 rows"), "shows configured visible rows");
+    assert!(full.contains("Live Preview: Command Popup"), "shows live preview title");
+    assert!(full.contains(":po█"), "shows simulated command bar prompt");
+    assert!(full.contains("pods"), "shows sample suggestions in preview");
+
+    // Banner preview render when selected_field == 3
+    let mut banner_state = TuiConfigViewState::new();
+    banner_state.selected_field = 3;
+    let banner_lines = common::render_lines(120, 30, |f| {
+        render_tui_config_view(f, f.area(), &banner_state, &config)
+    });
+    let banner_full = banner_lines.join("\n");
+    assert!(banner_full.contains("Live Preview: Startup Feature Banner"), "shows banner preview title");
+    assert!(banner_full.contains("Welcome to SRElens"), "shows banner contents in preview");
+
+    // Narrow render (70x24) — should not panic, uses vertical split layout
+    let narrow_lines = common::render_lines(70, 24, |f| {
+        render_tui_config_view(f, f.area(), &state, &config)
+    });
+    let narrow_full = narrow_lines.join("\n");
+    assert!(narrow_full.contains("TUI Configuration"));
+    assert!(narrow_full.contains("Command Popup Max Width"));
+    assert!(narrow_full.contains("Command Popup Text Size"));
+    assert!(narrow_full.contains("Startup Feature Banner"));
+}
+

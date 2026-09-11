@@ -13,6 +13,8 @@ import {
 import { useConsole } from "../console";
 import { useActiveContext } from "../lib/clusters";
 import { ClusterMovedAlert } from "../lib/clusterMoved";
+import { useTabs } from "../lib/tabsStore";
+import { useDismissOnPause } from "../lib/pausedContext";
 import {
   endSession,
   getSessions,
@@ -192,6 +194,8 @@ function askQuestion(session: TerminalSessionRow | undefined, context: string): 
 export function Terminals(_props: { route: string }) {
   const sessions = useSyncExternalStore(subscribeSessions, getSessions, getSessions);
   const cluster = useActiveContext();
+  const { workspace } = useTabs();
+  const paused = cluster !== undefined && workspace.pausedClusters?.includes(cluster.stableId) === true;
   const { ask } = useConsole();
   const [picked, setPicked] = useState<number | null>(null);
   /**
@@ -206,6 +210,7 @@ export function Terminals(_props: { route: string }) {
    * `ResourceMenu`'s `Open shell` pinned its own pick for the same reason.
    */
   const [newSession, setNewSession] = useState<{ context: string; namespace: string } | null>(null);
+  const targetPaused = useDismissOnPause(newSession?.context, () => setNewSession(null));
 
   /**
    * A session started anywhere — this screen's menu, or the resource row
@@ -265,6 +270,7 @@ export function Terminals(_props: { route: string }) {
           <Button
             variant="primary"
             size="sm"
+            disabled={paused}
             onClick={() =>
               setNewSession({ context: cluster?.name ?? "", namespace: cluster?.namespace ?? "" })
             }
@@ -274,7 +280,7 @@ export function Terminals(_props: { route: string }) {
         </>
       }
     >
-      {newSession && (
+      {newSession && !targetPaused && (
         <NewSessionMenu
           // The cluster that was in focus when `New session` was pressed, not
           // the active session's and not the one in focus now: a new session is
@@ -316,6 +322,7 @@ export function Terminals(_props: { route: string }) {
             onNewSession={() =>
               setNewSession({ context: cluster?.name ?? "", namespace: cluster?.namespace ?? "" })
             }
+            newSessionDisabled={paused}
           />
         }
         mainHead={

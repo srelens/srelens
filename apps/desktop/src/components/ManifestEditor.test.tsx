@@ -49,6 +49,7 @@ function Harness({ mode }: { mode: "create" | "edit" }) {
   return (
     <ManifestEditor
       context="kind-dev"
+      namespace="team-a"
       yaml={yaml}
       onYamlChange={setYaml}
       applyLabel={mode === "create" ? "Create" : "Apply"}
@@ -78,7 +79,14 @@ describe("ManifestEditor", () => {
     applyManifestMock.mockResolvedValue({ applied: true, documents: [{ kind: "ConfigMap", name: "web", applied: true }] });
     render(<Harness mode="create" />);
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
-    await waitFor(() => expect(applyManifestMock).toHaveBeenCalledWith("kind-dev", expect.stringContaining("ConfigMap"), false, undefined));
+    await waitFor(() =>
+      expect(applyManifestMock).toHaveBeenCalledWith(
+        "kind-dev",
+        expect.stringContaining("ConfigMap"),
+        false,
+        "team-a",
+      ),
+    );
     expect(notifyMock.success).toHaveBeenCalled();
   });
 

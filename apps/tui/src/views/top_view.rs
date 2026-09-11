@@ -515,15 +515,52 @@ pub fn render_top_view(f: &mut Frame, area: Rect, state: &TopViewState) {
                 })
                 .collect();
 
+            let mut max_ns = "NAMESPACE".len();
+            let mut max_name = "NAME".len();
+            let mut max_cpu = "CPU".len();
+            let mut max_cpu_req = "% REQ".len();
+            let mut max_cpu_lim = "% LIM".len();
+            let mut max_mem = "MEMORY".len();
+            let mut max_mem_req = "% REQ".len();
+            let mut max_mem_lim = "% LIM".len();
+
+            for pod in pods {
+                max_ns = max_ns.max(pod.namespace.len());
+                let mut name_len = pod.name.len();
+                if let Some(forwards) = state.active_port_forwards.get(&(pod.namespace.clone(), pod.name.clone())) {
+                    if !forwards.is_empty() {
+                        let pf_str = forwards
+                            .iter()
+                            .map(|(loc, rem, _)| {
+                                if loc == rem {
+                                    format!("{}", loc)
+                                } else {
+                                    format!("{}→{}", loc, rem)
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        name_len += 1 + format!("[PF: {}]", pf_str).len();
+                    }
+                }
+                max_name = max_name.max(name_len);
+                max_cpu = max_cpu.max(format_cpu(pod.cpu_millicores).len());
+                max_cpu_req = max_cpu_req.max(pod.cpu_req_pct().map(|p| format!("{:.0}%", p).len()).unwrap_or(1));
+                max_cpu_lim = max_cpu_lim.max(pod.cpu_lim_pct().map(|p| format!("{:.0}%", p).len()).unwrap_or(1));
+                max_mem = max_mem.max(format_mem(pod.mem_mib).len());
+                max_mem_req = max_mem_req.max(pod.mem_req_pct().map(|p| format!("{:.0}%", p).len()).unwrap_or(1));
+                max_mem_lim = max_mem_lim.max(pod.mem_lim_pct().map(|p| format!("{:.0}%", p).len()).unwrap_or(1));
+            }
+
             let widths = [
-                Constraint::Length(18), // Namespace
-                Constraint::Min(25),    // Name
-                Constraint::Length(10), // CPU
-                Constraint::Length(8),  // % REQ
-                Constraint::Length(8),  // % LIM
-                Constraint::Length(10), // Memory
-                Constraint::Length(8),  // % REQ
-                Constraint::Length(8),  // % LIM
+                Constraint::Length((max_ns + 1) as u16),
+                Constraint::Length((max_name + 1) as u16),
+                Constraint::Length((max_cpu + 1) as u16),
+                Constraint::Length((max_cpu_req + 1) as u16),
+                Constraint::Length((max_cpu_lim + 1) as u16),
+                Constraint::Length((max_mem + 1) as u16),
+                Constraint::Length((max_mem_req + 1) as u16),
+                Constraint::Length((max_mem_lim + 1) as u16),
             ];
 
             let table = Table::new(rows, widths).header(header);
@@ -592,15 +629,35 @@ pub fn render_top_view(f: &mut Frame, area: Rect, state: &TopViewState) {
                 })
                 .collect();
 
+            let mut max_name = "NAME".len();
+            let mut max_status = "STATUS".len();
+            let mut max_cpu_u = "CPU USAGE".len();
+            let mut max_cpu_a = "CPU ALLOC".len();
+            let mut max_cpu_p = "% CPU".len();
+            let mut max_mem_u = "MEM USAGE".len();
+            let mut max_mem_a = "MEM ALLOC".len();
+            let mut max_mem_p = "% MEM".len();
+
+            for node in nodes {
+                max_name = max_name.max(node.name.len());
+                max_status = max_status.max(node.status.len());
+                max_cpu_u = max_cpu_u.max(format_cpu(node.cpu_millicores).len());
+                max_cpu_a = max_cpu_a.max(format_cpu(node.cpu_alloc_millicores).len());
+                max_cpu_p = max_cpu_p.max(node.cpu_alloc_pct().map(|p| format!("{:.0}%", p).len()).unwrap_or(1));
+                max_mem_u = max_mem_u.max(format_mem(node.mem_mib).len());
+                max_mem_a = max_mem_a.max(format_mem(node.mem_alloc_mib).len());
+                max_mem_p = max_mem_p.max(node.mem_alloc_pct().map(|p| format!("{:.0}%", p).len()).unwrap_or(1));
+            }
+
             let widths = [
-                Constraint::Min(25),    // Name
-                Constraint::Length(12), // Status
-                Constraint::Length(12), // CPU Usage
-                Constraint::Length(12), // CPU Alloc
-                Constraint::Length(8),  // % CPU
-                Constraint::Length(12), // MEM Usage
-                Constraint::Length(12), // MEM Alloc
-                Constraint::Length(8),  // % MEM
+                Constraint::Length((max_name + 1) as u16),
+                Constraint::Length((max_status + 1) as u16),
+                Constraint::Length((max_cpu_u + 1) as u16),
+                Constraint::Length((max_cpu_a + 1) as u16),
+                Constraint::Length((max_cpu_p + 1) as u16),
+                Constraint::Length((max_mem_u + 1) as u16),
+                Constraint::Length((max_mem_a + 1) as u16),
+                Constraint::Length((max_mem_p + 1) as u16),
             ];
 
             let table = Table::new(rows, widths).header(header);

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ConfirmDialog, IconButton, Titlebar, WorkspaceSwitcher } from "@srelens/ui-kit";
 import { applyUiScale, getUiScale, isApplePlatform, isTauri, setUiScale, stepUiScale } from "@srelens/core";
 import { rememberTheme } from "../lib/appearance";
@@ -41,8 +41,8 @@ export interface ChromeProps {
  * for — at the ends of the range those differ.
  */
 export function zoom(action: "in" | "out" | "reset") {
-  const next = setUiScale(stepUiScale(getUiScale(), action));
-  applyUiScale(next);
+  const next = setUiScale(stepUiScale(getUiScale("next"), action), "next");
+  applyUiScale(next, "next");
 }
 
 /**
@@ -88,6 +88,9 @@ export function zoom(action: "in" | "out" | "reset") {
  * store the vault never sealed, and blanking them would imply it had.
  */
 export function Chrome({ controls, clusterName, onToggleTheme, onNewWorkspace, onLock }: ChromeProps) {
+  useEffect(() => {
+    if (isTauri()) applyUiScale(getUiScale("next"), "next");
+  }, []);
   const { workspace, workspaces } = useTabs();
   const sealed = useWorkspaceSealed();
   /**

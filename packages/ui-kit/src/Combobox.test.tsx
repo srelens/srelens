@@ -161,3 +161,8 @@ describe("Combobox", () => {
     expect(panel.style.position).toBe("relative");
   });
 });
+
+it("uses the form-control boundary for the searchable picker too", () => {
+  render(<Combobox value="alpha" onValueChange={() => {}} options={options} ariaLabel="Context" />);
+  expect(screen.getByRole("combobox").style.borderColor).toBe("var(--control-line)");
+});

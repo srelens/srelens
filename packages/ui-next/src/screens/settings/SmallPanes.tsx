@@ -1,22 +1,6 @@
 import { isApplePlatform } from "@srelens/core";
-import { Button, Panel } from "@srelens/ui-kit";
-import { openTab } from "../../lib/tabsStore";
+import { Panel } from "@srelens/ui-kit";
 import { hint, type WindowAction } from "../../lib/shortcuts";
-
-/**
- * §23's three small panes: `Accessibility`, `Shortcuts` and `Clusters`.
- *
- * **§J.1 has nothing to say about any of them.** The mock's "Invented data
- * fields" appendix (`docs/superpowers/specs/mock-full-design.md`) is grouped by
- * what a field would take to ship — a new store, an APM backend, an indexing
- * layer — and every row in it is Kubernetes- or agent-shaped: incident ids,
- * run records, audit verdicts. None of the three subjects here are data at
- * all. Accessibility and Shortcuts are read off things that already exist
- * (the stylesheet, `lib/shortcuts.ts`); Clusters deliberately holds none.
- * Checking J.1 was still worth doing — a sibling task found it silent on its
- * own pane too, and "the appendix doesn't mention it" is only reassuring once
- * you have looked.
- */
 
 /**
  * `Shortcuts` — every row's chord comes from {@link hint}, which reads the
@@ -158,34 +142,4 @@ export function AccessibilityPane() {
   );
 }
 
-/**
- * `Clusters` — a sentence and a link, per spec decision 3.
- *
- * **`/connections` already is the cluster-source screen** (PR #366): it lists
- * the kubeconfig files srelens reads, names each context's credential kind,
- * and probes reachability. A second panel here that lists contexts, or a
- * control that adds a kubeconfig, would be two places managing the same
- * sources — the exact duplication the Connections spec rejected when it
- * declined to duplicate the cluster rail. §23 itself calls this section a
- * stub: `"Clusters (and any unimplemented panel)"`. This pane draws no table
- * and no add-a-kubeconfig control; it says where the real one lives and sends
- * the reader there.
- */
-export function ClustersPane() {
-  return (
-    <div className="flex flex-col gap-4">
-      <Panel title="Clusters">
-        <p className="text-[0.75rem] leading-relaxed text-muted">
-          Which kubeconfig files srelens reads, what each context&apos;s credential kind is, and
-          whether it can be reached all live on Connections — this pane does not keep a second copy
-          of that list.
-        </p>
-        <div className="mt-3">
-          <Button variant="secondary" onClick={() => openTab("/connections")}>
-            Open Connections
-          </Button>
-        </div>
-      </Panel>
-    </div>
-  );
-}
+export { ClustersPane } from "./ClustersPane";

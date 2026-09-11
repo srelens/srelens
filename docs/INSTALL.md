@@ -79,7 +79,93 @@ Take the **musl** build if your distribution is Alpine, or if the glibc build
 reports a version error — it is statically linked and depends on nothing on the
 host. Otherwise prefer the glibc build.
 
-**Homebrew** is the shortest path on macOS and Linux:
+**On Linux, the install script** is the shortest path. Download it, then
+run it:
+
+```bash
+( f="$(mktemp)" && trap 'rm -f "$f"' EXIT &&
+  curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o "$f" &&
+  sh "$f" )
+```
+
+`mktemp` rather than a fixed name, and chained rather than three lines.
+
+The fixed name was the worse of the two: run from a directory another account
+can write to — `/tmp`, a shared build dir — that account can pre-create
+`srelens-install.sh` as a symlink, and `curl -o` follows it and truncates
+whatever it points at, with your privileges. Under `sudo` that is any file on
+the machine. `mktemp` creates the file exclusively, so there is nothing to
+aim at.
+
+The chaining matters because unchained, a failed download leaves the previous
+file to be run. And the cleanup is a `trap` in a subshell rather than a
+trailing `; rm -f`, because a command after `;` sets the status of the whole
+line — a failed install followed by a successful `rm` would report 0, the
+same way the pipeline did. The subshell exits with the install's status, and
+the trap removes the file on the way out whether it worked or not.
+
+Two steps rather than `curl … | sh` for a reason worth knowing: a pipeline
+reports the status of its *last* command. If the download fails — a 404, a
+TLS error, an outage — `sh` reads an empty script, does nothing, and exits
+0, so the whole line succeeds having installed nothing. Anything automated
+around it then carries on as though `srelens-tui` were there.
+
+```
+curl … | sh                       -> pipeline exit=0   (installed nothing)
+curl … -o f && sh f               -> chain exit=22
+```
+
+It still works piped, if you would rather. It just cannot tell you when it
+did not run.
+
+It picks the right architecture, always takes the static musl build so no
+distribution's glibc version matters, checks the download against the
+release's published SHA-256 before installing anything, and puts the binary
+in `/usr/local/bin` when that is writable and safe, or `~/.local/bin`
+otherwise.
+
+On Alpine, install `acl` first (`apk add acl`): the script checks whether the
+destination carries an extended ACL, and BusyBox `ls` cannot report one —
+rather than proceed without knowing, it stops and says so. Add `attr` too if you are
+replacing an existing copy **under `sudo`**, since it also checks for extended
+attributes it could not put back if the new binary had to be rolled back. An
+ordinary `~/.local/bin` update does not need it.
+It never invokes `sudo` on your behalf — run the whole line under `sudo` if
+you want it system-wide from an unprivileged shell.
+
+`--version <x.y.z>` installs a specific release. Same shape as above, with
+the option after the script:
+
+```bash
+( f="$(mktemp)" && trap 'rm -f "$f"' EXIT &&
+  curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh -o "$f" &&
+  sh "$f" --version 0.9.0 )
+```
+
+Piped, options cannot simply be appended — everything after `sh` belongs to
+the shell, which would reject `--version` as its own flag — so they go
+after `-s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/srelens/srelens/main/packaging/install/install.sh \
+  | sh -s -- --version 0.9.0
+```
+
+Those two destinations are the only ones. There is no flag for naming
+another: making an arbitrary caller-chosen directory safe against someone
+with a local account is not something a shell script can do honestly, so it
+does not pretend to. To put the binary elsewhere, unpack the tarball by hand
+as shown below.
+
+Downloading it first also means you can read it before running it; it is
+short, and
+[`packaging/install/install.sh`](../packaging/install/install.sh) is the file
+that URL serves.
+
+A copy installed this way is yours rather than a package manager's, so
+`srelens-tui update` will replace it in place.
+
+**Homebrew** is the shortest path on macOS, and works on Linux too:
 
 ```bash
 brew install srelens/tap/srelens-tui

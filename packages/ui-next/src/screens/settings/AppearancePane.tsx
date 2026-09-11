@@ -6,6 +6,7 @@ import {
   isApplePlatform,
   isTauri,
   setUiScale,
+  uiScaleFactor,
 } from "@srelens/core";
 import { Button, Panel } from "@srelens/ui-kit";
 import {
@@ -138,7 +139,7 @@ export type { AccentId, DensityId, ThemeId };
  * Native webview zoom does not change a computed CSS pixel, so the effective
  * size on screen is the computed one scaled by the percentage.
  */
-function bodyPixels(percent: number): number {
+function bodyPixels(percent: number, nativeZoom = true): number {
   let base = 16;
   try {
     const computed = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
@@ -146,7 +147,7 @@ function bodyPixels(percent: number): number {
   } catch {
     // No stylesheet attached — a unit test, or a first paint.
   }
-  return Math.round((base * percent) / 100);
+  return Math.round(base * (nativeZoom ? uiScaleFactor(percent, "next") : percent / 100));
 }
 
 /** The current row height, when a stylesheet is attached to say. */
@@ -195,9 +196,9 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
   // three buttons both go through `Chrome`'s `zoom`, which writes core's
   // setting and asks the webview to scale. Native zoom does move the layout
   // viewport, though, so a resize is the one signal that reaches here.
-  const [scale, setScale] = useState(getUiScale);
+  const [scale, setScale] = useState(() => getUiScale("next"));
   useEffect(() => {
-    const reread = () => setScale(getUiScale());
+    const reread = () => setScale(getUiScale("next"));
     window.addEventListener("resize", reread);
     return () => window.removeEventListener("resize", reread);
   }, []);
@@ -228,9 +229,9 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
   function pickScale(percent: number) {
     // `setUiScale` clamps and returns what it stored, so what is applied and
     // what is shown are both the stored value rather than the asked-for one.
-    const stored = setUiScale(percent);
+    const stored = setUiScale(percent, "next");
     setScale(stored);
-    applyUiScale(stored);
+    applyUiScale(stored, "next");
   }
 
   return (
@@ -370,7 +371,7 @@ export function AppearancePane({ ported, onSwitchToClassic }: AppearancePaneProp
           <p className="text-[0.75rem] leading-relaxed text-muted">
             Your browser&apos;s own zoom scales srelens here, so there is nothing for this pane to
             set — {chordHint("zoom-in", apple)} and {chordHint("zoom-out", apple)} work as they do on
-            any page. Currently {bodyPixels(UI_SCALE.DEFAULT)}px body text at the browser&apos;s
+            any page. Currently {bodyPixels(UI_SCALE.DEFAULT, false)}px body text at the browser&apos;s
             default zoom.
           </p>
         )}

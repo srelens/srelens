@@ -64,10 +64,10 @@ export function Select({
         aria-label={ariaLabel}
         aria-describedby={ariaDescribedBy}
         className={cx(
-          "appearance-none rounded-md border py-1 pl-2 pr-6 text-[0.8125rem] outline-none",
+          "appearance-none rounded-md border py-1 pl-2 pr-6 text-[0.8125rem]",
           className,
         )}
-        style={{ background: "var(--surface-sunk)", borderColor: "var(--rule)" }}
+        style={{ background: "var(--surface-sunk)", borderColor: "var(--control-line)" }}
       >
         {unmatched ? (
           // Rendered whenever the value matches nothing, with or without

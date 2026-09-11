@@ -1,7 +1,9 @@
-import { contextDisplayName, plural, type ClusterContext, type ClusterFacts } from "@srelens/core";
+import { useOrderedContexts } from "../../lib/contextOrder";
+import { symbolFor } from "../../lib/markSymbols";
+import { plural, type ClusterContext, type ClusterFacts } from "@srelens/core";
 import { Badge, Button, Mark, Table, cx, type Column } from "@srelens/ui-kit";
-import { useMark } from "../../lib/marks";
-import { glyph } from "../../lib/tree";
+import { getMark, useMark } from "../../lib/marks";
+
 import type { Probe } from "../../lib/probe";
 import { STATUS, bySource, joined, latencyLabel, sourceOf, viaOf } from "./clusterText";
 
@@ -78,16 +80,7 @@ function ClusterCell({ row }: { row: ClusterRow }) {
   const { context, probe, facts } = row;
   const mark = useMark(context.stableId, context.name);
 
-  /**
-   * The name the reader gave this context, or the context's own.
-   *
-   * `contextDisplayName` takes a profile, and ui-next has no profiles store
-   * yet — per-cluster appearance here is the marks store, which is a different
-   * record — so this resolves to the context name today. It is called anyway,
-   * and deliberately: it is the one place a profile has to be handed over when
-   * that store arrives, and inlining `context.name` would hide it.
-   */
-  const name = contextDisplayName(context.name);
+  const name = mark.name;
 
   /**
    * §6's second line, from whichever of the three parts exist.
@@ -120,7 +113,7 @@ function ClusterCell({ row }: { row: ClusterRow }) {
         // it and the `Open` control's own row context.
         decorative
         withBadge={mark.withText}
-        icon={mark.mark === "icon" && mark.icon ? glyph(mark.icon) : undefined}
+        icon={mark.mark === "icon" && mark.icon ? symbolFor(mark.icon) : undefined}
         imageSrc={mark.mark === "image" ? mark.imageSrc : undefined}
       />
       <div className="flex min-w-0 flex-col">
@@ -180,13 +173,15 @@ function ClusterCell({ row }: { row: ClusterRow }) {
  * agent.
  */
 export function ClusterTable({ rows, onOpen, className }: ClusterTableProps) {
+  useMark("", "");
   /**
    * The rows in the order the table draws them, grouped.
    *
    * Taken once and handed to the table, rather than called again for the
    * headings: the boundary and the rows have to be describing one list.
    */
-  const ordered = bySource(rows, (row) => row.context.isLocal);
+  const byName = useOrderedContexts(rows.map(row => ({ ...row, name: row.context.name, stableId: row.context.stableId })));
+  const ordered = bySource(byName, (row) => row.context.isLocal);
 
   /**
    * How many clusters each group holds, for the count in its heading.
@@ -208,7 +203,7 @@ export function ClusterTable({ rows, onOpen, className }: ClusterTableProps) {
       header: "Cluster",
       render: (row) => <ClusterCell row={row} />,
       // Sorted and searched on the name the reader can see, not on the object.
-      getValue: (row) => contextDisplayName(row.context.name),
+      getValue: (row) => getMark(row.context.stableId, row.context.name).name,
     },
     {
       key: "source",
@@ -340,7 +335,7 @@ export function ClusterTable({ rows, onOpen, className }: ClusterTableProps) {
             // while the cell that names the cluster is the row's own first
             // column, which is what a row-reading screen reader announces
             // around it. `title` carries the cluster for a pointer.
-            title={`Open ${contextDisplayName(row.context.name)}`}
+            title={`Open ${getMark(row.context.stableId, row.context.name).name}`}
             onClick={() => onOpen(row.context.stableId)}
           >
             Open

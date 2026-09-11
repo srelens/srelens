@@ -1,0 +1,9 @@
+# Shell scripts are LF, always. install.sh is served from
+# raw.githubusercontent straight into `sh`, and a CRLF shebang makes the
+# kernel look for an interpreter whose name ends in a carriage return --
+# "/bin/sh^M", which does not exist, for an error that names a path that
+# looks perfectly correct.
+#
+# Scoped to *.sh on purpose. A repository-wide rule here would renormalize a
+# working tree that is CRLF throughout.
+*.sh text eol=lf

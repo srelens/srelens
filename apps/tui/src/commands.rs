@@ -39,6 +39,7 @@ pub enum ResourceKind {
     Toolbox,
     Assistant,
     Settings,
+    TuiConfig,
     Workloads,
     Topology,
     GpuInfo,
@@ -106,6 +107,7 @@ impl ResourceKind {
             Self::Toolbox => "Toolbox Diagnostics",
             Self::Assistant => "SRElens Assistant",
             Self::Settings => "AI & Assistant Settings",
+            Self::TuiConfig => "TUI Configuration",
             Self::Workloads => "Workloads",
             Self::Topology => "Workload & Traffic Topology",
             Self::GpuInfo => "GPU Info & VRAM Allocation",
@@ -180,19 +182,20 @@ impl ResourceKind {
     }
 
     pub fn is_namespaced(&self) -> bool {
-        !matches!(
-            self,
+        match self {
+            Self::CustomResource(crd) => crd.namespaced,
             Self::Nodes
-                | Self::Namespaces
-                | Self::PersistentVolumes
-                | Self::StorageClasses
-                | Self::ClusterRoles
-                | Self::ClusterRoleBindings
-                | Self::CustomResourceDefinitions
-                | Self::Overview
-                | Self::Toolbox
-                | Self::Assistant
-        )
+            | Self::Namespaces
+            | Self::PersistentVolumes
+            | Self::StorageClasses
+            | Self::ClusterRoles
+            | Self::ClusterRoleBindings
+            | Self::CustomResourceDefinitions
+            | Self::Overview
+            | Self::Toolbox
+            | Self::Assistant => false,
+            _ => true,
+        }
     }
 }
 
@@ -220,6 +223,7 @@ pub enum CommandTarget {
     OpenUrl(String),
     ThemePicker,
     SetTheme(String),
+    FeatureBanner,
 }
 
 pub const COMMAND_REGISTRY: &[CommandDef] = &[
@@ -268,199 +272,211 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
     CommandDef {
         name: "pods",
         aliases: &["po", "pod"],
-        description: "Pods view",
+        description: "List, inspect, and tail Kubernetes pods across namespaces",
         target: CommandTarget::Resource(ResourceKind::Pods),
     },
     CommandDef {
         name: "deployments",
         aliases: &["dp", "deploy"],
-        description: "Deployments view",
+        description: "Manage, inspect, and scale deployment workloads",
         target: CommandTarget::Resource(ResourceKind::Deployments),
     },
     CommandDef {
         name: "statefulsets",
         aliases: &["sts", "statefulset"],
-        description: "StatefulSets view",
+        description: "Stateful set workloads and distributed replicas",
         target: CommandTarget::Resource(ResourceKind::StatefulSets),
     },
     CommandDef {
         name: "daemonsets",
         aliases: &["ds", "daemonset"],
-        description: "DaemonSets view",
+        description: "Node-local daemonset agent workloads",
         target: CommandTarget::Resource(ResourceKind::DaemonSets),
     },
     CommandDef {
         name: "jobs",
         aliases: &["job"],
-        description: "Jobs view",
+        description: "Batch job runs and execution completion status",
         target: CommandTarget::Resource(ResourceKind::Jobs),
     },
     CommandDef {
         name: "cronjobs",
         aliases: &["cj", "cronjob"],
-        description: "CronJobs view",
+        description: "Scheduled cron jobs and recurring execution history",
         target: CommandTarget::Resource(ResourceKind::CronJobs),
     },
     CommandDef {
         name: "services",
         aliases: &["svc", "service"],
-        description: "Services view",
+        description: "Service routing, cluster IPs, NodePorts and LoadBalancers",
         target: CommandTarget::Resource(ResourceKind::Services),
     },
     CommandDef {
         name: "ingresses",
         aliases: &["ing", "ingress"],
-        description: "Ingresses view",
+        description: "HTTP/HTTPS ingress routing rules and TLS certs",
         target: CommandTarget::Resource(ResourceKind::Ingresses),
     },
     CommandDef {
         name: "endpointslices",
         aliases: &["ep", "eps", "endpointslice"],
-        description: "EndpointSlices view",
+        description: "Scalable network endpoints for Kubernetes services",
         target: CommandTarget::Resource(ResourceKind::EndpointSlices),
     },
     CommandDef {
         name: "networkpolicies",
         aliases: &["np", "netpol"],
-        description: "NetworkPolicies view",
+        description: "Pod network traffic filtering and isolation rules",
         target: CommandTarget::Resource(ResourceKind::NetworkPolicies),
     },
     CommandDef {
         name: "configmaps",
         aliases: &["cm", "configmap"],
-        description: "ConfigMaps view",
+        description: "Key-value configuration maps and application data",
         target: CommandTarget::Resource(ResourceKind::ConfigMaps),
     },
     CommandDef {
         name: "secrets",
         aliases: &["sec", "secret"],
-        description: "Secrets view",
+        description: "Kubernetes secrets with masked base64 credentials",
         target: CommandTarget::Resource(ResourceKind::Secrets),
     },
     CommandDef {
         name: "persistentvolumeclaims",
         aliases: &["pvc"],
-        description: "PersistentVolumeClaims view",
+        description: "Persistent storage volume claims by namespace",
         target: CommandTarget::Resource(ResourceKind::PersistentVolumeClaims),
     },
     CommandDef {
         name: "persistentvolumes",
         aliases: &["pv"],
-        description: "PersistentVolumes view",
+        description: "Cluster-wide persistent storage volumes",
         target: CommandTarget::Resource(ResourceKind::PersistentVolumes),
     },
     CommandDef {
         name: "storageclasses",
         aliases: &["sc", "storageclass"],
-        description: "StorageClasses view",
+        description: "Storage provisioners, volume plugins & reclaim policies",
         target: CommandTarget::Resource(ResourceKind::StorageClasses),
     },
     CommandDef {
         name: "nodes",
         aliases: &["no", "node"],
-        description: "Nodes view",
+        description: "Cluster worker and control-plane node hardware and status",
         target: CommandTarget::Resource(ResourceKind::Nodes),
     },
     CommandDef {
         name: "namespaces",
         aliases: &["ns", "namespace"],
-        description: "Namespaces view / Switcher",
+        description: "Cluster tenancy namespaces switcher and viewer",
         target: CommandTarget::Namespaces,
     },
     CommandDef {
         name: "events",
         aliases: &["ev", "event"],
-        description: "Cluster Events stream",
+        description: "Cluster-wide event stream, errors, warnings & scheduling",
         target: CommandTarget::Resource(ResourceKind::Events),
     },
     CommandDef {
         name: "serviceaccounts",
         aliases: &["sa", "serviceaccount"],
-        description: "ServiceAccounts view",
+        description: "Service account identities and RBAC token bindings",
         target: CommandTarget::Resource(ResourceKind::ServiceAccounts),
     },
     CommandDef {
         name: "roles",
         aliases: &["role"],
-        description: "Roles view",
+        description: "Namespace-scoped RBAC roles and resource permissions",
         target: CommandTarget::Resource(ResourceKind::Roles),
     },
     CommandDef {
         name: "clusterroles",
         aliases: &["cr", "clusterrole"],
-        description: "ClusterRoles view",
+        description: "Cluster-wide RBAC roles and resource permissions",
         target: CommandTarget::Resource(ResourceKind::ClusterRoles),
     },
     CommandDef {
         name: "rolebindings",
         aliases: &["rb", "rolebinding"],
-        description: "RoleBindings view",
+        description: "Bindings granting roles to users and service accounts",
         target: CommandTarget::Resource(ResourceKind::RoleBindings),
     },
     CommandDef {
         name: "clusterrolebindings",
         aliases: &["crb", "clusterrolebinding"],
-        description: "ClusterRoleBindings view",
+        description: "Cluster-level role bindings for cluster roles",
         target: CommandTarget::Resource(ResourceKind::ClusterRoleBindings),
     },
     CommandDef {
         name: "crds",
         aliases: &["crd", "customresourcedefinitions"],
-        description: "Custom Resource Definitions",
+        description: "Custom Resource Definitions registered in cluster",
         target: CommandTarget::Resource(ResourceKind::CustomResourceDefinitions),
     },
     CommandDef {
         name: "helm",
         aliases: &["helmreleases", "releases"],
-        description: "Helm 3 Releases",
+        description: "Helm 3 release revisions, status, values and manifests",
         target: CommandTarget::Resource(ResourceKind::HelmReleases),
     },
     CommandDef {
         name: "portforwards",
         aliases: &["pf", "portforward"],
-        description: "Active Port Forwards",
+        description: "Active port forwards",
         target: CommandTarget::Resource(ResourceKind::PortForwards),
     },
     CommandDef {
         name: "contexts",
         aliases: &["ctx", "context"],
-        description: "Cluster Contexts Switcher",
+        description: "Kubeconfig context switcher for multi-cluster management",
         target: CommandTarget::Contexts,
     },
     CommandDef {
         name: "overview",
         aliases: &["info", "cluster"],
-        description: "Cluster Overview & Health",
+        description: "Cluster overview, health summary and node/pod capacity",
         target: CommandTarget::Resource(ResourceKind::Overview),
     },
     CommandDef {
         name: "toolbox",
         aliases: &["tb", "tools"],
-        description: "Toolbox diagnostics (kubectl, helm, krew)",
+        description: "Toolbox diagnostics (kubectl, helm, krew plugins)",
         target: CommandTarget::Resource(ResourceKind::Toolbox),
     },
     CommandDef {
         name: "assistant",
         aliases: &["ai", "chat"],
-        description: "SRElens AI Assistant Chat",
+        description: "SRElens AI Assistant Chat for troubleshooting",
         target: CommandTarget::Resource(ResourceKind::Assistant),
     },
     CommandDef {
         name: "ai-settings",
-        aliases: &["settings", "config", "ai-config"],
-        description: "AI & Assistant Settings",
+        aliases: &["settings", "ai-config"],
+        description: "AI & Assistant Settings (provider, model, API keys)",
         target: CommandTarget::Resource(ResourceKind::Settings),
+    },
+    CommandDef {
+        name: "config",
+        aliases: &["tui-config", "tui"],
+        description: "TUI Configuration (popup dimensions, visible rows & text size)",
+        target: CommandTarget::Resource(ResourceKind::TuiConfig),
+    },
+    CommandDef {
+        name: "features",
+        aliases: &["banner", "guide", "welcome"],
+        description: "Show SRElens feature highlights banner (:helm, :overview, :gpuinfo, :workloads, :ai, :ai-settings, :config)",
+        target: CommandTarget::FeatureBanner,
     },
     CommandDef {
         name: "help",
         aliases: &["?"],
-        description: "Show keybindings and command help",
+        description: "Show interactive keybindings palette and command cheatsheet",
         target: CommandTarget::Help,
     },
     CommandDef {
         name: "quit",
         aliases: &["q", "exit"],
-        description: "Quit srelens",
+        description: "Quit SRElens TUI session",
         target: CommandTarget::Quit,
     },
     CommandDef {
@@ -515,6 +531,91 @@ impl From<&CrdMeta> for DynamicCommandDef {
             aliases,
             description: format!("CRD: {} ({})", crd.kind, crd.group),
             target: CommandTarget::CustomResource(crd.clone()),
+        }
+    }
+}
+
+impl DynamicCommandDef {
+    pub fn category(&self) -> &'static str {
+        match &self.target {
+            CommandTarget::Resource(kind) => match kind {
+                ResourceKind::Pods
+                | ResourceKind::Deployments
+                | ResourceKind::StatefulSets
+                | ResourceKind::DaemonSets
+                | ResourceKind::Jobs
+                | ResourceKind::CronJobs
+                | ResourceKind::Workloads => "Workload",
+                ResourceKind::Services
+                | ResourceKind::Endpoints
+                | ResourceKind::EndpointSlices
+                | ResourceKind::Ingresses
+                | ResourceKind::NetworkPolicies => "Network",
+                ResourceKind::ConfigMaps
+                | ResourceKind::Secrets
+                | ResourceKind::ResourceQuotas
+                | ResourceKind::LimitRanges => "Config",
+                ResourceKind::PersistentVolumeClaims
+                | ResourceKind::PersistentVolumes
+                | ResourceKind::StorageClasses => "Storage",
+                ResourceKind::ServiceAccounts
+                | ResourceKind::Roles
+                | ResourceKind::ClusterRoles
+                | ResourceKind::RoleBindings
+                | ResourceKind::ClusterRoleBindings => "Auth / RBAC",
+                ResourceKind::Nodes
+                | ResourceKind::Namespaces
+                | ResourceKind::Events
+                | ResourceKind::CustomResourceDefinitions => "Cluster",
+                ResourceKind::HelmReleases => "Helm",
+                ResourceKind::PortForwards => "Forward",
+                ResourceKind::Overview => "Overview",
+                ResourceKind::Toolbox => "Diagnostic",
+                ResourceKind::Assistant => "AI Assistant",
+                ResourceKind::Settings => "Settings",
+                ResourceKind::TuiConfig => "Configuration",
+                ResourceKind::Topology => "Topology",
+                ResourceKind::GpuInfo => "GPU / Hardware",
+                ResourceKind::TopPods | ResourceKind::TopNodes => "Hotspots",
+                ResourceKind::CustomResource(_) => "Custom Resource",
+            },
+            CommandTarget::CustomResource(_) => "CRD",
+            CommandTarget::ThemePicker | CommandTarget::SetTheme(_) => "Themes",
+            CommandTarget::Contexts => "Context",
+            CommandTarget::Namespaces => "Namespace",
+            CommandTarget::Help => "Help",
+            CommandTarget::FeatureBanner => "Guide",
+            CommandTarget::Quit => "System",
+            CommandTarget::OpenUrl(_) => "Navigation",
+        }
+    }
+
+    pub fn syntax_hint(&self) -> &'static str {
+        match &self.target {
+            CommandTarget::Resource(ResourceKind::Pods) => ":pods [namespace]",
+            CommandTarget::Resource(ResourceKind::Deployments) => ":deployments [ns]",
+            CommandTarget::Resource(ResourceKind::Services) => ":services [ns]",
+            CommandTarget::Resource(ResourceKind::ConfigMaps) => ":configmaps [ns]",
+            CommandTarget::Resource(ResourceKind::Secrets) => ":secrets [ns]",
+            CommandTarget::Resource(ResourceKind::Nodes) => ":nodes",
+            CommandTarget::Resource(ResourceKind::Events) => ":events [ns]",
+            CommandTarget::Resource(ResourceKind::HelmReleases) => ":helm [ns]",
+            CommandTarget::Resource(ResourceKind::Workloads) => ":workloads [ns]",
+            CommandTarget::Resource(ResourceKind::Ingresses) => ":ingresses [ns]",
+            CommandTarget::Resource(ResourceKind::TopPods) => ":toppods [ns]",
+            CommandTarget::Resource(ResourceKind::TopNodes) => ":topnodes",
+            CommandTarget::Resource(ResourceKind::TuiConfig) => ":config",
+            CommandTarget::Resource(ResourceKind::Assistant) => ":assistant",
+            CommandTarget::Resource(ResourceKind::Toolbox) => ":toolbox",
+            CommandTarget::ThemePicker => ":themes",
+            CommandTarget::SetTheme(_) => ":theme <name>",
+            CommandTarget::Namespaces => ":namespaces",
+            CommandTarget::Contexts => ":contexts",
+            CommandTarget::Help => ":help",
+            CommandTarget::FeatureBanner => ":features",
+            CommandTarget::Quit => ":quit",
+            CommandTarget::OpenUrl(_) => ":open <url>",
+            _ => "",
         }
     }
 }

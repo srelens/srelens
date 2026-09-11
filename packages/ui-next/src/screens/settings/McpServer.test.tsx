@@ -17,6 +17,8 @@ vi.mock("@srelens/core", async (orig) => ({
   ...core,
 }));
 
+vi.mock("./McpClientSetup", () => ({ McpClientSetup: () => null }));
+
 import { McpServer } from "./McpServer";
 import { mcpAutoStartSettled, mcpAutoStartStarting, resetMcpAutoStart } from "../../lib/mcpAutoStart";
 
@@ -106,7 +108,7 @@ describe("McpServer", () => {
   it("offers no client list, and says why", async () => {
     render(<McpServer />);
     expect(screen.queryByText(/claude code|cursor/i)).toBeNull();
-    expect(await screen.findByText(/which clients are connected/i)).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Connected clients" })).toBeNull();
   });
 
   it("hides the token again once the reader is done looking", async () => {
@@ -750,4 +752,33 @@ describe("McpServer", () => {
       expect(stray.map((n) => n.textContent)).toEqual([]);
     });
   });
+  it("saves a stopped server's port without starting it", async () => {
+    core.mcpHttpStatus.mockResolvedValue(null);
+    const user = userEvent.setup(); render(<McpServer />);
+    await screen.findByRole("button", { name: "Start server" });
+    await user.clear(screen.getByLabelText("MCP server port"));
+    await user.type(screen.getByLabelText("MCP server port"), "9522");
+    await user.click(screen.getByRole("button", { name: "Save port" }));
+    expect(core.startMcpHttp).not.toHaveBeenCalled();
+    expect(core.saveMcpSettings).toHaveBeenCalledWith({ enabled: false, port: 9522 });
+    expect(address()).toContain("9522");
+  });
+
+  it("confirms a running server's port change and reconciles a failed restart", async () => {
+    const user = userEvent.setup(); render(<McpServer />);
+    await screen.findByRole("button", { name: "Stop server" });
+    await user.clear(screen.getByLabelText("MCP server port"));
+    await user.type(screen.getByLabelText("MCP server port"), "9522");
+    await user.click(screen.getByRole("button", { name: "Save port" }));
+    expect(core.startMcpHttp).not.toHaveBeenCalled();
+    core.startMcpHttp.mockRejectedValueOnce(new Error("address already in use"));
+    core.mcpHttpStatus.mockResolvedValue(null);
+    await user.click(screen.getByRole("button", { name: "Change port and restart" }));
+    expect(core.startMcpHttp).toHaveBeenCalledWith(9522);
+    expect(await screen.findByRole("button", { name: "Start server" })).toBeTruthy();
+    expect(core.saveMcpSettings).toHaveBeenLastCalledWith({ enabled: false, port: PORT });
+    expect(screen.getByRole("alert").textContent).toContain("address already in use");
+    expect(address()).toContain(String(PORT));
+  });
+
 });

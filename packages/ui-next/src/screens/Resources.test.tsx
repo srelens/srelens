@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { defaultMark, setMark, resetMark } from "../lib/marks";
 
 // Everything the screen reaches into core for. `watchResource` is held open by
 // the test rather than resolved once: half of what this screen does is react to
@@ -296,6 +297,18 @@ function open(route: string) {
   );
 }
 
+it("uses the configured short context name in the header and updates it live", () => {
+  setMark(CTX.stableId, { ...defaultMark(CTX.name), short: "M01" });
+  try {
+    const { container } = open("/k/pods");
+    expect(container.querySelector(".crumb")?.textContent).toBe("M01");
+    act(() => setMark(CTX.stableId, { ...defaultMark(CTX.name), short: "M02" }));
+    expect(container.querySelector(".crumb")?.textContent).toBe("M02");
+  } finally {
+    act(() => resetMark(CTX.stableId));
+  }
+});
+
 /**
  * The detail, in whichever host is on screen — they are two screens now, not
  * one pane in two frames (R-5 is retired). `Inspector` is the only thing in
@@ -589,6 +602,23 @@ describe("Resources", () => {
     await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
   });
 
+  it("switches the tab to regex filtering and keeps invalid patterns non-destructive", async () => {
+    open("/k/pods");
+    await waitFor(() => expect(rowNames()).toHaveLength(2));
+    const input = screen.getByRole("searchbox", { name: "Filter pods" });
+
+    await userEvent.type(input, "^web-1$");
+    await waitFor(() => expect(rowNames()).toEqual([]));
+    await userEvent.click(screen.getByRole("button", { name: "Use regular expression" }));
+    await waitFor(() => expect(rowNames()).toEqual(["web-1"]));
+    expect(tabFor("/k/pods").view?.regex).toBe(true);
+
+    await userEvent.clear(input);
+    await userEvent.type(input, "(");
+    await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+  });
+
   it("reorders by a sortable column when its header is activated", async () => {
     open("/k/pods");
     await waitFor(() => expect(rowNames()).toEqual(["web-1", "api-7"]));
@@ -685,8 +715,13 @@ describe("Resources", () => {
     await screen.findByRole("searchbox", { name: "Filter pods" });
 
     await userEvent.type(screen.getByRole("searchbox", { name: "Filter pods" }), "web");
+    await userEvent.click(
+      within(screen.getByRole("search", { name: "Filter pods" })).getByRole("button", {
+        name: "Use regular expression",
+      }),
+    );
 
-    expect(tabFor("/k/pods").view).toMatchObject({ filter: "web" });
+    expect(tabFor("/k/pods").view).toMatchObject({ filter: "web", regex: true });
     // Reading the *active* tab would have written the filter here instead, and
     // re-filtered a list the user is not even looking at on every keystroke.
     expect(tabFor("/k/nodes").view).toBeUndefined();
@@ -768,7 +803,7 @@ describe("Resources", () => {
     // The alert's dismiss action is the recovery: back to "all namespaces",
     // written through the same store a manual clear would use.
     await userEvent.click(screen.getByRole("button", { name: "Show all namespaces" }));
-    await waitFor(() => expect(getView().namespaces.prod).toBeUndefined());
+    await waitFor(() => expect(getView().namespaces.prod).toEqual([]));
   });
 
   it("does not warn about a selection that is merely empty of this kind right now", async () => {
@@ -853,6 +888,10 @@ describe("Resources", () => {
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select default/web-1" }));
     await screen.findByText("1 selected");
+    const filterRow = screen.getByRole("search", { name: "Filter pods" });
+    expect(within(filterRow).getByText("1 selected")).toBeTruthy();
+    expect(within(filterRow).getByRole("button", { name: "Delete" })).toBeTruthy();
+
 
     const scrollBody = document.querySelector<HTMLElement>(".scroll")!;
     expect(within(scrollBody).queryByText(/stale/i)).toBeNull();
@@ -872,6 +911,10 @@ describe("Resources", () => {
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select default/web-1" }));
     await screen.findByText("1 selected");
+    const filterRow = screen.getByRole("search");
+    const selectionCount = within(filterRow).getByText("1 selected");
+    const search = within(filterRow).getByRole("searchbox");
+    expect(selectionCount.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     act(() => setNamespaces(CTX.stableId, ["billing"]));
 

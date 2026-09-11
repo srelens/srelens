@@ -60,8 +60,8 @@ const POD_OBJECT = {
   },
 };
 
-let onStarted: ReturnType<typeof vi.fn>;
-let onClose: ReturnType<typeof vi.fn>;
+let onStarted: ReturnType<typeof vi.fn<(id: number) => void>>;
+let onClose: ReturnType<typeof vi.fn<() => void>>;
 
 beforeEach(() => {
   vi.clearAllMocks();

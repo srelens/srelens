@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::theme::Theme;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelmReleaseItem {
     pub name: String,
     pub namespace: String,
@@ -57,10 +57,25 @@ impl HelmViewState {
     }
 
     pub fn set_releases(&mut self, releases: Vec<HelmReleaseItem>) {
+        if self.releases == releases {
+            self.is_loading = false;
+            self.error = None;
+            return;
+        }
+        let sel_target = self.selected_release().map(|r| (r.name.clone(), r.namespace.clone()));
         self.releases = releases;
         self.is_loading = false;
         self.error = None;
-        let count = self.filtered_indices().len();
+        let indices = self.filtered_indices();
+        if let Some((name, ns)) = sel_target {
+            if let Some(pos) = indices.iter().position(|&idx| {
+                self.releases.get(idx).map(|r| r.name == name && r.namespace == ns).unwrap_or(false)
+            }) {
+                self.selected_idx = pos;
+                return;
+            }
+        }
+        let count = indices.len();
         if self.selected_idx >= count {
             self.selected_idx = count.saturating_sub(1);
         }
@@ -118,7 +133,7 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
     };
 
     let title = format!(
-        " ⎈ Helm 3 Releases [{}] (<Enter> Deep Inspector  <v> Values  <y> Manifest  <d> History  <r> Rollback  <ctrl-d> Uninstall  <Esc> Back) ",
+        " ⎈ Helm 3 Releases [{}] (<Enter> Deep Inspector  <v> Values  <y> Manifest  <d> History  <R> Refresh  <r> Rollback  <ctrl-d> Uninstall  <Esc> Back) ",
         count_text
     );
 
@@ -210,14 +225,38 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
         })
         .collect();
 
+    let mut max_ns = "NAMESPACE".len();
+    let mut max_name = "NAME".len();
+    let mut max_rev = "REVISION".len();
+    let mut max_status = "STATUS".len();
+    let mut max_chart = "CHART".len();
+    let mut max_app_v = "APP VERSION".len();
+    let mut max_updated = "UPDATED".len();
+
+    for &idx in &filtered {
+        let rel = &state.releases[idx];
+        max_ns = max_ns.max(rel.namespace.len());
+        max_name = max_name.max(rel.name.len());
+        max_rev = max_rev.max(rel.revision.to_string().len());
+        max_status = max_status.max(rel.status.len());
+        let chart_display_len = if rel.chart_version.is_empty() {
+            rel.chart.len()
+        } else {
+            rel.chart.len() + 1 + rel.chart_version.len()
+        };
+        max_chart = max_chart.max(chart_display_len);
+        max_app_v = max_app_v.max(rel.app_version.len());
+        max_updated = max_updated.max(rel.updated.len());
+    }
+
     let widths = [
-        Constraint::Length(18),
-        Constraint::Min(24),
-        Constraint::Length(10),
-        Constraint::Length(14),
-        Constraint::Length(26),
-        Constraint::Length(15),
-        Constraint::Length(25),
+        Constraint::Length((max_ns + 1) as u16),
+        Constraint::Min((max_name + 1) as u16),
+        Constraint::Length((max_rev + 1) as u16),
+        Constraint::Length((max_status + 1) as u16),
+        Constraint::Length((max_chart + 1) as u16),
+        Constraint::Length((max_app_v + 1) as u16),
+        Constraint::Length((max_updated + 1) as u16),
     ];
 
     let table = Table::new(rows, widths).header(headers);

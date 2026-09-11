@@ -1,6 +1,7 @@
+import { useOrderedContexts } from "../lib/contextOrder";
+import { symbolFor } from "../lib/markSymbols";
 import { useEffect, useRef, useState } from "react";
 import {
-  contextDisplayName,
   isTauri,
   listContexts,
   pickKubeconfigFiles,
@@ -35,7 +36,7 @@ import { useMark } from "../lib/marks";
 import { openCluster } from "../lib/openCluster";
 import { getProbe, probeCluster, useProbes, type Probe } from "../lib/probe";
 import { describe } from "../lib/routes";
-import { glyph } from "../lib/tree";
+import { useTabs } from "../lib/tabsStore";
 import { STATUS, bySource, latencyLabel, viaOf } from "./connections/clusterText";
 
 /**
@@ -154,6 +155,7 @@ const WEB_ONLY =
  * each of those rows re-render on every notification about any other one.
  */
 const UNREAD: Probe = { state: "unread" };
+const PAUSED: Probe = { state: "paused" };
 
 /**
  * How many files the rows came out of.
@@ -196,15 +198,7 @@ function ContextRow({
 }) {
   const id = context.stableId;
   const mark = useMark(id, context.name);
-  /**
-   * The name the reader gave this context, or the context's own.
-   *
-   * `contextDisplayName` takes a profile and ui-next has no profiles store yet,
-   * so this resolves to the context name today. It is called anyway: it is the
-   * one place a profile has to be handed over when that store arrives, and
-   * `context.name` inlined here would hide it.
-   */
-  const name = contextDisplayName(context.name);
+  const name = mark.name;
   /**
    * What the cluster is reached THROUGH: the kubeconfig it was declared in, or
    * — for a local cluster, where the file is beside the point — the tool that
@@ -244,7 +238,7 @@ function ContextRow({
         // and the control at the end of the row.
         decorative
         withBadge={mark.withText}
-        icon={mark.mark === "icon" && mark.icon ? glyph(mark.icon) : undefined}
+        icon={mark.mark === "icon" && mark.icon ? symbolFor(mark.icon) : undefined}
         imageSrc={mark.mark === "image" ? mark.imageSrc : undefined}
       />
       <div data-testid={`connect-text-${id}`} className="flex min-w-0 flex-1 flex-col">
@@ -472,10 +466,11 @@ export function Connect({ route }: { route: string }) {
   /** The routes table's own title, so the landmark and the tab strip agree. */
   const title = describe(route).title;
 
-  const contexts = useContexts();
+  const contexts = useOrderedContexts(useContexts());
   const status = useContextsStatus();
   const listError = useContextsError();
   const probes = useProbes();
+  const { workspace } = useTabs();
 
   /** A listing asked for by the reader, still out. */
   const [busy, setBusy] = useState(false);
@@ -693,7 +688,7 @@ export function Connect({ route }: { route: string }) {
                 context={context}
                 // `no reading` until the store has an answer for this cluster,
                 // which is what lets every row paint before any probe lands.
-                probe={probes[context.stableId] ?? UNREAD}
+                probe={workspace.pausedClusters?.includes(context.stableId) ? PAUSED : (probes[context.stableId] ?? UNREAD)}
                 onOpen={openCluster}
               />
             ))}

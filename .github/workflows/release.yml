@@ -57,7 +57,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
       - name: Compute + commit next version
         id: compute
         shell: bash
@@ -205,6 +205,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Linux dependencies
         run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in ci.yml's backend job: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -224,7 +229,7 @@ jobs:
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
@@ -241,7 +246,7 @@ jobs:
       - name: Build the app binary
         run: cargo build -p srelens-desktop --features custom-protocol --profile ci-smoke
       - name: Create kind cluster
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           cluster_name: srelens-e2e
       - name: Full smoke suite through the real app
@@ -439,6 +444,11 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in ci.yml's backend job: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -490,7 +500,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
@@ -676,6 +686,11 @@ jobs:
       - name: Install musl tooling
         if: ${{ endsWith(matrix.target, '-musl') }}
         run: |
+          # Third-party repos the runner image ships, dropped for the reason
+          # in ci.yml's backend job: an outage in one of them fails
+          # `apt-get update` for everyone, and this build uses none of them.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.* \
+                     /etc/apt/sources.list.d/microsoft-prod.*
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
@@ -980,8 +995,8 @@ jobs:
   #   dev           -> the permanent `dev-channel` pre-release, giving dev builds
   #                    a stable manifest URL for this build's assets.
   updater-manifest:
-    needs: [version, build]
-    if: ${{ always() && needs.build.result == 'success' && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
+    needs: [version, build, release-notes]
+    if: ${{ always() && needs.build.result == 'success' && (github.ref_name == 'main' || needs.release-notes.result == 'success') && (github.ref_name != 'main' || needs.version.outputs.release == 'true') }}
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -1004,6 +1019,12 @@ jobs:
           if ! ls sigs/*.sig >/dev/null 2>&1; then
             echo "No .sig files on $REL_TAG — updater signing key not configured yet; skipping manifest."
             exit 0
+          fi
+          # Dev notes are published by release-notes, not the version job.
+          # Read them only after that job completes so the manifest cannot race it.
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            NOTES="$(gh release view "$REL_TAG" --repo "$REPO" --json body --jq '.body')"
+            export NOTES
           fi
           node .github/scripts/compose-latest.cjs
           if [ "${{ github.ref_name }}" = "main" ]; then
@@ -1036,7 +1057,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: .nvmrc
       - name: Compare installer sizes against the previous release
         env:
           # Authenticates the Releases API reads (the anonymous rate limit is
@@ -1284,7 +1305,13 @@ jobs:
   # archives are attached.
   homebrew:
     needs: [version, tui-publish, publish-release]
-    if: ${{ github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
+    # `!cancelled()` first, and it is load-bearing. Without a status function
+    # GitHub applies an implicit `success()`, which is false whenever ANY job in
+    # the transitive `needs` chain was skipped -- and release-notes, upstream of
+    # updater-manifest and publish-release, is skipped on main by design. v0.11.0
+    # published and neither the tap nor AUR heard about it. The conditions that
+    # follow are the ones that actually decide.
+    if: ${{ !cancelled() && github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
     permissions:
       contents: read
     uses: ./.github/workflows/homebrew-publish.yml
@@ -1296,7 +1323,13 @@ jobs:
     # Also needs publish-release: updpkgsums fetches the release assets over
     # plain HTTPS, which only works once the release is out of draft.
     needs: [version, build, publish-release]
-    if: ${{ github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
+    # `!cancelled()` first, and it is load-bearing. Without a status function
+    # GitHub applies an implicit `success()`, which is false whenever ANY job in
+    # the transitive `needs` chain was skipped -- and release-notes, upstream of
+    # updater-manifest and publish-release, is skipped on main by design. v0.11.0
+    # published and neither the tap nor AUR heard about it. The conditions that
+    # follow are the ones that actually decide.
+    if: ${{ !cancelled() && github.ref_name == 'main' && needs.publish-release.result == 'success' && needs.version.outputs.release == 'true' }}
     # The called workflow declares `contents: read` for itself; the AUR push
     # authenticates with its own SSH deploy key, not GITHUB_TOKEN. Repeated
     # here because a reusable workflow cannot be granted more than its caller

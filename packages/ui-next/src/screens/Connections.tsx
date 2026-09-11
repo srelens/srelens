@@ -23,7 +23,7 @@ import { FailureAlert, FailureState } from "../lib/errorCopy";
 import { openCluster } from "../lib/openCluster";
 import { getProbe, probeCluster, useProbes, type Probe } from "../lib/probe";
 import { describe } from "../lib/routes";
-import { openTab } from "../lib/tabsStore";
+import { isClusterPaused, openTab, useTabs } from "../lib/tabsStore";
 import { ClusterTable, type ClusterRow } from "./connections/ClusterTable";
 import { SourcesRail } from "./connections/SourcesRail";
 
@@ -46,6 +46,7 @@ const CONNECT = "/connect";
  * the `useMemo` below on every notification.
  */
 const UNREAD: Probe = { state: "unread" };
+const PAUSED: Probe = { state: "paused" };
 
 /**
  * `/connections` — §6's screen: every cluster srelens can see, what the last
@@ -92,6 +93,7 @@ export function Connections({ route }: { route: string }) {
   const status = useContextsStatus();
   const listError = useContextsError();
   const probes = useProbes();
+  const { workspace } = useTabs();
   /**
    * The kubeconfig paths this window was started with, read at render the way
    * `Helm` reads them.
@@ -227,7 +229,7 @@ export function Connections({ route }: { route: string }) {
   }
 
   /**
-   * Read every cluster on the current list, each on its own.
+   * Read every cluster only after the reader explicitly refreshes the list.
    *
    * **Nothing here is awaited in series and nothing gates the render.** The
    * table is drawn from `contexts` the moment they exist, with every row
@@ -243,9 +245,12 @@ export function Connections({ route }: { route: string }) {
   useEffect(() => {
     const force = forceNext.current;
     forceNext.current = false;
+    if (!force) return;
 
     async function read(context: ClusterContext) {
       const id = context.stableId;
+      // A saved reading is not permission to contact a paused cluster again.
+      if (isClusterPaused(id)) return;
       /**
        * **Awaited, never skipped.**
        *
@@ -258,6 +263,9 @@ export function Connections({ route }: { route: string }) {
        * left the facts unfetched whenever a read spanned two listings.
        */
       if (force || getProbe(id).state === "unread") await probeCluster(context);
+      // Disconnect can happen while the reachability read is out. Do not turn
+      // the reading it invalidated into a follow-up facts request.
+      if (isClusterPaused(id)) return;
       // Not reachable: `provider` and `region` come from the API server, so
       // asking buys a second timeout for a row that already says why it is
       // empty. A later reading that DOES answer comes back through here.
@@ -302,11 +310,14 @@ export function Connections({ route }: { route: string }) {
   const rows = useMemo<ClusterRow[]>(
     () =>
       contexts.map((context) => {
-        const probe = probes[context.stableId] ?? UNREAD;
-        const known = facts[context.stableId];
+        const paused = workspace.pausedClusters?.includes(context.stableId) === true;
+        // A cached answer resumes after Reconnect, but must not be presented
+        // as current while this workspace has disconnected the cluster.
+        const probe = paused ? PAUSED : (probes[context.stableId] ?? UNREAD);
+        const known = paused ? undefined : facts[context.stableId];
         return known ? { context, probe, facts: known } : { context, probe };
       }),
-    [contexts, probes, facts],
+    [contexts, probes, facts, workspace.pausedClusters],
   );
 
   /**

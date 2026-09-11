@@ -15,7 +15,8 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
 use srelens_kube::contexts::ContextDto;
 use srelens_tui::app::{ActiveView, App, SuspendAction};
-use srelens_tui::commands::{command_suggestions_with_crds, CrdMeta, PrinterColumn, ResourceKind};
+use srelens_tui::commands::{command_suggestions_with_crds, CommandTarget, CrdMeta, PrinterColumn, ResourceKind};
+use srelens_tui::CommandPopupDensity;
 use srelens_tui::event::AppEvent;
 use srelens_tui::ui::{ContainerAction, InputMode, Modal};
 use srelens_tui::views::metrics_panel_view::MetricsTimeRange;
@@ -397,6 +398,168 @@ async fn tick_schedules_metric_refreshes_for_pod_and_node_views_and_modals() {
         "the assistant view needs neither"
     );
     assert_eq!(app.node_metrics_tick_counter, 3);
+}
+
+#[tokio::test]
+async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
+    let (mut app, _rx) = common::app().await;
+
+    let mut helm_state = srelens_tui::views::helm_view::HelmViewState::new();
+    let release_1 = srelens_tui::views::helm_view::HelmReleaseItem {
+        name: "nginx".into(),
+        namespace: "default".into(),
+        revision: 1,
+        status: "deployed".into(),
+        chart: "nginx-1.0.0".into(),
+        chart_version: "1.0.0".into(),
+        app_version: "1.25".into(),
+        updated: "2026-01-01".into(),
+    };
+    helm_state.set_releases(vec![release_1.clone()]);
+    app.active_view = ActiveView::Helm(helm_state);
+
+    // 1. Tick increments helm_tick_counter and triggers fetch on tick 1
+    app.handle_tick();
+    assert_eq!(app.helm_tick_counter, 1);
+    assert!(app.helm_refreshing, "helm_refreshing is set while fetch is in-flight");
+
+    // Existing releases remain visible during background refresh (zero flicker)
+    if let ActiveView::Helm(h) = &app.active_view {
+        assert!(!h.is_loading, "is_loading should stay false when releases are already loaded");
+        assert_eq!(h.releases.len(), 1);
+    } else {
+        panic!("expected Helm view");
+    }
+
+    // 2. handle_helm_releases_result finishes the refresh and preserves selection
+    let summary_1 = srelens_kube::helm::HelmReleaseSummary {
+        name: "nginx".into(),
+        namespace: "default".into(),
+        revision: 1,
+        status: "deployed".into(),
+        chart: "nginx-1.0.0".into(),
+        chart_version: "1.0.0".into(),
+        app_version: "1.25".into(),
+        updated: "2026-01-01".into(),
+    };
+    let summary_2 = srelens_kube::helm::HelmReleaseSummary {
+        name: "redis".into(),
+        namespace: "default".into(),
+        revision: 1,
+        status: "deployed".into(),
+        chart: "redis-1.0.0".into(),
+        chart_version: "1.0.0".into(),
+        app_version: "7.0".into(),
+        updated: "2026-01-01".into(),
+    };
+    app.handle_helm_releases_result("test-cluster", "default", Ok(vec![summary_1, summary_2]));
+    assert!(!app.helm_refreshing);
+    if let ActiveView::Helm(h) = &app.active_view {
+        assert_eq!(h.releases.len(), 2);
+    } else {
+        panic!("expected Helm view");
+    }
+
+    // 3. Advancing ticks: at tick 36 (35 ticks later), refresh fires again
+    for _ in 0..34 {
+        app.handle_tick();
+    }
+    assert_eq!(app.helm_tick_counter, 35);
+    app.handle_tick();
+    assert_eq!(app.helm_tick_counter, 36);
+    assert!(app.helm_refreshing, "tick 36 triggers another refresh");
+
+    // 4. Leaving Helm view resets the tick counter, while the in-flight guard is safely preserved until result handling
+    app.active_view = ActiveView::Assistant;
+    app.handle_tick();
+    assert_eq!(app.helm_tick_counter, 0);
+    assert!(app.helm_refreshing, "fetch initiated on tick 36 is still in-flight");
+
+    app.handle_helm_releases_result("test-cluster", "default", Ok(vec![]));
+    assert!(!app.helm_refreshing, "handling result clears in-flight guard");
+
+    // 5. Manual refresh keys: 'R' (Shift+R) and Ctrl+r trigger immediate refresh with toast
+    app.active_view = ActiveView::Helm(srelens_tui::views::helm_view::HelmViewState::new());
+    app.handle_key_event(common::ch('R')).await;
+    assert!(app.helm_refreshing);
+    assert!(app.toast.as_ref().map(|(msg, _, _)| msg.contains("Refreshing Helm releases")).unwrap_or(false));
+
+    // While refresh is in-flight, subsequent 'R' does not spawn duplicate or reset guard
+    app.toast = None;
+    app.handle_key_event(common::ch('R')).await;
+    assert!(app.helm_refreshing);
+    assert!(app.toast.as_ref().map(|(msg, _, _)| msg.contains("already in progress")).unwrap_or(false));
+
+    app.handle_helm_releases_result("test-cluster", "default", Ok(vec![]));
+    assert!(!app.helm_refreshing);
+    app.toast = None;
+    app.handle_key_event(common::ctrl('r')).await;
+    assert!(app.helm_refreshing);
+    assert!(app.toast.as_ref().map(|(msg, _, _)| msg.contains("Refreshing Helm releases")).unwrap_or(false));
+
+    // Lowercase 'r' on empty releases shows warn toast or rollback
+    app.toast = None;
+    app.handle_key_event(common::ch('r')).await;
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn helm_refresh_in_flight_survives_namespace_switch_and_refetches_new_target() {
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Helm(srelens_tui::views::helm_view::HelmViewState::new());
+    app.active_context = "test-cluster".into();
+    app.active_namespace = "default".into();
+
+    // 1. Initial refresh starts for "default"
+    app.refresh_helm_releases();
+    assert!(app.helm_refreshing);
+
+    // 2. User switches namespace to "kube-system" while refresh is in-flight
+    app.switch_namespace("kube-system".into()).await;
+    assert_eq!(app.active_namespace, "kube-system");
+    // In-flight guard prevented duplicate concurrent fetch during switch
+    assert!(app.helm_refreshing);
+
+    // 3. Stale result for "default" arrives
+    let summary = srelens_kube::helm::HelmReleaseSummary {
+        name: "stale-nginx".into(),
+        namespace: "default".into(),
+        revision: 1,
+        status: "deployed".into(),
+        chart: "nginx-1.0.0".into(),
+        chart_version: "1.0.0".into(),
+        app_version: "1.25".into(),
+        updated: "2026-01-01".into(),
+    };
+    app.handle_helm_releases_result("test-cluster", "default", Ok(vec![summary]));
+
+    // Stale result is NOT applied to kube-system, and a fresh refresh is triggered for kube-system
+    if let ActiveView::Helm(h) = &app.active_view {
+        assert!(h.releases.is_empty(), "stale releases for old namespace should not be applied");
+    } else {
+        panic!("expected Helm view");
+    }
+    assert!(app.helm_refreshing, "new fetch for kube-system was immediately triggered");
+
+    // 4. Fresh result for "kube-system" arrives
+    let ks_summary = srelens_kube::helm::HelmReleaseSummary {
+        name: "cilium".into(),
+        namespace: "kube-system".into(),
+        revision: 1,
+        status: "deployed".into(),
+        chart: "cilium-1.14.0".into(),
+        chart_version: "1.14.0".into(),
+        app_version: "1.14.0".into(),
+        updated: "2026-01-01".into(),
+    };
+    app.handle_helm_releases_result("test-cluster", "kube-system", Ok(vec![ks_summary]));
+    assert!(!app.helm_refreshing);
+    if let ActiveView::Helm(h) = &app.active_view {
+        assert_eq!(h.releases.len(), 1);
+        assert_eq!(h.releases[0].name, "cilium");
+    } else {
+        panic!("expected Helm view");
+    }
 }
 
 #[tokio::test]
@@ -885,6 +1048,14 @@ async fn namespace_picker_filters_navigates_and_switches() {
     assert_eq!(sel(&app).0, 0);
     press(&mut app, ctrl('k')).await;
     assert_eq!(sel(&app).0, 2);
+    press(&mut app, key(KeyCode::Home)).await;
+    assert_eq!(sel(&app).0, 0, "Home moves to the start");
+    press(&mut app, ctrl('g')).await;
+    assert_eq!(sel(&app).0, 2, "Ctrl+g moves to the end");
+    press(&mut app, key(KeyCode::Home)).await;
+    assert_eq!(sel(&app).0, 0);
+    press(&mut app, key(KeyCode::End)).await;
+    assert_eq!(sel(&app).0, 2, "End moves to the end");
     press(&mut app, key(KeyCode::Null)).await;
     assert_eq!(sel(&app).0, 2, "unknown keys leave the picker alone");
 
@@ -952,14 +1123,14 @@ async fn command_mode_tab_and_arrow_keys_cycle_the_suggestions() {
     let len = suggestions.len();
     assert!(len > 1, "':s' should offer several commands");
 
-    // Tab completes to suggestion and advances index
+    // Tab completes the text, so selection resets for the newly filtered list.
     app.command_buffer = "s".to_string();
     app.command_suggestion_idx = 0;
     press(&mut app, key(KeyCode::Tab)).await;
     assert_eq!(app.command_buffer, suggestions[0].0.name);
     assert_eq!(
-        app.command_suggestion_idx, 1,
-        "the cursor advances to the next candidate"
+        app.command_suggestion_idx, 0,
+        "the cursor stays on the completed command in the new list"
     );
 
     // Down arrow and Ctrl-N advance selection index in popup
@@ -1107,6 +1278,124 @@ async fn command_enter_runs_the_command_and_unknown_commands_toast() {
     type_str(&mut app, "q").await;
     press(&mut app, key(KeyCode::Enter)).await;
     assert!(!app.is_running);
+}
+
+#[tokio::test]
+async fn command_tab_then_enter_executes_the_completed_command() {
+    for query in ["serv", "s"] {
+        let (mut app, _rx) = common::app().await;
+        press(&mut app, ch(':')).await;
+        type_str(&mut app, query).await;
+        let suggestions = command_suggestions_with_crds(query, &app.crds);
+        let selected = suggestions.iter().position(|(cmd, _)| cmd.name == "services").unwrap();
+        for _ in 0..selected {
+            press(&mut app, key(KeyCode::Down)).await;
+        }
+        press(&mut app, key(KeyCode::Tab)).await;
+        assert_eq!(app.command_buffer, "services");
+        assert_eq!(app.command_suggestion_idx, 0);
+        let screen = common::render_app(&mut app, 120, 30);
+        assert!(screen.contains(":services"), "screen: {screen}");
+        // Repeated Tab must not move to a secondary match for the completed text.
+        press(&mut app, key(KeyCode::Tab)).await;
+        assert_eq!(app.command_buffer, "services");
+        press(&mut app, key(KeyCode::Enter)).await;
+        assert_eq!(table(&app).kind, ResourceKind::Services);
+        assert_eq!(app.input_mode, InputMode::Normal);
+    }
+}
+
+#[tokio::test]
+async fn command_completion_preserves_crd_identity_across_alias_and_group_collisions() {
+    for group in ["management.cattle.io", "example.io"] {
+        let (mut app, _rx) = common::app().await;
+        app.crds = ["management.cattle.io", "example.io"].into_iter().map(|group| CrdMeta {
+            crd_name: format!("settings.{group}"),
+            group: group.into(), version: "v1".into(), kind: "Setting".into(),
+            plural: "settings".into(), singular: "setting".into(), namespaced: false,
+            short_names: vec![], printer_columns: vec![],
+        }).collect();
+        let expected = CommandTarget::CustomResource(app.crds.iter().find(|crd| crd.group == group).unwrap().clone());
+        press(&mut app, ch(':')).await;
+        type_str(&mut app, "sett").await;
+        let selected = command_suggestions_with_crds("sett", &app.crds).iter()
+            .position(|(cmd, _)| cmd.target == expected).unwrap();
+        for _ in 0..selected {
+            press(&mut app, key(KeyCode::Down)).await;
+        }
+        for _ in 0..2 {
+            press(&mut app, key(KeyCode::Tab)).await;
+            assert_eq!(app.command_buffer, "settings");
+            let suggestions = command_suggestions_with_crds(&app.command_buffer, &app.crds);
+            assert_eq!(suggestions[app.command_suggestion_idx].0.target, expected);
+        }
+        press(&mut app, key(KeyCode::Enter)).await;
+        assert_eq!(table(&app).kind, ResourceKind::CustomResource(match expected {
+            CommandTarget::CustomResource(crd) => crd,
+            _ => unreachable!(),
+        }));
+    }
+}
+
+#[tokio::test]
+async fn empty_command_enter_runs_highlighted_suggestion_and_arrow_selection() {
+    let (mut app, _rx) = common::app().await;
+
+    // 1. ':' + Esc returns to Normal with no view change
+    press(&mut app, ch(':')).await;
+    assert_eq!(app.input_mode, InputMode::Command);
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert_eq!(app.input_mode, InputMode::Normal);
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+
+    // 2. ':' with empty buffer + Enter on index 0 executes the first suggestion (themes)
+    press(&mut app, ch(':')).await;
+    assert_eq!(app.input_mode, InputMode::Command);
+    assert_eq!(app.command_suggestion_idx, 0);
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.input_mode, InputMode::Normal);
+    assert!(
+        matches!(app.modal, Some(Modal::ThemePicker { .. })),
+        "expected ThemePicker modal, got {:?}",
+        app.modal
+    );
+    // Dismiss theme modal
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(app.modal.is_none());
+
+    // 3. ':' + Down until highlighted suggestion is pods + Enter -> opens Pods
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "nodes").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::Nodes);
+
+    press(&mut app, ch(':')).await;
+    assert_eq!(app.input_mode, InputMode::Command);
+    assert_eq!(app.command_buffer, "");
+    let suggestions = command_suggestions_with_crds("", &app.crds);
+    let pods_idx = suggestions
+        .iter()
+        .position(|(def, _)| def.name == "pods")
+        .expect("pods must be in command suggestions");
+    for _ in 0..pods_idx {
+        press(&mut app, key(KeyCode::Down)).await;
+    }
+    assert_eq!(app.command_suggestion_idx, pods_idx);
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.input_mode, InputMode::Normal);
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+
+    // 4. Non-empty :po + Enter still opens pods
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "po").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(table(&app).kind, ResourceKind::Pods);
+
+    // 5. Non-empty :zzzz + Enter still toasts unknown
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "zzzz").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(toast(&app).starts_with("Unknown command: 'zzzz'"));
 }
 
 #[tokio::test]
@@ -1969,7 +2258,7 @@ async fn container_picker_cycles_and_enter_opens_logs_or_a_shell() {
     press(&mut app, ch('s')).await;
     press(&mut app, key(KeyCode::Enter)).await;
     match &app.requires_terminal_suspend {
-        Some(SuspendAction::PodShell { pod, container }) => {
+        Some(SuspendAction::PodShell { pod, container, .. }) => {
             assert_eq!(pod, "multi");
             assert_eq!(container.as_deref(), Some("app"));
         }
@@ -2003,7 +2292,7 @@ async fn l_and_s_on_a_single_container_pod_go_straight_to_logs_and_shell() {
 
     press(&mut app, ch('s')).await;
     match &app.requires_terminal_suspend {
-        Some(SuspendAction::PodShell { pod, container }) => {
+        Some(SuspendAction::PodShell { pod, container, .. }) => {
             assert_eq!(pod, "pod-a");
             assert!(container.is_none());
         }
@@ -2926,4 +3215,388 @@ async fn the_workloads_view_watches_every_constituent_kind_and_rebuilds_from_the
         ],
         "the workloads view watches exactly its five constituent kinds"
     );
+}
+
+#[tokio::test]
+async fn test_nodes_table_press_s_triggers_node_shell() {
+    let (mut app, _rx) = common::app().await;
+    seed_table(
+        &mut app,
+        ResourceKind::Nodes,
+        vec![json!({ "name": "node-a", "status": "Ready", "roles": "master" })],
+    );
+    press(&mut app, ch('s')).await;
+    match &app.requires_terminal_suspend {
+        Some(SuspendAction::NodeShell { node }) => {
+            assert_eq!(node, "node-a");
+        }
+        _ => panic!("expected NodeShell suspend action"),
+    }
+}
+
+#[tokio::test]
+async fn test_node_inspector_press_s_on_selected_pod() {
+    let (mut app, _rx) = common::app().await;
+    let mut ni = NodeInspectorState::new("node-1".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-1".into(),
+        status: "Ready".into(),
+        pods: vec![srelens_kube::node_inspector::NodePodItem {
+            name: "test-pod".into(),
+            namespace: "custom-ns".into(),
+            phase: "Running".into(),
+            ready_containers: "1/1".into(),
+            restarts: 0,
+            age: "1d".into(),
+            cpu_requests_millicores: 100,
+            mem_requests_mib: 256,
+            gpu_requests: 0,
+            gpu_mem_requests_mib: 0,
+            pod_ip: "10.244.0.5".into(),
+        }],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    press(&mut app, ch('s')).await;
+    match &app.requires_terminal_suspend {
+        Some(SuspendAction::PodShell { pod, namespace, .. }) => {
+            assert_eq!(pod, "test-pod");
+            assert_eq!(namespace.as_deref(), Some("custom-ns"));
+        }
+        _ => panic!("expected PodShell suspend action with custom-ns namespace"),
+    }
+}
+
+#[tokio::test]
+async fn test_node_inspector_press_s_when_no_pods_triggers_node_shell() {
+    let (mut app, _rx) = common::app().await;
+    let mut ni = NodeInspectorState::new("node-empty".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-empty".into(),
+        status: "Ready".into(),
+        pods: vec![],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    press(&mut app, ch('s')).await;
+    match &app.requires_terminal_suspend {
+        Some(SuspendAction::NodeShell { node }) => {
+            assert_eq!(node, "node-empty");
+        }
+        _ => panic!("expected NodeShell suspend action when no pods scheduled"),
+    }
+}
+
+#[tokio::test]
+async fn test_node_inspector_press_capital_s_triggers_node_shell_even_with_pods() {
+    let (mut app, _rx) = common::app().await;
+    let mut ni = NodeInspectorState::new("node-2".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-2".into(),
+        status: "Ready".into(),
+        pods: vec![srelens_kube::node_inspector::NodePodItem {
+            name: "test-pod-2".into(),
+            namespace: "default".into(),
+            phase: "Running".into(),
+            ready_containers: "1/1".into(),
+            restarts: 0,
+            age: "1d".into(),
+            cpu_requests_millicores: 100,
+            mem_requests_mib: 256,
+            gpu_requests: 0,
+            gpu_mem_requests_mib: 0,
+            pod_ip: "10.244.0.6".into(),
+        }],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    press(&mut app, ch('S')).await;
+    match &app.requires_terminal_suspend {
+        Some(SuspendAction::NodeShell { node }) => {
+            assert_eq!(node, "node-2");
+        }
+        _ => panic!("expected NodeShell suspend action when pressing capital S"),
+    }
+}
+
+#[tokio::test]
+async fn non_pod_and_custom_resources_reject_pod_actions() {
+    let (mut app, _rx) = common::app().await;
+    let secret_store_crd = ResourceKind::CustomResource(CrdMeta {
+        crd_name: "secretstores.external-secrets.io".to_string(),
+        group: "external-secrets.io".to_string(),
+        version: "v1beta1".to_string(),
+        kind: "SecretStore".to_string(),
+        plural: "secretstores".to_string(),
+        singular: "secretstore".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+    });
+
+    for kind in [secret_store_crd, ResourceKind::ConfigMaps, ResourceKind::Secrets] {
+        set_table(
+            &mut app,
+            kind.clone(),
+            vec![json!({ "name": "my-resource", "namespace": "default" })],
+        );
+
+        // 1. Port forward rejected
+        press(&mut app, ch('f')).await;
+        assert!(app.modal.is_none());
+        assert_eq!(toast(&app), "Port forward is only available for Pods and Services");
+
+        press(&mut app, ch('F')).await;
+        assert!(app.modal.is_none());
+        assert_eq!(toast(&app), "Port forward is only available for Pods and Services");
+
+        // 2. Logs rejected
+        press(&mut app, ch('l')).await;
+        assert_eq!(toast(&app), "Logs are only available for Pods and Workloads");
+
+        // 3. Rollout restart rejected
+        press(&mut app, ch('r')).await;
+        assert!(app.modal.is_none());
+        assert_eq!(toast(&app), "Rollout restart is only available for Deployments, StatefulSets, and DaemonSets");
+
+        // 4. Scale rejected
+        press(&mut app, ctrl('s')).await;
+        assert!(app.modal.is_none());
+        assert_eq!(toast(&app), "Scale is only available for Deployments and StatefulSets");
+
+        // 5. Shell rejected
+        press(&mut app, ch('s')).await;
+        assert_eq!(toast(&app), "Shell only available for Pods and Nodes");
+    }
+}
+
+#[tokio::test]
+async fn helm_detail_manifest_search_and_navigation_input_flow() {
+    let (mut app, _rx) = common::app().await;
+    let mut detail_state = srelens_tui::views::HelmDetailViewState::new("my-release".into(), "default".into());
+    detail_state.set_detail(srelens_kube::helm::HelmReleaseDetail {
+        name: "my-release".into(),
+        namespace: "default".into(),
+        revision: 1,
+        status: "deployed".into(),
+        chart: "my-chart".into(),
+        chart_version: "1.0.0".into(),
+        app_version: "1.0.0".into(),
+        updated: "2026-09-10T12:00:00Z".into(),
+        values_yaml: "".into(),
+        chart_values_yaml: "".into(),
+        computed_values_yaml: "".into(),
+        manifest: "---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app-token\ndata:\n  github_token: Z2hw...\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: app\n".into(),
+        notes: "".into(),
+        history: vec![],
+    });
+    detail_state.set_tab(srelens_tui::views::HelmDetailTab::Manifest);
+    app.active_view = srelens_tui::app::ActiveView::HelmDetail(detail_state);
+
+    // 1. Press '/' to enter search mode
+    press(&mut app, ch('/')).await;
+    assert_eq!(app.input_mode, srelens_tui::ui::statusbar::InputMode::Filter);
+
+    // 2. Type "token"
+    for c in "token".chars() {
+        press(&mut app, ch(c)).await;
+    }
+    assert_eq!(app.filter_buffer, "token");
+    if let srelens_tui::app::ActiveView::HelmDetail(ref detail) = app.active_view {
+        assert_eq!(detail.search_query, "token");
+        assert_eq!(detail.search_matches.len(), 2);
+        assert_eq!(detail.current_match_idx, Some(0));
+        assert_eq!(detail.scroll_offset, detail.search_matches[0]);
+    } else {
+        panic!("expected HelmDetail view");
+    }
+
+    // 3. Press Enter to return to Normal mode with search query active
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.input_mode, srelens_tui::ui::statusbar::InputMode::Normal);
+    assert_eq!(app.filter_buffer, "token");
+
+    // 4. Press 'n' to go to next match
+    press(&mut app, ch('n')).await;
+    if let srelens_tui::app::ActiveView::HelmDetail(ref detail) = app.active_view {
+        assert_eq!(detail.current_match_idx, Some(1));
+        assert_eq!(detail.scroll_offset, detail.search_matches[1]);
+    } else {
+        panic!("expected HelmDetail view");
+    }
+
+    // 5. Press 'N' to go to previous match
+    press(&mut app, ch('N')).await;
+    if let srelens_tui::app::ActiveView::HelmDetail(ref detail) = app.active_view {
+        assert_eq!(detail.current_match_idx, Some(0));
+        assert_eq!(detail.scroll_offset, detail.search_matches[0]);
+    } else {
+        panic!("expected HelmDetail view");
+    }
+
+    // 6. Press Esc to clear filter
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(app.filter_buffer.is_empty());
+    if let srelens_tui::app::ActiveView::HelmDetail(ref detail) = app.active_view {
+        assert!(detail.search_query.is_empty());
+        assert!(detail.search_matches.is_empty());
+        assert!(detail.current_match_idx.is_none());
+    } else {
+        panic!("expected HelmDetail view");
+    }
+}
+
+#[tokio::test]
+async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("tui.json");
+    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_path);
+
+    let (tx, _rx) = unbounded_channel();
+    let mut app = App::new(
+        Some("test-ctx".into()),
+        Some("default".into()),
+        false,
+        None,
+        vec![],
+        tx,
+    )
+    .await
+    .expect("app");
+
+    // Initial state: pods table
+    assert!(matches!(app.active_view, ActiveView::Table(_)));
+
+    // Open :config
+    press(&mut app, ch(':')).await;
+    assert_eq!(app.input_mode, InputMode::Command);
+    type_str(&mut app, "config").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    // Active view is now TuiConfig
+    assert!(matches!(app.active_view, ActiveView::TuiConfig(_)));
+
+    // Initial config values
+    assert_eq!(app.tui_config.command_popup_max_width, 65);
+    assert_eq!(app.tui_config.command_popup_max_visible, 6);
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Compact);
+
+    // Adjust width (+5 with 'l')
+    press(&mut app, ch('l')).await;
+    assert_eq!(app.tui_config.command_popup_max_width, 70);
+
+    // Adjust width (-5 with 'h')
+    press(&mut app, ch('h')).await;
+    assert_eq!(app.tui_config.command_popup_max_width, 65);
+
+    // Switch to visible rows field with 'j'
+    press(&mut app, ch('j')).await;
+    if let ActiveView::TuiConfig(ref s) = app.active_view {
+        assert_eq!(s.selected_field, 1);
+    }
+
+    // Adjust visible rows (+1 with '+')
+    press(&mut app, ch('+')).await;
+    assert_eq!(app.tui_config.command_popup_max_visible, 7);
+
+    // Switch to text size/density field with 'j'
+    press(&mut app, ch('j')).await;
+    if let ActiveView::TuiConfig(ref s) = app.active_view {
+        assert_eq!(s.selected_field, 2);
+    }
+
+    // Step density to Standard with 'l'
+    press(&mut app, ch('l')).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Standard);
+
+    // Step to Large with 'l'
+    press(&mut app, ch('l')).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Large);
+
+    // Step back to Standard with 'h'
+    press(&mut app, ch('h')).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Standard);
+
+    // Cycle forward with Space (Standard -> Large)
+    press(&mut app, ch(' ')).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Large);
+
+    // Cycle forward with Enter (Large -> ExtraLarge)
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::ExtraLarge);
+
+    // Switch to startup banner field with 'j'
+    press(&mut app, ch('j')).await;
+    if let ActiveView::TuiConfig(ref s) = app.active_view {
+        assert_eq!(s.selected_field, 3);
+    }
+
+    // Toggle startup banner with Space
+    assert!(app.tui_config.show_feature_banner);
+    press(&mut app, ch(' ')).await;
+    assert!(!app.tui_config.show_feature_banner);
+
+    // Toggle back with Enter
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.tui_config.show_feature_banner);
+
+    // Reset defaults with 'r'
+    press(&mut app, ch('r')).await;
+    assert_eq!(app.tui_config.command_popup_max_width, 65);
+    assert_eq!(app.tui_config.command_popup_max_visible, 6);
+    assert_eq!(app.tui_config.command_popup_density, CommandPopupDensity::Compact);
+    assert!(app.tui_config.show_feature_banner);
+
+    // Press Esc pops back to table view
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Table(_)));
+
+    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
+}
+
+#[tokio::test]
+async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_file = tmp.path().join("tui.json");
+    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_file);
+
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    // Open via :banner command
+    common::type_str(&mut app, ":banner").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    // Toggle startup banner with 't'
+    assert!(app.tui_config.show_feature_banner);
+    press(&mut app, ch('t')).await;
+    assert!(!app.tui_config.show_feature_banner);
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { show_on_startup: false })));
+
+    // Toggle back with 'T'
+    press(&mut app, ch('T')).await;
+    assert!(app.tui_config.show_feature_banner);
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { show_on_startup: true })));
+
+    // Press '1' jumps directly to Helm releases
+    press(&mut app, ch('1')).await;
+    assert!(app.modal.is_none());
+    assert!(matches!(app.active_view, ActiveView::Helm(_)));
+
+    // Re-open via :features
+    common::type_str(&mut app, ":features").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    // Dismiss with Esc
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(app.modal.is_none());
+
+    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
 }
