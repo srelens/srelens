@@ -419,7 +419,8 @@ describe("EditResource", () => {
   it("says what the schema allows where the cursor is, and completes from the same schema", async () => {
     render(<EditResource route={ROUTE} />);
     await waitFor(() => expect(latestEditor()?.value).toBe(LIVE));
-    expect(core.openApiSchema).toHaveBeenCalledWith("prod-eu", "v1", "ConfigMap");
+    // Schema loading follows the manifest update in a separate effect.
+    await waitFor(() => expect(core.openApiSchema).toHaveBeenCalledWith("prod-eu", "v1", "ConfigMap"));
     const sidebar = screen.getByRole("complementary", { name: "Analysis" });
     // Cursor at the top: the top-level keys, with type and description.
     expect(await within(sidebar).findByText("immutable")).toBeDefined();
