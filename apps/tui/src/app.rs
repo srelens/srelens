@@ -1537,10 +1537,12 @@ impl App {
                         }
                         KeyCode::Char('t') | KeyCode::Char('T') => {
                             self.tui_config.show_feature_banner = !self.tui_config.show_feature_banner;
-                            let _ = self.tui_config.save();
+                            let save_result = self.tui_config.save();
                             let is_enabled = self.tui_config.show_feature_banner;
                             self.modal = Some(Modal::FeatureBanner { show_on_startup: is_enabled });
-                            if is_enabled {
+                            if let Err(err) = save_result {
+                                self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                            } else if is_enabled {
                                 self.set_toast("Startup feature banner: Enabled".to_string(), Theme::status_ok());
                             } else {
                                 self.set_toast("Startup feature banner: Disabled".to_string(), Theme::status_warn());
@@ -3517,6 +3519,10 @@ impl App {
                         }
                     }
                     KeyCode::Char('r') => {
+                        if helm.error.is_some() || self.helm_refreshing {
+                            self.set_toast("Refresh Helm releases successfully before rollback (R to retry)".to_string(), Theme::status_warn());
+                            return;
+                        }
                         if let Some(rel) = sel_rel {
                             if rel.revision > 1 {
                                 let target_rev = rel.revision - 1;
@@ -3957,23 +3963,35 @@ impl App {
                     KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => cfg_state.select_next_field(),
                     KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => cfg_state.select_prev_field(),
                     KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('-') => {
-                        cfg_state.adjust_current(-1, &mut self.tui_config);
+                        if let Err(err) = cfg_state.adjust_current(-1, &mut self.tui_config) {
+                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                        }
                     }
                     KeyCode::Char('l') | KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => {
-                        cfg_state.adjust_current(1, &mut self.tui_config);
+                        if let Err(err) = cfg_state.adjust_current(1, &mut self.tui_config) {
+                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                        }
                     }
                     KeyCode::Enter | KeyCode::Char(' ') => {
-                        cfg_state.cycle_current(&mut self.tui_config);
+                        if let Err(err) = cfg_state.cycle_current(&mut self.tui_config) {
+                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                        }
                     }
                     KeyCode::Char('[') | KeyCode::Char('{') => {
-                        cfg_state.adjust_current(-5, &mut self.tui_config);
+                        if let Err(err) = cfg_state.adjust_current(-5, &mut self.tui_config) {
+                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                        }
                     }
                     KeyCode::Char(']') | KeyCode::Char('}') => {
-                        cfg_state.adjust_current(5, &mut self.tui_config);
+                        if let Err(err) = cfg_state.adjust_current(5, &mut self.tui_config) {
+                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                        }
                     }
                     KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('d') => {
-                        cfg_state.reset_defaults(&mut self.tui_config);
-                        self.set_toast("Reset TUI settings to defaults".to_string(), Theme::status_ok());
+                        match cfg_state.reset_defaults(&mut self.tui_config) {
+                            Ok(()) => self.set_toast("Reset TUI settings to defaults".to_string(), Theme::status_ok()),
+                            Err(err) => self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error()),
+                        }
                     }
                     _ => {}
                 }
@@ -6427,7 +6445,6 @@ impl App {
             if helm.releases.is_empty() {
                 helm.is_loading = true;
             }
-            helm.error = None;
         }
         let ctx = self.active_context.clone();
         let ns = if self.active_namespace.is_empty() {
@@ -6463,11 +6480,7 @@ impl App {
                         let items: Vec<HelmReleaseItem> = summaries.into_iter().map(Into::into).collect();
                         helm.set_releases(items);
                     }
-                    Err(err) => {
-                        if helm.releases.is_empty() {
-                            helm.set_error(err);
-                        }
-                    }
+                    Err(err) => helm.set_error(err),
                 }
             } else {
                 self.refresh_helm_releases();
@@ -7291,6 +7304,10 @@ impl App {
             });
             self.set_toast(format!("Uncordoning node '{}'...", node_name), Theme::status_warn());
         } else if action_name.starts_with("helm-rollback:") {
+            if matches!(&self.active_view, ActiveView::Helm(helm) if helm.error.is_some() || self.helm_refreshing) {
+                self.set_toast("Refresh Helm releases successfully before rollback (R to retry)".to_string(), Theme::status_warn());
+                return;
+            }
             let parts: Vec<&str> = action_name.splitn(4, ':').collect();
             if parts.len() == 4 {
                 let name = parts[1].to_string();

@@ -930,6 +930,21 @@ fn command_popup_geometry_respects_max_width_and_visible_rows() {
     // ExtraLarge density mode: 3 items, max_visible 6 -> 3 items * 3 rows = 9 rows + 2 borders = 11 height
     let r6 = command_popup_rect(bar_area, 3, 65, 6, CommandPopupDensity::ExtraLarge);
     assert_eq!(r6, Rect::new(2, 11, 65, 11));
+    let capped = command_popup_rect(bar_area, 30, 65, 20, CommandPopupDensity::ExtraLarge);
+    assert!(capped.bottom() <= bar_area.y);
+    assert!(capped.height <= bar_area.y);
+}
+
+#[test]
+fn command_popup_keeps_last_selection_visible_in_a_short_terminal() {
+    let suggs = command_suggestions("");
+    let mode = InputMode::Command;
+    let mut props = status_props(&mode);
+    props.suggestions = Some((&suggs, suggs.len() - 1));
+    props.command_popup_max_visible = Some(20);
+    props.command_popup_density = Some(CommandPopupDensity::ExtraLarge);
+    let text = common::render_text(100, 24, |f| render_statusbar(f, Rect::new(0, 22, 100, 2), props));
+    assert!(text.contains(&format!("▶ {}", suggs.last().unwrap().0.name.to_uppercase())), "{text}");
 }
 
 #[test]
@@ -2368,6 +2383,8 @@ async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
     detail_state.set_tab(HelmDetailTab::Notes);
     let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
     assert!(text.contains("Chart Release Notes") && text.contains("everything is ready"), "{text}");
+    assert!(text.contains("<y> Copy"), "{text}");
+    assert!(!text.contains("<c> Copy"), "{text}");
 }
 
 #[test]
@@ -2394,3 +2411,73 @@ fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
     assert!(text_disabled.contains("Disabled"), "shows disabled state");
 }
 
+#[test]
+fn feature_banner_stays_inside_small_preview_regions() {
+    for area in [Rect::new(4, 5, 35, 6), Rect::new(4, 5, 20, 1), Rect::new(4, 5, 0, 0)] {
+        let lines = common::render_lines(80, 30, |f| {
+            for y in 0..30 {
+                f.render_widget(ratatui::widgets::Paragraph::new("X".repeat(80)), Rect::new(0, y, 80, 1));
+            }
+            srelens_tui::ui::dialogs::render_feature_banner_modal(f, area, true);
+        });
+        for (y, line) in lines.iter().enumerate() {
+            for (x, c) in line.chars().enumerate() {
+                if x < area.x as usize || x >= area.right() as usize || y < area.y as usize || y >= area.bottom() as usize {
+                    assert_eq!(c, 'X', "banner escaped preview at {x},{y}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn long_helm_errors_show_the_reason_and_recovery_with_and_without_stale_rows() {
+    use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+    for stale in [false, true] {
+        let mut state = HelmViewState::new();
+        if stale {
+            state.set_releases(vec![HelmReleaseItem {
+                name: "cached-release".into(), namespace: "default".into(), revision: 3,
+                status: "deployed".into(), chart: "web".into(), chart_version: "1".into(),
+                app_version: "1".into(), updated: "today".into(),
+            }]);
+        }
+        state.set_error(format!("{} permission denied", "Unable to list Helm release secrets in the selected Kubernetes namespace. ".repeat(3)));
+        let text = common::render_text(80, 24, |f| render_helm_view(f, f.area(), &state));
+        let content = text.lines().map(|line| line.trim_matches('│')).collect::<Vec<_>>().join(" ");
+        let words = content.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("permission denied"), "{text}");
+        assert!(words.contains("Press R to retry."), "{text}");
+        if stale {
+            assert!(words.contains("Rollback is disabled."), "{text}");
+            assert!(text.contains("cached-release"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn oversized_helm_errors_preserve_recovery_and_stale_rows() {
+    use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+    for (width, height) in [(80, 12), (40, 12), (80, 8)] {
+        for stale in [false, true] {
+            let mut state = HelmViewState::new();
+            if stale {
+                state.set_releases(vec![HelmReleaseItem {
+                    name: "cached".into(), namespace: "ns".into(), revision: 3,
+                    status: "deployed".into(), chart: "web".into(), chart_version: "1".into(),
+                    app_version: "1".into(), updated: "today".into(),
+                }]);
+            }
+            state.set_error("Permission denied while listing Helm secrets. ".repeat(100));
+            let text = common::render_text(width, height, |f| render_helm_view(f, f.area(), &state));
+            let content = text.lines().map(|line| line.trim_matches('│')).collect::<Vec<_>>().join(" ");
+            let words = content.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(words.contains("Press R to retry."), "{text}");
+            assert!(words.contains("error truncated"), "{text}");
+            if stale {
+                assert!(words.contains("Rollback is disabled."), "{text}");
+                assert!(text.contains("cached"), "{text}");
+            }
+        }
+    }
+}

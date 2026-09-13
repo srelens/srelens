@@ -6781,6 +6781,17 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
         assert!(matches!(app.active_view, ActiveView::Helm(_)));
 
+        // Returning to the list refreshes it; complete that refresh before rollback.
+        let releases = match &app.active_view {
+            ActiveView::Helm(helm) => helm.releases.clone(),
+            _ => unreachable!(),
+        };
+        let summaries = releases.into_iter().map(|r| srelens_kube::helm::HelmReleaseSummary {
+            name: r.name, namespace: r.namespace, revision: r.revision, status: r.status,
+            chart: r.chart, chart_version: r.chart_version, app_version: r.app_version, updated: r.updated,
+        }).collect();
+        app.handle_helm_releases_result("test-ctx", "default", Ok(summaries));
+
         // 5. From Helm list, press 'r' to trigger rollback modal to revision - 1
         app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
         match &app.modal {

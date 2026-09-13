@@ -758,8 +758,8 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 }
 
 pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: bool) {
-    let modal_width = (area.width.saturating_sub(4)).min(94).max(48);
-    let modal_height = (area.height.saturating_sub(2)).min(21).max(14);
+    let modal_width = (area.width.saturating_sub(4)).clamp(48, 94).min(area.width);
+    let modal_height = (area.height.saturating_sub(2)).clamp(14, 21).min(area.height);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
