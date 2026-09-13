@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 /**
@@ -199,6 +199,16 @@ function row(stableId: string) {
 
 describe("Connect", () => {
   describe("what §24 puts on the page", () => {
+    it("renders a disconnected cluster as paused rather than its retained reading", async () => {
+      open();
+      await waitFor(() => expect(row(PROD.stableId).status.textContent).toContain("reachable"));
+
+      act(() => store.setClusterPaused(store.currentWorkspace().id, PROD.stableId, true));
+
+      await waitFor(() => expect(row(PROD.stableId).status.textContent).toContain("paused"));
+      expect(row(PROD.stableId).latency).toBeNull();
+    });
+
     it("draws the eyebrow, both headline lines and the lede", async () => {
       core.isTauri.mockReturnValue(true);
       open();

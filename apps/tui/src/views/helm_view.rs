@@ -1,15 +1,15 @@
 use ratatui::{
-    layout::{Constraint, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::Span,
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
     Frame,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::theme::Theme;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelmReleaseItem {
     pub name: String,
     pub namespace: String,
@@ -57,10 +57,25 @@ impl HelmViewState {
     }
 
     pub fn set_releases(&mut self, releases: Vec<HelmReleaseItem>) {
+        if self.releases == releases {
+            self.is_loading = false;
+            self.error = None;
+            return;
+        }
+        let sel_target = self.selected_release().map(|r| (r.name.clone(), r.namespace.clone()));
         self.releases = releases;
         self.is_loading = false;
         self.error = None;
-        let count = self.filtered_indices().len();
+        let indices = self.filtered_indices();
+        if let Some((name, ns)) = sel_target {
+            if let Some(pos) = indices.iter().position(|&idx| {
+                self.releases.get(idx).map(|r| r.name == name && r.namespace == ns).unwrap_or(false)
+            }) {
+                self.selected_idx = pos;
+                return;
+            }
+        }
+        let count = indices.len();
         if self.selected_idx >= count {
             self.selected_idx = count.saturating_sub(1);
         }
@@ -118,7 +133,7 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
     };
 
     let title = format!(
-        " ⎈ Helm 3 Releases [{}] (<Enter> Deep Inspector  <v> Values  <y> Manifest  <d> History  <r> Rollback  <ctrl-d> Uninstall  <Esc> Back) ",
+        " ⎈ Helm 3 Releases [{}] (<Enter> Deep Inspector  <v> Values  <y> Manifest  <d> History  <R> Refresh  <r> Rollback  <ctrl-d> Uninstall  <Esc> Back) ",
         count_text
     );
 
@@ -128,7 +143,7 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
         .border_style(Style::default().fg(Theme::border()))
         .title(Span::styled(title, Theme::title()));
 
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
     f.render_widget(block, area);
 
     if state.is_loading {
@@ -139,10 +154,41 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
     }
 
     if let Some(ref err) = state.error {
-        let error_msg = Paragraph::new(format!("⚠ Failed to load Helm releases: {}", err))
+        let stale = !state.releases.is_empty();
+        let message = if stale {
+            format!("Refresh failed; rows are stale: {err}")
+        } else {
+            format!("Failed to load Helm releases: {err}")
+        };
+        let error = Paragraph::new(message)
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::red()));
-        f.render_widget(error_msg, inner);
-        return;
+        let recovery = Paragraph::new(if stale {
+            "Press R to retry. Rollback is disabled."
+        } else {
+            "Press R to retry."
+        }).wrap(Wrap { trim: true }).style(Style::default().fg(Theme::red()));
+        let recovery_height = recovery.line_count(inner.width).min(inner.height as usize) as u16;
+        // Keep the table header, its margin and at least one cached release visible.
+        let table_height = if stale { 3.min(inner.height.saturating_sub(recovery_height)) } else { 0 };
+        let available = inner.height.saturating_sub(recovery_height + table_height);
+        let error_lines = error.line_count(inner.width);
+        let error_height = error_lines.min(available as usize) as u16;
+        let truncated = error_lines > error_height as usize && error_height > 0;
+        let marker_height = u16::from(truncated);
+        let regions = Layout::vertical([
+            Constraint::Length(error_height.saturating_sub(marker_height)),
+            Constraint::Length(marker_height),
+            Constraint::Length(recovery_height),
+            Constraint::Min(table_height),
+        ]).split(inner);
+        f.render_widget(error, regions[0]);
+        if truncated {
+            f.render_widget(Paragraph::new("… error truncated").style(Style::default().fg(Theme::red())), regions[1]);
+        }
+        f.render_widget(recovery, regions[2]);
+        if !stale { return; }
+        inner = regions[3];
     }
 
     if state.releases.is_empty() {

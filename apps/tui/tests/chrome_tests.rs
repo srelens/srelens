@@ -22,7 +22,8 @@ use srelens_tui::ui::dialogs::{
 };
 use srelens_tui::ui::header::{render_header, ContextChipInfo, HeaderProps};
 use srelens_tui::ui::help::{centered_rect, render_help_modal};
-use srelens_tui::ui::statusbar::{render_statusbar, InputMode, StatusBarProps};
+use srelens_tui::ui::statusbar::{command_popup_rect, render_statusbar, InputMode, StatusBarProps};
+use srelens_tui::CommandPopupDensity;
 use srelens_tui::views::assistant_view::{
     format_message_content, format_message_content_with_width, parse_inline_markdown,
     render_assistant_view, render_markdown_table, wrap_line, AssistantViewState, ChatMessage,
@@ -116,6 +117,9 @@ fn status_props(mode: &InputMode) -> StatusBarProps<'_> {
         suggestions: None,
         close_pf_button: None,
         close_pf_rect: None,
+        command_popup_max_width: None,
+        command_popup_max_visible: None,
+        command_popup_density: None,
     }
 }
 
@@ -899,6 +903,152 @@ fn command_mode_pops_up_the_matching_commands_above_the_bar_and_arrows_the_selec
 }
 
 #[test]
+fn command_popup_geometry_respects_max_width_and_visible_rows() {
+    let bar_area = Rect::new(0, 22, 80, 2);
+    // 2 items, max_visible 6, Compact (1 row/item) -> 2 items + 2 borders = 4 height, width 80 - 4 = 76 min 65 = 65
+    let r1 = command_popup_rect(bar_area, 2, 65, 6, CommandPopupDensity::Compact);
+    assert_eq!(r1, Rect::new(2, 18, 65, 4));
+
+    // 10 items, max_visible 6, Compact -> 6 items + 2 borders = 8 height
+    let r2 = command_popup_rect(bar_area, 10, 65, 6, CommandPopupDensity::Compact);
+    assert_eq!(r2, Rect::new(2, 14, 65, 8));
+
+    // Narrow terminal: 50 cols, max_width 65 -> clamped to 50 - 4 = 46
+    let narrow_bar = Rect::new(0, 22, 50, 2);
+    let r3 = command_popup_rect(narrow_bar, 5, 65, 6, CommandPopupDensity::Compact);
+    assert_eq!(r3, Rect::new(2, 15, 46, 7));
+
+    // Wide terminal with custom config: 160 cols, 10 items, max_width 120, max_visible 10
+    let wide_bar = Rect::new(0, 22, 160, 2);
+    let r4 = command_popup_rect(wide_bar, 10, 120, 10, CommandPopupDensity::Compact);
+    assert_eq!(r4, Rect::new(2, 10, 120, 12));
+
+    // Large density mode: 5 items, max_visible 6 -> 5 items * 2 rows = 10 rows + 2 borders = 12 height
+    let r5 = command_popup_rect(bar_area, 5, 65, 6, CommandPopupDensity::Large);
+    assert_eq!(r5, Rect::new(2, 10, 65, 12));
+
+    // ExtraLarge density mode: 3 items, max_visible 6 -> 3 items * 3 rows = 9 rows + 2 borders = 11 height
+    let r6 = command_popup_rect(bar_area, 3, 65, 6, CommandPopupDensity::ExtraLarge);
+    assert_eq!(r6, Rect::new(2, 11, 65, 11));
+    let capped = command_popup_rect(bar_area, 30, 65, 20, CommandPopupDensity::ExtraLarge);
+    assert!(capped.bottom() <= bar_area.y);
+    assert!(capped.height <= bar_area.y);
+}
+
+#[test]
+fn command_popup_keeps_last_selection_visible_in_a_short_terminal() {
+    let suggs = command_suggestions("");
+    let mode = InputMode::Command;
+    let mut props = status_props(&mode);
+    props.suggestions = Some((&suggs, suggs.len() - 1));
+    props.command_popup_max_visible = Some(20);
+    props.command_popup_density = Some(CommandPopupDensity::ExtraLarge);
+    let text = common::render_text(100, 24, |f| render_statusbar(f, Rect::new(0, 22, 100, 2), props));
+    assert!(text.contains(&format!("▶ {}", suggs.last().unwrap().0.name.to_uppercase())), "{text}");
+}
+
+#[test]
+fn command_popup_rendering_expands_to_configured_width_and_visible_rows() {
+    let suggs = command_suggestions("");
+    assert!(suggs.len() >= 10, "empty query matches all commands");
+
+    let mode = InputMode::Command;
+    let mut props = status_props(&mode);
+    props.command_input = "";
+    props.suggestions = Some((&suggs, 0));
+    props.command_popup_max_width = Some(110);
+    props.command_popup_max_visible = Some(10);
+    props.command_popup_density = Some(CommandPopupDensity::Compact);
+
+    let lines = common::render_lines(160, 24, |f| {
+        render_statusbar(f, Rect::new(0, 22, 160, 2), props)
+    });
+
+    // With max_visible = 10, popup has 10 items + 2 borders = 12 rows tall.
+    // Base bar starts at y=22, so popup top is at y = 22 - 12 = 10.
+    let popup_title_row = lines
+        .iter()
+        .position(|l| l.contains("Commands [1/"))
+        .expect("popup title present");
+    assert_eq!(popup_title_row, 10, "top border of popup is at y=10");
+
+    // Check width of the box header line: title line should span ~110 chars
+    let header_line = &lines[popup_title_row];
+    assert!(
+        header_line.trim_end().len() >= 108,
+        "popup border should extend to configured max width of 110, got line: {header_line}"
+    );
+}
+
+#[test]
+fn command_popup_rendering_large_density_mode() {
+    let suggs = command_suggestions("");
+    assert!(suggs.len() >= 5, "empty query matches all commands");
+
+    let mode = InputMode::Command;
+    let mut props = status_props(&mode);
+    props.command_input = "";
+    props.suggestions = Some((&suggs, 0));
+    props.command_popup_max_width = Some(90);
+    props.command_popup_max_visible = Some(4);
+    props.command_popup_density = Some(CommandPopupDensity::Large);
+
+    let lines = common::render_lines(120, 24, |f| {
+        render_statusbar(f, Rect::new(0, 22, 120, 2), props)
+    });
+
+    // With 4 visible items in Large mode: 4 * 2 = 8 rows + 2 borders = 10 rows tall.
+    // Base bar at y=22 -> popup top at y = 22 - 10 = 12.
+    let popup_title_row = lines
+        .iter()
+        .position(|l| l.contains("Commands [1/"))
+        .expect("popup title present");
+    assert_eq!(popup_title_row, 12, "top border of large popup is at y=12");
+
+    // Large mode renders bold uppercase command names
+    let content_lines = &lines[popup_title_row + 1..22];
+    let rendered_text = content_lines.join("\n");
+    assert!(
+        rendered_text.contains("THEMES") || rendered_text.contains("WORKLOADS") || rendered_text.contains("PODS"),
+        "large mode renders uppercase command names, got:\n{rendered_text}"
+    );
+}
+
+#[test]
+fn command_popup_rendering_extra_large_density_mode() {
+    let suggs = command_suggestions("");
+    assert!(suggs.len() >= 3, "empty query matches all commands");
+
+    let mode = InputMode::Command;
+    let mut props = status_props(&mode);
+    props.command_input = "";
+    props.suggestions = Some((&suggs, 0));
+    props.command_popup_max_width = Some(100);
+    props.command_popup_max_visible = Some(3);
+    props.command_popup_density = Some(CommandPopupDensity::ExtraLarge);
+
+    let lines = common::render_lines(120, 24, |f| {
+        render_statusbar(f, Rect::new(0, 22, 120, 2), props)
+    });
+
+    // With 3 visible items in ExtraLarge mode: 3 * 3 = 9 rows + 2 borders = 11 rows tall.
+    // Base bar at y=22 -> popup top at y = 22 - 11 = 11.
+    let popup_title_row = lines
+        .iter()
+        .position(|l| l.contains("Commands [1/"))
+        .expect("popup title present");
+    assert_eq!(popup_title_row, 11, "top border of extra large popup is at y=11");
+
+    // ExtraLarge mode renders 3 lines per item including Usage line
+    let content_lines = &lines[popup_title_row + 1..22];
+    let rendered_text = content_lines.join("\n");
+    assert!(
+        rendered_text.contains("Usage:"),
+        "extra large mode renders usage line, got:\n{rendered_text}"
+    );
+}
+
+#[test]
 fn regex_filter_mode_shows_the_match_ratio_and_apply_hint() {
     let mode = InputMode::Filter;
     let mut props = status_props(&mode);
@@ -965,6 +1115,34 @@ fn normal_mode_prefixes_a_toast_and_appends_the_active_filter() {
         "{text}"
     );
     assert!(text.contains(" | Filter: \"web\" [2/9]"), "{text}");
+}
+
+#[test]
+fn normal_mode_appends_active_search_when_is_text_search_is_true() {
+    let mode = InputMode::Normal;
+    let mut props = status_props(&mode);
+    props.filter_input = "token";
+    props.matched_count = 2;
+    props.total_count = 100;
+    props.is_text_search = true;
+    let text = statusbar_text(props);
+    assert!(text.contains(" | Search: \"token\" [2 matches, n/N]"), "{text}");
+
+    let mut props = status_props(&mode);
+    props.filter_input = "token";
+    props.matched_count = 1;
+    props.total_count = 100;
+    props.is_text_search = true;
+    let text = statusbar_text(props);
+    assert!(text.contains(" | Search: \"token\" [1 match, n/N]"), "{text}");
+
+    let mut props = status_props(&mode);
+    props.filter_input = "token";
+    props.matched_count = 0;
+    props.total_count = 100;
+    props.is_text_search = true;
+    let text = statusbar_text(props);
+    assert!(text.contains(" | Search: \"token\" [0 matches]"), "{text}");
 }
 
 #[test]
@@ -2191,8 +2369,115 @@ async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
     let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
     assert!(text.contains("Rendered Kubernetes Manifests") && text.contains("kind: Deployment"), "{text}");
 
+    // Manifest search rendering
+    detail_state.set_search_query("Deployment");
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("[Search: \"Deployment\" (1/1 matches, n/N)]"), "{text}");
+
+    detail_state.set_search_query("nonexistent");
+    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    assert!(text.contains("[Search: \"nonexistent\" (0 matches)]"), "{text}");
+    detail_state.clear_search();
+
     // Notes tab
     detail_state.set_tab(HelmDetailTab::Notes);
     let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
     assert!(text.contains("Chart Release Notes") && text.contains("everything is ready"), "{text}");
+    assert!(text.contains("<y> Copy"), "{text}");
+    assert!(!text.contains("<c> Copy"), "{text}");
+}
+
+#[test]
+fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
+    let modal_enabled = Modal::FeatureBanner { show_on_startup: true };
+    let text_enabled = modal_text(100, 30, &modal_enabled);
+
+    assert!(text_enabled.contains("Welcome to SRElens — Feature Highlights"), "has header title");
+    assert!(text_enabled.contains(":helm"), "shows helm command");
+    assert!(text_enabled.contains(":overview"), "shows overview command");
+    assert!(text_enabled.contains(":gpuinfo"), "shows gpuinfo command");
+    assert!(text_enabled.contains(":workloads"), "shows workloads command");
+    assert!(text_enabled.contains(":ai"), "shows ai assistant command");
+    assert!(text_enabled.contains(":ai-settings"), "shows ai-settings command");
+    assert!(text_enabled.contains(":config"), "shows config command");
+    assert!(text_enabled.contains("[●]"), "shows enabled checkbox dot");
+    assert!(text_enabled.contains("Show this feature banner on startup"), "shows checkbox label");
+    assert!(text_enabled.contains("to dismiss"), "shows dismiss key hint");
+    assert!(text_enabled.contains("to jump directly"), "shows jump hint");
+
+    let modal_disabled = Modal::FeatureBanner { show_on_startup: false };
+    let text_disabled = modal_text(100, 30, &modal_disabled);
+    assert!(text_disabled.contains("[○]"), "shows unchecked checkbox");
+    assert!(text_disabled.contains("Disabled"), "shows disabled state");
+}
+
+#[test]
+fn feature_banner_stays_inside_small_preview_regions() {
+    for area in [Rect::new(4, 5, 35, 6), Rect::new(4, 5, 20, 1), Rect::new(4, 5, 0, 0)] {
+        let lines = common::render_lines(80, 30, |f| {
+            for y in 0..30 {
+                f.render_widget(ratatui::widgets::Paragraph::new("X".repeat(80)), Rect::new(0, y, 80, 1));
+            }
+            srelens_tui::ui::dialogs::render_feature_banner_modal(f, area, true);
+        });
+        for (y, line) in lines.iter().enumerate() {
+            for (x, c) in line.chars().enumerate() {
+                if x < area.x as usize || x >= area.right() as usize || y < area.y as usize || y >= area.bottom() as usize {
+                    assert_eq!(c, 'X', "banner escaped preview at {x},{y}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn long_helm_errors_show_the_reason_and_recovery_with_and_without_stale_rows() {
+    use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+    for stale in [false, true] {
+        let mut state = HelmViewState::new();
+        if stale {
+            state.set_releases(vec![HelmReleaseItem {
+                name: "cached-release".into(), namespace: "default".into(), revision: 3,
+                status: "deployed".into(), chart: "web".into(), chart_version: "1".into(),
+                app_version: "1".into(), updated: "today".into(),
+            }]);
+        }
+        state.set_error(format!("{} permission denied", "Unable to list Helm release secrets in the selected Kubernetes namespace. ".repeat(3)));
+        let text = common::render_text(80, 24, |f| render_helm_view(f, f.area(), &state));
+        let content = text.lines().map(|line| line.trim_matches('│')).collect::<Vec<_>>().join(" ");
+        let words = content.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("permission denied"), "{text}");
+        assert!(words.contains("Press R to retry."), "{text}");
+        if stale {
+            assert!(words.contains("Rollback is disabled."), "{text}");
+            assert!(text.contains("cached-release"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn oversized_helm_errors_preserve_recovery_and_stale_rows() {
+    use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
+    for (width, height) in [(80, 12), (40, 12), (80, 8)] {
+        for stale in [false, true] {
+            let mut state = HelmViewState::new();
+            if stale {
+                state.set_releases(vec![HelmReleaseItem {
+                    name: "cached".into(), namespace: "ns".into(), revision: 3,
+                    status: "deployed".into(), chart: "web".into(), chart_version: "1".into(),
+                    app_version: "1".into(), updated: "today".into(),
+                }]);
+            }
+            state.set_error("Permission denied while listing Helm secrets. ".repeat(100));
+            let text = common::render_text(width, height, |f| render_helm_view(f, f.area(), &state));
+            let content = text.lines().map(|line| line.trim_matches('│')).collect::<Vec<_>>().join(" ");
+            let words = content.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(words.contains("Press R to retry."), "{text}");
+            assert!(words.contains("error truncated"), "{text}");
+            if stale {
+                assert!(words.contains("Rollback is disabled."), "{text}");
+                assert!(text.contains("cached"), "{text}");
+            }
+        }
+    }
 }

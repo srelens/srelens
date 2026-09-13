@@ -48,6 +48,7 @@ impl DeepLink {
                         crate::commands::ResourceKind::Overview => "overview".to_string(),
                         crate::commands::ResourceKind::Toolbox => "toolbox".to_string(),
                         crate::commands::ResourceKind::Settings => "settings".to_string(),
+                        crate::commands::ResourceKind::TuiConfig => "config".to_string(),
                         other => other.to_string().to_lowercase(),
                     },
                     CommandTarget::CustomResource(crd) => crd.plural.to_lowercase(),
@@ -57,6 +58,7 @@ impl DeepLink {
                     CommandTarget::Quit => "quit".to_string(),
                     CommandTarget::ThemePicker => "themes".to_string(),
                     CommandTarget::SetTheme(t) => format!("theme/{}", t),
+                    CommandTarget::FeatureBanner => "features".to_string(),
                     CommandTarget::OpenUrl(u) => format!("open/{}", u),
                 };
                 format!("srelens://view/{}/{}/{}", ctx, ns, target_name)

@@ -22,6 +22,8 @@ export interface FilterBarProps {
   invalid?: boolean;
   /** Controls that filter alongside the text — a namespace picker, a toggle. */
   children?: ReactNode;
+  /** Selection actions shown before the search field. */
+  leading?: ReactNode;
   className?: string;
 }
 
@@ -66,6 +68,7 @@ export function FilterBar({
   onRegexChange,
   invalid = false,
   children,
+  leading,
   className,
 }: FilterBarProps) {
   const fieldRef = useRef<HTMLInputElement>(null);
@@ -78,6 +81,7 @@ export function FilterBar({
       className={cx("rule-b flex shrink-0 flex-wrap items-center gap-3 px-2.5 py-1.5", className)}
       style={{ background: "var(--surface-sunk)" }}
     >
+      {leading}
       <div
         className="flex min-w-[200px] flex-1 items-center gap-1.5 rounded border border-transparent px-1"
         data-invalid={invalid ? "true" : undefined}
@@ -96,27 +100,6 @@ export function FilterBar({
           <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
           <path d="m20 20-3.6-3.6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
         </svg>
-        <input
-          ref={fieldRef}
-          type="search"
-          value={value}
-          onChange={(e) => onValueChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key !== "Escape" || value === "") return;
-            // Claimed only while there is a filter to drop. Left alone, Escape
-            // belongs to whatever this list is inside.
-            e.preventDefault();
-            e.stopPropagation();
-            onValueChange("");
-          }}
-          placeholder={placeholder}
-          disabled={disabled}
-          aria-label={label}
-          aria-invalid={invalid ? true : undefined}
-          aria-describedby={invalid ? invalidId : undefined}
-          title={invalid ? "Invalid regular expression" : undefined}
-          className="w-full bg-transparent text-[0.8125rem] outline-none placeholder:text-faint"
-        />
         {onRegexChange && (
           <button
             type="button"
@@ -140,6 +123,27 @@ export function FilterBar({
             .*
           </button>
         )}
+        <input
+          ref={fieldRef}
+          type="search"
+          value={value}
+          onChange={(e) => onValueChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key !== "Escape" || value === "") return;
+            // Claimed only while there is a filter to drop. Left alone, Escape
+            // belongs to whatever this list is inside.
+            e.preventDefault();
+            e.stopPropagation();
+            onValueChange("");
+          }}
+          placeholder={placeholder}
+          disabled={disabled}
+          aria-label={label}
+          aria-invalid={invalid ? true : undefined}
+          aria-describedby={invalid ? invalidId : undefined}
+          title={invalid ? "Invalid regular expression" : undefined}
+          className="w-full bg-transparent text-[0.8125rem] outline-none placeholder:text-faint"
+        />
         {value !== "" && (
           <button
             type="button"

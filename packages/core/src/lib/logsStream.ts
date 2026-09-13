@@ -13,7 +13,7 @@ export interface LogStream {
 }
 
 /** Connection health of a live-tail stream. */
-export type LogStatus = "live" | "reconnecting";
+export type LogStatus = "live" | "reconnecting" | "completed";
 
 /** Per-stream options: how much history to tail and whether to timestamp. */
 export interface LogStreamOptions {

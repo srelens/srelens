@@ -175,6 +175,11 @@ afterEach(() => {
 });
 
 describe("Terminals", () => {
+  it("closes creation when its captured cluster is paused after a rail switch", async () => {
+    await pickPodThenMove(userEvent.setup());
+    act(() => tabs.setClusterPaused(tabs.currentWorkspace().id, CTX.stableId, true));
+    expect(screen.queryByRole("button", { name: "Start session" })).toBeNull();
+  });
   it("lets the pane shrink, so the rail is not pushed off the window", async () => {
     // xterm sizes its content in explicit pixels, and a flex item's implicit
     // `min-width: auto` refuses to shrink below its content — so without

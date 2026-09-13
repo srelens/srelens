@@ -31,7 +31,15 @@ export interface PodSummary {
 
 export interface NamespacesOutcome {
   namespaces?: string[];
+  summaries?: NamespaceSummary[];
   error?: string;
+}
+
+export interface NamespaceSummary {
+  name: string;
+  phase: string;
+  labels: Record<string, string>;
+  age: string;
 }
 
 export interface PodsOutcome {
@@ -50,6 +58,9 @@ export interface DeploymentSummary {
   ready: string;
   upToDate: number;
   available: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -62,6 +73,9 @@ export interface ServiceSummary {
    *  empty when there is none, `<pending>` while a LoadBalancer waits. */
   externalIP: string;
   ports: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -71,8 +85,21 @@ export async function listNamespaces(
   invoke: Invoker = invokeCapability,
 ): Promise<NamespacesOutcome> {
   try {
-    const out = await invoke<{ namespaces: string[] }>("k8s.listNamespaces", { context });
-    return { namespaces: out.namespaces };
+    const out = await invoke<{ namespaces: string[]; summaries?: NamespaceSummary[] }>(
+      "k8s.listNamespaces",
+      { context },
+    );
+    const summaries =
+      out.summaries ??
+      out.namespaces.map((name) => ({
+        name,
+        // A legacy backend did not report phase at all. Keep that distinct
+        // from a real `Unknown` phase, which is an unhealthy cluster verdict.
+        phase: "-",
+        labels: {},
+        age: "-",
+      }));
+    return { namespaces: out.namespaces, summaries };
   } catch (e) {
     return { error: String(e) };
   }
@@ -132,6 +159,9 @@ export interface ReplicaSetSummary {
   desired: number;
   ready: number;
   current: number;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 

@@ -265,7 +265,7 @@ export function ManifestEditor({
       active = false;
       clearTimeout(t);
     };
-  }, [context, yaml, fill]);
+  }, [context, namespace, yaml, fill]);
 
   const editor = (
     <Suspense fallback={<Spinner label="Loading editor" />}>

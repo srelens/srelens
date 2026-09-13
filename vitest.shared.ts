@@ -30,3 +30,9 @@
  * timed out in CI — the argument for the raise simply does not apply to them.
  */
 export const TEST_TIMEOUT_MS = 15_000;
+
+/** Node 25+ exposes process-wide Web Storage. Let jsdom provide isolated
+ * browser storage instead; Node-only tests should have no browser storage.
+ * Worker flags apply before environment setup, including when a package's
+ * suite is run directly rather than through the root command. */
+export const TEST_EXEC_ARGV = ["--no-experimental-webstorage"];

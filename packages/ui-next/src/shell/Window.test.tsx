@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { render, screen, waitFor, act, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { fireEvent } from "@testing-library/react";
 
@@ -189,6 +189,7 @@ import { defaultMark, getMark, setMark, MARKS_KEY } from "../lib/marks";
 import { contextFor, getContextsError, getContextsStatus, resetContexts } from "../lib/clusters";
 import { resetLock } from "./LockGate";
 import { mcpAutoStartPhase, resetMcpAutoStart } from "../lib/mcpAutoStart";
+import { openCluster } from "../lib/openCluster";
 
 /** An open vault: the state every test in this file but the lock ones needs. */
 const VAULT_OPEN = {
@@ -215,7 +216,7 @@ beforeEach(() => {
   listContexts.mockReset().mockResolvedValue({ contexts: [ctx("prod")] });
   loadTabsState.mockReset().mockReturnValue(null);
   scheduleSave.mockReset();
-  connectCluster.mockReset().mockImplementation(async (name: string) => ({ context: name, reachable: true, version: "1.30" }));
+  connectCluster.mockReset().mockImplementation(async (name: string) => ({ context: name, reachable: false }));
   listCrds.mockReset().mockResolvedValue({ crds: [] });
   getForwards.mockReset().mockReturnValue([]);
   subscribeForwards.mockReset().mockReturnValue(() => {});
@@ -255,13 +256,58 @@ async function booted() {
       <Window ported={[]} onOpenInClassic={() => {}} />
     </ConsoleProvider>,
   );
-  await waitFor(() => expect(screen.getByRole("tablist")).toBeDefined());
+  await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
 }
 
 describe("Window boot", () => {
+  it.each([false, true])("probes only an unpaused restored active resource tab (paused: %s)", async paused => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    const saved = defaultState([ctx("prod"), ctx("stage")]);
+    const tab = makeTab("/overview", { clusterName: "prod" });
+    saved.workspaces[0].tabs.push(tab);
+    saved.workspaces[0].activeId = tab.id;
+    saved.workspaces[0].pausedClusters = paused ? ["prod"] : [];
+    loadTabsState.mockReturnValue(saved);
+    await booted();
+    if (paused) expect(connectCluster).not.toHaveBeenCalled();
+    else {
+      await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("prod"));
+      expect(connectCluster).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("probes a cluster when its overview is opened directly", async () => {
+    await booted();
+    act(() => { store.openTab("/overview", { clusterName: "prod" }); });
+    await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("prod"));
+  });
+
+  it("keeps the agent console mounted when its explicitly scoped cluster is paused", async () => {
+    await booted();
+    act(() => { store.openTab("/agent", { clusterName: "prod" }); });
+    expect(screen.getByRole("textbox", { name: "Console prompt" })).toBeDefined();
+    act(() => { store.setClusterPaused(store.currentWorkspace().id, "prod", true); });
+    expect(screen.getByRole("textbox", { name: "Console prompt" })).toBeDefined();
+  });
+
+  it("does not contact configured clusters until the reader opens one", async () => {
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    await booted();
+    expect(connectCluster).not.toHaveBeenCalled();
+  });
+
+  it("keeps a restored Home tab active after connecting", async () => {
+    connectCluster.mockResolvedValue({ context: "prod", reachable: true });
+    loadTabsState.mockReturnValue(defaultState([ctx("prod")]));
+    await booted();
+    expect(connectCluster).not.toHaveBeenCalled();
+    expect(store.activeRoute()).toBe("/");
+  });
+
   it("loads the cluster's saved sidebar groups before navigation mounts", async () => {
     localStorage.setItem(EXPANDED_KEY, JSON.stringify({ prod: ["network"], offline: ["workloads"] }));
     await booted();
+    act(() => { store.openTab("/overview"); });
     expect(screen.getByRole("treeitem", { name: "Services" })).toBeDefined();
     expect(screen.queryByRole("treeitem", { name: "Pods" })).toBeNull();
     await userEvent.click(screen.getByRole("treeitem", { name: "Workloads" }));
@@ -354,7 +400,7 @@ describe("Window boot", () => {
     listContexts.mockResolvedValue({ error: "kubeconfig unreadable" });
     await booted();
     expect(store.getState().workspaces.length).toBeGreaterThan(0);
-    expect(screen.getByRole("tablist")).toBeDefined();
+    expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined();
   });
 
   it("boots to a live window when the saved currentId names a workspace that did not parse and the cluster list also errors", async () => {
@@ -395,7 +441,7 @@ describe("Window boot", () => {
     saved.workspaces[0].tabs.push(makeTab("/k/Pod/default/%zz"));
     loadTabsState.mockReturnValue(saved);
     await booted();
-    expect(screen.getByRole("tablist")).toBeDefined();
+    expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined();
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/k/Pod/default/%zz")).toBe(true);
   });
 
@@ -415,7 +461,7 @@ describe("Window boot", () => {
         <Window ported={[]} onOpenInClassic={() => {}} />
       </ConsoleProvider>,
     );
-    await waitFor(() => expect(screen.getByRole("tablist")).toBeDefined());
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
     act(() => store.openTab("/k/pods"));
     expect(flushSave).not.toHaveBeenCalled();
     view.unmount();
@@ -492,7 +538,7 @@ describe("Window strip", () => {
     expect(screen.getAllByRole("tab")).toHaveLength(2);
     // Both bodies are mounted; only the active is visible.
     const headings = screen.getAllByRole("heading", { level: 1, hidden: true });
-    expect(headings.map((h) => h.textContent)).toEqual(["Control room", "Pods"]);
+    expect(headings.map((h) => h.textContent)).toEqual(["Home", "Pods"]);
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Pods");
   });
@@ -500,8 +546,8 @@ describe("Window strip", () => {
   it("selecting a tab switches the body", async () => {
     await booted();
     act(() => store.openTab("/k/pods"));
-    await userEvent.click(screen.getByRole("tab", { name: /Control room/ }));
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Control room");
+    await userEvent.click(screen.getByRole("tab", { name: /Home/ }));
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Home");
   });
 
   it("closing a tab goes through the store", async () => {
@@ -517,16 +563,12 @@ describe("Window strip", () => {
     expect(store.currentWorkspace().tabs.map((t) => t.route)).toEqual(["/", "/"]);
   });
 
-  it("names the workspace's active cluster on a new tab", async () => {
-    // `contexts[0]` would have been whichever context the kubeconfig lists
-    // first — not the current one, and not necessarily even in this
-    // workspace. The active cluster is what a new tab is about, so its name
-    // is what the tab carries.
+  it("keeps new Home tabs app-scoped even when a cluster is active", async () => {
     listContexts.mockResolvedValue({ contexts: [ctx("prod", "prod-eu")] });
     await booted();
     await userEvent.click(screen.getByRole("button", { name: /new tab/i }));
     const opened = store.currentWorkspace().tabs.at(-1)!;
-    expect(opened.sub).toBe("prod-eu");
+    expect(opened.sub).toBeUndefined();
   });
 
   it("hands the Placeholder the way back to classic, with the cluster", async () => {
@@ -536,9 +578,10 @@ describe("Window strip", () => {
         <Window ported={[]} onOpenInClassic={onOpenInClassic} />
       </ConsoleProvider>,
     );
-    await waitFor(() => expect(screen.getByRole("tablist")).toBeDefined());
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    act(() => store.openTab("/incidents"));
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
-    expect(onOpenInClassic).toHaveBeenCalledWith("/", "prod");
+    expect(onOpenInClassic).toHaveBeenCalledWith("/incidents", "prod");
   });
 });
 
@@ -558,7 +601,7 @@ describe("Window — the console dock's scope", () => {
         <Window ported={[]} onOpenInClassic={() => {}} />
       </ConsoleProvider>,
     );
-    await waitFor(() => expect(screen.getByRole("tablist")).toBeDefined());
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
   }
 
   it("scopes the dock to the active cluster on boot, then to a resource once one is open", async () => {
@@ -583,12 +626,12 @@ describe("Window — the console dock's scope", () => {
 });
 
 describe("Window accelerators", () => {
-  it("binds ⌘T to a new tab carrying the active cluster's name", async () => {
+  it("binds ⌘T to an app-wide Home tab", async () => {
     await booted();
     fireEvent.keyDown(window, { key: "t", metaKey: true });
     const tabs = store.currentWorkspace().tabs;
     expect(tabs).toHaveLength(2);
-    expect(tabs.at(-1)!.sub).toBe("prod");
+    expect(tabs.at(-1)!.sub).toBeUndefined();
   });
 
   it("⌘W closes the active tab and ⌘⇧T reopens it", async () => {
@@ -614,13 +657,13 @@ describe("Window accelerators", () => {
         <Window ported={[]} onOpenInClassic={() => {}} active={false} />
       </ConsoleProvider>,
     );
-    await screen.findByText(/not in the new design yet/);
+    await screen.findByRole("heading", { level: 1, name: "Home" });
     expect(screen.queryByRole("tablist")).toBeNull();
     fireEvent.keyDown(window, { key: "t", metaKey: true });
     expect(store.currentWorkspace().tabs).toHaveLength(1);
   });
 
-  it("probes each cluster of the workspace once at boot", async () => {
+  it("does not probe workspace clusters at boot", async () => {
     listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("dev")] });
     render(
       <ConsoleProvider>
@@ -628,8 +671,17 @@ describe("Window accelerators", () => {
       </ConsoleProvider>,
     );
     await screen.findByRole("tablist");
-    await waitFor(() => expect(connectCluster).toHaveBeenCalledTimes(2));
-    expect(connectCluster.mock.calls.map((c) => c[0])).toEqual(["prod", "dev"]);
+    expect(connectCluster).not.toHaveBeenCalled();
+  });
+
+  it("probes a configured cluster when Home adds it to the workspace", async () => {
+    const saved = defaultState([ctx("prod")]);
+    loadTabsState.mockReturnValue(saved);
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("dev")] });
+    await booted();
+    expect(connectCluster).not.toHaveBeenCalled();
+    act(() => openCluster(ctx("dev")));
+    await waitFor(() => expect(connectCluster).toHaveBeenCalledWith("dev"));
   });
 
   it("offers Close others on a tab's context menu", async () => {
@@ -774,7 +826,7 @@ describe("Window lock cover", () => {
     await booted();
     expect(screen.getByRole("tablist")).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Clusters" })).toBeTruthy();
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Control room");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Home");
     expect(screen.queryByText("Workspace locked")).toBeNull();
   });
 
@@ -791,7 +843,7 @@ describe("Window lock cover", () => {
     expect(screen.queryByRole("navigation", { name: "Clusters" })).toBeNull();
     // The screen under the strip is gone too — including from the hidden tab
     // surfaces, which stay mounted for every other reason.
-    expect(screen.queryByRole("heading", { level: 1, hidden: true, name: "Control room" })).toBeNull();
+    expect(screen.queryByRole("heading", { level: 1, hidden: true, name: "Home" })).toBeNull();
   });
 
   it("seals and covers on the lock chord", async () => {
@@ -891,7 +943,7 @@ describe("Window — what the cover has to take with it", () => {
 
   it("offers no way into Settings from the titlebar while the cover is up", async () => {
     await sealed();
-    const gear = screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement;
+    const gear = within(screen.getByRole("banner", { name: "Window" })).getByRole("button", { name: "Settings" }) as HTMLButtonElement;
     expect(gear.disabled).toBe(true);
     await userEvent.click(gear);
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(false);
@@ -953,7 +1005,7 @@ describe("Window — what the cover has to take with it", () => {
     await userEvent.click(screen.getByRole("button", { name: "Unlock workspace" }));
     await screen.findByRole("tablist");
     expect(
-      (screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled,
+      (within(screen.getByRole("banner", { name: "Window" })).getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled,
     ).toBe(false);
     expect(screen.getByRole("button", { name: /Default/ })).toBeTruthy();
     expect(
@@ -1007,7 +1059,7 @@ describe("Window — the launch check, before the vault has answered", () => {
 
   it("offers no way into Settings for the whole check", async () => {
     await stillChecking();
-    const gear = screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement;
+    const gear = within(screen.getByRole("banner", { name: "Window" })).getByRole("button", { name: "Settings" }) as HTMLButtonElement;
     expect(gear.disabled).toBe(true);
     await userEvent.click(gear);
     expect(store.currentWorkspace().tabs.some((t) => t.route === "/settings")).toBe(false);
@@ -1040,7 +1092,7 @@ describe("Window — the launch check, before the vault has answered", () => {
   it("gives every one of those back once the launch read says the vault is open", async () => {
     await booted();
     expect(
-      (screen.getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled,
+      (within(screen.getByRole("banner", { name: "Window" })).getByRole("button", { name: "Settings" }) as HTMLButtonElement).disabled,
     ).toBe(false);
     expect(screen.getByRole("button", { name: /Default/ })).toBeTruthy();
     expect(
@@ -1457,6 +1509,29 @@ it("shows saved display names on tabs while retaining the real context for opera
   act(() => store.openTab("/k/pods", { clusterName: "prod" }));
   expect(screen.getByRole("tab", { name: /Pods · Production Europe/ })).toBeDefined();
   expect(store.currentWorkspace().tabs.find(tab => tab.route === "/k/pods")?.sub).toBe("prod");
+  act(() => { screen.getByRole("tab", { name: /Pods · Production Europe/ }).focus(); });
+  expect((await screen.findByRole("tooltip")).textContent).toContain("PE");
+  expect(screen.getByRole("tooltip").textContent).not.toContain("prod");
+  expect(await screen.findByPlaceholderText("Ask about PE / pods")).toBeDefined();
   act(() => setMark("prod", { ...defaultMark("prod"), name: "Production East" }));
   expect(screen.getByRole("tab", { name: /Pods · Production East/ })).toBeDefined();
+});
+
+
+it.each(["/forwards", "/terminals", "/helm"])("shows the active context for a status-opened %s tab", async route => {
+  loadTabsState.mockReturnValue(defaultState([ctx("prod")]));
+  await booted();
+  act(() => { store.openTab(route); });
+  const opened = store.getState().workspaces[0].tabs.find(t => t.route === route)!;
+  expect(opened.sub).toBeUndefined();
+  act(() => { screen.getByRole("tab", { name: opened.title }).focus(); });
+  expect((await screen.findByRole("tooltip")).textContent).toContain("prod");
+});
+
+it("does not label an app-level tab with the active cluster", async () => {
+  loadTabsState.mockReturnValue(defaultState([ctx("prod")]));
+  await booted();
+  act(() => { store.openTab("/settings"); });
+  act(() => { screen.getByRole("tab", { name: "Settings" }).focus(); });
+  expect((await screen.findByRole("tooltip")).textContent).not.toContain("prod");
 });

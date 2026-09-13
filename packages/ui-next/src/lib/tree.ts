@@ -78,7 +78,7 @@ const CLUSTER_ROUTES: ReadonlyArray<{ kind: ResourceKind; route: string; before?
 
 /** Where the app can be sent that is not a list of resources. */
 export const INVESTIGATE: ReadonlyArray<{ id: string; label: string; route: string }> = [
-  { id: "control", label: "Control room", route: "/" },
+  { id: "control", label: "Home", route: "/" },
   { id: "incidents", label: "Incidents", route: "/incidents" },
   { id: "topology", label: "Topology", route: "/topology" },
   { id: "agent", label: "Agent", route: "/agent" },

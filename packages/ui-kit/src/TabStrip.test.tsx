@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
 import { useState, type FormEvent } from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
@@ -427,4 +429,113 @@ describe("TabStrip with nothing open", () => {
     render(<TabStrip tabs={TABS} activeId="gone" onSelect={() => {}} />);
     expect(tab("Pods").getAttribute("tabindex")).toBe("0");
   });
+});
+
+describe("tab navigation enhancements", () => {
+  it("does not open a neighbour's tooltip when a pointer close transfers focus", async () => {
+    function Harness() {
+      const [tabs, setTabs] = useState<StripTab[]>([{ id: "home", title: "Home", pinned: true }, { id: "pods", title: "Pods" }]);
+      return <TabStrip tabs={tabs} activeId="pods" onSelect={() => {}} onClose={id => setTabs(rest => rest.filter(t => t.id !== id))} />;
+    }
+    render(<Harness />);
+    await userEvent.click(screen.getByRole("button", { name: "Close Pods" }));
+    expect(document.activeElement).toBe(tab("Home"));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    await userEvent.hover(tab("Home"));
+    expect(await screen.findByRole("tooltip")).toBeDefined();
+  });
+  it("shows full identity on keyboard focus and dismisses it with Escape", async () => {
+    const title = "production-monitoring-collector-configuration";
+    setup({ tabs: [{ id: "one", title, sub: "short", context: "long-cluster-context", detail: "ConfigMap · monitoring" }] });
+    await userEvent.tab();
+    expect((await screen.findByRole("tooltip")).textContent).toContain("long-cluster-context");
+    expect(screen.getByRole("tooltip").textContent).toContain("ConfigMap · monitoring");
+    expect(screen.getByRole("tooltip").textContent).toContain(title);
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+  it("requests a keyboard reorder without activating a tab", () => {
+    const onMove = vi.fn(); const {onSelect}=setup({onMove});
+    fireEvent.keyDown(tab("checkout-api"),{key:"ArrowLeft",ctrlKey:true,shiftKey:true});
+    expect(onMove).toHaveBeenCalledWith("logs",0);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+  it("keeps edge controls visible and out of the tab order when nothing overflows", () => {
+    setup();
+    for(const label of ["Scroll tabs left","Scroll tabs right"]){
+      const button=screen.getByRole("button",{name:label});
+      expect(button).toHaveProperty("disabled",true);
+      expect(button.tabIndex).toBe(-1);
+    }
+  });
+  it("does not select or reorder a tab dropped back in its own position", () => {
+    const onMove=vi.fn();const {onSelect}=setup({onMove});
+    const node=tab("checkout-api");
+    fireEvent.dragStart(node,{dataTransfer:{setData:vi.fn()}});
+    fireEvent.dragOver(node,{clientX:0});
+    fireEvent.drop(node,{clientX:0});
+    fireEvent.dragEnd(node);
+    fireEvent.click(node);
+    expect(onMove).not.toHaveBeenCalled();expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
+it("announces a completed keyboard move and keeps focus and selection separate", async () => {
+  function Reorderable() {
+    const [tabs,setTabs]=useState(TABS);
+    return <TabStrip tabs={tabs} activeId="pods" onSelect={()=>{}} onMove={(id,to)=>setTabs(old=>{
+      const next=[...old]; const [moved]=next.splice(next.findIndex(t=>t.id===id),1);next.splice(to,0,moved);return next;
+    })}/>;
+  }
+  render(<Reorderable/>);
+  tab("checkout-api").focus();
+  fireEvent.keyDown(tab("checkout-api"),{key:"ArrowLeft",metaKey:true,shiftKey:true});
+  expect(screen.getAllByRole("tab")[0]).toBe(tab("checkout-api"));
+  expect(document.activeElement).toBe(tab("checkout-api"));
+  expect(tab("Pods").getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("status").textContent).toBe("checkout-api moved to position 1 of 3");
+});
+
+it("shows an insertion marker and requests a drop without selecting", () => {
+  const onMove=vi.fn();const {onSelect}=setup({onMove});
+  fireEvent.dragStart(tab("nginx-7d4b"),{dataTransfer:{setData:vi.fn()}});
+  fireEvent.dragOver(tab("Pods"),{clientX:0});
+  expect(tab("Pods").getAttribute("data-drop")).toBe("before");
+  fireEvent.drop(tab("Pods"),{clientX:0});
+  expect(onMove).toHaveBeenCalledWith("shell",0);
+  expect(onSelect).not.toHaveBeenCalled();
+});
+
+
+it("rejects a tab drag that began on its close button and permits the next body drag", () => {
+  const onMove = vi.fn();
+  const onClose = vi.fn();
+  const { onSelect } = setup({ onMove, onClose });
+  const source = tab("nginx-7d4b");
+  const close = screen.getByRole("button", { name: "Close nginx-7d4b" });
+  const dataTransfer = { setData: vi.fn() };
+  fireEvent.pointerDown(close.querySelector("svg") ?? close);
+  // Native dragstart targets the draggable ancestor, not the pressed button.
+  expect(fireEvent.dragStart(source, { dataTransfer })).toBe(false);
+  fireEvent.dragOver(tab("Pods"), { clientX: 0 });
+  fireEvent.drop(tab("Pods"), { clientX: 0 });
+  expect(onMove).not.toHaveBeenCalled();
+  expect(dataTransfer.setData).not.toHaveBeenCalled();
+  expect(onSelect).not.toHaveBeenCalled();
+  fireEvent.click(close);
+  expect(onClose).toHaveBeenCalledWith("shell");
+
+  fireEvent.pointerDown(source);
+  expect(fireEvent.dragStart(source, { dataTransfer })).toBe(true);
+  fireEvent.drop(tab("Pods"), { clientX: 0 });
+  expect(onMove).toHaveBeenCalledWith("shell", 0);
+});
+
+
+it("keeps long tooltip identifiers on one horizontally scrollable line", () => {
+  const css = readFileSync(join(__dirname, "styles/kit.css"), "utf8");
+  const rule = css.match(/\.tab-tooltip\s*\{([^}]+)\}/)?.[1] ?? "";
+  expect(rule).toMatch(/white-space:\s*nowrap/);
+  expect(rule).toMatch(/overflow-x:\s*auto/);
+  expect(rule).not.toMatch(/overflow-wrap:\s*anywhere/);
 });

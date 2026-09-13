@@ -2,6 +2,9 @@ import { describe, it, expect } from "vitest";
 import { logConnectionStatus } from "./logConnectionStatus";
 
 describe("logConnectionStatus", () => {
+  it("labels a finite completed stream without an outage tone", () => {
+    expect(logConnectionStatus("completed")).toEqual({ label: "Completed", health: "neutral" });
+  });
   it("reads 'connecting' as an info-toned 'Connecting'", () => {
     expect(logConnectionStatus("connecting")).toEqual({ label: "Connecting", health: "info" });
   });

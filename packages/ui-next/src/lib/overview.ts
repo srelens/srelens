@@ -36,7 +36,7 @@ import type { ResourceStatus } from "./useResource";
  *
  * A screen made of independent facts fails in independent pieces: a refused
  * `listNodes` empties the nodes table and says so, while the namespace count,
- * the object counts, the control-plane facts and Fleet stay on screen. Every
+ * the object counts and the control-plane facts stay on screen. Every
  * hook below therefore owns its own loader, and nothing here ever awaits two
  * capabilities in a way that lets one fail the other.
  *
@@ -208,9 +208,6 @@ export interface OverviewPods {
  * 5 416 pods and 114 MB, which does not come back inside the request budget —
  * so all three read "No reading" on the one cluster where they matter most.
  * See `crates/kube/src/pod_overview.rs` for what replaced it and why.
- *
- * Fleet counts through `podCount` per cluster for the same reason: neither
- * screen can afford a pod list, and neither takes one.
  */
 export function useOverviewPods(context: string): OverviewPods {
   const pods = useCachedResource(

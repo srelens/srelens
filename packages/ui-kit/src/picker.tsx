@@ -70,7 +70,7 @@ export function Picker({ summary, ariaLabel, searchPlaceholder = "Search…", cl
             aria-expanded, aria-controls and data-state; the combobox role is
             ours, because a popover full of options is not the generic dialog
             Radix assumes. */}
-        <button type="button" role="combobox" aria-label={ariaLabel} className={cx("btn justify-between", className)}>
+        <button type="button" role="combobox" aria-label={ariaLabel} className={cx("btn justify-between", className)} style={{ borderColor: "var(--control-line)" }}>
           <span className="min-w-0 truncate">{summary}</span>
           {/* Inline rather than an icon-set import: the kit takes no dependency
               on lucide, and these are the only two glyphs it needs. */}

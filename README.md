@@ -203,7 +203,7 @@ Example stdio configuration:
 ### Prerequisites
 
 - [Rust](https://rustup.rs) stable
-- [Node.js](https://nodejs.org) 22+
+- [Node.js](https://nodejs.org) 26 (development default; Node 24 LTS is also supported). Run `nvm install && nvm use` to use the version in `.nvmrc`.
 - [pnpm](https://pnpm.io) 9+
 - [Tauri v2 system dependencies](https://v2.tauri.app/start/prerequisites/)
 - A reachable Kubernetes cluster for cluster-dependent workflows

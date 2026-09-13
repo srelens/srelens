@@ -41,6 +41,30 @@ describe("AgeCell (#405)", () => {
     expect(screen.getByText("—")).toBeDefined();
   });
 
+  // The follow-up to #412: the same cell now backs every kind's AGE column,
+  // typed and untyped alike. These render the cell exactly as those column
+  // definitions do, from a row of each shape.
+  it("ticks for a typed kind's row (Deployment)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(AT(0));
+    const row = { name: "web", namespace: "default", created: CREATED, age: "0s" };
+    render(<span data-testid="dep"><AgeCell created={row.created} age={row.age} /></span>);
+    expect(screen.getByTestId("dep").textContent).toBe("0s");
+    act(() => void vi.advanceTimersByTime(120_000));
+    expect(screen.getByTestId("dep").textContent).toBe("2m");
+  });
+
+  it("ticks for the generic list path (ResourceRow), which serves every untyped kind", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(AT(0));
+    // What `k8s.listResource` returns: name, namespace, created, age.
+    const row = { name: "some-lease", namespace: "kube-system", created: CREATED, age: "0s" };
+    render(<span data-testid="generic"><AgeCell created={row.created} age={row.age} /></span>);
+    expect(screen.getByTestId("generic").textContent).toBe("0s");
+    act(() => void vi.advanceTimersByTime(3_600_000));
+    expect(screen.getByTestId("generic").textContent).toBe("1h");
+  });
+
   it("stops its interval once the last cell unmounts", () => {
     vi.useFakeTimers();
     const clear = vi.spyOn(globalThis, "clearInterval");

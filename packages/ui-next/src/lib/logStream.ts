@@ -91,6 +91,7 @@ export type LogStreamStatus = "connecting" | LogStatus | "error";
  *  denominator for both counts; targets that have not reported yet are
  *  neither `live` nor `reconnecting`. */
 export interface LogTargetCounts {
+  readonly completed?: number;
   readonly live: number;
   readonly reconnecting: number;
   readonly total: number;
@@ -114,7 +115,8 @@ export interface LogTargetCounts {
  */
 export function aggregateLogStatus(counts: LogTargetCounts): "connecting" | LogStatus {
   if (counts.reconnecting > 0) return "reconnecting";
-  if (counts.total > 0 && counts.live >= counts.total) return "live";
+  if (counts.total > 0 && (counts.completed ?? 0) >= counts.total) return "completed";
+  if (counts.total > 0 && counts.live + (counts.completed ?? 0) >= counts.total) return "live";
   return "connecting";
 }
 
@@ -126,6 +128,8 @@ export interface UseLogStreamResult {
   status: LogStreamStatus;
   /** How many of this stream's targets are streaming right now. */
   liveTargets: number;
+  /** Finite init-container logs that have been fully read. */
+  completedTargets: number;
   /** How many are down and retrying — every one of them a gap in the tail. */
   reconnectingTargets: number;
   /** How many targets this stream follows: the denominator for both counts. */
@@ -312,11 +316,13 @@ export function useLogStream(
         seen.set(source, s);
         let live = 0;
         let reconnecting = 0;
+        let completed = 0;
         for (const state of seen.values()) {
           if (state === "live") live += 1;
+          else if (state === "completed") completed += 1;
           else reconnecting += 1;
         }
-        setCounts({ live, reconnecting, total });
+        setCounts({ live, reconnecting, completed, total });
       },
       { timestamps, sinceSeconds, tailLines },
     ).then(
@@ -354,6 +360,7 @@ export function useLogStream(
       status: error !== undefined ? "error" : aggregateLogStatus(counts),
       liveTargets: counts.live,
       reconnectingTargets: counts.reconnecting,
+      completedTargets: counts.completed ?? 0,
       totalTargets: counts.total,
       error,
       paused,

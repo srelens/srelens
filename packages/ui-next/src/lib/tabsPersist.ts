@@ -1,3 +1,4 @@
+import { describe } from "./routes";
 import { loadRestoreSession, settingsStorage } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
 import type { Tab, TabsState, Workspace } from "./tabs";
@@ -50,6 +51,14 @@ function parseTab(v: unknown): Tab | null {
   if (!isRecord(v) || !isString(v.id) || !isString(v.route) || !isString(v.title) || !isString(v.kind)) return null;
   const tab: Tab = { id: v.id, route: v.route, title: v.title, kind: v.kind as Tab["kind"] };
   if (isString(v.sub)) tab.sub = v.sub;
+  // The former Control room route is now app-wide; retain the tab's identity
+  // and pin preference while dropping its obsolete cluster label.
+  if (tab.route === "/") {
+    const home = describe("/");
+    tab.title = home.title;
+    tab.kind = home.kind;
+    delete tab.sub;
+  }
   if (v.preview === true) tab.preview = true;
   if (v.pinned === true) tab.pinned = true;
   const view = parseView(v.view);
@@ -71,6 +80,7 @@ function parseWorkspace(v: unknown): Workspace | null {
     activeId: v.activeId,
     closed,
   };
+  if (Array.isArray(v.pausedClusters)) ws.pausedClusters = v.pausedClusters.filter(isString).filter((id) => clusters.includes(id));
   // Only a cluster the workspace actually has: the field is an index into
   // `clusters`, and `reconcile` would drop a dangling one anyway.
   if (isString(v.activeCluster) && clusters.includes(v.activeCluster)) ws.activeCluster = v.activeCluster;

@@ -2,6 +2,9 @@ packages:
   - "apps/*"
   - "packages/*"
 
+# Enforce the supported Node majors declared in package.json.
+engineStrict: true
+
 # esbuild's postinstall fetches its platform binary, so it has to run.
 #
 # pnpm 11 asks per package rather than taking a bare allow-list, and when it

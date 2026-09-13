@@ -115,7 +115,7 @@ export const ConsolePrompt = forwardRef<HTMLTextAreaElement, ConsolePromptProps>
         <textarea
           ref={ref}
           rows={1}
-          className="console-input min-w-0 resize-none !py-0 leading-[34px]"
+          className="console-input min-w-0 resize-none overflow-hidden !py-0 leading-[34px]"
           aria-label={`${label} prompt`}
           value={value}
           placeholder={placeholder}

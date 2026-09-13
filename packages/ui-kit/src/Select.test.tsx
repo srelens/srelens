@@ -120,3 +120,11 @@ describe("Select", () => {
     expect((screen.getByRole("option", { name: "Pick one" }) as HTMLOptionElement).disabled).toBe(true);
   });
 });
+
+
+it("keeps a visible control boundary and does not suppress keyboard focus", () => {
+  render(<Select value="default" onValueChange={() => {}} options={options} aria-label="Namespace" />);
+  const control = screen.getByRole("combobox");
+  expect(control.className).not.toContain("outline-none");
+  expect(control.style.borderColor).toBe("var(--control-line)");
+});

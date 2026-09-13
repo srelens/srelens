@@ -161,6 +161,70 @@ fn highlight_text_matches_handles_a_match_that_ends_the_text() {
     assert_eq!(parts, vec!["abc", "XYZ"]);
 }
 
+#[test]
+fn highlight_text_matches_safely_handles_unicode_and_case_expansion_without_panicking() {
+    let base = Style::default().fg(Color::White);
+    let hit = Style::default().fg(Color::Yellow);
+
+    // 1. Multibyte emoji and accented characters
+    let spans = highlight_text_matches("Prefix ⚡ Bolt", "bolt", base, hit);
+    let parts: Vec<(&str, Option<Color>)> = spans
+        .iter()
+        .map(|s| (s.content.as_ref(), s.style.fg))
+        .collect();
+    assert_eq!(
+        parts,
+        vec![("Prefix ⚡ ", Some(Color::White)), ("Bolt", Some(Color::Yellow))]
+    );
+
+    let spans = highlight_text_matches("café LATTE", "latte", base, hit);
+    let parts: Vec<(&str, Option<Color>)> = spans
+        .iter()
+        .map(|s| (s.content.as_ref(), s.style.fg))
+        .collect();
+    assert_eq!(
+        parts,
+        vec![("café ", Some(Color::White)), ("LATTE", Some(Color::Yellow))]
+    );
+
+    let spans = highlight_text_matches("CAFÉ Latte", "café", base, hit);
+    let parts: Vec<(&str, Option<Color>)> = spans
+        .iter()
+        .map(|s| (s.content.as_ref(), s.style.fg))
+        .collect();
+    assert_eq!(
+        parts,
+        vec![("CAFÉ", Some(Color::Yellow)), (" Latte", Some(Color::White))]
+    );
+
+    // 2. German capital sharp S (ẞ) which lowercases to 'ß'
+    let spans = highlight_text_matches("GROẞE Halle", "große", base, hit);
+    let parts: Vec<(&str, Option<Color>)> = spans
+        .iter()
+        .map(|s| (s.content.as_ref(), s.style.fg))
+        .collect();
+    assert_eq!(
+        parts,
+        vec![("GROẞE", Some(Color::Yellow)), (" Halle", Some(Color::White))]
+    );
+
+    // 3. Turkish dotted I (\u{0130}) where lowercasing expands from 2 bytes to 3 bytes
+    let spans = highlight_text_matches("T\u{0130}TLE", "\u{0130}", base, hit);
+    let parts: Vec<(&str, Option<Color>)> = spans
+        .iter()
+        .map(|s| (s.content.as_ref(), s.style.fg))
+        .collect();
+    assert_eq!(
+        parts,
+        vec![("T", Some(Color::White)), ("\u{0130}", Some(Color::Yellow)), ("TLE", Some(Color::White))]
+    );
+
+    // 4. Multibyte with no matches
+    let spans = highlight_text_matches("⚡ Bolt ❄", "zzz", base, hit);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].content, "⚡ Bolt ❄");
+}
+
 // ---------------------------------------------------------------------------
 // logs_view
 // ---------------------------------------------------------------------------
@@ -1162,6 +1226,38 @@ fn helm_view_set_releases_clamps_the_selection() {
     state.set_releases(vec![]);
     state.select_next();
     assert_eq!(state.selected_idx, 0);
+}
+
+#[test]
+fn helm_view_set_releases_preserves_selected_release_by_name_and_namespace() {
+    let mut state = HelmViewState::new();
+    let mut rel_c_default = release("c", "deployed", 1);
+    rel_c_default.namespace = "default".to_string();
+    let mut rel_c_platform = release("c", "deployed", 1);
+    rel_c_platform.namespace = "platform".to_string();
+
+    state.set_releases(vec![
+        release("b", "deployed", 1),
+        rel_c_platform.clone(),
+        rel_c_default.clone(),
+    ]);
+    state.select_next();
+    state.select_next();
+    assert_eq!(state.selected_release().unwrap().name, "c");
+    assert_eq!(state.selected_release().unwrap().namespace, "default");
+    assert_eq!(state.selected_idx, 2);
+
+    // A new release "a" is installed and prepended:
+    state.set_releases(vec![
+        release("a", "deployed", 1),
+        release("b", "deployed", 1),
+        rel_c_platform.clone(),
+        rel_c_default.clone(),
+    ]);
+    // Selection stays locked to release ("c", "default") at index 3:
+    assert_eq!(state.selected_release().unwrap().name, "c");
+    assert_eq!(state.selected_release().unwrap().namespace, "default");
+    assert_eq!(state.selected_idx, 3);
 }
 
 #[test]

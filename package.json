@@ -14,5 +14,8 @@
     "@vitest/coverage-v8": "^4.1.11",
     "turbo": "^2.0.0",
     "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": "24.x || 26.x"
   }
 }

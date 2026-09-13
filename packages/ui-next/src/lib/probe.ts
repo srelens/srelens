@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { connectCluster, describeError, type ClusterContext, type ClusterInfo } from "@srelens/core";
 import { setLink } from "./workspace";
+import { currentWorkspace, isClusterPaused } from "./tabsStore";
 
 let infos: Record<string, ClusterInfo> = {};
 
@@ -11,7 +12,7 @@ let infos: Record<string, ClusterInfo> = {};
  * `infos`, so `getInfo`/`useInfo`/`useInfos` and their callers — the rail, the
  * status strip, Overview, Toolbox — stay untouched.
  */
-export type ProbeState = "unread" | "reachable" | "unreachable";
+export type ProbeState = "unread" | "reachable" | "unreachable" | "paused";
 
 export interface Probe {
   state: ProbeState;
@@ -47,7 +48,7 @@ const emit = () => { for (const l of listeners) l(); };
 
 export function getInfo(stableId: string): ClusterInfo | undefined { return infos[stableId]; }
 export function getProbe(stableId: string): Probe { return probes[stableId] ?? UNREAD; }
-export function resetProbes(): void { infos = {}; probes = {}; reading.clear(); emit(); }
+export function resetProbes(): void { infos = {}; probes = {}; reading.clear(); pauseGenerations.clear(); emit(); }
 function subscribe(l: () => void) { listeners.add(l); return () => listeners.delete(l); }
 export function useProbe(stableId: string | null): Probe {
   return useSyncExternalStore(subscribe, () => (stableId ? (probes[stableId] ?? UNREAD) : UNREAD), () => UNREAD);
@@ -108,7 +109,44 @@ export function useInfos(): Record<string, ClusterInfo> {
  * {@link resetProbes} clears this along with the answers, so a test that leaves
  * a read hanging does not leave the next one joined to it.
  */
-const reading = new Map<string, Promise<void>>();
+interface Reading {
+  promise: Promise<void>;
+  /** Every workspace that is entitled to use this result. */
+  participants: Map<string, number>;
+}
+
+const reading = new Map<string, Reading>();
+const pauseGenerations = new Map<string, number>();
+
+function pauseKey(workspaceId: string, clusterId: string) {
+  return `${workspaceId}\u0000${clusterId}`;
+}
+
+function participantIsValid(clusterId: string, workspaceId: string, generation: number): boolean {
+  return !isClusterPaused(clusterId, workspaceId) &&
+    generation === (pauseGenerations.get(pauseKey(workspaceId, clusterId)) ?? 0);
+}
+
+/** Invalidate a workspace's in-flight reading when its reader disconnects. */
+export function invalidateProbe(workspaceId: string, clusterId: string): void {
+  const key = pauseKey(workspaceId, clusterId);
+  pauseGenerations.set(key, (pauseGenerations.get(key) ?? 0) + 1);
+  const running = reading.get(clusterId);
+  if (running && ![...running.participants].some(([id, generation]) => participantIsValid(clusterId, id, generation))) {
+    restoreObservedLink(clusterId);
+  }
+}
+
+/** An abandoned request is no longer connecting; retain only accepted facts. */
+function restoreObservedLink(clusterId: string): void {
+  const info = infos[clusterId];
+  setLink(clusterId, !info ? undefined : info.reachable ? "connected" : info.error ? "error" : "disconnected", info?.error ?? undefined);
+}
+
+interface ProbeOptions {
+  workspaceId?: string;
+  fresh?: boolean;
+}
 
 /**
  * Read one cluster: connect to it, time the round trip, and record what came
@@ -136,19 +174,37 @@ export function probeCluster(
   ctx: ClusterContext,
   connect: typeof connectCluster = connectCluster,
   now: () => number = Date.now,
+  options: ProbeOptions = {},
 ): Promise<void> {
+  const workspaceId = options.workspaceId ?? currentWorkspace().id;
+  if (isClusterPaused(ctx.stableId, workspaceId)) return Promise.resolve();
+  const generation = pauseGenerations.get(pauseKey(workspaceId, ctx.stableId)) ?? 0;
   const running = reading.get(ctx.stableId);
-  if (running) return running;
-  const run = read(ctx, connect, now).finally(() => {
+  // A pause invalidates only its own workspace's observation. Another
+  // workspace may still use a simultaneous connection, but it must not join a
+  // read whose owner has since invalidated it: that read will deliberately
+  // discard its result, leaving the joining workspace stuck on Connecting.
+  const runningIsValid = running &&
+    [...running.participants].some(([id, participantGeneration]) =>
+      participantIsValid(ctx.stableId, id, participantGeneration));
+  // A reconnect only needs a fresh read when the prior one was invalidated.
+  // A valid read owned by another workspace is safe to share, and avoids two
+  // accepted writes racing each other.
+  if (runningIsValid) {
+    running.participants.set(workspaceId, generation);
+    return running.promise;
+  }
+  const participants = new Map([[workspaceId, generation]]);
+  const run = read(ctx, connect, now, participants).finally(() => {
     // **By identity, not by key.** A read that {@link resetProbes} forgot
     // still lands, and deleting by key alone would clear whatever is under
     // that key by then — which is the CURRENT read. That silently reopens the
     // guard and the next caller starts a third concurrent read of one cluster,
     // the exact case this map exists to prevent. Only the entry this read
     // installed is its to remove.
-    if (reading.get(ctx.stableId) === run) reading.delete(ctx.stableId);
+    if (reading.get(ctx.stableId)?.promise === run) reading.delete(ctx.stableId);
   });
-  reading.set(ctx.stableId, run);
+  reading.set(ctx.stableId, { promise: run, participants });
   return run;
 }
 
@@ -157,6 +213,7 @@ async function read(
   ctx: ClusterContext,
   connect: typeof connectCluster,
   now: () => number,
+  participants: ReadonlyMap<string, number>,
 ): Promise<void> {
   setLink(ctx.stableId, "connecting");
   const started = now();
@@ -167,6 +224,13 @@ async function read(
     info = { context: ctx.name, reachable: false, error: String(e) };
   }
   const elapsedMs = now() - started;
+  // Disconnect may have been picked while the probe was in flight. Its result
+  // is an observation from before that choice, so never revive a paused row.
+  if (![...participants].some(([workspaceId, generation]) => participantIsValid(ctx.stableId, workspaceId, generation))) {
+    // A newer read owns the link once this one has been replaced.
+    if (reading.get(ctx.stableId)?.participants === participants) restoreObservedLink(ctx.stableId);
+    return;
+  }
   infos = { ...infos, [ctx.stableId]: info };
   probes = { ...probes, [ctx.stableId]: deriveProbe(info, elapsedMs) };
   emit();

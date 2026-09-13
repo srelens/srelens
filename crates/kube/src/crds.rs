@@ -351,6 +351,10 @@ pub struct ListCustomIn {
 pub struct CustomRow {
     pub name: String,
     pub namespace: String,
+    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// `age` below is rendered once, when this summary is built, and only
+    /// rebuilt when a watch event arrives — so it goes stale (#405).
+    pub created: Option<String>,
     pub age: String,
     /// Values for the requested printer columns, in the order they were asked
     /// for. Empty when none were requested.
@@ -419,6 +423,7 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                         CustomRow {
                             name: o.metadata.name.clone().unwrap_or_default(),
                             namespace: o.metadata.namespace.clone().unwrap_or_default(),
+                            created: crate::creation_rfc3339(o.metadata.creation_timestamp.as_ref()),
                             age: crate::humanize_age(o.metadata.creation_timestamp.as_ref()),
                             columns: values,
                             sort_keys,

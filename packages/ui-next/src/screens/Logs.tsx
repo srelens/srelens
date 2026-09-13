@@ -207,8 +207,9 @@ function connectionLabel(
   verdict: LogConnectionVerdict,
   live: number,
   total: number,
+  completed = 0,
 ): string {
-  return `${verdict.label} — ${live} of ${total} streaming`;
+  return `${verdict.label} — ${live} of ${total} streaming${completed > 0 ? `, ${completed} completed` : ""}`;
 }
 
 /**
@@ -1263,6 +1264,7 @@ function LogsStream({
                 signal,
                 stream.liveTargets,
                 stream.totalTargets,
+                stream.completedTargets,
               )}
               tone={statusTone(signal.health)}
             />

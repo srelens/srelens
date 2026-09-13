@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { setContexts } from "../lib/clusters";
 import userEvent from "@testing-library/user-event";
 
 // Everything this hook reaches into core for. Mocked so a test can control
@@ -512,6 +513,15 @@ describe("useRowMenu — the cluster the row was picked on", () => {
   const box = () => within(screen.getByRole("dialog"));
   const tickFor = (verb: string) => screen.getByRole("checkbox", { name: `Yes, still ${verb} on ${PINNED}.` });
   const REFUSAL = `This runs on ${PINNED}, not ${MOVED}. Confirm the cluster above, or cancel.`;
+  it("dismisses a pending write when its captured cluster is paused", async () => {
+    const contexts = [PINNED, MOVED].map(name => ({ name, stableId: `id-${name}`, cluster: name, server: "", isCurrent: false, sourceFile: "", authKind: "token" }));
+    setContexts(contexts);
+    store.setState(defaultState(contexts));
+    await pickThenMove("Delete");
+    act(() => store.setClusterPaused(store.currentWorkspace().id, `id-${PINNED}`, true));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(deleteResource).not.toHaveBeenCalled();
+  });
 
   /** Pick an entry on `prod-eu`, then move the rail to `stage-eu` under it. */
   async function pickThenMove(label: string, args: (context: string) => UseRowMenuArgs = argsOn) {

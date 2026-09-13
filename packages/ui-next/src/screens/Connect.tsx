@@ -36,6 +36,7 @@ import { useMark } from "../lib/marks";
 import { openCluster } from "../lib/openCluster";
 import { getProbe, probeCluster, useProbes, type Probe } from "../lib/probe";
 import { describe } from "../lib/routes";
+import { useTabs } from "../lib/tabsStore";
 import { STATUS, bySource, latencyLabel, viaOf } from "./connections/clusterText";
 
 /**
@@ -154,6 +155,7 @@ const WEB_ONLY =
  * each of those rows re-render on every notification about any other one.
  */
 const UNREAD: Probe = { state: "unread" };
+const PAUSED: Probe = { state: "paused" };
 
 /**
  * How many files the rows came out of.
@@ -468,6 +470,7 @@ export function Connect({ route }: { route: string }) {
   const status = useContextsStatus();
   const listError = useContextsError();
   const probes = useProbes();
+  const { workspace } = useTabs();
 
   /** A listing asked for by the reader, still out. */
   const [busy, setBusy] = useState(false);
@@ -685,7 +688,7 @@ export function Connect({ route }: { route: string }) {
                 context={context}
                 // `no reading` until the store has an answer for this cluster,
                 // which is what lets every row paint before any probe lands.
-                probe={probes[context.stableId] ?? UNREAD}
+                probe={workspace.pausedClusters?.includes(context.stableId) ? PAUSED : (probes[context.stableId] ?? UNREAD)}
                 onOpen={openCluster}
               />
             ))}

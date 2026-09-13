@@ -3,9 +3,13 @@ import { WATCHABLE_KINDS, type ResourceKind } from "@srelens/core";
 
 // Hoisted for the same reason resourceList.test.tsx hoists its doubles:
 // `vi.mock` is lifted above every declaration in the file.
-const { podMetrics } = vi.hoisted(() => ({ podMetrics: vi.fn() }));
+const { listNamespaces, podMetrics } = vi.hoisted(() => ({
+  listNamespaces: vi.fn(),
+  podMetrics: vi.fn(),
+}));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
+  listNamespaces,
   podMetrics,
 }));
 
@@ -82,11 +86,11 @@ describe("descriptors", () => {
 
   /**
    * The kinds that must have a typed view: every kind the backend streams, plus
-   * nodes. This is classic's TYPED_KINDS, which is exactly WATCHABLE_KINDS + nodes.
+   * nodes and the richer polled Namespace summary.
    * A kind added to that set without columns falls back to the generic table and
    * silently loses its detail — this is what catches that.
    */
-  const MUST_BE_TYPED = [...WATCHABLE_KINDS, "nodes"].filter((k) => k !== "events");
+  const MUST_BE_TYPED = [...WATCHABLE_KINDS, "nodes", "namespaces"].filter((k) => k !== "events");
 
   it("gives every kind that should have a typed view one, rather than the generic table", () => {
     const generic = ["name", "namespace", "age"];
@@ -96,6 +100,30 @@ describe("descriptors", () => {
       return keys.join() === generic.join() || keys.join() === genericCluster.join();
     });
     expect(untyped).toEqual([]);
+  });
+
+  it("polls typed namespace summaries without turning their server-computed Age into a frozen watch field", async () => {
+    const summaries = [
+      {
+        name: "legacy-billing",
+        phase: "Terminating",
+        labels: { env: "prod", team: "payments" },
+        age: "17m",
+      },
+    ];
+    listNamespaces.mockResolvedValue({ summaries });
+    const descriptor = descriptorFor("namespaces")!;
+
+    expect(descriptor.source).toBe("poll");
+    expect(descriptor.scope).toBe("cluster");
+    expect(descriptor.columns.map((column) => column.key)).toEqual([
+      "name",
+      "phase",
+      "labels",
+      "age",
+    ]);
+    expect(await descriptor.load!("prod", "ignored")).toEqual({ rows: summaries });
+    expect(listNamespaces).toHaveBeenCalledWith("prod");
   });
 
   describe("flagged rows — the design's unhealthy dot", () => {

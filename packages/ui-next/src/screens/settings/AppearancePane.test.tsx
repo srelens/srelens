@@ -85,7 +85,7 @@ describe("AppearancePane", () => {
   afterEach(() => {
     const root = document.documentElement;
     for (const name of ["data-theme", "data-accent", "data-density"]) root.removeAttribute(name);
-    setUiScale(UI_SCALE.DEFAULT);
+    setUiScale(UI_SCALE.DEFAULT, "next");
     localStorage.clear();
   });
 
@@ -242,7 +242,7 @@ describe("AppearancePane", () => {
       expect(offered).toEqual(ZOOM_STEPS.map((percent) => `${percent}%`));
       // Derived, not transcribed: every option must be a value `setUiScale`
       // stores unchanged, and both ends of core's range must be reachable.
-      for (const percent of ZOOM_STEPS) expect(setUiScale(percent)).toBe(percent);
+      for (const percent of ZOOM_STEPS) expect(setUiScale(percent, "next")).toBe(percent);
       expect(offered).toContain(`${UI_SCALE.MIN}%`);
       expect(offered).toContain(`${UI_SCALE.MAX}%`);
     });
@@ -255,8 +255,8 @@ describe("AppearancePane", () => {
     it("persists a picked zoom and asks the webview for it", async () => {
       const { user } = paint();
       await user.click(screen.getByRole("radio", { name: `${UI_SCALE.MIN}%` }));
-      expect(getUiScale()).toBe(UI_SCALE.MIN);
-      expect(core.applyUiScale).toHaveBeenCalledWith(UI_SCALE.MIN);
+      expect(getUiScale("next")).toBe(UI_SCALE.MIN);
+      expect(core.applyUiScale).toHaveBeenCalledWith(UI_SCALE.MIN, "next");
     });
 
     it("names the chord that does the same thing, from the bindings that exist", () => {

@@ -46,6 +46,36 @@ afterEach(() => {
 });
 
 describe("LogsView", () => {
+  it("keeps completed init logs visible and labels the finished stream", async () => {
+    startLogStreamMock.mockImplementation(async (_c, _n, _t, onLine, onStatus) => {
+      onLine("", "init finished");
+      onStatus("completed", "");
+      return { stop: vi.fn() };
+    });
+    render(<LogsView context="kind-dev" namespace="default" source={{type:"pod",pod:"web-1"}} initialContainer="setup" />);
+    await screen.findByRole("combobox", { name: "Container" });
+    fireEvent.click(screen.getByRole("button", { name: "Live tail" }));
+    expect(await screen.findByText("completed")).toBeDefined();
+    expect(screen.getByText("init finished")).toBeDefined();
+    expect(screen.queryByText("reconnecting…")).toBeNull();
+  });
+  it("offers init logs while the app container is waiting and can tail the selected init container", async () => {
+    getObjectMock.mockResolvedValue({ object: {
+      spec: { containers: [{ name: "app" }], initContainers: [{ name: "migrate" }] },
+      status: { phase: "Pending" },
+    } });
+    podLogsMock.mockImplementation(async (_c, _n, _p, _i, options) =>
+      options.container === "migrate" ? { logs: "migration failed" } : { error: "PodInitializing" });
+    render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);
+    await userEvent.click(await screen.findByRole("combobox", { name: "Container" }));
+    await userEvent.click(await screen.findByRole("option", { name: "migrate" }));
+    expect(await screen.findByText(/migration failed/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Live tail" }));
+    await waitFor(() => expect(startLogStreamMock).toHaveBeenCalledWith(
+      "kind-dev", "default", [{ pod: "web-1", container: "migrate", label: "" }],
+      expect.any(Function), expect.any(Function), expect.any(Object),
+    ));
+  });
   it("fetches and renders logs for the pod's container", async () => {
     podLogsMock.mockResolvedValue({ logs: "line one\nline two" });
     render(<LogsView context="kind-dev" namespace="default" source={{ type: "pod", pod: "web-1" }} />);

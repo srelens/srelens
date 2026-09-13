@@ -26,6 +26,8 @@ export interface Workspace {
   name: string;
   /** `ClusterContext.stableId`s. Never display names — see #265. */
   clusters: string[];
+  /** Clusters the reader has paused without removing from this workspace. */
+  pausedClusters?: string[];
   /** The cluster the sidebar and status bar are about. A `stableId` in `clusters`. */
   activeCluster?: string;
   tabs: Tab[];
@@ -122,6 +124,7 @@ export function defaultState(contexts: ClusterContext[]): TabsState {
     id: newId(),
     name: "Default",
     clusters: ids,
+    pausedClusters: [],
     tabs: [home],
     activeId: home.id,
     closed: [],
@@ -145,6 +148,8 @@ export function reconcile(state: TabsState, contexts: ClusterContext[]): TabsSta
     let next = w;
     const clusters = w.clusters.filter((id) => known.has(id));
     if (clusters.length !== w.clusters.length) next = { ...next, clusters };
+    const pausedClusters = (w.pausedClusters ?? []).filter((id) => clusters.includes(id));
+    if (pausedClusters.length !== (w.pausedClusters ?? []).length) next = { ...next, pausedClusters };
 
     // The active cluster follows its list: it survives if it is still there,
     // and otherwise the first that remains takes over — including for a

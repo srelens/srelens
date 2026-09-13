@@ -1,4 +1,4 @@
-import { K8S_KIND, WATCHABLE_KINDS, listNodes, listResource, nodeMetrics, podMetrics, type ResourceKind } from "@srelens/core";
+import { K8S_KIND, WATCHABLE_KINDS, listNamespaces, listNodes, listResource, nodeMetrics, podMetrics, type ResourceKind } from "@srelens/core";
 import type { Column } from "@srelens/ui-kit";
 import {
   clusterRoleBindingColumns,
@@ -15,6 +15,7 @@ import {
   jobFlagged,
   limitRangeColumns,
   networkPolicyColumns,
+  namespaceColumns,
   nodeColumns,
   nodeFlagged,
   podColumns,
@@ -74,6 +75,11 @@ const loadNodes = async (context: string) => {
     memory: byName.get(n.name)?.memoryMiB,
   }));
   return { rows, error: list.error };
+};
+
+const loadNamespaces = async (context: string) => {
+  const list = await listNamespaces(context);
+  return { rows: list.summaries, error: list.error };
 };
 
 /**
@@ -183,6 +189,16 @@ const TYPED: Partial<Record<ResourceKind, KindDescriptor<ListRow>>> = {
     // promise. Present so a NotReady or cordoned node's row asks the same
     // question its detail pane asks — both read core's `nodeStatus`.
     flagged: nodeFlagged as (row: ListRow) => boolean,
+  },
+  namespaces: {
+    k8sKind: "Namespace",
+    columns: namespaceColumns as Column<ListRow>[],
+    // Keep polling: Age is humanised server-side and must keep moving. A
+    // cached watch summary would freeze it until #405's client-side clock fix.
+    source: "poll",
+    scope: "cluster",
+    load: loadNamespaces,
+    actions: {},
   },
   configmaps: {
     k8sKind: "ConfigMap",

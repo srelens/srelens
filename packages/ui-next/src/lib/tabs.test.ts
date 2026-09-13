@@ -143,6 +143,12 @@ describe("reconcile", () => {
     expect(reconcile(s, []).workspaces[0].activeCluster).toBeUndefined();
   });
 
+  it("drops pauses for contexts removed from the kubeconfig", () => {
+    const s = defaultState([ctx("a"), ctx("b")]);
+    s.workspaces[0].pausedClusters = ["a", "b"];
+    expect(reconcile(s, [ctx("b")]).workspaces[0].pausedClusters).toEqual(["b"]);
+  });
+
   it("relabels cluster-scoped tabs when reconciliation picks a surviving context", () => {
     const s = defaultState([ctx("a", "prod"), ctx("b", "staging")]);
     s.workspaces[0].tabs = [

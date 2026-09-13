@@ -52,6 +52,9 @@ export interface PvcSummary {
   accessModes: string;
   storageClass: string;
   volume: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -65,6 +68,9 @@ export interface PvSummary {
   /** Bound claim as "namespace/name", empty when unbound. */
   claim: string;
   storageClass: string;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 
@@ -75,6 +81,9 @@ export interface StorageClassSummary {
   reclaimPolicy: string;
   volumeBindingMode: string;
   default: boolean;
+  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+   *  the backend renders once and which freezes (#405). */
+  created?: string | null;
   age: string;
 }
 

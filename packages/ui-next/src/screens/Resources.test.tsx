@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { defaultMark, setMark, resetMark } from "../lib/marks";
 
 // Everything the screen reaches into core for. `watchResource` is held open by
 // the test rather than resolved once: half of what this screen does is react to
@@ -11,6 +12,7 @@ const {
   watchResource,
   listCrds,
   listCustomResource,
+  listNamespaces,
   listNodes,
   nodeMetrics,
   podMetrics,
@@ -21,6 +23,7 @@ const {
   watchResource: vi.fn(),
   listCrds: vi.fn(),
   listCustomResource: vi.fn(),
+  listNamespaces: vi.fn(),
   listNodes: vi.fn(),
   nodeMetrics: vi.fn(),
   podMetrics: vi.fn(),
@@ -37,6 +40,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   watchResource: (...a: unknown[]) => watchResource(...a),
   listCrds: (...a: unknown[]) => listCrds(...a),
   listCustomResource: (...a: unknown[]) => listCustomResource(...a),
+  listNamespaces: (...a: unknown[]) => listNamespaces(...a),
   listNodes: (...a: unknown[]) => listNodes(...a),
   nodeMetrics: (...a: unknown[]) => nodeMetrics(...a),
   podMetrics: (...a: unknown[]) => podMetrics(...a),
@@ -210,6 +214,7 @@ beforeEach(() => {
   );
   listCrds.mockResolvedValue({ crds: [] });
   listCustomResource.mockResolvedValue({ items: [] });
+  listNamespaces.mockResolvedValue({ namespaces: [], summaries: [] });
   listNodes.mockResolvedValue({ nodes: [] });
   nodeMetrics.mockResolvedValue({ metrics: [] });
   podMetrics.mockResolvedValue({ metrics: [] });
@@ -291,6 +296,18 @@ function open(route: string) {
     </ConsoleProvider>,
   );
 }
+
+it("uses the configured short context name in the header and updates it live", () => {
+  setMark(CTX.stableId, { ...defaultMark(CTX.name), short: "M01" });
+  try {
+    const { container } = open("/k/pods");
+    expect(container.querySelector(".crumb")?.textContent).toBe("M01");
+    act(() => setMark(CTX.stableId, { ...defaultMark(CTX.name), short: "M02" }));
+    expect(container.querySelector(".crumb")?.textContent).toBe("M02");
+  } finally {
+    act(() => resetMark(CTX.stableId));
+  }
+});
 
 /**
  * The detail, in whichever host is on screen — they are two screens now, not
@@ -536,6 +553,44 @@ describe("Resources", () => {
     // Discovery is what a rail would have to be built from, and a built-in
     // kind must never pay for it.
     expect(listCrds).not.toHaveBeenCalled();
+  });
+
+  it("renders namespace status and labels from the typed namespace loader", async () => {
+    listNamespaces.mockResolvedValue({
+      namespaces: ["default", "payments"],
+      summaries: [
+        {
+          name: "default",
+          phase: "Active",
+          labels: { "kubernetes.io/metadata.name": "default" },
+          age: "12d",
+        },
+        {
+          name: "payments",
+          phase: "Terminating",
+          labels: {
+            "kubernetes.io/metadata.name": "payments",
+            team: "checkout",
+            tier: "backend",
+            zone: "west",
+          },
+          age: "4d",
+        },
+      ],
+    });
+
+    open("/k/namespaces");
+
+    await waitFor(() => expect(rowNames()).toEqual(["default", "payments"]));
+    expect(headers().filter(Boolean)).toEqual(["Name", "Status", "Labels", "Age"]);
+    expect(listNamespaces).toHaveBeenCalledWith("prod-eu");
+
+    const payments = within(screen.getByText("payments").closest("tr")!);
+    expect(payments.getByText("Terminating")).toBeTruthy();
+    expect(payments.getByText("team=checkout")).toBeTruthy();
+    expect(payments.getByText("tier=backend")).toBeTruthy();
+    expect(payments.getByText("+1")).toBeTruthy();
+    expect(payments.queryByText("kubernetes.io/metadata.name=payments")).toBeNull();
   });
 
   it("narrows the list by the filter text", async () => {
@@ -833,6 +888,10 @@ describe("Resources", () => {
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select default/web-1" }));
     await screen.findByText("1 selected");
+    const filterRow = screen.getByRole("search", { name: "Filter pods" });
+    expect(within(filterRow).getByText("1 selected")).toBeTruthy();
+    expect(within(filterRow).getByRole("button", { name: "Delete" })).toBeTruthy();
+
 
     const scrollBody = document.querySelector<HTMLElement>(".scroll")!;
     expect(within(scrollBody).queryByText(/stale/i)).toBeNull();
@@ -852,6 +911,10 @@ describe("Resources", () => {
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select default/web-1" }));
     await screen.findByText("1 selected");
+    const filterRow = screen.getByRole("search");
+    const selectionCount = within(filterRow).getByText("1 selected");
+    const search = within(filterRow).getByRole("searchbox");
+    expect(selectionCount.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     act(() => setNamespaces(CTX.stableId, ["billing"]));
 

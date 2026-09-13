@@ -58,7 +58,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  : <command>", Theme::key_hint_key())),
-            Cell::from("Open command prompt (:pod, :deploy, :top, :toppods, :topnodes, :gpuinfo, :svc, :topo, :no, :ns, :helm, :pf, :ai, :ctx, :q)"),
+            Cell::from("Open command prompt (:pod, :deploy, :top, :toppods, :topnodes, :gpuinfo, :svc, :topo, :no, :ns, :helm, :pf, :ai, :config, :ctx, :q)"),
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  :top / :toppods / :topnodes", Theme::key_hint_key())),

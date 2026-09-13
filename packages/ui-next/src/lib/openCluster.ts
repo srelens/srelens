@@ -1,5 +1,22 @@
 import type { ClusterContext } from "@srelens/core";
-import { currentWorkspace, openTab, setActiveCluster, setWorkspaceClusters } from "./tabsStore";
+import { currentWorkspace, openTab, setActiveCluster, setClusterPaused, setWorkspaceClusters } from "./tabsStore";
+import { invalidateProbe, probeCluster } from "./probe";
+
+/** Pause one workspace's reading and invalidate any observation already out. */
+export function pauseCluster(workspaceId: string, clusterId: string): void {
+  setClusterPaused(workspaceId, clusterId, true);
+  invalidateProbe(workspaceId, clusterId);
+}
+
+/** Resume a paused cluster and begin its explicit reachability read. */
+export function reconnectCluster(context: ClusterContext): void {
+  const workspace = currentWorkspace();
+  const wasPaused = workspace.pausedClusters?.includes(context.stableId) === true;
+  setClusterPaused(workspace.id, context.stableId, false);
+  // Opening a cluster that is already connected joins its reading; only a
+  // reconnect must bypass the observation invalidated by Disconnect.
+  void probeCluster(context, undefined, undefined, { workspaceId: workspace.id, fresh: wasPaused });
+}
 
 /**
  * Open a cluster: put it in this workspace, focus it, and open its overview.
@@ -28,6 +45,7 @@ export function openCluster(context: ClusterContext): void {
   if (!workspace.clusters.includes(id)) {
     setWorkspaceClusters(workspace.id, [...workspace.clusters, id]);
   }
+  reconnectCluster(context);
   // By NAME as well as by stableId, and the name is not spare: the workspace
   // stores the id (#265), while the strip's labels — and core's `list*` and
   // `watchResource` — are all in terms of the context name. `setActiveCluster`

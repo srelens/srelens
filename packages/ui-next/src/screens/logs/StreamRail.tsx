@@ -89,7 +89,7 @@ function ToneRow({
   lead?: ReactNode;
 }) {
   return (
-    <div data-slot={slot} className="flex items-center gap-2 px-0.5 py-[3px]">
+    <div data-slot={slot} className="flex items-center gap-2 px-3 py-[3px]">
       {lead}
       <span className="flex min-w-0 flex-1">
         {/* `min-w-0` as well as `truncate`: the label is itself a flex item of
@@ -167,6 +167,7 @@ export function StreamRail({ pods, lines, onTogglePod }: StreamRailProps) {
       {showSources && (
         <Section
           smallCaps
+          padded={false}
           title={
             <span className="flex items-center justify-between gap-2">
               <span>Sources</span>
@@ -203,7 +204,7 @@ export function StreamRail({ pods, lines, onTogglePod }: StreamRailProps) {
         </Section>
       )}
       {terms.length > 0 && (
-        <Section smallCaps title="Top terms">
+        <Section smallCaps padded={false} title="Top terms">
           {terms.map((term) => (
             <ToneRow
               key={term.term}
