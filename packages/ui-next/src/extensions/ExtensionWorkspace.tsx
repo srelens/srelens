@@ -1,3 +1,4 @@
+import { AgeCell } from "../lib/ageCell";
 import { useNamespaceOptions } from "@srelens/core/react";
 import { useContext, useState } from "react";
 import {
@@ -209,8 +210,8 @@ function Events({
                   <td>{e.object}</td>
                   <td>{e.source || "—"}</td>
                   <td>{e.count}</td>
-                  <td>{e.firstAge || "—"}</td>
-                  <td>{e.age}</td>
+                  <td><AgeCell created={e.firstCreated} age={e.firstAge} /></td>
+                  <td><AgeCell created={e.created} age={e.age} /></td>
                 </tr>
               ))}
             </tbody>

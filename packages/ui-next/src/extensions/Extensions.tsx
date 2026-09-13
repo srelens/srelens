@@ -1,11 +1,8 @@
-import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useContext, useState } from "react";
 import {
   configureExtensions,
   contributionKind,
-  EXTENSIONS_CHANGED,
   isTauri,
-  listExtensions,
-  type ExtensionInventory,
   type ExtensionChange,
   type ExtensionContribution,
   type InstalledExtension,
@@ -17,55 +14,9 @@ import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 export { ExtensionResults } from "./ExtensionResults";
 import { ExtensionWorkspace } from "./ExtensionWorkspace";
 
-/** Poll the durable inventory: MCP and other desktop processes can change it. */
-export function useExtensions() {
-  const [state, setState] = useState<{
-    status: "loading" | "ready" | "error";
-    data?: ExtensionInventory;
-    error?: string;
-  }>({ status: "loading" });
-  const [revision, setRevision] = useState(0);
-  const reload = useCallback(() => setRevision(v => v + 1), []);
-  const generation = useRef(0);
-  useEffect(() => {
-    let active = true;
-    let pending = false;
-    const refresh = async () => {
-      if (pending) return;
-      pending = true;
-      const mine = ++generation.current;
-      try {
-        const data = isTauri() ? await listExtensions() : {
-          schemaVersion: 1, developerMode: false, nextRevision: 1, plugins: [],
-        };
-        if (active && mine === generation.current) {
-          // Preserve mounted views and drafts when a background check is unchanged.
-          setState(previous => previous.status === "ready"
-            && JSON.stringify(previous.data) === JSON.stringify(data)
-            ? previous : { status: "ready", data });
-        }
-      } catch (error) {
-        if (active && mine === generation.current) {
-          setState({ status: "error", error: error instanceof Error ? error.message : String(error) });
-        }
-      } finally {
-        pending = false;
-      }
-    };
-    void refresh();
-    window.addEventListener(EXTENSIONS_CHANGED, reload);
-    window.addEventListener("focus", reload);
-    const timer = isTauri() ? window.setInterval(() => void refresh(), 5000) : undefined;
-    return () => {
-      active = false;
-      generation.current++;
-      window.clearInterval(timer);
-      window.removeEventListener(EXTENSIONS_CHANGED, reload);
-      window.removeEventListener("focus", reload);
-    };
-  }, [revision, reload]);
-  return { ...state, reload };
-}
+import { useExtensions } from "./inventoryStore";
+export { useExtensions } from "./inventoryStore";
+
 export function ExtensionManager({
   contexts = [],
   onOpen,

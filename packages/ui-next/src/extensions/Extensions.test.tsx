@@ -401,3 +401,39 @@ it("advances extension resource ages without refreshing backend data", async () 
     expect(readExtension).toHaveBeenCalledTimes(1);
   } finally {view!.unmount();vi.useRealTimers();}
 });
+
+it("shares one inventory poll and stops it after the last consumer unmounts", async () => {
+  const {useExtensions}=await import("./Extensions");
+  const {act}=await import("@testing-library/react");
+  const Consumer=()=>{useExtensions();return null;};
+  vi.useFakeTimers();
+  let first:ReturnType<typeof render>,second:ReturnType<typeof render>;
+  try {
+    await act(async()=>{first=render(<Consumer/>);second=render(<Consumer/>);});
+    expect(listExtensions).toHaveBeenCalledTimes(1);
+    await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+    expect(listExtensions).toHaveBeenCalledTimes(2);
+    first!.unmount();
+    await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+    expect(listExtensions).toHaveBeenCalledTimes(3);
+    second!.unmount();
+    await act(async()=>{await vi.advanceTimersByTimeAsync(10000);});
+    expect(listExtensions).toHaveBeenCalledTimes(3);
+  } finally {first!?.unmount();second!?.unmount();vi.useRealTimers();}
+});
+
+it("queues lifecycle refreshes behind one pending poll and discards its stale result", async () => {
+  const {ExtensionWarning}=await import("./Extensions");
+  const {act}=await import("@testing-library/react");
+  const {EXTENSIONS_CHANGED}=await import("@srelens/core");
+  let finish:(value:any)=>void;
+  vi.mocked(listExtensions).mockReturnValueOnce(new Promise(resolve=>{finish=resolve;}));
+  vi.mocked(listExtensions).mockResolvedValue({developerMode:true,plugins:[]} as any);
+  render(<ExtensionWarning/>);
+  fireEvent(window,new Event(EXTENSIONS_CHANGED));
+  fireEvent(window,new Event(EXTENSIONS_CHANGED));
+  expect(listExtensions).toHaveBeenCalledTimes(1);
+  await act(async()=>{finish!({developerMode:true,plugins:[plugin]});});
+  expect(listExtensions).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText(/Unsigned local extensions enabled/)).toBeNull();
+});

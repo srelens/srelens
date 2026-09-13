@@ -257,3 +257,20 @@ it("carries the selected namespace into group navigation", async () => {
   fireEvent.click(screen.getByRole("button",{name:"Sources"}));
   expect(onPage).toHaveBeenCalledWith("repos","team");
 });
+
+it("ticks event first and last occurrence ages without reloading events", async () => {
+  const {act}=await import("@testing-library/react");
+  const eventPlugin=structuredClone(plugin);
+  eventPlugin.manifest.contributions.pages[0].dashboard!.events={capability:"events",apiGroups:["source.toolkit.fluxcd.io"]};
+  vi.mocked(readExtension).mockImplementation(async (_id,_revision,capability)=>(capability==="events"?{events:[{name:"event",objectApiVersion:"source.toolkit.fluxcd.io/v1",object:"GitRepository/apps",message:"Fetched",age:"0s",firstAge:"0s",created:"2026-09-13T12:00:10Z",firstCreated:"2026-09-13T12:00:00Z"}]}:{items:[]}) as any);
+  vi.useFakeTimers();vi.setSystemTime(new Date("2026-09-13T12:00:10Z"));
+  let view:ReturnType<typeof render>;
+  try {
+    await act(async()=>{view=render(<ExtensionWorkspace plugin={eventPlugin} page={eventPlugin.manifest.contributions.pages[0]} context="staging"/>);});
+    expect(screen.getByText("10s")).toBeTruthy();
+    act(()=>{vi.advanceTimersByTime(30000);});
+    expect(screen.getByText("40s")).toBeTruthy();
+    expect(screen.getByText("30s")).toBeTruthy();
+    expect(readExtension).toHaveBeenCalledTimes(2);
+  } finally {view!?.unmount();vi.useRealTimers();}
+});
