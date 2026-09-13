@@ -43,7 +43,14 @@ describe("extension contract", () => {
 it("matches contribution kinds by their actual API group", async () => {
   const { contributionKind } = await import("./extensions");
   expect(contributionKind("Namespace")).toBe("/Namespace");
-  expect(contributionKind("Deployment")).toBe("apps/Deployment");
+  expect(contributionKind("Deployment", "apps")).toBe("apps/Deployment");
   expect(contributionKind("acme.io/Deployment")).toBe("acme.io/Deployment");
-  expect(contributionKind("UnknownCustomKind")).toBe("");
+  expect(contributionKind("UnknownCustomKind", "example.io")).toBe("example.io/UnknownCustomKind");
+});
+
+it("matches explicit API identity, including custom and unmapped built-in kinds", async () => {
+  const { contributionKind } = await import("./extensions");
+  expect(contributionKind("Application", "argoproj.io")).toBe("argoproj.io/Application");
+  expect(contributionKind("ResourceQuota", "")).toBe("/ResourceQuota");
+  expect(contributionKind("Deployment", "example.io")).toBe("example.io/Deployment");
 });

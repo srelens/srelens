@@ -148,6 +148,7 @@ it("persists settings, disable and remove through the backend", async () => {
     // Reload can replace the inventory between two separate async lookups.
     fireEvent.click(remove);
   });
+  fireEvent.click(screen.getByRole("button", {name:"Remove extension"}));
   await waitFor(() =>
     expect(configureExtensions).toHaveBeenCalledWith({
       action: "remove",
@@ -351,4 +352,36 @@ it("renders readable conditions and short revisions while preserving the full va
   expect(await screen.findByText("Ready", {selector:"td span"})).toBeTruthy();
   expect(screen.getByText("No", {selector:"td span"})).toBeTruthy();
   expect(screen.getByText("main@01234567").getAttribute("title")).toBe(revision);
+});
+
+it("requires confirmation and permits cancelling removal of stored settings", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({developerMode:true,plugins:[plugin]} as any);
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("button", {name:"Remove"}));
+  expect(configureExtensions).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", {name:"Cancel"}));
+  expect(configureExtensions).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", {name:"Remove"}));
+  fireEvent.click(screen.getByRole("button", {name:"Remove extension"}));
+  await waitFor(()=>expect(configureExtensions).toHaveBeenCalledWith({action:"remove",id:plugin.manifest.id}));
+});
+it("refreshes external lifecycle changes without unmounting enabled content", async () => {
+  const { ExtensionWarning } = await import("./Extensions");
+  vi.mocked(listExtensions).mockResolvedValue({developerMode:true,plugins:[plugin]} as any);
+  const {act}=await import("@testing-library/react");
+  vi.useFakeTimers();
+  let view: ReturnType<typeof render>;
+  try {
+    await act(async()=>{view=render(<ExtensionWarning />);});
+    expect(screen.getByText(/Unsigned local extensions enabled/)).toBeTruthy();
+    vi.mocked(listExtensions).mockResolvedValue({developerMode:true,plugins:[]} as any);
+    await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+    expect(screen.queryByText(/Unsigned local extensions enabled/)).toBeNull();
+  } finally {view!.unmount();vi.useRealTimers();}
+});
+it("distinguishes filtered rows from an empty resource response", async () => {
+  vi.mocked(readExtension).mockResolvedValue({items:[{name:"apps",namespace:"team",age:"1d",columns:[]}]});
+  render(<ExtensionResults plugin={plugin} capability="list" context="test" search="missing" />);
+  expect(await screen.findByText("No matching resources.")).toBeTruthy();
+  expect(screen.queryByText("No resources returned by this extension.")).toBeNull();
 });

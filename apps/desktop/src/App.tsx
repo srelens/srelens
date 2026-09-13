@@ -1051,9 +1051,9 @@ export function App() {
         />
       )}
       <div className="fl-main">
+        <ExtensionWarning />
         {tabs.length > 0 ? (
           <>
-            <ExtensionWarning />
             <ResourceTabs
               tabs={tabDescriptors}
               activeId={activeTabId}

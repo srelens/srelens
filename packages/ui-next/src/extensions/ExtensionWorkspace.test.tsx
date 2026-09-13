@@ -62,8 +62,9 @@ const plugin = {
   },
   revision: 3,
 } as unknown as InstalledExtension;
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetAllMocks();
+  vi.spyOn(await import("@srelens/core/lib/workloads"),"listNamespaces").mockImplementation((...args)=>listNamespaces(...args));
   vi.mocked(listNamespaces).mockResolvedValue({ namespaces: [] } as never);
   vi.mocked(readExtension).mockResolvedValue({
     items: [
@@ -177,7 +178,7 @@ it("filters events by API group and search, not just a matching kind name", asyn
 
 it("retains a namespace discovery error and offers retry", async () => {
   vi.mocked(listNamespaces).mockResolvedValue({
-    error: "namespace list forbidden",
+    error: "namespace request timed out",
   });
   render(
     <ExtensionWorkspace
@@ -187,7 +188,7 @@ it("retains a namespace discovery error and offers retry", async () => {
     />,
   );
   expect((await screen.findByRole("alert")).textContent).toContain(
-    "namespace list forbidden",
+    "namespace request timed out",
   );
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   await waitFor(() => expect(listNamespaces).toHaveBeenCalledTimes(2));
@@ -236,4 +237,12 @@ it("reloads the selected namespace without changing the pinned cluster", async (
       "flux-system",
     ),
   );
+});
+
+it("uses the restricted namespace instead of an all-namespace resource read", async () => {
+  vi.mocked(listNamespaces).mockResolvedValue({error:'Forbidden: User "system:serviceaccount:team:reader" cannot list namespaces'} as any);
+  vi.spyOn(await import("@srelens/core/lib/clusters"),"listContexts").mockResolvedValue({contexts:[{name:"staging",namespace:"team"}]} as any);
+  render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" />);
+  await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(plugin.manifest.id,plugin.revision,"apps","staging","team"));
+  expect(vi.mocked(readExtension).mock.calls.every(call=>call[4]==="team")).toBe(true);
 });

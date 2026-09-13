@@ -1,4 +1,3 @@
-import { ExtensionResourceSlot } from "./Extensions";
 import React, { useState } from "react";
 import { Tabs } from "../ui";
 import { ResourceOverview } from "./ResourceOverview";
@@ -70,7 +69,6 @@ export function ResourceDetail({
             objectName={name}
           />
         )}
-        {tab === "overview" && <ExtensionResourceSlot context={context} kind={kind} namespace={namespace} name={name} />}
       </div>
     </div>
   );

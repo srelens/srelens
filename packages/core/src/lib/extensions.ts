@@ -1,4 +1,3 @@
-import { kindToResource } from "./kinds";
 import { invokeCapability } from "../transport/transport";
 export interface ExtensionContribution {
   id: string;
@@ -105,8 +104,6 @@ export function parseExtensionRoute(route: string) {
     return null;
   }
 }
-export function contributionKind(kind: string) {
-  if (kind.includes("/")) return kind;
-  const resource = kindToResource(kind);
-  return resource ? `${resource.group}/${kind}` : "";
+export function contributionKind(kind: string, group = "") {
+  return kind.includes("/") ? kind : `${group}/${kind}`;
 }

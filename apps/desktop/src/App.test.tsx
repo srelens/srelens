@@ -4,6 +4,10 @@ import React from "react";
 
 // Capture the Tauri event handler App registers for the macOS Cmd+W menu item,
 // and a stub window so we can assert tab-close vs. window-close behavior.
+vi.mock("@srelens/ui-next/extensions", async original => ({
+  ...await original<typeof import("@srelens/ui-next/extensions")>(),
+  ExtensionWarning: () => <div data-testid="extension-warning">Unsigned extension warning</div>,
+}));
 const tauri = vi.hoisted(() => {
   const handlers = new Map<string, (e: { payload: unknown }) => void>();
   // Promise-returning, like the real commands: the close path chains a
@@ -639,4 +643,11 @@ describe("App", () => {
     expect(screen.queryByTestId("browser")).toBeNull();
     expect(screen.queryByTestId("overview")).toBeNull();
   });
+});
+
+it("keeps the extension warning visible on the no-tab landing screen", () => {
+  render(<App />);
+  expect(screen.getByTestId("extension-warning")).toBeTruthy();
+  fireEvent.click(screen.getByText("open-settings"));
+  expect(screen.getAllByTestId("extension-warning")).toHaveLength(1);
 });

@@ -1,15 +1,15 @@
-import { useContext, useEffect, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
   configureExtensions,
   contributionKind,
   EXTENSIONS_CHANGED,
   isTauri,
   listExtensions,
+  type ExtensionInventory,
   type ExtensionChange,
   type ExtensionContribution,
   type InstalledExtension,
 } from "@srelens/core";
-import { useResource } from "../lib/useResource";
 
 import { ExtensionControls } from "./ExtensionControls";
 export { ExtensionControlsProvider } from "./ExtensionControls";
@@ -17,25 +17,54 @@ import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 export { ExtensionResults } from "./ExtensionResults";
 import { ExtensionWorkspace } from "./ExtensionWorkspace";
 
+/** Poll the durable inventory: MCP and other desktop processes can change it. */
 export function useExtensions() {
+  const [state, setState] = useState<{
+    status: "loading" | "ready" | "error";
+    data?: ExtensionInventory;
+    error?: string;
+  }>({ status: "loading" });
   const [revision, setRevision] = useState(0);
+  const reload = useCallback(() => setRevision(v => v + 1), []);
+  const generation = useRef(0);
   useEffect(() => {
-    const reload = () => setRevision((v) => v + 1);
+    let active = true;
+    let pending = false;
+    const refresh = async () => {
+      if (pending) return;
+      pending = true;
+      const mine = ++generation.current;
+      try {
+        const data = isTauri() ? await listExtensions() : {
+          schemaVersion: 1, developerMode: false, nextRevision: 1, plugins: [],
+        };
+        if (active && mine === generation.current) {
+          // Preserve mounted views and drafts when a background check is unchanged.
+          setState(previous => previous.status === "ready"
+            && JSON.stringify(previous.data) === JSON.stringify(data)
+            ? previous : { status: "ready", data });
+        }
+      } catch (error) {
+        if (active && mine === generation.current) {
+          setState({ status: "error", error: error instanceof Error ? error.message : String(error) });
+        }
+      } finally {
+        pending = false;
+      }
+    };
+    void refresh();
     window.addEventListener(EXTENSIONS_CHANGED, reload);
-    return () => window.removeEventListener(EXTENSIONS_CHANGED, reload);
-  }, []);
-  return useResource(
-    async () =>
-      isTauri()
-        ? listExtensions()
-        : {
-            schemaVersion: 1,
-            developerMode: false,
-            nextRevision: 1,
-            plugins: [],
-          },
-    [revision],
-  );
+    window.addEventListener("focus", reload);
+    const timer = isTauri() ? window.setInterval(() => void refresh(), 5000) : undefined;
+    return () => {
+      active = false;
+      generation.current++;
+      window.clearInterval(timer);
+      window.removeEventListener(EXTENSIONS_CHANGED, reload);
+      window.removeEventListener("focus", reload);
+    };
+  }, [revision, reload]);
+  return { ...state, reload };
 }
 export function ExtensionManager({
   contexts = [],
@@ -53,6 +82,7 @@ export function ExtensionManager({
   const [source, setSource] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [removing, setRemoving] = useState<InstalledExtension | null>(null);
   const [review, setReview] = useState<{
     source: string;
     name: string;
@@ -72,8 +102,10 @@ export function ExtensionManager({
       await configureExtensions(action);
       inventory.reload();
       setReview(null);
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -232,7 +264,7 @@ export function ExtensionManager({
               variant="danger"
               disabled={busy}
               onClick={() =>
-                void change({ action: "remove", id: plugin.manifest.id })
+                setRemoving(plugin)
               }
             >
               Remove
@@ -241,6 +273,14 @@ export function ExtensionManager({
           <p className="extension-message">{plugin.manifest.id}</p>
         </section>
       ))}
+      {removing && (
+        <section className="extension-install" role="alertdialog" aria-label="Remove extension" onKeyDown={e=>{if(e.key==="Escape" && !busy)setRemoving(null);}}>
+          <strong>Remove {removing.manifest.name}?</strong>
+          <p>This removes the extension and its saved settings.</p>
+          <Button variant="secondary" autoFocus disabled={busy} onClick={()=>setRemoving(null)}>Cancel</Button>
+          <Button variant="danger" disabled={busy} onClick={()=>{void change({action:"remove",id:removing.manifest.id}).then(removed=>{if(removed)setRemoving(null);});}}>Remove extension</Button>
+        </section>
+      )}
       {settings && (
         <section className="extension-install">
           <label htmlFor="extension-settings">
@@ -332,12 +372,12 @@ export function ExtensionManager({
     </div>
   );
 }
-export function useExtensionContributions(kind: string) {
+export function useExtensionContributions(kind: string, group?: string) {
   const inventory = useExtensions();
   const plugins = inventory.data?.developerMode
     ? inventory.data.plugins.filter((p) => p.enabled)
     : [];
-  const qualified = contributionKind(kind);
+  const qualified = contributionKind(kind, group);
   return {
     inventory,
     tabs: plugins.flatMap((plugin) =>
@@ -364,16 +404,18 @@ export function useExtensionContributions(kind: string) {
 export function ExtensionResourceSlot({
   context,
   kind,
+  group,
   namespace,
   name,
 }: {
   context: string;
   kind: string;
+  group?: string;
   namespace: string | null;
   name: string;
 }) {
   const { Button, Tabs } = useContext(ExtensionControls);
-  const { inventory, tabs, actions } = useExtensionContributions(kind);
+  const { inventory, tabs, actions } = useExtensionContributions(kind, group);
   const [selected, setSelected] = useState("");
   const active = [...tabs, ...actions].some((c) => c.id === selected)
     ? selected
@@ -386,7 +428,7 @@ export function ExtensionResourceSlot({
   if (inventory.status === "error")
     return <ErrorNotice message={inventory.error} retry={inventory.reload} />;
   if (!tabs.length && !actions.length) return null;
-  const ns = kind === "Namespace" ? name : (namespace ?? "");
+  const ns = contributionKind(kind, group) === "/Namespace" ? name : (namespace ?? "");
   return (
     <section className="extension-installed extension-resource-slot">
       <div className="extension-toolbar">

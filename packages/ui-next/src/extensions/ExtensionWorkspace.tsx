@@ -1,6 +1,7 @@
+import { useNamespaceOptions } from "@srelens/core/react";
 import { useContext, useState } from "react";
 import {
-  listNamespaces,
+  loadKubeconfigFiles,
   readExtension,
   type ExtensionContribution,
   type InstalledExtension,
@@ -238,13 +239,11 @@ export function ExtensionWorkspace({
 }) {
   const { Button, Combobox } = useContext(ExtensionControls);
   const [localPage, setLocalPage] = useState(page.id);
-  const [namespace, setNamespace] = useState(initialNamespace);
+  const [selectedNamespace, setNamespace] = useState(initialNamespace);
   const [search, setSearch] = useState("");
   const [refresh, setRefresh] = useState(0);
-  const namespaces = useResource(
-    () => (context ? listNamespaces(context) : Promise.resolve(null)),
-    [context],
-  );
+  const {namespaces, scope, error:namespaceError} = useNamespaceOptions(context, loadKubeconfigFiles(), refresh);
+  const namespace = scope || selectedNamespace;
   const current = onPage
     ? page
     : (plugin.manifest.contributions.pages.find((p) => p.id === localPage) ??
@@ -301,25 +300,20 @@ export function ExtensionWorkspace({
         </nav>
       )}
       <div className="extension-toolbar extension-filters">
-        <Combobox
+        {namespaces === null ? <Button variant="secondary" disabled>Loading namespaces…</Button> : <Combobox
           ariaLabel="Extension namespace"
           value={namespace}
           onValueChange={setNamespace}
           options={[
-            { value: "", label: "All namespaces" },
-            ...(namespaces.data && "namespaces" in namespaces.data
-              ? (namespaces.data.namespaces ?? []).map((n) => ({
-                  value: n,
-                  label: n,
-                }))
-              : []),
+            ...(scope ? [] : [{ value: "", label: "All namespaces" }]),
+            ...(namespaces ?? []).map(n=>({value:n,label:n})),
           ]}
           placeholder={
-            namespaces.status === "loading"
+            namespaces === null
               ? "Loading namespaces…"
               : "Namespace"
           }
-        />
+        />}
         <input
           className="extension-search"
           aria-label="Search extension resources"
@@ -333,14 +327,14 @@ export function ExtensionWorkspace({
           Refresh
         </Button>
       </div>
-      {namespaces.data && "error" in namespaces.data && (
+      {namespaceError && (
         <ErrorNotice
           cluster
-          message={namespaces.data.error}
-          retry={namespaces.reload}
+          message={namespaceError}
+          retry={()=>setRefresh(v=>v+1)}
         />
       )}
-      {current.dashboard ? (
+      {namespaces === null ? <p role="status" className="extension-message">Loading namespaces…</p> : current.dashboard ? (
         <>
           <div className="extension-summaries">
             {current.dashboard.pages.map((id) => {

@@ -220,7 +220,7 @@ export function ExtensionResults({
         </div>
       ) : (
         <p className="extension-message">
-          No resources returned by this extension.
+          {data.data?.items.length ? "No matching resources." : "No resources returned by this extension."}
         </p>
       )}
     </section>
