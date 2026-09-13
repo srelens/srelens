@@ -1,8 +1,7 @@
 //! Native extension contract and declarative capability broker.
 //!
 //! No package code is loaded here. A trusted installer supplies explicit
-//! grants; the future Freelens adapter targets this same host contract.
-pub mod freelens;
+//! grants for native srelens manifests.
 mod manifest;
 pub use manifest::*;
 

@@ -33,7 +33,6 @@ export interface ExtensionManifest {
   };
 }
 export interface InstalledExtension {
-  freelens?: string;
   manifest: ExtensionManifest;
   enabled: boolean;
   revision: number;
@@ -49,7 +48,6 @@ export interface ExtensionInventory {
 export type ExtensionChange =
   | { action: "developerMode"; enabled: boolean }
   | { action: "install"; manifest: string; grants: string[] }
-  | { action: "installArchive"; archive: string; grants: string[] }
   | { action: "enable"; id: string; enabled: boolean }
   | { action: "remove"; id: string }
   | { action: "settings"; id: string; settings: Record<string, unknown> };
@@ -112,21 +110,3 @@ export function contributionKind(kind: string) {
   const resource = kindToResource(kind);
   return resource ? `${resource.group}/${kind}` : "";
 }
-
-export interface FreelensBootstrap {
-  source: string;
-  crds: Array<Record<string, unknown>>;
-  namespaces: string[];
-}
-export const readFreelensExtension = <T = unknown>(
-  id: string,
-  revision: number,
-  context: string,
-  request: Record<string, unknown>,
-) =>
-  invokeCapability<T>("extensions.freelensRead", {
-    ...request,
-    id,
-    revision,
-    context,
-  });

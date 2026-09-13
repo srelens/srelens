@@ -3,13 +3,9 @@
 Tracking: [#163](https://github.com/srelens/srelens/issues/163). Architecture:
 [plugin ADR](design/plugin-architecture.md).
 
-The platform has two authoring paths over one host:
-
-- **Native srelens extensions:** a versioned manifest, brokered capabilities and
-  UI contributions. Native extensions must not depend on Lens APIs.
-- **Freelens/OpenLens extensions:** a compatibility adapter maps their lifecycle,
-  APIs and UI registrations to the native layer. This is a required platform
-  feature, not a replacement for native authoring.
+The platform supports **native srelens extensions**: a versioned manifest,
+brokered capabilities and UI contributions rendered with the app's components.
+Freelens/OpenLens packages and their JavaScript runtimes are not supported.
 
 ## What is implemented
 
@@ -39,8 +35,8 @@ any extension is enabled. Turning developer mode off disables all extensions.
 The app deliberately accepts a narrower surface than the developer broker:
 `k8s.listCustomResource` bindings with fixed, nonempty group/version/plural/kind
 and fixed resource scope, plus explicitly granted `k8s.listEvents` readers. Only `context` and `namespace` are forwarded from the
-host view. Core-group resources, caller-supplied resource selectors, arbitrary executable
-entry points and operations requiring consent are rejected by the declarative path. Reads remain subject
+host view. Core-group resources, caller-supplied resource selectors, executable
+entry points and operations requiring consent are rejected. Reads remain subject
 to the selected cluster's RBAC; the extension receives no kubeconfig or token.
 
 The inventory lives next to the desktop settings file, using the settings path
@@ -54,59 +50,18 @@ settings are JSON data; this declarative version does not interpolate settings
 into capability arguments.
 
 The application exposes `extensions.list`, `extensions.configure` and
-`extensions.read`, plus the read-only `extensions.freelensRead` compatibility broker, through the shared capability registry and MCP. Configure is
+`extensions.read` through the shared capability registry and MCP. Configure is
 mutating and uses the normal MCP consent gate. App-installed operations currently
 use the `extensions.read` facade with installation ID, revision, operation and
 context; individual `plugin/...` tool discovery remains a developer-harness
 feature. The app facade refuses a host reader with stronger consent annotations.
-All four capabilities are unavailable on the multi-user web host until per-user
+All three capabilities are unavailable on the multi-user web host until per-user
 extension state is implemented.
 
-## Run the Freelens FluxCD archive
-
-Both desktop designs can import the **original @freelensapp/fluxcd-extension
-5.3.1 release archive** from
-[the upstream release](https://github.com/freelensapp/freelens-fluxcd-extension/releases/tag/v5.3.1).
-
-1. Enable developer mode in **Settings → Extensions**.
-2. Choose `freelensapp-fluxcd-extension-5.3.1.tgz` in the archive picker.
-3. Review and grant `freelens.flux.read`, then open **FluxCD (Freelens)** for a
-   connected cluster. Existing native Flux manifests remain separate installs.
-4. Use the extension navigation for its dashboard and resource pages. Click a
-   resource name to open its registered detail components; **Object** shows the
-   full custom resource, and Escape closes the panel.
-
-This executes the package's actual CommonJS renderer and React/MobX components;
-it does not translate the tarball into a native table manifest. The host supplies
-compatible list, chart, navigation, store and detail primitives using an isolated
-React 17 runtime. Native app React 19 and native extension authoring remain separate.
-Duplicate upstream menu/detail registrations are deduplicated. Resource stores
-resolve by declared API version, kind and plural rather than trusting a conflicting
-`apiBase` (the upstream HelmChart v1 declaration names the HelmRepository path).
-
-This first compatibility target is deliberately version-specific. The backend
-verifies SHA-256
-`27b433c2738e6228cd06c79fe98d0141101180679474dd6e81a56f12aacb4ddf`
-before reading the bounded archive. Other releases, repacked files and unrelated
-Freelens/OpenLens extensions fail with an explicit unsupported-package error.
-No archive is extracted to disk; npm installation, lifecycle scripts and the
-package's Node main process are not run. Additional packages need a compatibility
-and permission audit, not just a new filename in the picker.
-
-The renderer runs in an `allow-scripts`-only iframe with an opaque origin. Its CSP
-blocks direct network reads, forms and external assets; the parent permits only
-blob frames. Messages are accepted only from the mounted frame and expose only
-resource/event reads. The host supplies the pinned context and installation
-revision, and the backend rechecks the durable grant and served Flux CRDs for
-reads. The renderer receives no kubeconfig, token, Tauri API or filesystem API.
-Reads refresh every 30 seconds while a page is mounted. Discovery/RBAC failures
-remain errors; an empty discovery result is reported separately.
-
-**Current limits:** read-only compatibility. Reconcile, suspend/resume, edit,
-delete and core-resource/Secret reads are not exposed. Core-resource references
-are displayed as text; use the host browser for those resources. Marketplace,
-signing, generic Node/Electron execution and arbitrary third-party packages remain
-future work. Developer mode and the archive integrity allowlist are required.
+No third-party code, subprocess, iframe, download, npm install or lifecycle script
+is executed. Only native srelens manifests are accepted. Signed distribution,
+executable runtimes and sandboxing remain future work; local developer-mode
+support does not claim those protections.
 
 ## Try a native extension
 
@@ -192,8 +147,7 @@ supported in API 0.1.
 
 ## Delivery plan and exit checks
 
-The current PR includes the broker and local declarative app lifecycle. #163 stays open until both authoring paths
-work end-to-end.
+The current PR includes the broker and local declarative app lifecycle. #163 stays open until the native platform delivery milestones are complete.
 
 1. **Native contract and broker (implemented):** executable manifest examples,
    collision/permission/input validation, revocation and real MCP consent tests.
@@ -208,50 +162,20 @@ work end-to-end.
    sandboxed iframe bridge; managed runtime, quotas, cancellation and teardown;
    deny ambient network/filesystem/process access. Unsupported OS sandbox backends
    must refuse executable extensions. Persist settings only through the backend.
-4. **Freelens/OpenLens adapter:** package API aliases, main lifecycle, React/MobX
-   iframe runtime, Kubernetes stores/watch adapters and registration translation.
-   Rebuild and run the real Flux extension first, then ArgoCD. Unsupported APIs
-   must fail with the API name and migration guidance; no silent stub success.
-5. **GitOps workflows and distribution:** native ArgoCD/Flux pages and detail
+4. **GitOps workflows and distribution:** native ArgoCD/Flux pages and detail
    panels, confirm-gated Sync/Refresh/Reconcile, reference Trivy integration,
    signed update verification, permission-diff consent, marketplace and revocation.
 
-The sequence refines the ADR: the declarative broker can be proven without
-executing untrusted code, but neither executable runtime is released before
-sandboxing and trust verification. Native and compatibility runtimes share grants,
-registry, contribution lifecycle and consent; they do not create parallel stores.
+The declarative broker is implemented before executable runtimes. Executable
+extensions remain future work until sandboxing and trust verification exist.
 
-## Freelens/OpenLens compatibility matrix
+## Upgrading from the retired compatibility prototype
 
-The following is a **porting plan**, not a supported-runtime claim. As of this
-foundation, existing extension packages cannot run in srelens.
-
-Source audit on 2026-09-11:
-[Flux package](https://github.com/freelensapp/freelens-fluxcd-extension/blob/e76a2f11a77add08dd9ed0ace02d9f2f59bdd58d/package.json),
-[Flux renderer](https://github.com/freelensapp/freelens-fluxcd-extension/blob/e76a2f11a77add08dd9ed0ace02d9f2f59bdd58d/src/renderer/index.tsx),
-[ArgoCD package](https://github.com/Sebastian-Prokesch/freelens-argocd-extension/blob/e41c3fed658472b239bf6c49d6d5cc6060cd7522/package.json),
-[ArgoCD renderer](https://github.com/Sebastian-Prokesch/freelens-argocd-extension/blob/e41c3fed658472b239bf6c49d6d5cc6060cd7522/src/renderer/index.tsx).
-Both audited projects expose separate main/renderer entries and React 17/MobX
-renderer dependencies. Srelens uses a Tauri webview; those bundles cannot be loaded
-as host-renderer modules or assumed to share its React instance.
-
-| Extension surface | Native destination | Compatibility work still required |
-| --- | --- | --- |
-| `Main.LensExtension`, `Renderer.LensExtension`, activation/disposal | Supervised instance lifecycle | Node host + iframe adapter, cleanup on failure/disable |
-| `@freelensapp/extensions`, legacy `@k8slens/extensions` | `@srelens/lens-compat` API aliases | Versioned export mappings and actionable unsupported errors |
-| Cluster pages and menus | Page contributions and cluster-scoped routes | Translate registrations and mount isolated React components |
-| Kubernetes detail/menu registrations | Detail tabs and row actions | Match group/kind; pin resource identity and enforce consent |
-| `KubeObject`, `KubeApi`, stores and watches | Brokered CRD capabilities/streams | Store semantics, reconnect, cancellation and disposal |
-| React 17, MobX, renderer styling | Isolated iframe runtime | Bundle dependencies there; adapt theme tokens without host CSS access |
-| `clusterFrameComponents` / dialogs | Isolated overlay contribution | Focus, keyboard dismissal and bridge ownership |
-| Extension preferences/store | Backend-owned per-extension settings | Serialization, scoped keys, migration and observable adapter |
-| Node filesystem/network/process/Electron APIs | Explicit broker methods | Deny ambient access; add allow-listed adapters case by case |
-
-Binary/drop-in compatibility with arbitrary historical Lens packages is not
-promised. The initial acceptance target is rebuilding representative supported
-extensions against the compatibility shim, then demonstrating their pages, resource
-reads, settings and guarded mutations inside the app. OpenLens API coverage must
-be tested against real legacy imports rather than inferred from Freelens branding.
+Existing archive installations are excluded when the backend reads the inventory;
+native installations, permissions, revisions and settings remain intact. The next
+successful inventory change removes retired entries from the saved file. Archive
+installation and the compatibility broker are no longer available. Install the
+native Flux or Argo CD JSON example through Settings → Extensions instead.
 
 ## Native dashboard and navigation contributions
 
@@ -279,6 +203,5 @@ installed manifest or expand its grants. Flux controllers/CRDs must already exis
 on the selected cluster. API versions are declared by the manifest; unsupported
 versions produce an explicit error, not a claim that the cluster has no Flux.
 
-These are native declarative views, not execution of the Freelens extension's
-React bundle. Reconcile/suspend writes, arbitrary custom renderer code and the
-Freelens runtime remain separate platform work.
+Reconcile/suspend writes and arbitrary custom renderer code remain future native
+platform work.
