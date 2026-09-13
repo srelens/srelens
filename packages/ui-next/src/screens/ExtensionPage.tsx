@@ -42,9 +42,9 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
           <ExtensionWorkspace
             plugin={plugin}
             page={page}
-            onPage={(id) =>
+            onPage={(id, namespace) =>
               openTab(
-                extensionRoute(target.context, target.id, id, target.namespace),
+                extensionRoute(target.context, target.id, id, namespace),
               )
             }
             context={target.context}

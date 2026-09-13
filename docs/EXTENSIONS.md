@@ -95,7 +95,7 @@ cargo run -p srelens-plugin-host --example extension_host -- \
   examples/extensions/argocd.json --grant=k8s.listCustomResource
 
 cargo run -p srelens-plugin-host --example extension_host -- \
-  examples/extensions/flux.json --grant=k8s.listCustomResource
+  examples/extensions/flux.json --grant=k8s.listCustomResource --grant=k8s.listEvents
 
 # Generate the JSON schema used for authoring and validation.
 cargo run -p srelens-plugin-host --example extension_host -- --schema

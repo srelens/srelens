@@ -67,6 +67,7 @@ export interface ExtensionResourceResult {
     name: string;
     namespace: string;
     age: string;
+    created?: string | null;
     columns: string[];
   }>;
 }

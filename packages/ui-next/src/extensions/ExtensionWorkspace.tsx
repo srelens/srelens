@@ -235,7 +235,7 @@ export function ExtensionWorkspace({
   page: ExtensionContribution;
   context: string;
   namespace?: string;
-  onPage?(id: string): void;
+  onPage?(id: string, namespace: string): void;
 }) {
   const { Button, Combobox } = useContext(ExtensionControls);
   const [localPage, setLocalPage] = useState(page.id);
@@ -250,7 +250,7 @@ export function ExtensionWorkspace({
       page);
   const navigate = (id: string) => {
     setSearch("");
-    if (onPage) onPage(id);
+    if (onPage) onPage(id, namespace);
     else setLocalPage(id);
   };
   const pages = plugin.manifest.contributions.pages;

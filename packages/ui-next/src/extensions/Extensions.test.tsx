@@ -385,3 +385,19 @@ it("distinguishes filtered rows from an empty resource response", async () => {
   expect(await screen.findByText("No matching resources.")).toBeTruthy();
   expect(screen.queryByText("No resources returned by this extension.")).toBeNull();
 });
+
+it("advances extension resource ages without refreshing backend data", async () => {
+  const {act}=await import("@testing-library/react");
+  vi.useFakeTimers();
+  const created="2026-09-13T12:00:00Z";
+  vi.setSystemTime(new Date(created));
+  vi.mocked(readExtension).mockResolvedValue({items:[{name:"apps",namespace:"team",age:"0s",created,columns:[]}]} as any);
+  let view:ReturnType<typeof render>;
+  try {
+    await act(async()=>{view=render(<ExtensionResults plugin={plugin} capability="list" context="test" />);});
+    expect(screen.getByText("0s")).toBeTruthy();
+    act(()=>{vi.advanceTimersByTime(30000);});
+    expect(screen.getByText("30s")).toBeTruthy();
+    expect(readExtension).toHaveBeenCalledTimes(1);
+  } finally {view!.unmount();vi.useRealTimers();}
+});

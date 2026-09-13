@@ -1,3 +1,4 @@
+import { AgeCell } from "../lib/ageCell";
 import { useContext } from "react";
 import {
   describeError,
@@ -212,7 +213,7 @@ export function ExtensionResults({
                       />
                     </td>
                   ))}
-                  <td>{row.age}</td>
+                  <td><AgeCell created={row.created} age={row.age} /></td>
                 </tr>
               ))}
             </tbody>

@@ -106,7 +106,7 @@ it("shows dashboard counts and navigates to grouped resource pages on the pinned
     "",
   );
   fireEvent.click(screen.getByRole("button", { name: "Sources" }));
-  expect(onPage).toHaveBeenCalledWith("repos");
+  expect(onPage).toHaveBeenCalledWith("repos", "");
 });
 it("reports failed summaries instead of displaying zero healthy resources", async () => {
   vi.mocked(readExtension).mockRejectedValue(new Error("Forbidden"));
@@ -245,4 +245,15 @@ it("uses the restricted namespace instead of an all-namespace resource read", as
   render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" />);
   await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(plugin.manifest.id,plugin.revision,"apps","staging","team"));
   expect(vi.mocked(readExtension).mock.calls.every(call=>call[4]==="team")).toBe(true);
+});
+
+it("carries the selected namespace into group navigation", async () => {
+  vi.mocked(listNamespaces).mockResolvedValue({namespaces:["team"]} as any);
+  const onPage=vi.fn();
+  render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" onPage={onPage}/>);
+  await screen.findByRole("cell",{name:"apps"});
+  fireEvent.click(screen.getByRole("combobox",{name:"Extension namespace"}));
+  fireEvent.click(await screen.findByRole("option",{name:"team"}));
+  fireEvent.click(screen.getByRole("button",{name:"Sources"}));
+  expect(onPage).toHaveBeenCalledWith("repos","team");
 });
