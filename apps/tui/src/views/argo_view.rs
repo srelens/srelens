@@ -1,7 +1,7 @@
 use ratatui::{
     layout::{Constraint, Rect},
     style::{Modifier, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table},
     Frame,
 };
@@ -169,7 +169,7 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
     };
 
     let title = format!(
-        " 🐙 ArgoCD Applications [{}] {}(<Enter> Details  <s> Sync  <p> Toggle Auto-Sync  <R> Hard Refresh  <g> Git  <r> Reload  <Esc> Back) ",
+        " 🐙 ArgoCD Applications [{}] {}(<Enter> Details  <s> Sync  <p> Toggle Auto-Sync  <R> Hard Refresh  <g> Git  <c> Config Hub  <r> Reload  <Esc> Back) ",
         count_text, hub_tag
     );
 
@@ -190,9 +190,29 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
     }
 
     if let Some(ref err) = state.error {
-        let error_msg = Paragraph::new(format!("⚠ Failed to load ArgoCD applications: {}", err))
-            .style(Style::default().fg(Theme::red()));
-        f.render_widget(error_msg, inner);
+        let msg = if err.contains("No ArgoCD deployment in this cluster") || err.contains("no argocd deployment") {
+            format!("⚠ {}", err)
+        } else {
+            format!("⚠ Failed to load ArgoCD applications: {}", err)
+        };
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(msg, Style::default().fg(Theme::red()).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "Hint: In a Hub-and-Spoke setup, press ",
+                    Style::default().fg(Theme::dim()),
+                ),
+                Span::styled("<c>", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " to configure the ArgoCD Hub context or external kubeconfig in ':config'.",
+                    Style::default().fg(Theme::dim()),
+                ),
+            ]),
+        ];
+        let p = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true });
+        f.render_widget(p, inner);
         return;
     }
 

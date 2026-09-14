@@ -2380,6 +2380,7 @@ fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
     assert!(text_enabled.contains(":overview"), "shows overview command");
     assert!(text_enabled.contains(":gpuinfo"), "shows gpuinfo command");
     assert!(text_enabled.contains(":workloads"), "shows workloads command");
+    assert!(text_enabled.contains(":argo"), "shows argo gitops command");
     assert!(text_enabled.contains(":ai"), "shows ai assistant command");
     assert!(text_enabled.contains(":ai-settings"), "shows ai-settings command");
     assert!(text_enabled.contains(":config"), "shows config command");
