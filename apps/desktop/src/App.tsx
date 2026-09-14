@@ -1074,7 +1074,7 @@ export function App() {
             {activeTab && (
               <>
                 <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-                  {activeTab.app && activeCluster ? <ClassicAppPage key={activeTab.id} context={activeCluster} id={activeTab.app.id} page={activeTab.app.page} namespace={activeTab.namespace} resourceName={activeTab.app.resourceName} onOpenResource={(name,namespace)=>openAppPage(activeCluster,activeTab.app!.id,activeTab.app!.page,namespace,name)} onPage={(page,namespace)=>openAppPage(activeCluster,activeTab.app!.id,page,namespace)}/> : activeKind === "settings" ? (
+                  {activeTab.app && activeCluster ? <ClassicAppPage key={activeTab.id} context={activeCluster} id={activeTab.app.id} page={activeTab.app.page} namespace={activeTab.namespace} onNamespace={namespace=>setTabs(ts=>ts.map(t=>t.id===activeTab.id?{...t,namespace}:t))} resourceName={activeTab.app.resourceName} onOpenResource={(name,namespace)=>openAppPage(activeCluster,activeTab.app!.id,activeTab.app!.page,namespace,name)} onPage={(page,namespace)=>openAppPage(activeCluster,activeTab.app!.id,page,namespace)}/> : activeKind === "settings" ? (
                     <SettingsView
                       key={`${activeTab.id}:${settingsSectionNonce}`}
                       initialSection={settingsInitialSection}

@@ -90,7 +90,7 @@ vi.mock("./components/Sidebar", () => ({
     activeCluster: string;
   }) => <><span data-testid="sidebar-active-kind">{activeKind}</span><button onClick={() => onSelect(activeCluster, "services")}>nav-services</button><button onClick={()=>onOpenApp(activeCluster,"org.srelens.flux","kustomizations")}>nav-app</button></>,
 }));
-vi.mock("./components/Extensions",()=>({ClassicAppPage:({context,id,page}:{context:string;id:string;page:string})=><div data-testid="app-page">{context}:{id}:{page}</div>}));
+vi.mock("./components/Extensions",()=>({ClassicAppPage:({context,id,page,namespace,onNamespace}:{context:string;id:string;page:string;namespace:string;onNamespace?(namespace:string):void})=><><div data-testid="app-page">{context}:{id}:{page}</div><div data-testid="app-namespace">{namespace}</div><button onClick={()=>onNamespace?.("flux-system")}>app-namespace-change</button></>}));
 vi.mock("./components/ClusterOverview", () => ({
   ClusterOverview: ({ context }: { context: string }) => (
     <div data-testid="overview">{context}</div>
@@ -668,4 +668,16 @@ it("opens classic app pages in distinct cluster-bound tabs without replacing Ove
  expect(screen.getByTestId("app-page").textContent).toContain("kind-dev:");
  fireEvent.click(screen.getByRole("tab",{name:/Overview · kind-dev/}));
  expect(screen.getByTestId("overview").textContent).toBe("kind-dev");
+});
+
+it("retains each classic app tab namespace across tab switches",()=>{
+ render(<App/>);
+ fireEvent.click(screen.getByText("open-kind-dev"));
+ fireEvent.click(screen.getByText("nav-app"));
+ fireEvent.click(screen.getByText("app-namespace-change"));
+ fireEvent.click(screen.getByText("open-prod"));
+ fireEvent.click(screen.getByText("nav-app"));
+ expect(screen.getByTestId("app-namespace").textContent).toBe("");
+ fireEvent.click(screen.getByRole("tab",{name:/kustomizations · kind-dev/}));
+ expect(screen.getByTestId("app-namespace").textContent).toBe("flux-system");
 });

@@ -253,12 +253,14 @@ it("uses the restricted namespace instead of an all-namespace resource read", as
 it("carries the selected namespace into group navigation", async () => {
   vi.mocked(listNamespaces).mockResolvedValue({namespaces:["team"]} as any);
   const onPage=vi.fn();
-  render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" onPage={onPage}/>);
+  const onNamespace=vi.fn();
+  render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" onPage={onPage} onNamespace={onNamespace}/>);
   await screen.findByRole("cell",{name:"apps"});
   fireEvent.click(screen.getByRole("combobox",{name:"App namespace"}));
   fireEvent.click(await screen.findByRole("option",{name:"team"}));
   fireEvent.click(screen.getByRole("button",{name:"Sources"}));
   expect(onPage).toHaveBeenCalledWith("repos","team");
+  expect(onNamespace).toHaveBeenCalledWith("team");
 });
 
 it("ticks event first and last occurrence ages without reloading events", async () => {

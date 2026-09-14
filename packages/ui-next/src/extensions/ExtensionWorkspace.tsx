@@ -233,12 +233,14 @@ export function ExtensionWorkspace({
   context,
   namespace: initialNamespace = "",
   onPage,
+  onNamespace,
 }: {
   plugin: InstalledExtension;
   page: ExtensionContribution;
   context: string;
   namespace?: string;
   onPage?(id: string, namespace: string): void;
+  onNamespace?(namespace: string): void;
 }) {
   const { Button, Combobox } = useContext(ExtensionControls);
   const [localPage, setLocalPage] = useState(page.id);
@@ -308,7 +310,7 @@ export function ExtensionWorkspace({
         {namespaces === null ? <Button variant="secondary" disabled>Loading namespaces…</Button> : <Combobox
           ariaLabel="App namespace"
           value={namespace}
-          onValueChange={setNamespace}
+          onValueChange={(value) => { setNamespace(value); onNamespace?.(value); }}
           options={[
             ...(scope ? [] : [{ value: "", label: "All namespaces" }]),
             ...(namespaces ?? []).map(n=>({value:n,label:n})),
