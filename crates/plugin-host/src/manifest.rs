@@ -31,6 +31,53 @@ fn unsupported_api(range: &str) -> String {
         SUPPORTED_API_VERSIONS.join(", ")
     )
 }
+/// Manifest fields added after API 0.1, each with the API version that introduced it. A
+/// manifest may use a field only when its range negotiates to that version or later.
+/// Paths are dot-separated from the manifest root; `[]` steps into every element of an
+/// array, and the last segment always names a field. Empty while 0.1 is the only version.
+pub const API_FIELDS: &[(&str, &str)] = &[];
+
+/// Rejects a field in `raw` that `fields` says arrived after `negotiated`.
+pub fn check_api_fields_in(
+    raw: &Value,
+    negotiated: &semver::Version,
+    fields: &[(&str, &str)],
+) -> Result<(), String> {
+    for (path, introduced) in fields {
+        let introduced = semver::Version::parse(introduced)
+            .map_err(|e| format!("invalid API version for {path}: {e}"))?;
+        if *negotiated < introduced && field_present(raw, path) {
+            return Err(format!(
+                "`{path}` requires API {introduced}; this manifest's srelensApiVersion is served as API {negotiated}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn field_present(value: &Value, path: &str) -> bool {
+    let mut nodes = vec![value];
+    for segment in path.split('.') {
+        let (key, each) = match segment.strip_suffix("[]") {
+            Some(key) => (key, true),
+            None => (segment, false),
+        };
+        let mut next = Vec::new();
+        for node in nodes {
+            match node.get(key) {
+                Some(Value::Array(items)) if each => next.extend(items.iter()),
+                Some(child) if !each => next.push(child),
+                _ => {}
+            }
+        }
+        if next.is_empty() {
+            return false;
+        }
+        nodes = next;
+    }
+    true
+}
+
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -181,17 +228,16 @@ impl Manifest {
             return Err("extension manifest exceeds 256 KiB".into());
         }
         // Check the API range before the strict schema, so a manifest written for a newer API
-        // is told which version it needs rather than which field this host does not know.
+        // is told which version it needs rather than which field this host does not know,
+        // and so it uses only the fields of the version its range negotiates to.
         let raw = serde_json::from_str::<Value>(source).ok();
-        if let Some(range) = raw
-            .as_ref()
-            .and_then(|raw| raw.get("srelensApiVersion"))
-            .and_then(Value::as_str)
-        {
-            if semver::VersionReq::parse(range)
-                .is_ok_and(|req| negotiate_api_version(&req).is_none())
-            {
-                return Err(unsupported_api(range));
+        if let Some(raw) = &raw {
+            if let Some(range) = raw.get("srelensApiVersion").and_then(Value::as_str) {
+                if let Ok(req) = semver::VersionReq::parse(range) {
+                    let negotiated =
+                        negotiate_api_version(&req).ok_or_else(|| unsupported_api(range))?;
+                    check_api_fields_in(raw, &negotiated, API_FIELDS)?;
+                }
             }
         }
         let manifest: Self =

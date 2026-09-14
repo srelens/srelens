@@ -74,6 +74,12 @@ Why a new field needs a new minor even though it is optional: manifests are stri
 (see below), so a host that predates the field would reject it. Requiring the minor
 turns that into a clear "requires API 0.x" message.
 
+The host enforces this. Every manifest field added after API 0.1 is listed with the
+API version that introduced it (`API_FIELDS` in `crates/plugin-host/src/manifest.rs`).
+A manifest that uses such a field while its range negotiates to an older version is
+rejected, even by a host that knows the field. Otherwise the manifest would install on
+newer hosts and fail on older ones that still match its range.
+
 ## Deprecation
 
 - A deprecated field or contribution is listed in the changelog with its replacement
@@ -170,4 +176,5 @@ receive without an update.
 - **#530:**
   - The host declares a set of supported API versions and serves each manifest under the highest version its range matches.
   - A manifest whose range the host does not support is rejected with the versions it needs and the host supports, before strict schema checks.
+  - A manifest may use only the fields of the API version its range negotiates to (`API_FIELDS`, empty while 0.1 is the only version).
   - `extensions.catalog` also reports `hostApiVersions`, the full list. `hostApiVersion` stays, set to the newest supported version, and is deprecated (see [Deprecation](#deprecation)).
