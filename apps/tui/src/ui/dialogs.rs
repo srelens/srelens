@@ -758,7 +758,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 }
 
 pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: bool) {
-    let modal_width = (area.width.saturating_sub(4)).min(94).max(48);
+    let modal_width = (area.width.saturating_sub(2)).min(98).max(48);
     let modal_height = (area.height.saturating_sub(2)).min(21).max(14);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
@@ -787,7 +787,7 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
         ])
         .split(inner);
 
-    // 1. Header description
+    // 1. Header description (concise to prevent cutoffs)
     let header_lines = vec![
         Line::from(vec![
             Span::styled(
@@ -797,37 +797,48 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
         ]),
         Line::from(vec![
             Span::styled(
-                "Key built-in features you should know (press [1-7] to jump directly, or type ':' for command prompt):",
+                "Key built-in features (press [1-7] to jump directly, or ':' for command prompt):",
                 Style::default().fg(Theme::dim()),
             ),
         ]),
     ];
-    f.render_widget(Paragraph::new(header_lines), chunks[0]);
+    f.render_widget(
+        Paragraph::new(header_lines).wrap(ratatui::widgets::Wrap { trim: true }),
+        chunks[0],
+    );
 
     // 2. Feature highlights
-    let features: &[(&str, &str, &str, &str, &str)] = &[
-        ("[1]", ":helm",        "[Helm 3]",        "Helm 3 release revisions, rollback status, values & manifests", ":helm [ns]"),
-        ("[2]", ":overview",    "[Cluster]",       "Cluster overview, health summary & node/pod capacity",          ":overview"),
-        ("[3]", ":gpuinfo",     "[Hardware]",      "GPU hardware inspector, specs & per-pod VRAM allocations",     ":gpuinfo"),
-        ("[4]", ":workloads",   "[Workload]",      "Unified workloads view (Pods, Deployments, STS, DS, Jobs)",     ":workloads [ns]"),
-        ("[5]", ":ai",          "[AI Assistant]",  "Interactive AI troubleshooting chat for automated RCA",         ":ai"),
-        ("[6]", ":ai-settings", "[AI Config]",     "Configure AI providers (Claude, OpenAI, Gemini), models & keys", ":ai-settings"),
-        ("[7]", ":config",      "[Lens Settings]", "Lens settings: popup width, visible rows, text scale & banner",  ":config"),
+    let features: &[(&str, &str, &str, &str)] = &[
+        ("[1]", ":helm",        "[Helm 3]",   "Helm 3 release revisions, status, values & manifests"),
+        ("[2]", ":overview",    "[Cluster]",  "Cluster overview, health summary & node/pod capacity"),
+        ("[3]", ":gpuinfo",     "[Hardware]", "GPU hardware inspector, specs & VRAM allocations"),
+        ("[4]", ":workloads",   "[Workload]", "Unified view: Pods, Deployments, STS, DS & Jobs"),
+        ("[5]", ":ai",          "[AI Chat]",  "Interactive AI troubleshooting assistant for RCA"),
+        ("[6]", ":ai-settings", "[AI Config]","Configure AI providers (Claude, OpenAI, Gemini) & keys"),
+        ("[7]", ":config",      "[Settings]", "Lens settings: popup width, visible rows & text scale"),
     ];
 
     let inner_w = chunks[1].width as usize;
+    let desc_budget = inner_w.saturating_sub(29);
     let items: Vec<ListItem> = features
         .iter()
-        .map(|(num, cmd, cat, desc, syntax)| {
-            let mut spans = vec![
+        .map(|(num, cmd, cat, desc)| {
+            let display_desc = if desc.chars().count() <= desc_budget {
+                desc.to_string()
+            } else if desc_budget > 3 {
+                let mut s: String = desc.chars().take(desc_budget.saturating_sub(1)).collect();
+                s.push('…');
+                s
+            } else {
+                String::new()
+            };
+
+            let spans = vec![
                 Span::styled(format!("{num} "), Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
                 Span::styled(format!("{:<13}", cmd), Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:<15}", cat), Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:<desc_len$}", desc, desc_len = if inner_w >= 85 { 44 } else { 32 }), Style::default().fg(Theme::fg())),
+                Span::styled(format!("{:<12}", cat), Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
+                Span::styled(display_desc, Style::default().fg(Theme::fg())),
             ];
-            if inner_w >= 80 {
-                spans.push(Span::styled(format!("  ({})", syntax), Style::default().fg(Theme::dim())));
-            }
             ListItem::new(Line::from(spans))
         })
         .collect();
@@ -857,21 +868,16 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
 
     let footer_lines = vec![
         Line::from(vec![
-            Span::styled("─".repeat(inner_w.min(90)), Style::default().fg(Theme::border())),
+            Span::styled("─".repeat(inner_w.min(94)), Style::default().fg(Theme::border())),
         ]),
         Line::from(checkbox_spans),
         Line::from(vec![
-            Span::styled(" Press ", Style::default().fg(Theme::dim())),
-            Span::styled("Enter", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
-            Span::styled(", ", Style::default().fg(Theme::dim())),
-            Span::styled("Esc", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
-            Span::styled(", or ", Style::default().fg(Theme::dim())),
-            Span::styled("q", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
-            Span::styled(" to dismiss  |  Press ", Style::default().fg(Theme::dim())),
-            Span::styled("1-7", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
-            Span::styled(" to jump directly  |  ", Style::default().fg(Theme::dim())),
-            Span::styled(":banner", Style::default().fg(Theme::accent())),
-            Span::styled(" to reopen anytime", Style::default().fg(Theme::dim())),
+            Span::styled(" [Enter/Esc/q] ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled("to dismiss  •  ", Style::default().fg(Theme::dim())),
+            Span::styled("[1-7] ", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled("to jump directly  •  ", Style::default().fg(Theme::dim())),
+            Span::styled(":banner", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
+            Span::styled(" to reopen", Style::default().fg(Theme::dim())),
         ]),
     ];
 
