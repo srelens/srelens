@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { afterEach, describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within, act } from "@testing-library/react";
 import { createRef } from "react";
 import {
@@ -19,9 +19,34 @@ vi.mock("@srelens/core/lib/skills");
 vi.mock("@srelens/core/lib/mcpSecurity", () => ({
   respondToConfirm: vi.fn(),
 }));
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: () => Promise.resolve(() => {}),
+const tauriEvent = vi.hoisted(() => ({
+  listen: vi.fn((_channel: string, _handler: unknown) => Promise.resolve(() => {})),
 }));
+vi.mock("@tauri-apps/api/event", () => tauriEvent);
+
+// jsdom is a plain browser, i.e. web mode: `isTauri()` looks for
+// `window.__TAURI_INTERNALS__` and finds nothing. The consent subscriptions
+// are desktop only (#512): `listen()` from @tauri-apps/api throws in a
+// browser, and the classic assistant tab is reachable on the web.
+describe("AssistantConversation on the web (#512)", () => {
+  const marker = window as unknown as Record<string, unknown>;
+  afterEach(() => {
+    delete marker.__TAURI_INTERNALS__;
+  });
+
+  it("does not subscribe to Tauri consent events without a Tauri runtime", () => {
+    delete marker.__TAURI_INTERNALS__;
+    render(<AssistantConversation />);
+    expect(tauriEvent.listen).not.toHaveBeenCalled();
+  });
+
+  it("still subscribes to both consent events under the desktop runtime", () => {
+    marker.__TAURI_INTERNALS__ = {};
+    render(<AssistantConversation />);
+    const channels = tauriEvent.listen.mock.calls.map((c) => c[0]);
+    expect(channels).toEqual(["mcp://confirm-request", "mcp://confirm-resolved"]);
+  });
+});
 
 // This repo doesn't pull in @testing-library/jest-dom, so assert directly on
 // DOM presence (`getByText`/`queryByText` throws-or-null) instead of

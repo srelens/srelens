@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { SquareTerminal } from "lucide-react";
+import { isTauri } from "@srelens/core";
 import { ClusterUsage } from "./ClusterUsage";
 import { ForwardsIndicator } from "./ForwardsIndicator";
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
@@ -130,7 +131,9 @@ export function StatusBar({
         <span className="tabular-nums">
           {tabCount} {tabCount === 1 ? "tab" : "tabs"}
         </span>
-        <span className="opacity-70">srelens · Tauri</span>
+        {/* The one line of chrome that names the host, so it has to name the
+            right one: this bar is also what the web renders (#513). */}
+        <span className="opacity-70">srelens · {isTauri() ? "Tauri" : "web"}</span>
       </span>
     </footer>
   );
