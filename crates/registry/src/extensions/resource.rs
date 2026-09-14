@@ -102,7 +102,7 @@ mod tests {
         let path = dir.path().join("apps.json");
         let core = super::super::tests::fake_core();
         let revision = super::super::tests::install(&path, core.clone());
-        let payload = json!({"id":"org.srelens.argocd","revision":revision,"capability":"applications","context":"cluster/a","namespace":"team","name":"app"});
+        let payload = json!({"id":"org.example.argocd","revision":revision,"capability":"applications","context":"cluster/a","namespace":"team","name":"app"});
         // Use the actual binding name rather than inventing a second wire contract.
         let state = read(&path).unwrap();
         let mut payload = payload;
@@ -124,7 +124,7 @@ mod tests {
             &path,
             core.clone(),
             Configure::Enable {
-                id: "org.srelens.argocd".into(),
+                id: "org.example.argocd".into(),
                 enabled: false,
             },
         )
@@ -155,7 +155,7 @@ mod tests {
             .clone();
         let mut reg = Registry::new();
         register(&mut reg, path.clone(), core.clone());
-        let selected = json!({"id":"org.srelens.argocd","revision":revision,"capability":binding,"context":"cluster/a","namespace":"team","name":"app"});
+        let selected = json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"cluster/a","namespace":"team","name":"app"});
         let payload = json!({"resource":selected,"action":"sync","uid":"u","resourceVersion":"2"});
         let result = reg
             .invoke("extensions.action", payload.clone())
@@ -175,7 +175,7 @@ mod tests {
             &path,
             core.clone(),
             Configure::Remove {
-                id: "org.srelens.argocd".into(),
+                id: "org.example.argocd".into(),
             },
         )
         .unwrap();

@@ -170,13 +170,13 @@ export function ExtensionManager() {
           <div className="extension-toolbar">
             <ExtensionLogo id={plugin.manifest.id} name={plugin.manifest.name} size={24} />
             <strong>{plugin.manifest.name}</strong>
-            <span>{plugin.manifest.version} · {plugin.signatureProof ? "Signed by srelens" : "Unsigned local"}</span>
+            <span>{plugin.manifest.version} · {!plugin.signatureProof ? "Unsigned local" : plugin.quarantined ? "Signature not verified" : "Signed by srelens"}</span>
             <label>
               <input
                 aria-label={`Enable ${plugin.manifest.name}`}
                 type="checkbox"
                 checked={plugin.enabled}
-                disabled={busy}
+                disabled={busy || Boolean(plugin.quarantined)}
                 onChange={(e) =>
                   void change({
                     action: "enable",
@@ -210,6 +210,11 @@ export function ExtensionManager() {
             </Button>
           </div>
           <p className="extension-message">{plugin.manifest.id}</p>
+          {plugin.quarantined && (
+            <p className="extension-error">
+              Disabled: {plugin.quarantined}. Remove it or reinstall it from the Catalog.
+            </p>
+          )}
         </section>
       ))}
       {removing && (

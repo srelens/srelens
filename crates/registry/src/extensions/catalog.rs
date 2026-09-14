@@ -10,15 +10,16 @@ use std::{
 const CATALOG_URL: &str = "https://raw.githubusercontent.com/srelens/extensions/main/catalog.json";
 const MAX_CATALOG: usize = 1024 * 1024;
 const TTL: u64 = 24 * 60 * 60;
+// Catalog metadata is additive. Released hosts ignore fields they don't know, so the
+// catalog can gain publishers, categories or revocations without every installed
+// host rejecting it; a breaking change bumps `schemaVersion` instead.
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct Catalog {
     #[serde(rename = "schemaVersion")]
     schema_version: u32,
     extensions: Vec<Entry>,
 }
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct Entry {
     id: String,
     name: String,
@@ -30,13 +31,11 @@ struct Entry {
     tested_host: TestedHost,
 }
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct TestedHost {
     repository: String,
     revision: String,
 }
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct Release {
     version: String,
     #[serde(rename = "manifestUrl")]
@@ -285,9 +284,7 @@ fn verify_manifest(entry: &Entry, raw: &[u8]) -> Result<String, String> {
     Ok(source.into())
 }
 fn signature_url(entry: &Entry) -> Result<Option<String>, String> {
-    let official = entry.id.starts_with("org.srelens.")
-        || entry.repository.starts_with("https://github.com/srelens/");
-    if !official {
+    if !super::signing::claims_official(&entry.id, &entry.repository) {
         return Ok(None);
     }
     let repository =
@@ -403,6 +400,27 @@ mod tests {
         assert!(signature_url(&entry).is_err());
         entry.id = "org.srelens.unknown".into();
         assert!(signature_url(&entry).is_err());
+        // An official repository cannot publish unsigned under an unofficial ID.
+        entry.id = "org.other.argocd".into();
+        entry.repository = "https://github.com/srelens/extension-argocd".into();
+        assert!(signature_url(&entry).is_err());
+        // Lookalike prefixes are ordinary, unsigned third-party entries.
+        entry.id = "org.srelensx.argocd".into();
+        entry.repository = "https://github.com/srelensx/extension-argocd".into();
+        assert_eq!(signature_url(&entry).unwrap(), None);
+    }
+    #[test]
+    fn additive_catalog_fields_do_not_break_released_hosts() {
+        let mut value: Value = serde_json::from_slice(&fixture()).unwrap();
+        value["revoked"] = json!([{"id": "org.srelens.argocd", "versions": ["0.0.1"]}]);
+        value["extensions"][0]["publisher"] = json!({"name": "srelens"});
+        value["extensions"][0]["categories"] = json!(["gitops"]);
+        value["extensions"][0]["release"]["signatureUrl"] = json!("https://example.invalid");
+        value["extensions"][0]["testedHost"]["platform"] = json!("linux");
+        let catalog = parse_catalog(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(catalog.extensions.len(), 2);
+        value["extensions"][0]["release"]["sha256"] = json!("bad");
+        assert!(parse_catalog(&serde_json::to_vec(&value).unwrap()).is_err());
     }
     #[test]
     fn rejects_private_downloads_and_redirects() {
