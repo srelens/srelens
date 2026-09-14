@@ -261,9 +261,9 @@ User-facing extension management is named **Apps**. Internal `extensions.*`
 capability IDs, manifest IDs and existing routes remain stable.
 
 Click a resource row to open its overview: metadata, spec, conditions, status,
-labels/annotations, a read-only JSON manifest, and up to 100 resource-UID-filtered
+labels/annotations, a read-only YAML manifest in the shared CodeEditor, and up to 100 resource-UID-filtered
 events. Event RBAC failures are shown separately and preserve the overview.
-Back to resources refreshes the list. Existing native manifests need no update.
+The list stays visible beside the shared Inspector; Open tab promotes details to an independent resource tab. Existing native manifests need no update.
 
 The host derives the API group, kind, plural, version and scope from the enabled
 app's declared reader. `extensions.resource` and `extensions.action` reload the

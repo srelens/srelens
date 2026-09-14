@@ -1,4 +1,4 @@
-import { isMap, isScalar, parse, parseDocument, visit } from "yaml";
+import { isMap, isScalar, parse, parseDocument, stringify, visit } from "yaml";
 import { invokeCapability, type Invoker } from "../transport/transport";
 import type { NodeTaint } from "./taints";
 
@@ -508,4 +508,9 @@ export async function listNodes(
   } catch (e) {
     return { error: String(e) };
   }
+}
+
+/** Serialize an already authorized resource read for the shared YAML viewer. */
+export function formatResourceManifest(resource: Record<string, unknown>): string {
+  return stringify(resource, { lineWidth: 0 });
 }

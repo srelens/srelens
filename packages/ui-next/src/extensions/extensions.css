@@ -298,11 +298,8 @@
 .extension-resource-detail > .pane { flex: 1; min-height: 0; }
 .extension-detail-heading { margin: 0; padding: 8px 12px; font-size: inherit; font-weight: 600; background: var(--surface, var(--fl-color-surface)); border-block: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-detail-fields { margin: 0; }
-.extension-detail-fields > div { display: grid; grid-template-columns: minmax(110px, 20%) minmax(0, 1fr); gap: 12px; padding: 7px 12px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
-.extension-detail-fields dt { color: var(--ink-muted, var(--fl-color-text-muted)); }
-.extension-detail-fields dd { margin: 0; min-width: 0; overflow: auto; }
 .extension-resource-detail pre { white-space: pre; overflow: auto; max-width: 100%; font-family: var(--font-mono); font-size: inherit; }
-.extension-detail-manifest, .extension-detail-metadata { padding: 12px; margin: 0; }
+.extension-detail-metadata { padding: 12px; margin: 0; }
 .extension-action-review { padding: 12px; border-block: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }
 .extension-action-review .extension-toolbar { padding: 0; border: 0; }
 
@@ -317,10 +314,13 @@
 .extension-detail-peek > .extension-resource-detail { flex: 1; min-height: 0; }
 .extension-resource-detail { flex: 1; min-height: 0; }
 .extension-detail-peek .extension-toolbar { gap: 6px; padding: 8px 12px; }
-.extension-detail-peek .extension-detail-fields > div { grid-template-columns: minmax(80px, 30%) minmax(0, 1fr); }
-.extension-detail-peek .extension-detail-fields dd { white-space: nowrap; }
 .extension-results tbody tr[aria-selected="true"] { background: var(--accent-wash, var(--fl-color-surface)); }
-.extension-detail-fields dt { min-width: 0; overflow-x: auto; white-space: nowrap; }
 .extension-condition-list article { padding: 8px 12px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-condition-list p { margin: 4px 0; white-space: normal; overflow-wrap: break-word; }
 .extension-condition-list strong { font-weight: 600; }
+
+.extension-detail-fields { padding: 4px 12px; }
+.extension-field-value { display: block; overflow-x: auto; white-space: nowrap; }
+.extension-nested-fields { padding-block: 6px; }
+.extension-nested-fields h5 { margin: 0 0 4px; font-size: inherit; font-weight: 600; }
+.extension-nested-fields > .extension-detail-fields { padding: 0 0 0 10px; border-left: 1px solid var(--rule, var(--fl-color-border)); }

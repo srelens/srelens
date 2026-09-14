@@ -1,7 +1,7 @@
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useEffect, useRef, useState } from "react";
-import { inspectExtensionResource, actOnExtensionResource, type ExtensionResourceSelection } from "@srelens/core";
-import { Inspector, Button } from "@srelens/ui-kit";
+import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, type ExtensionResourceSelection } from "@srelens/core";
+import { Inspector, Button, CodeEditor, KV } from "@srelens/ui-kit";
 import { Icons } from "../lib/icons";
 import { ErrorNotice } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
@@ -15,8 +15,20 @@ const actions: Record<string,{label:string;description:string}> = {
   "hard-refresh":{label:"Hard refresh",description:"Invalidate Argo CD's manifest cache and refresh this application."},
   sync:{label:"Sync",description:"Apply the application's desired resources with Argo CD. This request does not enable pruning. Application sync options and hooks still apply."},
 };
-function Fields({value}:{value:Record<string,unknown>}) {
-  return <dl className="extension-detail-fields">{Object.entries(value).map(([key,value])=><div key={key}><dt>{key}</dt><dd>{value !== null && typeof value === "object" ? <details><summary>{Array.isArray(value)?`${value.length} entries`:"View fields"}</summary><pre>{JSON.stringify(value,null,2)}</pre></details> : String(value ?? "—")}</dd></div>)}</dl>;
+const fieldLabels: Record<string,string> = {sourceRef:"Source reference",suspend:"Suspended",prune:"Prune",wait:"Wait for readiness",force:"Force",apiVersion:"API version"};
+function fieldLabel(key:string) {
+  const words=key.replace(/([a-z0-9])([A-Z])/g,"$1 $2").replace(/_/g," ");
+  return Object.hasOwn(fieldLabels,key) ? fieldLabels[key] : words.charAt(0).toUpperCase()+words.slice(1);
+}
+function Fields({value,depth=0}:{value:Record<string,unknown>;depth?:number}) {
+  return <div className="extension-detail-fields">{Object.entries(value).map(([key,value])=>{
+    const label=fieldLabel(key);
+    if(value !== null && typeof value === "object") {
+      if(depth>=2 || Array.isArray(value)) return <KV key={key} k={label} v={<details><summary>{Array.isArray(value)?`${value.length} entries`:"Show data"}</summary><pre>{JSON.stringify(value,null,2)}</pre></details>}/>;
+      return <div key={key} className="extension-nested-fields"><h5>{label}</h5><Fields value={value as Record<string,unknown>} depth={depth+1}/></div>;
+    }
+    return <KV key={key} k={label} v={<span className="extension-field-value">{typeof value === "boolean" ? value ? "Yes" : "No" : String(value ?? "—")}</span>}/>;
+  })}</div>;
 }
 export function ExtensionResourceDetails({selection,onClose,onChanged,fullPage=false}:{selection:ExtensionResourceSelection;onClose?():void;onChanged():void;fullPage?:boolean}) {
   const openResource=useContext(ExtensionResourceNavigation);
@@ -68,7 +80,7 @@ export function ExtensionResourceDetails({selection,onClose,onChanged,fullPage=f
         <strong>{actions[pending].label}: {selection.namespace}/{selection.name}</strong><p>Cluster: {selection.context}</p><p>{actions[pending].description}</p>
         <div className="extension-toolbar"><Button disabled={busy} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${actions[pending].label}`}</Button><Button variant="outline" disabled={busy} onClick={cancel}>Cancel</Button></div>
       </div>}
-      {tab==="manifest"?<pre className="extension-detail-manifest">{JSON.stringify(resource,null,2)}</pre>:<>
+      {tab==="manifest"?<div className="flex h-full min-h-0 flex-col"><div className="min-h-0 flex-1"><CodeEditor value={formatResourceManifest(resource)} readOnly language="yaml" fill ariaLabel={`${selection.name} manifest`}/></div></div>:<>
         <h4 className="extension-detail-heading">Overview</h4><Fields value={{Name:resource.metadata.name,Namespace:resource.metadata.namespace??"—",Kind:resource.kind,API:resource.apiVersion,Created:resource.metadata.creationTimestamp??"—",...(resource.spec??{})}}/>
         <h4 className="extension-detail-heading">Conditions</h4>
         {Array.isArray(resource.status?.conditions)&&resource.status.conditions.length?<div className="extension-condition-list">{resource.status.conditions.map((c:any,i:number)=><article key={i}><strong>{c.type} · {c.status}</strong><div>{c.reason||"—"}</div><p>{c.message||"—"}</p></article>)}</div>:<p className="extension-message">No conditions reported.</p>}
