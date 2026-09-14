@@ -2067,13 +2067,44 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     state.adjust_current(1, &mut config);
     assert_eq!(config.argo_hub_context, None); // cycled back to None
 
-    // Direct editing of field 4
+    // Direct editing of field 4 with cursor movement and insertion
     state.start_editing(&config);
     assert!(state.is_editing);
-    state.edit_buffer = "my-hub-cluster".to_string();
+    assert_eq!(state.cursor_pos(), 0);
+    state.insert_str("hub-prod");
+    assert_eq!(state.edit_buffer, "hub-prod");
+    assert_eq!(state.cursor_pos(), 8);
+
+    // Left navigation
+    state.move_cursor_left();
+    state.move_cursor_left();
+    state.move_cursor_left();
+    state.move_cursor_left();
+    assert_eq!(state.cursor_pos(), 4);
+
+    // Insert in middle
+    state.insert_char('x');
+    assert_eq!(state.edit_buffer, "hub-xprod");
+    assert_eq!(state.cursor_pos(), 5);
+
+    // Delete at cursor
+    state.delete(); // deletes 'p'
+    assert_eq!(state.edit_buffer, "hub-xrod");
+
+    // Backspace before cursor
+    state.backspace(); // deletes 'x'
+    assert_eq!(state.edit_buffer, "hub-rod");
+    assert_eq!(state.cursor_pos(), 4);
+
+    // Home, End
+    state.move_cursor_home();
+    assert_eq!(state.cursor_pos(), 0);
+    state.move_cursor_end();
+    assert_eq!(state.cursor_pos(), 7);
+
     state.finish_editing(&mut config);
     assert!(!state.is_editing);
-    assert_eq!(config.argo_hub_context.as_deref(), Some("my-hub-cluster"));
+    assert_eq!(config.argo_hub_context.as_deref(), Some("hub-rod"));
 
     state.clear_current(&mut config);
     assert_eq!(config.argo_hub_context, None);
@@ -2213,6 +2244,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
     edit_state.selected_field = 4;
     edit_state.is_editing = true;
     edit_state.edit_buffer = "my-argo-hub".to_string();
+    edit_state.edit_cursor = "my-argo-hub".chars().count();
     let edit_lines = common::render_lines(120, 30, |f| {
         render_tui_config_view(f, f.area(), &edit_state, &config)
     });

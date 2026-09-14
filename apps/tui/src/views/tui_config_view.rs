@@ -45,6 +45,7 @@ pub struct TuiConfigViewState {
     pub selected_field: usize, // 0 = Width, 1 = Visible Rows, 2 = Text Size / Density, 3 = Startup Banner, 4 = Argo Hub Context, 5 = Argo Hub Kubeconfig
     pub is_editing: bool,
     pub edit_buffer: String,
+    pub edit_cursor: usize,
     pub available_contexts: Vec<String>,
 }
 
@@ -60,6 +61,7 @@ impl TuiConfigViewState {
             selected_field: 0,
             is_editing: false,
             edit_buffer: String::new(),
+            edit_cursor: 0,
             available_contexts: Vec::new(),
         }
     }
@@ -86,6 +88,7 @@ impl TuiConfigViewState {
         match self.selected_field {
             4 => {
                 self.edit_buffer = config.argo_hub_context.clone().unwrap_or_default();
+                self.edit_cursor = self.edit_buffer.chars().count();
                 self.is_editing = true;
             }
             5 => {
@@ -94,6 +97,7 @@ impl TuiConfigViewState {
                     .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
+                self.edit_cursor = self.edit_buffer.chars().count();
                 self.is_editing = true;
             }
             _ => {}
@@ -103,6 +107,7 @@ impl TuiConfigViewState {
     pub fn cancel_editing(&mut self) {
         self.is_editing = false;
         self.edit_buffer.clear();
+        self.edit_cursor = 0;
     }
 
     pub fn finish_editing(&mut self, config: &mut TuiConfig) {
@@ -122,7 +127,103 @@ impl TuiConfigViewState {
         }
         self.is_editing = false;
         self.edit_buffer.clear();
+        self.edit_cursor = 0;
         let _ = config.save();
+    }
+
+    pub fn cursor_pos(&self) -> usize {
+        let len = self.edit_buffer.chars().count();
+        self.edit_cursor.min(len)
+    }
+
+    pub fn move_cursor_left(&mut self) {
+        let pos = self.cursor_pos();
+        if pos > 0 {
+            self.edit_cursor = pos - 1;
+        } else {
+            self.edit_cursor = 0;
+        }
+    }
+
+    pub fn move_cursor_right(&mut self) {
+        let pos = self.cursor_pos();
+        let len = self.edit_buffer.chars().count();
+        if pos < len {
+            self.edit_cursor = pos + 1;
+        } else {
+            self.edit_cursor = len;
+        }
+    }
+
+    pub fn move_cursor_home(&mut self) {
+        self.edit_cursor = 0;
+    }
+
+    pub fn move_cursor_end(&mut self) {
+        self.edit_cursor = self.edit_buffer.chars().count();
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        let pos = self.cursor_pos();
+        let mut chars: Vec<char> = self.edit_buffer.chars().collect();
+        chars.insert(pos, c);
+        self.edit_buffer = chars.into_iter().collect();
+        self.edit_cursor = pos + 1;
+    }
+
+    pub fn insert_str(&mut self, s: &str) {
+        let pos = self.cursor_pos();
+        let mut chars: Vec<char> = self.edit_buffer.chars().collect();
+        let added_len = s.chars().count();
+        for (i, c) in s.chars().enumerate() {
+            chars.insert(pos + i, c);
+        }
+        self.edit_buffer = chars.into_iter().collect();
+        self.edit_cursor = pos + added_len;
+    }
+
+    pub fn backspace(&mut self) {
+        let pos = self.cursor_pos();
+        if pos > 0 {
+            let mut chars: Vec<char> = self.edit_buffer.chars().collect();
+            chars.remove(pos - 1);
+            self.edit_buffer = chars.into_iter().collect();
+            self.edit_cursor = pos - 1;
+        }
+    }
+
+    pub fn delete(&mut self) {
+        let pos = self.cursor_pos();
+        let mut chars: Vec<char> = self.edit_buffer.chars().collect();
+        if pos < chars.len() {
+            chars.remove(pos);
+            self.edit_buffer = chars.into_iter().collect();
+            self.edit_cursor = pos;
+        }
+    }
+
+    pub fn delete_word_back(&mut self) {
+        let pos = self.cursor_pos();
+        if pos == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.edit_buffer.chars().collect();
+        let mut i = pos;
+        while i > 0 && (chars[i - 1].is_whitespace() || chars[i - 1] == '/' || chars[i - 1] == '-') {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() && chars[i - 1] != '/' && chars[i - 1] != '-' {
+            i -= 1;
+        }
+        let mut new_chars = chars[..i].to_vec();
+        new_chars.extend_from_slice(&chars[pos..]);
+        self.edit_buffer = new_chars.into_iter().collect();
+        self.edit_cursor = i;
+    }
+
+    pub fn clear_input(&mut self) {
+        self.edit_buffer.clear();
+        self.edit_cursor = 0;
     }
 
     pub fn clear_current(&mut self, config: &mut TuiConfig) {
@@ -1156,13 +1257,30 @@ pub fn render_tui_config_view(
         let prompt_p = Paragraph::new(prompt_text).style(Style::default().fg(Theme::dim()));
         f.render_widget(prompt_p, v_chunks[0]);
 
+        let chars: Vec<char> = state.edit_buffer.chars().collect();
+        let pos = state.cursor_pos();
+        let before: String = chars[..pos].iter().collect();
+        let after: String = chars[pos..].iter().collect();
+
+        let input_line = Line::from(vec![
+            Span::styled(before, Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(Theme::cyan())),
+            Span::styled(after, Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)),
+        ]);
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::yellow()));
-        let input_text = format!("{}█", state.edit_buffer);
-        let input_p = Paragraph::new(input_text)
-            .style(Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD))
-            .block(input_block);
+
+        let inner_width = v_chunks[1].width.saturating_sub(2) as usize;
+        let scroll_x = if inner_width > 0 && pos >= inner_width {
+            (pos + 1 - inner_width) as u16
+        } else {
+            0
+        };
+
+        let input_p = Paragraph::new(input_line)
+            .block(input_block)
+            .scroll((0, scroll_x));
         f.render_widget(input_p, v_chunks[1]);
 
         let hint_line = Line::from(vec![
@@ -1170,6 +1288,10 @@ pub fn render_tui_config_view(
             Span::styled("Save  ", Style::default().fg(Theme::dim())),
             Span::styled("<Esc> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
             Span::styled("Cancel  ", Style::default().fg(Theme::dim())),
+            Span::styled("<Ctrl+V/Cmd+V> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled("Paste  ", Style::default().fg(Theme::dim())),
+            Span::styled("<←/→> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled("Move  ", Style::default().fg(Theme::dim())),
             Span::styled("<Ctrl+U> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
             Span::styled("Clear", Style::default().fg(Theme::dim())),
         ]);
