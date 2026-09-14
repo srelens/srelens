@@ -4,7 +4,7 @@ vi.mock("@srelens/core", async (original) => ({ ...(await original<typeof import
 import { listExtensionCatalog, reviewCatalogExtension, openExternal } from "@srelens/core";
 import { ExtensionCatalog } from "./ExtensionCatalog";
 const entry = { id: "org.srelens.flux", name: "Flux", description: "Flux resources", repository: "https://github.com/srelens/extension-flux", license: "MIT", release: { version: "0.2.0", sha256: "abc", srelensApiVersion: "^0.1", prerelease: true } };
-const snapshot = { catalog: { extensions: [entry] }, fetchedAt: 1, stale: false, error: null, hostApiVersion: "0.1.0", incompatible: [] };
+const snapshot = { catalog: { extensions: [entry] }, fetchedAt: 1, stale: false, error: null, hostApiVersions: ["0.1.0", "0.2.0"], incompatible: [] };
 beforeEach(() => { vi.resetAllMocks(); vi.mocked(listExtensionCatalog).mockResolvedValue(snapshot as any); });
 it("browses on demand, searches, and reviews exact verified bytes before any install", async () => {
   const review = vi.fn();
@@ -14,6 +14,7 @@ it("browses on demand, searches, and reviews exact verified bytes before any ins
   fireEvent.click(screen.getByText("Browse catalog"));
   expect(await screen.findByText("Flux")).toBeTruthy();
   expect(screen.getByText(/Preview/)).toBeTruthy();
+  expect(screen.getByText(/Host API 0.1.0, 0.2.0/)).toBeTruthy();
   fireEvent.change(screen.getByLabelText("Find an app"), { target: { value: "argo" } });
   expect(screen.getByText("No matching apps.")).toBeTruthy();
   fireEvent.change(screen.getByLabelText("Find an app"), { target: { value: "flux" } });

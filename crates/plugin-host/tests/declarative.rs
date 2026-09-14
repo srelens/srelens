@@ -293,6 +293,48 @@ fn manifest_wire_contract_and_contribution_identity_are_strict() {
 }
 
 #[test]
+fn api_ranges_negotiate_against_every_supported_version() {
+    use srelens_plugin_host::{negotiate_api_version_in, SUPPORTED_API_VERSIONS};
+    let req = |range: &str| semver::VersionReq::parse(range).unwrap();
+    let both = ["0.1.0", "0.2.0"];
+    let negotiated = |range: &str, supported: &[&str]| {
+        negotiate_api_version_in(&req(range), supported).map(|v| v.to_string())
+    };
+    // A ^0.1 manifest keeps installing on a host that also supports 0.2.
+    assert_eq!(negotiated("^0.1", &both).as_deref(), Some("0.1.0"));
+    assert_eq!(negotiated("^0.2", &both).as_deref(), Some("0.2.0"));
+    // A range spanning several supported versions is served under the highest.
+    assert_eq!(negotiated(">=0.1, <1", &both).as_deref(), Some("0.2.0"));
+    assert_eq!(negotiated("^0.3", &both), None);
+    assert_eq!(negotiated("^0.1", &["0.2.0"]), None);
+    // The host's own set parses and is ordered oldest to newest.
+    let parsed: Vec<semver::Version> = SUPPORTED_API_VERSIONS
+        .iter()
+        .map(|v| semver::Version::parse(v).unwrap())
+        .collect();
+    assert!(!parsed.is_empty() && parsed.windows(2).all(|w| w[0] < w[1]));
+    assert!(Manifest::parse(&manifest().to_string()).is_ok());
+}
+
+#[test]
+fn a_manifest_for_a_newer_api_is_told_the_version_it_needs_not_an_unknown_field() {
+    let mut newer = manifest();
+    newer["srelensApiVersion"] = json!("^0.9");
+    newer["contributions"]["dashboardCards"] = json!([]);
+    let error = Manifest::parse(&newer.to_string()).unwrap_err();
+    assert!(error.contains("requires API ^0.9"), "{error}");
+    assert!(
+        error.contains(&srelens_plugin_host::SUPPORTED_API_VERSIONS.join(", ")),
+        "{error}"
+    );
+    // A supported range still gets the strict schema.
+    newer["srelensApiVersion"] = json!("^0.1");
+    assert!(Manifest::parse(&newer.to_string())
+        .unwrap_err()
+        .contains("unknown field"));
+}
+
+#[test]
 fn core_kinds_use_an_explicit_empty_api_group() {
     let mut value = manifest();
     value["contributions"]["detailTabs"] =

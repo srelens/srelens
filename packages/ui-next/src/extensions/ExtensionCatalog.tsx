@@ -40,7 +40,7 @@ export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
     {busy && <p className="extension-message" role="status">Loading…</p>}
     {error && <p className="extension-error" role="alert">{error}</p>}
     {data && <>
-      <p className="extension-message extension-catalog-meta">{data.stale ? "Cached catalog" : "Catalog checked"} · {new Date(data.fetchedAt * 1000).toLocaleString()} · Host API {data.hostApiVersion}</p>
+      <p className="extension-message extension-catalog-meta">{data.stale ? "Cached catalog" : "Catalog checked"} · {new Date(data.fetchedAt * 1000).toLocaleString()} · Host API {data.hostApiVersions.join(", ")}</p>
       {data.error && <p className="extension-warning" role="alert">Refresh failed: {data.error}. Showing the cached catalog.</p>}
       <p className="extension-message">Official srelens app signatures are verified before installation review. Review permissions before installing.</p>
       {entries?.length === 0 && <p className="extension-message">No matching apps.</p>}

@@ -7,7 +7,10 @@ decisions are tracked in [#163](https://github.com/srelens/srelens/issues/163).
 ## Supported contract
 
 Extensions target the versioned srelens manifest and capability broker in
-`crates/plugin-host`. The desktop application renders declarative pages,
+`crates/plugin-host`. The host declares a set of supported extension API versions and
+serves each manifest under the highest one its `srelensApiVersion` range matches; the
+versioning and compatibility rules are in the
+[extension API specification](../extensions/specification.md). The desktop application renders declarative pages,
 dashboards, resource details, navigation groups and actions with host components
 in both classic and new designs. No third-party JavaScript executes in the host.
 Native Flux and Argo CD manifests are the reference integrations.

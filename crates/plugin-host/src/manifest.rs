@@ -3,7 +3,34 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
-pub const API_VERSION: &str = "0.1.0";
+/// Extension API versions this host implements, oldest first. A manifest is accepted when
+/// its `srelensApiVersion` range matches any of them. How versions are added and retired
+/// is specified in docs/extensions/specification.md.
+pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.1.0"];
+
+/// The highest version in `supported` that `range` matches.
+pub fn negotiate_api_version_in(
+    range: &semver::VersionReq,
+    supported: &[&str],
+) -> Option<semver::Version> {
+    supported
+        .iter()
+        .filter_map(|version| semver::Version::parse(version).ok())
+        .filter(|version| range.matches(version))
+        .max()
+}
+
+/// The API version this host serves a manifest under, if it supports the manifest's range.
+pub fn negotiate_api_version(range: &semver::VersionReq) -> Option<semver::Version> {
+    negotiate_api_version_in(range, SUPPORTED_API_VERSIONS)
+}
+
+fn unsupported_api(range: &str) -> String {
+    format!(
+        "extension requires API {range}; host supports {}",
+        SUPPORTED_API_VERSIONS.join(", ")
+    )
+}
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -153,6 +180,20 @@ impl Manifest {
         if source.len() > MAX_MANIFEST_BYTES {
             return Err("extension manifest exceeds 256 KiB".into());
         }
+        // Check the API range before the strict schema, so a manifest written for a newer API
+        // is told which version it needs rather than which field this host does not know.
+        let raw = serde_json::from_str::<Value>(source).ok();
+        if let Some(range) = raw
+            .as_ref()
+            .and_then(|raw| raw.get("srelensApiVersion"))
+            .and_then(Value::as_str)
+        {
+            if semver::VersionReq::parse(range)
+                .is_ok_and(|req| negotiate_api_version(&req).is_none())
+            {
+                return Err(unsupported_api(range));
+            }
+        }
         let manifest: Self =
             serde_json::from_str(source).map_err(|e| format!("invalid extension manifest: {e}"))?;
         manifest.validate()?;
@@ -174,11 +215,8 @@ impl Manifest {
             .map_err(|e| format!("invalid extension version: {e}"))?;
         let range = semver::VersionReq::parse(&self.api_version)
             .map_err(|e| format!("invalid srelensApiVersion: {e}"))?;
-        if !range.matches(&semver::Version::parse(API_VERSION).unwrap()) {
-            return Err(format!(
-                "extension requires API {}; host supports {API_VERSION}",
-                self.api_version
-            ));
+        if negotiate_api_version(&range).is_none() {
+            return Err(unsupported_api(&self.api_version));
         }
         if self.capabilities.is_empty() || self.capabilities.len() > 32 {
             return Err("declare 1–32 capabilities".into());
