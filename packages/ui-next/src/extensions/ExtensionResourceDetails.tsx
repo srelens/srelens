@@ -20,11 +20,25 @@ function fieldLabel(key:string) {
   const words=key.replace(/([a-z0-9])([A-Z])/g,"$1 $2").replace(/_/g," ");
   return Object.hasOwn(fieldLabels,key) ? fieldLabels[key] : words.charAt(0).toUpperCase()+words.slice(1);
 }
+function Entries({label,items}:{label:string;items:unknown[]}) {
+  const [open,setOpen]=useState(false);
+  const rows=items.map(item=>item !== null && typeof item === "object" && !Array.isArray(item) ? item as Record<string,unknown> : {value:item});
+  const columns=[...new Set(rows.flatMap(row=>Object.keys(row)))];
+  const cell=(value:unknown)=>value == null ? "—" : typeof value === "object" ? JSON.stringify(value) : String(value);
+  return <details className="extension-entries" open={open} onToggle={event=>setOpen(event.currentTarget.open)}>
+    <summary>{label} · {items.length} {items.length===1?"entry":"entries"}</summary>
+    {open && (items.length ? <div className="extension-entries-scroll" tabIndex={0} role="region" aria-label={`${label} list`}>
+      <table aria-label={label}><thead><tr>{columns.map(column=><th scope="col" key={column}>{column==="id"?"ID":column==="v"?"Version":fieldLabel(column)}</th>)}</tr></thead>
+      <tbody>{rows.map((row,index)=><tr key={index}>{columns.map(column=><td key={column}>{cell(row[column])}</td>)}</tr>)}</tbody></table>
+    </div> : <p className="extension-message">No entries.</p>)}
+  </details>;
+}
 function Fields({value,depth=0}:{value:Record<string,unknown>;depth?:number}) {
   return <div className="extension-detail-fields">{Object.entries(value).map(([key,value])=>{
     const label=fieldLabel(key);
     if(value !== null && typeof value === "object") {
-      if(depth>=2 || Array.isArray(value)) return <KV key={key} k={label} v={<details><summary>{Array.isArray(value)?`${value.length} entries`:"Show data"}</summary><pre>{JSON.stringify(value,null,2)}</pre></details>}/>;
+      if(Array.isArray(value)) return <Entries key={key} label={label} items={value}/>;
+      if(depth>=2) return <KV key={key} k={label} v={<details><summary>Show data</summary><pre>{JSON.stringify(value,null,2)}</pre></details>}/>;
       return <div key={key} className="extension-nested-fields"><h5>{label}</h5><Fields value={value as Record<string,unknown>} depth={depth+1}/></div>;
     }
     return <KV key={key} k={label} v={<span className="extension-field-value">{typeof value === "boolean" ? value ? "Yes" : "No" : String(value ?? "—")}</span>}/>;

@@ -61,3 +61,15 @@ it("promotes a peek to its own tab while keeping the list's close control separa
  view.rerender(<ExtensionResourceNavigation.Provider value={open}><ExtensionResourceDetails fullPage selection={selection} onChanged={vi.fn()}/></ExtensionResourceNavigation.Provider>);
  expect(screen.queryByRole("button",{name:"Open tab"})).toBeNull();expect(screen.queryByRole("button",{name:"Close inspector"})).toBeNull();
 });
+
+it("renders inventory entries as a full-width table instead of a JSON block",async()=>{
+ vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,status:{inventory:{entries:[{id:"team_service__Service",v:"v1"},{id:"team_api_apps_Deployment",v:"v1"}]}}}});
+ render(<ExtensionResourceDetails selection={selection} onChanged={vi.fn()}/>);
+ const disclosure=await screen.findByText("Entries · 2 entries");
+ fireEvent.click(disclosure);
+ expect(await screen.findByRole("table",{name:"Entries"})).toBeTruthy();
+ expect(screen.getByRole("columnheader",{name:"ID"})).toBeTruthy();
+ expect(screen.getByRole("columnheader",{name:"Version"})).toBeTruthy();
+ expect(screen.getByRole("cell",{name:"team_service__Service"})).toBeTruthy();
+ expect(screen.getByRole("cell",{name:"team_api_apps_Deployment"})).toBeTruthy();
+});

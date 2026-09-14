@@ -324,3 +324,11 @@
 .extension-nested-fields { padding-block: 6px; }
 .extension-nested-fields h5 { margin: 0 0 4px; font-size: inherit; font-weight: 600; }
 .extension-nested-fields > .extension-detail-fields { padding: 0 0 0 10px; border-left: 1px solid var(--rule, var(--fl-color-border)); }
+
+.extension-entries { margin-block: 6px; }
+.extension-entries > summary { cursor: pointer; padding-block: 4px; font-weight: 600; }
+.extension-entries-scroll { max-height: 20rem; overflow: auto; border-block: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-entries table { min-width: 100%; border-collapse: separate; border-spacing: 0; font: inherit; }
+.extension-entries th, .extension-entries td { padding: 5px 8px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-entries th { position: sticky; top: 0; z-index: 1; background: var(--surface, var(--fl-color-surface)); font-weight: 600; }
+.extension-entries tbody tr:last-child td { border-bottom: 0; }
