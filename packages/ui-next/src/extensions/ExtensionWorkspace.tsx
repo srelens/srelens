@@ -1,3 +1,5 @@
+import { ExtensionLogo } from "./ExtensionLogo";
+import { ExtensionRequirements } from "./ExtensionRequirements";
 import { AgeCell } from "../lib/ageCell";
 import { useNamespaceOptions } from "@srelens/core/react";
 import { useContext, useState } from "react";
@@ -231,12 +233,14 @@ export function ExtensionWorkspace({
   context,
   namespace: initialNamespace = "",
   onPage,
+  onNamespace,
 }: {
   plugin: InstalledExtension;
   page: ExtensionContribution;
   context: string;
   namespace?: string;
   onPage?(id: string, namespace: string): void;
+  onNamespace?(namespace: string): void;
 }) {
   const { Button, Combobox } = useContext(ExtensionControls);
   const [localPage, setLocalPage] = useState(page.id);
@@ -259,7 +263,7 @@ export function ExtensionWorkspace({
   if (!context)
     return (
       <p className="extension-message">
-        Choose a cluster before opening an extension page.
+        Choose a cluster before opening an app page.
       </p>
     );
   return (
@@ -268,6 +272,7 @@ export function ExtensionWorkspace({
         className="extension-toolbar extension-navigation"
         aria-label={`${plugin.manifest.name} pages`}
       >
+        <ExtensionLogo id={plugin.manifest.id} name={plugin.manifest.name} />
         {groups.map((group) => (
           <Button
             key={group}
@@ -300,11 +305,12 @@ export function ExtensionWorkspace({
             ))}
         </nav>
       )}
+      <ExtensionRequirements plugin={plugin} page={current} context={context} refresh={refresh}>
       <div className="extension-toolbar extension-filters">
         {namespaces === null ? <Button variant="secondary" disabled>Loading namespaces…</Button> : <Combobox
-          ariaLabel="Extension namespace"
+          ariaLabel="App namespace"
           value={namespace}
-          onValueChange={setNamespace}
+          onValueChange={(value) => { setNamespace(value); onNamespace?.(value); }}
           options={[
             ...(scope ? [] : [{ value: "", label: "All namespaces" }]),
             ...(namespaces ?? []).map(n=>({value:n,label:n})),
@@ -317,7 +323,7 @@ export function ExtensionWorkspace({
         />}
         <input
           className="extension-search"
-          aria-label="Search extension resources"
+          aria-label="Search app resources"
           placeholder={
             current.dashboard ? "Search events…" : "Search resources…"
           }
@@ -377,6 +383,7 @@ export function ExtensionWorkspace({
           hideToolbar
         />
       )}
+      </ExtensionRequirements>
     </div>
   );
 }

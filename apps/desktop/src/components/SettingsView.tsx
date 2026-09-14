@@ -132,7 +132,7 @@ const SETTINGS_SECTIONS: Array<{
   { id: "assistant", label: "Assistant", description: "srelens agent API keys and model", icon: Bot },
   { id: "security", label: "Security", description: "Master password and biometric unlock", icon: Shield },
   { id: "logs", label: "Application logs", description: "Diagnostics and log file", icon: ScrollText },
-  { id: "extensions", label: "Extensions", description: "Local extensions and permissions", icon: Plug },
+  { id: "extensions", label: "Apps", description: "Local apps and permissions", icon: Plug },
   { id: "updates", label: "Updates", description: "App version and updates", icon: Download },
 ];
 
@@ -1107,7 +1107,7 @@ export function SettingsView({
             </SectionPanel>
           )}
 
-          {section === "extensions" && isTauri() && <ExtensionManager contexts={(contexts ?? []).map(c => ({name: c.name, label: contextProfiles[c.name]?.shortName || contextDisplayName(c.name, contextProfiles[c.name])}))} />}
+          {section === "extensions" && isTauri() && <ExtensionManager />}
           {section === "updates" && isTauri() && (
             <SectionPanel title="Updates" description="Check for and install new versions of srelens.">
               <div className="fl-settings-update">

@@ -394,6 +394,8 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::schema::open_api_schema_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::gitops::resource_capability(cache.clone()));
+    reg.register(srelens_kube::gitops::action_capability(cache.clone()));
     reg.register(srelens_kube::crds::list_crds_capability(cache.clone()));
     reg.register(srelens_kube::crds::list_custom_resource_capability(
         cache.clone(),
@@ -564,7 +566,7 @@ mod tests {
         let reg = build_registry_with_paths(cache, vec![]);
         assert!(!reg.ids().contains(&"settings.get"));
         assert!(!reg.ids().contains(&"settings.set"));
-        for id in ["extensions.list", "extensions.configure", "extensions.read"] { assert!(reg.get(id).is_none()); }
+        for id in ["extensions.catalog", "extensions.catalogManifest", "extensions.list", "extensions.configure", "extensions.read"] { assert!(reg.get(id).is_none()); }
     }
 
     #[test]

@@ -33,7 +33,7 @@ function start() {
     const mine = generation;
     try {
       const data = isTauri() ? await listExtensions() : {
-        schemaVersion: 1, developerMode: false, nextRevision: 1, plugins: [],
+        schemaVersion: 1, nextRevision: 1, plugins: [],
       };
       if (active && mine === generation) publish({ status: "ready", data });
     } catch (error) {

@@ -175,8 +175,14 @@ impl Harness {
 /// A capability registered later with no case here fails the coverage
 /// assertion at the end of `full_capability_suite`.
 const EXCLUDED: &[(&str, &str)] = &[
+    ("k8s.getCustomResource", "needs custom APIs; GitOps mock HTTP tests exercise resource GET and event RBAC failure"),
+    ("k8s.gitOpsAction", "needs running Flux/Argo controllers; mock HTTP tests verify conditional PATCH and rejected writes"),
+    ("extensions.resource", "requires installed app; isolated registry tests verify pinned identity and revocation"),
+    ("extensions.action", "requires installed app; isolated registry and MCP tests verify scope and consent"),
+    ("extensions.catalog", "desktop public catalog; offline cache and validation use isolated registry tests"),
+    ("extensions.catalogManifest", "release download needs the public catalog; checksum/identity and permission validation use registry tests"),
     ("extensions.list", "desktop-local inventory; registry lifecycle tests use an isolated temporary store"),
-    ("extensions.configure", "developer-mode grants and atomic persistence are exercised with an isolated temporary store"),
+    ("extensions.configure", "explicit grants and atomic persistence are exercised with an isolated temporary store"),
     ("extensions.read", "requires an installed extension and GitOps CRDs; registry tests exercise the real binding against an injected core handler"),
     (
         "toolbox.installKubectl",

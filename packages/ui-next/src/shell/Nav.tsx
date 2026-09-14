@@ -1,3 +1,4 @@
+import { extensionLogoIcon, extensionPageIcon } from "../extensions/ExtensionLogo";
 import { useExtensions } from "../extensions/Extensions";
 import { extensionRoute } from "@srelens/core";
 import { symbolFor } from "../lib/markSymbols";
@@ -110,25 +111,26 @@ export function Nav({ contexts }: NavProps) {
 
   const nodes = useMemo<ResourceNode[]>(
     () => [
-      ...kindNodes(),
-      ...(ctx && extensions.data?.developerMode && extensions.data.plugins.some(p => p.enabled && p.manifest.contributions.pages.length)
+      ...kindNodes().slice(0, 1),
+      ...(ctx && extensions.data && extensions.data.plugins.some(p => p.enabled && p.manifest.contributions.pages.length)
         ? [{
-            id: "extensions", label: "Extensions", icon: Icons.crds,
+            id: "extensions", label: "Apps", icon: Icons.apps,
             children: extensions.data.plugins.filter(p => p.enabled && p.manifest.contributions.pages.length).map(p => ({
-              id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: Icons.crds,
+              id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: extensionLogoIcon(p.manifest.id, p.manifest.name),
               children: p.manifest.contributions.pages.flatMap((page, index, pages) => {
                 const leaf = (item: typeof page) => ({
                   id: `route:${extensionRoute(ctx.name, p.manifest.id, item.id)}`,
-                  label: item.title, icon: Icons.crds,
+                  label: item.title, icon: extensionPageIcon(item.title),
                 });
                 if (!page.group) return [leaf(page)];
                 if (pages.findIndex(item => item.group === page.group) !== index) return [];
-                return [{ id: `extension:${p.manifest.id}:${page.group}`, label: page.group, icon: Icons.crds,
+                return [{ id: `extension:${p.manifest.id}:${page.group}`, label: page.group, icon: extensionPageIcon(page.group),
                   children: pages.filter(item => item.group === page.group).map(leaf) }];
               }),
             })),
           }]
         : []),
+      ...kindNodes().slice(1),
       { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crdChildren },
       {
         id: "investigate",

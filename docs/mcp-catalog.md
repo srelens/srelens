@@ -5,11 +5,11 @@
 
 Everything this server exposes over MCP, generated from the live registry so it cannot drift. Written for someone wiring an agent to srelens; the narrative reference is [MCP.md](MCP.md).
 
-## Tools (97)
+## Tools (103)
 
 Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
-### Kubernetes — read-only (54)
+### Kubernetes — read-only (55)
 
 | Tool | Summary |
 | --- | --- |
@@ -18,6 +18,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.clusterFacts` | report a cluster's provider, region and metrics-server availability |
 | `k8s.clusterInfo` | connect to a kube context and report server version and reachability |
 | `k8s.diffManifest` | diff a manifest against the cluster via server dry-run apply (per document) |
+| `k8s.getCustomResource` | Inspect one custom resource and its supported host actions |
 | `k8s.getManifest` | fetch a resource's manifest as YAML (any supported kind) |
 | `k8s.getObject` | fetch a resource as a structured JSON object (any supported kind) |
 | `k8s.listCRDs` | list installed CustomResourceDefinitions (group, kind, plural, scope) |
@@ -76,7 +77,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.podConnections` | read the established TCP connections of pods, from their own /proc/net/tcp |
 | `k8s.topologyProbe` | the topology graph, plus each pod's open connections read over pods/exec (one exec per pod) |
 
-### Kubernetes — needs confirmation (7)
+### Kubernetes — needs confirmation (8)
 
 | Tool | Summary |
 | --- | --- |
@@ -84,6 +85,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.cordonNode` | cordon or uncordon a node (set spec.unschedulable) |
 | `k8s.cronjobSetSuspend` | suspend or resume a CronJob (set spec.suspend) |
 | `k8s.cronjobTriggerNow` | run a CronJob immediately by creating a Job from its jobTemplate |
+| `k8s.gitOpsAction` | Request a supported Flux or Argo CD operation on the reviewed resource; requires confirmation |
 | `k8s.rolloutRestart` | trigger a rolling restart of a workload |
 | `k8s.scale` | set the replica count of a workload (Deployment/StatefulSet/ReplicaSet) |
 | `k8s.updateConfigData` | update ConfigMap or Secret values in place (merge patch) |
@@ -145,19 +147,23 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `toolbox.removePlugin` | remove an installed krew plugin |
 | `toolbox.upgradePlugin` | upgrade an installed krew plugin |
 
-### Server — read-only (4)
+### Server — read-only (7)
 
 | Tool | Summary |
 | --- | --- |
-| `extensions.list` | List installed declarative extensions and developer-mode state |
+| `extensions.catalog` | Browse the native extension catalog with a durable cache; never connects clusters |
+| `extensions.catalogManifest` | Download and checksum-verify a catalog manifest for permission review; does not install it |
+| `extensions.list` | List installed declarative extensions |
 | `extensions.read` | Read a declared custom-resource contribution from an enabled extension |
+| `extensions.resource` | Inspect the selected resource of an enabled app |
 | `ping` | health check; echoes the input back as { pong: <input> } |
 | `settings.get` | read durable desktop settings; omit key to return the complete map |
 
-### Server — needs confirmation (2)
+### Server — needs confirmation (3)
 
 | Tool | Summary |
 | --- | --- |
+| `extensions.action` | Request a host-owned GitOps action on an app resource; requires explicit confirmation |
 | `extensions.configure` | Install, enable, remove or configure local extensions; requires approval |
 | `settings.set` | atomically write or remove durable desktop settings |
 

@@ -227,16 +227,21 @@ describe("Nav", () => {
   });
 });
 
-it("groups extension pages under their display name", async () => {
-  extensionState.data = { developerMode: true, plugins: [
+it("groups app pages under their display name", async () => {
+  extensionState.data = { plugins: [
     { enabled: true, manifest: { id: "org.srelens.flux", name: "Flux", contributions: { pages: [
       { id: "kustomizations", title: "Kustomizations" },
       { id: "repositories", title: "Git repositories", group: "Sources" },
     ] } } },
   ] };
   render(<Nav contexts={[PROD]} />);
-  await userEvent.click(await screen.findByRole("treeitem", { name: "Extensions" }));
-  await userEvent.click(await screen.findByRole("treeitem", { name: "Flux" }));
+  await userEvent.click(await screen.findByRole("treeitem", { name: "Apps" }));
+  const apps = screen.getByRole("treeitem", {name:"Apps"});
+  expect(screen.getByRole("treeitem",{name:"Cluster"}).compareDocumentPosition(apps) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(apps.compareDocumentPosition(screen.getByRole("treeitem",{name:"Workloads"})) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const fluxNode = await screen.findByRole("treeitem", { name: "Flux" });
+  expect(fluxNode.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("org.srelens.flux");
+  await userEvent.click(fluxNode);
   await userEvent.click(await screen.findByRole("treeitem", { name: "Kustomizations" }));
   expect(tabFor("/extensions/prod-eu/org.srelens.flux/kustomizations/")?.sub).toBe("prod-eu");
   expect(screen.queryByText("org.srelens.flux")).toBeNull();

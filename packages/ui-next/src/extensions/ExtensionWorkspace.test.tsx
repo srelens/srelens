@@ -2,10 +2,12 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { it, expect, vi, beforeEach } from "vitest";
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
+  listCrds: vi.fn(),
   readExtension: vi.fn(),
   listNamespaces: vi.fn(),
 }));
 import {
+  listCrds,
   readExtension,
   listNamespaces,
   type InstalledExtension,
@@ -169,7 +171,7 @@ it("filters events by API group and search, not just a matching kind name", asyn
   expect(await screen.findByText("Reconciliation succeeded")).toBeTruthy();
   expect(screen.queryByText("Unrelated event")).toBeNull();
   fireEvent.change(
-    screen.getByRole("textbox", { name: "Search extension resources" }),
+    screen.getByRole("textbox", { name: "Search app resources" }),
     { target: { value: "does not match" } },
   );
   expect(await screen.findByText("No matching events.")).toBeTruthy();
@@ -204,7 +206,7 @@ it("filters resource rows without a second cluster read", async () => {
   );
   expect(await screen.findByRole("cell", { name: "apps" })).toBeTruthy();
   fireEvent.change(
-    screen.getByRole("textbox", { name: "Search extension resources" }),
+    screen.getByRole("textbox", { name: "Search app resources" }),
     { target: { value: "missing" } },
   );
   expect(screen.queryByRole("cell", { name: "apps" })).toBeNull();
@@ -225,7 +227,7 @@ it("reloads the selected namespace without changing the pinned cluster", async (
   );
   await screen.findByRole("cell", { name: "apps" });
   fireEvent.click(
-    screen.getByRole("combobox", { name: "Extension namespace" }),
+    screen.getByRole("combobox", { name: "App namespace" }),
   );
   fireEvent.click(await screen.findByRole("option", { name: "flux-system" }));
   await waitFor(() =>
@@ -235,6 +237,7 @@ it("reloads the selected namespace without changing the pinned cluster", async (
       "apps",
       "staging",
       "flux-system",
+      true,
     ),
   );
 });
@@ -243,19 +246,21 @@ it("uses the restricted namespace instead of an all-namespace resource read", as
   vi.mocked(listNamespaces).mockResolvedValue({error:'Forbidden: User "system:serviceaccount:team:reader" cannot list namespaces'} as any);
   vi.spyOn(await import("@srelens/core/lib/clusters"),"listContexts").mockResolvedValue({contexts:[{name:"staging",namespace:"team"}]} as any);
   render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" />);
-  await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(plugin.manifest.id,plugin.revision,"apps","staging","team"));
+  await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(plugin.manifest.id,plugin.revision,"apps","staging","team",true));
   expect(vi.mocked(readExtension).mock.calls.every(call=>call[4]==="team")).toBe(true);
 });
 
 it("carries the selected namespace into group navigation", async () => {
   vi.mocked(listNamespaces).mockResolvedValue({namespaces:["team"]} as any);
   const onPage=vi.fn();
-  render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" onPage={onPage}/>);
+  const onNamespace=vi.fn();
+  render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" onPage={onPage} onNamespace={onNamespace}/>);
   await screen.findByRole("cell",{name:"apps"});
-  fireEvent.click(screen.getByRole("combobox",{name:"Extension namespace"}));
+  fireEvent.click(screen.getByRole("combobox",{name:"App namespace"}));
   fireEvent.click(await screen.findByRole("option",{name:"team"}));
   fireEvent.click(screen.getByRole("button",{name:"Sources"}));
   expect(onPage).toHaveBeenCalledWith("repos","team");
+  expect(onNamespace).toHaveBeenCalledWith("team");
 });
 
 it("ticks event first and last occurrence ages without reloading events", async () => {
@@ -273,4 +278,15 @@ it("ticks event first and last occurrence ages without reloading events", async 
     expect(screen.getByText("30s")).toBeTruthy();
     expect(readExtension).toHaveBeenCalledTimes(2);
   } finally {view!?.unmount();vi.useRealTimers();}
+});
+
+it("shows unsupported-cluster requirements without reading app resources", async () => {
+  const requiring = structuredClone(plugin);
+  requiring.manifest.capabilities[0].target = "k8s.listCustomResource";
+  Object.assign(requiring.manifest.capabilities[0].arguments, { group: "kustomize.toolkit.fluxcd.io", version: "v1", plural: "kustomizations", kind: "Kustomization" });
+  vi.mocked(listCrds).mockResolvedValue({ crds: [] });
+  render(<ExtensionWorkspace plugin={requiring} page={requiring.manifest.contributions.pages[0]} context="staging" />);
+  expect(await screen.findByText("Missing requirements")).toBeTruthy();
+  expect(readExtension).not.toHaveBeenCalled();
+  expect(screen.getByRole("navigation", { name: "Flux pages" })).toBeTruthy();
 });

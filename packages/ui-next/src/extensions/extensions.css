@@ -74,12 +74,6 @@
   background: var(--surface, var(--fl-color-surface));
 }
 
-.extension-banner {
-  flex-shrink: 0;
-  padding: 4px 12px;
-  border-bottom: 1px solid var(--rule, var(--fl-color-border));
-  font-size: 0.75rem;
-}
 
 .extension-error pre {
   max-width: 100%;
@@ -248,3 +242,93 @@
   vertical-align: middle;
   margin-right: 6px;
 }
+
+.extension-catalog-search {
+  min-width: 0;
+  max-width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--rule, var(--fl-color-border));
+  border-radius: 4px;
+  background: var(--surface, var(--fl-color-surface));
+  color: inherit;
+  font: inherit;
+}
+
+/* Settings uses the same body/meta scale as the owning design. */
+.extension-manager, .extension-catalog {
+  font-family: inherit;
+  font-size: var(--text-body, 0.8125rem);
+  line-height: 1.5;
+}
+.extension-manager strong { font-weight: 600; }
+.extension-manager [hidden] { display: none; }
+.extension-local-tools > summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-local-tools > summary:focus-visible {
+  outline: 2px solid var(--accent, var(--fl-color-primary));
+  outline-offset: -2px;
+}
+.extension-install > button { justify-self: start; }
+.extension-catalog-description { flex: 1 1 260px; min-width: 0; }
+.extension-catalog-description p { margin: 3px 0 0; }
+.extension-catalog-meta {
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  font-size: var(--text-caption, 0.75rem);
+  white-space: nowrap;
+  overflow-x: auto;
+}
+.extension-catalog-entry > .extension-toolbar { border-bottom: 0; }
+.extension-catalog-entry .extension-catalog-meta { margin-top: 3px; }
+.extension-permission-review { background: var(--surface, var(--fl-color-surface)); }
+
+.extension-requirements {
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+  font-size: var(--text-body, 0.8125rem);
+}
+
+.extension-logo { display: inline-block; flex-shrink: 0; vertical-align: middle; }
+
+.extension-resource-link { padding: 0; background: none; border: 0; color: var(--accent, var(--fl-color-primary)); font: inherit; cursor: pointer; text-align: left; }
+.extension-resource-link:hover { text-decoration: underline; }
+.extension-resource-link:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.extension-resource-detail { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+.extension-resource-detail > .pane { flex: 1; min-height: 0; }
+.extension-detail-heading { margin: 0; padding: 8px 12px; font-size: inherit; font-weight: 600; background: var(--surface, var(--fl-color-surface)); border-block: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-detail-fields { margin: 0; }
+.extension-resource-detail pre { white-space: pre; overflow: auto; max-width: 100%; font-family: var(--font-mono); font-size: inherit; }
+.extension-detail-metadata { padding: 12px; margin: 0; }
+.extension-action-review { padding: 12px; border-block: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }
+.extension-action-review .extension-toolbar { padding: 0; border: 0; }
+
+/* App resources use the same list + independently scrolling right-hand peek as core resources. */
+.extension-workspace { display: flex; flex-direction: column; min-height: 0; height: 100%; overflow: auto; }
+.extension-workspace > nav, .extension-workspace > .extension-toolbar { flex-shrink: 0; }
+.extension-results { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.extension-resource-list { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.extension-resource-list > .extension-toolbar { flex-shrink: 0; }
+.extension-resource-list > .extension-table-scroll { flex: 1; min-height: 0; }
+.extension-detail-peek { position: relative; display: flex; flex-direction: column; flex-shrink: 0; min-height: 0; }
+.extension-detail-peek > .extension-resource-detail { flex: 1; min-height: 0; }
+.extension-resource-detail { flex: 1; min-height: 0; }
+.extension-detail-peek .extension-toolbar { gap: 6px; padding: 8px 12px; }
+.extension-results tbody tr[aria-selected="true"] { background: var(--accent-wash, var(--fl-color-surface)); }
+.extension-condition-list article { padding: 8px 12px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-condition-list p { margin: 4px 0; white-space: normal; overflow-wrap: break-word; }
+.extension-condition-list strong { font-weight: 600; }
+
+.extension-detail-fields { padding: 4px 12px; }
+.extension-field-value { display: block; overflow-x: auto; white-space: nowrap; }
+.extension-nested-fields { padding-block: 6px; }
+.extension-nested-fields h5 { margin: 0 0 4px; font-size: inherit; font-weight: 600; }
+.extension-nested-fields > .extension-detail-fields { padding: 0 0 0 10px; border-left: 1px solid var(--rule, var(--fl-color-border)); }
+
+.extension-entries { margin-block: 6px; }
+.extension-entries > summary { cursor: pointer; padding-block: 4px; font-weight: 600; }
+.extension-entries-scroll { max-height: 20rem; overflow: auto; border-block: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-entries table { min-width: 100%; border-collapse: separate; border-spacing: 0; font: inherit; }
+.extension-entries th, .extension-entries td { padding: 5px 8px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-entries th { position: sticky; top: 0; z-index: 1; background: var(--surface, var(--fl-color-surface)); font-weight: 600; }
+.extension-entries tbody tr:last-child td { border-bottom: 0; }

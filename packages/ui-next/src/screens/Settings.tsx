@@ -1,9 +1,8 @@
-import { getContextLabel } from "../lib/marks";
 import { ExtensionManager } from "../extensions/Extensions";
 import { useContexts } from "../lib/clusters";
 import { openTab } from "../lib/tabsStore";
 import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { extensionRoute, isTauri } from "@srelens/core";
+import { isTauri } from "@srelens/core";
 import { Screen } from "@srelens/ui-kit";
 import type { RoutedScreenProps } from "../lib/routes";
 import { ApplicationLogsPane, KubernetesPane, WorkspacePane } from "./settings/PreferencePanes";
@@ -82,7 +81,7 @@ const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true
   { id: "logs", label: "Application logs" },
   { id: "updates", label: "Updates", desktopOnly: true },
   { id: "clusters", label: "Clusters" },
-  { id: "extensions", label: "Extensions", desktopOnly: true },
+  { id: "extensions", label: "Apps", desktopOnly: true },
 ];
 
 /**
@@ -205,7 +204,7 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
       case "updates":
         return null;
       case "extensions":
-        return <ExtensionManager contexts={contexts.map(c => ({name: c.name, label: getContextLabel(c.stableId, c.name)}))} onOpen={(plugin, page, context) => openTab(extensionRoute(context, plugin.manifest.id, page.id), { clusterName: context })} />;
+        return <ExtensionManager />;
       case "clusters":
         return <ClustersPane />;
     }

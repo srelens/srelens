@@ -26,11 +26,20 @@ execute it. Do not advertise live tool-list updates until that lifecycle wiring
 exists.
 
 Both desktop designs now load local declarative manifests through **Settings →
-Extensions**. The backend owns installation, grants, enable/disable, updates,
-removal and per-extension JSON settings. Developer mode is off by default;
-unsigned installs require enabling it and reviewing the requested capability
-before granting permission. An unsigned-extension notice remains visible while
-any extension is enabled. Turning developer mode off disables all extensions.
+Apps**. The backend owns installation, grants, enable/disable, updates,
+removal and per-extension JSON settings. Installation requires explicit review
+and grants for the requested capabilities. Native declarative extensions do not
+require developer mode. Legacy inventories retain settings and revisions, and
+previously disabled extensions remain disabled.
+
+Installation and enablement are app-wide, not per kubeconfig context. Enabled
+pages remain available across clusters. When a page opens, the host checks the
+CRDs and served versions required by that page (including dashboard summaries).
+A missing CRD/version produces a requirements page with the exact API names and
+a **Check again** action; it does not uninstall or disable the extension. CRD
+discovery failures are reported as unverifiable requirements and do not prevent
+resource reads allowed by the user's existing RBAC. Switching clusters never
+reuses another cluster's discovery result.
 
 The app deliberately accepts a narrower surface than the developer broker:
 `k8s.listCustomResource` bindings with fixed, nonempty group/version/plural/kind
@@ -55,37 +64,94 @@ mutating and uses the normal MCP consent gate. App-installed operations currentl
 use the `extensions.read` facade with installation ID, revision, operation and
 context; individual `plugin/...` tool discovery remains a developer-harness
 feature. The app facade refuses a host reader with stronger consent annotations.
-All three capabilities are unavailable on the multi-user web host until per-user
+All extension capabilities are unavailable on the multi-user web host until per-user
 extension state is implemented.
 
-No third-party code, subprocess, iframe, download, npm install or lifecycle script
-is executed. Only native srelens manifests are accepted. Signed distribution,
-executable runtimes and sandboxing remain future work; local developer-mode
+No third-party code, subprocess, iframe, npm install or lifecycle script
+is executed. Catalog downloads contain JSON data only. Only native srelens manifests are accepted. Signed distribution,
+executable runtimes and sandboxing remain future work; native declarative
 support does not claim those protections.
+
+## Browse the native catalog
+
+In either desktop design, open **Settings → Apps → Catalog**.
+The **Apps** tab lists installed extensions. A collapsed
+**Install a local manifest** section exposes JSON installation tools. The
+**Catalog** tab loads discovery on first opening and keeps its search/list state
+when switching tabs.
+
+The catalog comes from [srelens/extensions](https://github.com/srelens/extensions);
+each entry points to its own repository and versioned GitHub release asset.
+Flux and Argo CD use locally bundled project logos in Settings and navigation.
+Other native extensions receive a name-based initials mark. Page icons follow
+their role (overview, sources, Helm, notifications) rather than repeating the
+extension glyph. Logos identify integrations and do not indicate trust/signing.
+
+The initial entries are [Flux](https://github.com/srelens/extension-flux) and
+[Argo CD](https://github.com/srelens/extension-argocd). Search by name, ID or description.
+
+The backend caches validated metadata for 24 hours alongside the inventory in
+`*.extensions.catalog.json`. **Refresh catalog** checks immediately. A failed
+refresh retains the cache and displays the failure and original timestamp.
+Catalog browsing does not connect clusters or install extensions.
+
+**Review installation** downloads a size-bounded manifest over HTTPS, checks its
+SHA-256 against the selected catalog release, verifies ID/version/API identity,
+and validates the app's read-only capability contract. The exact verified bytes
+then go through the existing permission review and install action. A catalog
+change invalidates the selected checksum and requires a new review. Replacing
+an installed ID is explicit and preserves its settings. There are no automatic
+updates or downgrade decisions.
+
+API-incompatible releases stay visible but cannot be installed. Preview labels
+come from catalog metadata. `testedHost.revision` records test provenance, not an
+exact-build restriction. Official Flux and Argo CD releases carry a detached
+Ed25519 signature (`manifest.json.sig`) over the exact manifest bytes. The host
+pins the public key and the app ID/repository mapping; catalog metadata cannot
+supply a trusted key. Missing signatures, modified bytes and repository
+substitution are rejected before review. Installation re-verifies the proof,
+persists it, and checks it against the installed manifest when loading inventory.
+Permission review is still required. A checksum alone is not a publisher signature.
+
+Unsigned local manifests remain explicitly labelled as unsigned. Existing installs
+do not gain a signed label automatically: review a catalog replacement to install
+the signed release. A local replacement clears any previous signature proof.
+
+Release workflows in both app repositories require `APP_SIGNING_PRIVATE_KEY`
+(PKCS#8 Ed25519 PEM) in GitHub Actions secrets, check it against
+`signing-public.pem`, and publish a 64-byte binary signature. The private key must
+never be committed. Key rotation requires a host trust-key update before new
+release signatures are published. The current public key is also stored as raw
+32 bytes in `crates/registry/src/extensions/srelens-apps.pub`.
+
+`extensions.catalog` and `extensions.catalogManifest` are read-only capabilities.
+Both are refused on the web host. Downloads accept only the fixed catalog URL,
+GitHub release assets and GitHub's release-asset redirects, with bounded sizes,
+timeouts and redirect counts. The frontend never fetches catalog URLs or writes
+catalog caches to browser storage.
 
 ## Try a native extension
 
 In either desktop design:
 
-1. Open **Settings → Extensions** and enable developer mode.
+1. Open **Settings → Apps → Install a local manifest**.
 2. Paste `examples/extensions/argocd.json` or `flux.json`, review the manifest,
    then install and grant `k8s.listCustomResource` (Flux also requests
    `k8s.listEvents` for its dashboard).
-3. Choose a cluster and open an extension page. The new design also adds pages
-   beneath **Extensions → extension name** in the cluster sidebar, with nested
-   page groups; its routes pin the cluster.
-   Classic opens pages inline in the manager with its own controls and theme.
-4. Open a Namespace's resource overview. Its **Extensions** section contains the
-   declared detail view and an **Extension actions** menu, scoped to that namespace.
+3. Open pages beneath **Apps → app name** in the connected cluster’s
+   sidebar in either desktop design. Classic opens separate app tabs; both designs pin the cluster. Settings has no cluster
+   selector or page launcher; it manages app-wide installation only.
+4. Open a Namespace's resource overview. Its **Apps** section contains the
+   declared detail view and an **App actions** menu, scoped to that namespace.
 5. Disable/remove the extension to remove its contributions, or install the same
    ID again to update it. Open views refresh against the new revision. JSON
    settings are preserved across updates and restarts, and deleted on removal.
 
 Installation and inventory discovery do not contact clusters. Page reads happen
 when opened; namespace detail contributions read only the selected resource's
-cluster and namespace. Refresh explicitly repeats a read. These are read-only
-lists; native Sync/Reconcile actions and arbitrary custom renderers are not part
-of this stage.
+cluster and namespace. Refresh explicitly repeats a read. Readers remain declarative and read-only. The host supplies resource inspection
+and explicitly confirmed GitOps actions, described below; arbitrary custom
+renderers and extension-defined write forwarding remain unsupported.
 
 The examples use the existing CRD reader. They do not install CRDs or connect to
 any cluster merely by validating the manifest.
@@ -152,8 +218,7 @@ The current PR includes the broker and local declarative app lifecycle. #163 sta
 1. **Native contract and broker (implemented):** executable manifest examples,
    collision/permission/input validation, revocation and real MCP consent tests.
 2. **Application lifecycle and declarative UI (local desktop implemented):** backend-owned install inventory,
-   grants and per-extension settings; atomic save/update/remove; developer mode
-   off by default for unsigned local manifests; signed distributed packages remain pending;
+   grants and per-extension settings; atomic save/update/remove; explicit installation review; official distributed manifests are signature-verified;
    enable/disable and contribution removal in both classic and new UI. One sample
    must visibly add a page, detail tab and menu action without editing app source.
    Cluster identity belongs in extension routes and broker calls. Web instances
@@ -175,7 +240,7 @@ Existing archive installations are excluded when the backend reads the inventory
 native installations, permissions, revisions and settings remain intact. The next
 successful inventory change removes retired entries from the saved file. Archive
 installation and the compatibility broker are no longer available. Install the
-native Flux or Argo CD JSON example through Settings → Extensions instead.
+native Flux or Argo CD JSON example through Settings → Apps instead.
 
 ## Native dashboard and navigation contributions
 
@@ -205,3 +270,48 @@ versions produce an explicit error, not a claim that the cluster has no Flux.
 
 Reconcile/suspend writes and arbitrary custom renderer code remain future native
 platform work.
+
+## Resource inspection and host actions
+
+User-facing extension management is named **Apps**. Internal `extensions.*`
+capability IDs, manifest IDs and existing routes remain stable.
+
+Click a resource row to open its overview: metadata, spec, conditions, status,
+labels/annotations, a read-only YAML manifest in the shared CodeEditor, and up to 100 resource-UID-filtered
+events. Event RBAC failures are shown separately and preserve the overview.
+The list stays visible beside the shared Inspector; Open tab promotes details to an independent resource tab. Existing native manifests need no update.
+
+The host derives the API group, kind, plural, version and scope from the enabled
+app's declared reader. `extensions.resource` and `extensions.action` reload the
+backend inventory and verify its revision and grants on every request. An app
+cannot rebind a reader to a write capability. These are host UI operations;
+installation does not grant extension code arbitrary patch access.
+
+Supported controls are resource-specific:
+
+- Flux Kustomizations, HelmReleases, sources, ImageRepositories and
+  ImageUpdateAutomations: Suspend, Resume, Reconcile.
+- Flux HelmReleases: also Force reconcile and Reset retries.
+- Argo CD Applications: Refresh status, Hard refresh, Sync. Sync does not enable
+  pruning; configured sync options and hooks still apply.
+- Other resources remain inspectable without invented or unsupported actions.
+
+Each write requires a review naming the pinned cluster and namespace/resource.
+The backend checks UID and resourceVersion and includes both in its conditional
+PATCH, rejecting stale/replaced resources. It rejects a second Argo CD sync
+while an operation is already present, reconciliation while suspended, and
+writes to a resource being deleted. Acknowledgement says **Request accepted**,
+not that reconciliation completed. API failures remain errors with no success
+message. Kubernetes RBAC still governs GET, events and PATCH.
+
+The implementation follows [Flux reconciliation and Helm actions](https://fluxcd.io/flux/components/helm/helmreleases/)
+and [Argo CD operations through Kubernetes](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-kubectl/).
+
+App resource lists request `useCrdColumns: true` through `extensions.read`.
+The host keeps the installed binding's API target and reads that CRD's
+`additionalPrinterColumns` for the exact served version. Columns use the same
+JSONPath renderer, priority filtering and Age deduplication as Custom Resources.
+The response includes column definitions alongside the rendered values so headers
+cannot drift from their data. If definition discovery fails, app-defined columns
+remain available with an explicit error notice. Dashboard reads retain their
+declared status-column mapping; signed manifests are not modified on disk.

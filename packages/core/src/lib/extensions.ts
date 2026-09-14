@@ -32,6 +32,7 @@ export interface ExtensionManifest {
   };
 }
 export interface InstalledExtension {
+  signatureProof?: {manifest:string;signature:number[]};
   manifest: ExtensionManifest;
   enabled: boolean;
   revision: number;
@@ -40,13 +41,11 @@ export interface InstalledExtension {
 }
 export interface ExtensionInventory {
   schemaVersion: number;
-  developerMode: boolean;
   nextRevision: number;
   plugins: InstalledExtension[];
 }
 export type ExtensionChange =
-  | { action: "developerMode"; enabled: boolean }
-  | { action: "install"; manifest: string; grants: string[] }
+  | { action: "install"; manifest: string; grants: string[]; signature?: number[] }
   | { action: "enable"; id: string; enabled: boolean }
   | { action: "remove"; id: string }
   | { action: "settings"; id: string; settings: Record<string, unknown> };
@@ -63,6 +62,8 @@ export async function configureExtensions(change: ExtensionChange) {
   return state;
 }
 export interface ExtensionResourceResult {
+  printerColumns?: Array<{name:string;jsonPath:string;type?:string}>;
+  columnsError?: string;
   items: Array<{
     name: string;
     namespace: string;
@@ -77,6 +78,7 @@ export const readExtension = <T = ExtensionResourceResult>(
   capability: string,
   context: string,
   namespace = "",
+  useCrdColumns = false,
 ) =>
   invokeCapability<T>("extensions.read", {
     id,
@@ -84,6 +86,7 @@ export const readExtension = <T = ExtensionResourceResult>(
     capability,
     context,
     namespace,
+    ...(useCrdColumns ? {useCrdColumns:true} : {}),
   });
 export function extensionRoute(
   context: string,
@@ -95,16 +98,58 @@ export function extensionRoute(
 }
 export function parseExtensionRoute(route: string) {
   const pieces = route.split("/");
-  if (pieces.length !== 6 || pieces[1] !== "extensions") return null;
+  if ((pieces.length !== 6 && pieces.length !== 7) || pieces[1] !== "extensions") return null;
   try {
     const [context, id, page, namespace] = pieces
       .slice(2)
       .map(decodeURIComponent);
-    return context && id && page ? { context, id, page, namespace } : null;
+    const resourceName = pieces.length === 7 ? decodeURIComponent(pieces[6]) : undefined;
+    if (pieces.length === 7 && !resourceName) return null;
+    return context && id && page ? { context, id, page, namespace, ...(resourceName ? { resourceName } : {}) } : null;
   } catch {
     return null;
   }
 }
 export function contributionKind(kind: string, group = "") {
   return kind.includes("/") ? kind : `${group}/${kind}`;
+}
+
+export interface ExtensionCatalogEntry {
+  id: string;
+  name: string;
+  description: string;
+  repository: string;
+  license: string;
+  release: { version: string; manifestUrl: string; sha256: string; srelensApiVersion: string; prerelease: boolean };
+  testedHost: { repository: string; revision: string };
+}
+export interface ExtensionCatalogSnapshot {
+  catalog: { schemaVersion: number; extensions: ExtensionCatalogEntry[] };
+  fetchedAt: number;
+  stale: boolean;
+  error: string | null;
+  hostApiVersion: string;
+  incompatible: string[];
+}
+export const listExtensionCatalog = (refresh = false) =>
+  invokeCapability<ExtensionCatalogSnapshot>("extensions.catalog", { refresh });
+/** Returns the exact checksum-verified bytes for explicit permission review. */
+export const reviewCatalogExtension = (id: string, sha256: string) =>
+  invokeCapability<{ manifest: string; signature?: number[] | null }>("extensions.catalogManifest", { id, sha256 });
+
+/** Host-selected resource identity; API group/kind are resolved from the installed app. */
+export interface ExtensionResourceSelection {
+  id: string; revision: number; capability: string; context: string; namespace: string; name: string;
+}
+export interface ExtensionResourceDetail {
+  resource: { apiVersion?: string; kind?: string; metadata: { name: string; namespace?: string; uid: string; resourceVersion: string; creationTimestamp?: string; labels?: Record<string,string>; annotations?: Record<string,string>; [key:string]: unknown }; spec?: Record<string, any>; status?: Record<string, any>; [key:string]: unknown };
+  actions: string[];
+  events?: Array<{type?:string;reason?:string;message?:string;count?:number}>;
+  eventsError?: string | null;
+}
+export const inspectExtensionResource = (resource: ExtensionResourceSelection) => invokeCapability<ExtensionResourceDetail>("extensions.resource", resource);
+export const actOnExtensionResource = (resource: ExtensionResourceSelection, action: string, uid: string, resourceVersion: string) => invokeCapability<{requested: boolean}>("extensions.action", {resource, action, uid, resourceVersion});
+
+export function extensionResourceRoute(context:string,id:string,page:string,namespace:string,name:string) {
+  return `${extensionRoute(context,id,page,namespace)}/${encodeURIComponent(name)}`;
 }

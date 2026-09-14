@@ -1,3 +1,5 @@
+import { ExtensionRequirements } from "./ExtensionRequirements";
+import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useState } from "react";
 import {
   configureExtensions,
@@ -8,27 +10,20 @@ import {
   type InstalledExtension,
 } from "@srelens/core";
 
+import { ExtensionCatalog } from "./ExtensionCatalog";
 import { ExtensionControls } from "./ExtensionControls";
 export { ExtensionControlsProvider } from "./ExtensionControls";
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 export { ExtensionResults } from "./ExtensionResults";
-import { ExtensionWorkspace } from "./ExtensionWorkspace";
+
 
 import { useExtensions } from "./inventoryStore";
 export { useExtensions } from "./inventoryStore";
 
-export function ExtensionManager({
-  contexts = [],
-  onOpen,
-}: {
-  contexts?: Array<{ name: string; label?: string }>;
-  onOpen?: (
-    plugin: InstalledExtension,
-    page: ExtensionContribution,
-    context: string,
-  ) => void;
-}) {
-  const { Button, Combobox } = useContext(ExtensionControls);
+export function ExtensionManager() {
+  const { Button, Tabs } = useContext(ExtensionControls);
+  const [tab, setTab] = useState("installed");
+  const [catalogOpened, setCatalogOpened] = useState(false);
   const inventory = useExtensions();
   const [source, setSource] = useState("");
   const [error, setError] = useState("");
@@ -36,13 +31,10 @@ export function ExtensionManager({
   const [removing, setRemoving] = useState<InstalledExtension | null>(null);
   const [review, setReview] = useState<{
     source: string;
+    signature?: number[];
     name: string;
     permissions: string[];
   } | null>(null);
-  const [context, setContext] = useState("");
-  const [opened, setOpened] = useState<{ id: string; page: string } | null>(
-    null,
-  );
   const [settings, setSettings] = useState<{ id: string; text: string } | null>(
     null,
   );
@@ -53,6 +45,7 @@ export function ExtensionManager({
       await configureExtensions(action);
       inventory.reload();
       setReview(null);
+      if (action.action === "install") setTab("installed");
       return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -64,60 +57,75 @@ export function ExtensionManager({
   if (!isTauri())
     return (
       <p className="extension-message">
-        Local extensions are available in the desktop app.
+        Local apps are available in the desktop app.
       </p>
     );
   if (inventory.status === "loading")
     return (
       <p role="status" className="extension-message">
-        Loading extensions…
+        Loading apps…
       </p>
     );
   if (inventory.status === "error")
     return <ErrorNotice message={inventory.error} retry={inventory.reload} />;
   const state = inventory.data!;
-  const enabled = state.plugins.filter((p) => p.enabled && state.developerMode);
-  const selected = enabled.find((p) => p.manifest.id === opened?.id);
-  const selectedPage = selected?.manifest.contributions.pages.find(
-    (p) => p.id === opened?.page,
-  );
   return (
     <div className="extension-manager">
       <div className="extension-toolbar">
-        <strong>Extensions</strong>
-        <label>
-          <input
-            aria-label="Extension developer mode"
-            type="checkbox"
-            checked={state.developerMode}
-            disabled={busy}
-            onChange={(e) =>
-              void change({
-                action: "developerMode",
-                enabled: e.target.checked,
-              })
-            }
-          />{" "}
-          Developer mode
-        </label>
+        <strong>Apps</strong>
         <Button variant="secondary" onClick={inventory.reload}>
           Refresh
         </Button>
       </div>
-      {state.developerMode && (
-        <p className="extension-warning" role="status">
-          Developer mode: unsigned local extensions are allowed. Only read-only
-          custom-resource manifests are supported.
-        </p>
-      )}
       {error && (
         <p role="alert" className="extension-error">
           {error}
         </p>
       )}
+      <Tabs variant="underline" label="App settings" tabs={[
+        { id: "installed", label: "Apps" },
+        { id: "catalog", label: "Catalog" },
+      ]} active={tab} onChange={(next) => { setTab(next); if (next === "catalog") setCatalogOpened(true); }} />
+        {review && (
+          <section className="extension-install extension-permission-review" aria-label="Review app permissions">
+            <p>
+              <strong>{review.name}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) requests:{" "}
+              {review.permissions.join(", ")}. Installing an existing ID
+              replaces its manifest and refreshes its open pages.
+            </p>
+            <Button
+              disabled={busy}
+              onClick={() =>
+                void change({
+                  action: "install",
+                  manifest: review.source,
+                  ...(review.signature ? {signature: review.signature} : {}),
+                  grants: review.permissions,
+                })
+              }
+            >
+              Install and grant permissions
+            </Button>
+            <Button variant="secondary" onClick={() => setReview(null)}>
+              Cancel
+            </Button>
+          </section>
+        )}
+      <div hidden={tab !== "catalog"}>
+        {catalogOpened && (
+      <ExtensionCatalog autoLoad installed={state.plugins} onReview={(manifest, signature) => {
+        const parsed = JSON.parse(manifest);
+        setReview({ source: manifest, signature, name: parsed.name, permissions: parsed.permissions });
+        setError("");
+      }} />
+        )}
+      </div>
+      <div hidden={tab !== "installed"}>
+      <details className="extension-local-tools">
+        <summary>Install a local manifest</summary>
       <div className="extension-install">
         <label htmlFor="extension-manifest">
-          Local extension manifest (JSON)
+          Local app manifest (JSON)
         </label>
         <textarea
           id="extension-manifest"
@@ -131,7 +139,7 @@ export function ExtensionManager({
           disabled={busy}
         />
         <Button
-          disabled={!source.trim() || !state.developerMode || busy}
+          disabled={!source.trim() || busy}
           onClick={() => {
             try {
               const m = JSON.parse(source);
@@ -150,45 +158,25 @@ export function ExtensionManager({
         >
           Review manifest
         </Button>
-        {review && (
-          <section aria-label="Review extension permissions">
-            <p>
-              <strong>{review.name}</strong> requests:{" "}
-              {review.permissions.join(", ")}. Installing an existing ID
-              replaces its manifest and refreshes its open pages.
-            </p>
-            <Button
-              disabled={busy}
-              onClick={() =>
-                void change({
-                  action: "install",
-                  manifest: review.source,
-                  grants: review.permissions,
-                })
-              }
-            >
-              Install and grant permissions
-            </Button>
-            <Button variant="secondary" onClick={() => setReview(null)}>
-              Cancel
-            </Button>
-          </section>
-        )}
       </div>
+      </details>
+
+      <p className="extension-message extension-catalog-meta">Apps are installed app-wide and available across clusters. Each page checks the APIs it needs when opened.</p>
       {state.plugins.length === 0 && (
-        <p className="extension-message">No extensions installed.</p>
+        <p className="extension-message">No apps installed.</p>
       )}
       {state.plugins.map((plugin) => (
         <section className="extension-installed" key={plugin.manifest.id}>
           <div className="extension-toolbar">
+            <ExtensionLogo id={plugin.manifest.id} name={plugin.manifest.name} size={24} />
             <strong>{plugin.manifest.name}</strong>
-            <span>{plugin.manifest.version} · Unsigned local</span>
+            <span>{plugin.manifest.version} · {plugin.signatureProof ? "Signed by srelens" : "Unsigned local"}</span>
             <label>
               <input
                 aria-label={`Enable ${plugin.manifest.name}`}
                 type="checkbox"
                 checked={plugin.enabled}
-                disabled={busy || !state.developerMode}
+                disabled={busy}
                 onChange={(e) =>
                   void change({
                     action: "enable",
@@ -225,17 +213,17 @@ export function ExtensionManager({
         </section>
       ))}
       {removing && (
-        <section className="extension-install" role="alertdialog" aria-label="Remove extension" onKeyDown={e=>{if(e.key==="Escape" && !busy)setRemoving(null);}}>
+        <section className="extension-install" role="alertdialog" aria-label="Remove app" onKeyDown={e=>{if(e.key==="Escape" && !busy)setRemoving(null);}}>
           <strong>Remove {removing.manifest.name}?</strong>
-          <p>This removes the extension and its saved settings.</p>
+          <p>This removes the app and its saved settings.</p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={()=>setRemoving(null)}>Cancel</Button>
-          <Button variant="danger" disabled={busy} onClick={()=>{void change({action:"remove",id:removing.manifest.id}).then(removed=>{if(removed)setRemoving(null);});}}>Remove extension</Button>
+          <Button variant="danger" disabled={busy} onClick={()=>{void change({action:"remove",id:removing.manifest.id}).then(removed=>{if(removed)setRemoving(null);});}}>Remove app</Button>
         </section>
       )}
       {settings && (
         <section className="extension-install">
           <label htmlFor="extension-settings">
-            Extension settings (JSON object)
+            App settings (JSON object)
           </label>
           <textarea
             id="extension-settings"
@@ -267,67 +255,13 @@ export function ExtensionManager({
           </Button>
         </section>
       )}
-      {enabled.length > 0 && (
-        <section>
-          <div className="extension-toolbar">
-            <strong>Extension pages</strong>
-            <Combobox
-              ariaLabel="Extension cluster"
-              value={context}
-              onValueChange={(value) => {
-                setContext(value);
-                setOpened(null);
-              }}
-              options={contexts.map((c) => ({
-                value: c.name,
-                label: c.label ?? c.name,
-              }))}
-              placeholder="Choose a cluster"
-            />
-          </div>
-          {enabled.map((plugin) => (
-            <div key={plugin.manifest.id}>
-              <h3 className="extension-message">{plugin.manifest.name}</h3>
-              <div className="extension-toolbar">
-                {plugin.manifest.contributions.pages.map((page) => (
-                  <Button
-                    variant="secondary"
-                    key={page.id}
-                    disabled={!context}
-                    onClick={() =>
-                      onOpen
-                        ? onOpen(plugin, page, context)
-                        : setOpened({ id: plugin.manifest.id, page: page.id })
-                    }
-                  >
-                    {page.group ? `${page.group} · ${page.title}` : page.title}
-                  </Button>
-                ))}
-              </div>
-            </div>
-          ))}
-        </section>
-      )}
-      {selected && selectedPage && (
-        <section>
-          <h3 className="extension-message">{selectedPage.title}</h3>
-          <ExtensionWorkspace
-            key={`${context}/${selected.manifest.id}`}
-            plugin={selected}
-            page={selectedPage}
-            context={context}
-            onPage={(page) => setOpened({ id: selected.manifest.id, page })}
-          />
-        </section>
-      )}
+      </div>
     </div>
   );
 }
 export function useExtensionContributions(kind: string, group?: string) {
   const inventory = useExtensions();
-  const plugins = inventory.data?.developerMode
-    ? inventory.data.plugins.filter((p) => p.enabled)
-    : [];
+  const plugins = inventory.data?.plugins.filter((p) => p.enabled) ?? [];
   const qualified = contributionKind(kind, group);
   return {
     inventory,
@@ -383,10 +317,10 @@ export function ExtensionResourceSlot({
   return (
     <section className="extension-installed extension-resource-slot">
       <div className="extension-toolbar">
-        <strong>Extensions</strong>
+        <strong>Apps</strong>
         {actions.length > 0 && (
           <details>
-            <summary>Extension actions</summary>
+            <summary>App actions</summary>
             {actions.map((c) => (
               <Button
                 variant="secondary"
@@ -402,7 +336,7 @@ export function ExtensionResourceSlot({
       {panelTabs.length > 0 && (
         <Tabs
           variant="underline"
-          label="Extension views"
+          label="App views"
           tabs={panelTabs.map((c) => ({
             id: c.id,
             label: c.contribution.title,
@@ -412,6 +346,7 @@ export function ExtensionResourceSlot({
         />
       )}
       {current && inventory.status !== "loading" && (
+        <ExtensionRequirements plugin={current.plugin} page={current.contribution} context={context} refresh={0}>
         <ExtensionResults
           key={`${context}/${kind}/${namespace}/${name}/${current.id}`}
           plugin={current.plugin}
@@ -419,22 +354,14 @@ export function ExtensionResourceSlot({
           context={context}
           namespace={ns}
         />
+        </ExtensionRequirements>
       )}
     </section>
   );
 }
 
-/** Kept visible outside Settings while unsigned local extensions are enabled. */
-export function ExtensionWarning() {
-  const inventory = useExtensions();
-  if (
-    !inventory.data?.developerMode ||
-    !inventory.data.plugins.some((p) => p.enabled)
-  )
-    return null;
-  return (
-    <div className="extension-warning extension-banner" role="status">
-      Developer mode · Unsigned local extensions enabled
-    </div>
-  );
-}
+export { ExtensionWorkspace } from "./ExtensionWorkspace";
+export { ExtensionLogo } from "./ExtensionLogo";
+
+export { ExtensionResourceNavigation } from "./resourceNavigation";
+export { ExtensionResourceDetails } from "./ExtensionResourceDetails";
