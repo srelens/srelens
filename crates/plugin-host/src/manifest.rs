@@ -31,25 +31,52 @@ fn unsupported_api(range: &str) -> String {
         SUPPORTED_API_VERSIONS.join(", ")
     )
 }
-/// Manifest fields added after API 0.1, each with the API version that introduced it. A
-/// manifest may use a field only when its range negotiates to that version or later.
-/// Paths are dot-separated from the manifest root; `[]` steps into every element of an
-/// array, and the last segment always names a field. Empty while 0.1 is the only version.
-pub const API_FIELDS: &[(&str, &str)] = &[];
+/// A manifest field that is not part of every supported API version.
+#[derive(Debug, Clone, Copy)]
+pub struct ApiField {
+    /// Dot-separated from the manifest root; `[]` steps into every element of an array,
+    /// and the last segment always names a field.
+    pub path: &'static str,
+    /// The first API version with the field.
+    pub introduced: &'static str,
+    /// The first API version without it, when a later line removed or renamed it.
+    pub removed: Option<&'static str>,
+}
 
-/// Rejects a field in `raw` that `fields` says arrived after `negotiated`.
+/// Manifest fields added or removed after API 0.1. A manifest may use a field only when
+/// its range negotiates to a version inside the field's availability. A rename is a
+/// removal plus an addition. Empty while 0.1 is the only version.
+pub const API_FIELDS: &[ApiField] = &[];
+
+/// Rejects a field in `raw` that is not available in the `negotiated` API version.
 pub fn check_api_fields_in(
     raw: &Value,
     negotiated: &semver::Version,
-    fields: &[(&str, &str)],
+    fields: &[ApiField],
 ) -> Result<(), String> {
-    for (path, introduced) in fields {
-        let introduced = semver::Version::parse(introduced)
-            .map_err(|e| format!("invalid API version for {path}: {e}"))?;
-        if *negotiated < introduced && field_present(raw, path) {
+    let parse = |field: &ApiField, version: &str| {
+        semver::Version::parse(version)
+            .map_err(|e| format!("invalid API version for {}: {e}", field.path))
+    };
+    for field in fields {
+        if !field_present(raw, field.path) {
+            continue;
+        }
+        let introduced = parse(field, field.introduced)?;
+        if *negotiated < introduced {
             return Err(format!(
-                "`{path}` requires API {introduced}; this manifest's srelensApiVersion is served as API {negotiated}"
+                "`{}` requires API {introduced}; this manifest's srelensApiVersion is served as API {negotiated}",
+                field.path
             ));
+        }
+        if let Some(removed) = field.removed {
+            let removed = parse(field, removed)?;
+            if *negotiated >= removed {
+                return Err(format!(
+                    "`{}` was removed in API {removed}; this manifest's srelensApiVersion is served as API {negotiated}",
+                    field.path
+                ));
+            }
         }
     }
     Ok(())

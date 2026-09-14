@@ -335,18 +335,39 @@ fn a_manifest_for_a_newer_api_is_told_the_version_it_needs_not_an_unknown_field(
 }
 
 #[test]
-fn fields_newer_than_the_negotiated_api_version_are_rejected() {
-    use srelens_plugin_host::{check_api_fields_in, API_FIELDS, SUPPORTED_API_VERSIONS};
+fn fields_outside_the_negotiated_api_version_are_rejected() {
+    use srelens_plugin_host::{check_api_fields_in, ApiField, API_FIELDS, SUPPORTED_API_VERSIONS};
     let version = |v: &str| semver::Version::parse(v).unwrap();
     let fields = [
-        ("contributions.dashboardCards", "0.2.0"),
-        ("contributions.pages[].badges", "0.2.0"),
+        ApiField {
+            path: "contributions.dashboardCards",
+            introduced: "0.2.0",
+            removed: None,
+        },
+        ApiField {
+            path: "contributions.pages[].badges",
+            introduced: "0.2.0",
+            removed: None,
+        },
+        // A 0.1 field a later line removed; a rename is this plus an addition.
+        ApiField {
+            path: "contributions.rowActions",
+            introduced: "0.1.0",
+            removed: Some("0.2.0"),
+        },
     ];
-    let value = manifest();
-    assert!(check_api_fields_in(&value, &version("0.1.0"), &fields).is_ok());
+    let without_row_actions = || {
+        let mut value = manifest();
+        value["contributions"]
+            .as_object_mut()
+            .unwrap()
+            .remove("rowActions");
+        value
+    };
+    assert!(check_api_fields_in(&manifest(), &version("0.1.0"), &fields).is_ok());
 
     // Declaring ^0.1 while using a 0.2 field fails even on a host that knows the field.
-    let mut top_level = manifest();
+    let mut top_level = without_row_actions();
     top_level["contributions"]["dashboardCards"] = json!([]);
     let error = check_api_fields_in(&top_level, &version("0.1.0"), &fields).unwrap_err();
     assert!(
@@ -356,14 +377,33 @@ fn fields_newer_than_the_negotiated_api_version_are_rejected() {
     assert!(error.contains("served as API 0.1.0"), "{error}");
     assert!(check_api_fields_in(&top_level, &version("0.2.0"), &fields).is_ok());
 
-    let mut per_page = manifest();
+    let mut per_page = without_row_actions();
     per_page["contributions"]["pages"][0]["badges"] = json!([]);
     assert!(check_api_fields_in(&per_page, &version("0.1.0"), &fields).is_err());
     assert!(check_api_fields_in(&per_page, &version("0.2.0"), &fields).is_ok());
 
-    // Every gated field names an API version this host actually supports.
-    for (field, introduced) in API_FIELDS {
-        assert!(SUPPORTED_API_VERSIONS.contains(introduced), "{field}");
+    // A field removed in 0.2 is still accepted under 0.1 and rejected under 0.2.
+    let removed = check_api_fields_in(&manifest(), &version("0.2.0"), &fields).unwrap_err();
+    assert!(
+        removed.contains("`contributions.rowActions` was removed in API 0.2.0"),
+        "{removed}"
+    );
+    assert!(check_api_fields_in(&without_row_actions(), &version("0.2.0"), &fields).is_ok());
+
+    // Every gated field names a supported version and is removed only after it arrived.
+    for field in API_FIELDS {
+        assert!(
+            SUPPORTED_API_VERSIONS.contains(&field.introduced),
+            "{}",
+            field.path
+        );
+        if let Some(removed) = field.removed {
+            assert!(
+                version(removed) > version(field.introduced),
+                "{}",
+                field.path
+            );
+        }
     }
 }
 

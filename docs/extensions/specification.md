@@ -74,11 +74,17 @@ Why a new field needs a new minor even though it is optional: manifests are stri
 (see below), so a host that predates the field would reject it. Requiring the minor
 turns that into a clear "requires API 0.x" message.
 
-The host enforces this. Every manifest field added after API 0.1 is listed with the
-API version that introduced it (`API_FIELDS` in `crates/plugin-host/src/manifest.rs`).
-A manifest that uses such a field while its range negotiates to an older version is
-rejected, even by a host that knows the field. Otherwise the manifest would install on
-newer hosts and fail on older ones that still match its range.
+The host enforces this for fields. `API_FIELDS` in `crates/plugin-host/src/manifest.rs`
+lists every manifest field added or removed after API 0.1, with the API versions it is
+available in. A rename is a removal plus an addition.
+
+A manifest that uses a field outside the version its range negotiates to is rejected,
+even by a host that knows the field. That covers a field a later line added, and one a
+later line removed or renamed. Otherwise the manifest would install on some hosts and
+fail on others that still match its range.
+
+A change that narrows the values a field accepts, rather than adding or removing the
+field, must add a check keyed on the negotiated API version in the same change.
 
 ## Deprecation
 
