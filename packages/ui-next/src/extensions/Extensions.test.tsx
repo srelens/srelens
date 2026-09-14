@@ -55,6 +55,23 @@ it("shows backend errors and retries instead of claiming no apps", async () => {
   fireEvent.click(screen.getByText("Retry"));
   expect(await screen.findByText("No apps installed.")).toBeTruthy();
 });
+it("says why an app was quarantined and does not offer to re-enable it", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [
+      { ...plugin, enabled: false, quarantined: "App publisher signature is invalid" },
+    ],
+  } as any);
+  render(<ExtensionManager />);
+  expect(
+    (await screen.findByText(/App publisher signature is invalid/)).textContent,
+  ).toContain("Remove it or reinstall it from the Catalog");
+  const toggle = screen.getByLabelText("Enable GitOps") as HTMLInputElement;
+  expect(toggle.checked).toBe(false);
+  expect(toggle.disabled).toBe(true);
+  expect(screen.getByText("Remove")).toBeTruthy();
+});
 it("offers native installation without a developer-mode toggle", async () => {
   render(<ExtensionManager />);
   expect(await screen.findByText("Install a local manifest")).toBeTruthy();

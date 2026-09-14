@@ -33,6 +33,8 @@ export interface ExtensionManifest {
 }
 export interface InstalledExtension {
   signatureProof?: {manifest:string;signature:number[]};
+  /** Set by the host when a stored app failed re-verification; the app is disabled. */
+  quarantined?: string;
   manifest: ExtensionManifest;
   enabled: boolean;
   revision: number;

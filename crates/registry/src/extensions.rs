@@ -19,6 +19,10 @@ use std::{
 pub struct Installed {
     #[serde(default, rename = "signatureProof", skip_serializing_if = "Option::is_none")]
     signature_proof: Option<SignatureProof>,
+    /// Why this host refused to trust the stored entry when loading it. Recomputed
+    /// on every read, reported to the UI, and never written to disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quarantined: Option<String>,
     manifest: Manifest,
     grants: Vec<String>,
     enabled: bool,
@@ -126,29 +130,50 @@ fn read(path: &Path) -> Result<Inventory, String> {
             }
         }
     }
-    let state: Inventory =
+    let mut state: Inventory =
         serde_json::from_value(stored).map_err(|e| format!("parse extension inventory: {e}"))?;
     if state.schema_version != 1 {
         return Err("unsupported extension inventory version".into());
     }
     let mut ids = std::collections::BTreeSet::new();
     for plugin in &state.plugins {
-        plugin.manifest.validate()?;
-        if let Some(proof) = &plugin.signature_proof {
-            signing::verify(proof.manifest.as_bytes(), &proof.signature)?;
-            let parsed = Manifest::parse(&proof.manifest)?;
-            if serde_json::to_value(parsed).map_err(|e| e.to_string())? != serde_json::to_value(&plugin.manifest).map_err(|e| e.to_string())? {
-                return Err("Installed app does not match its signed manifest".into());
-            }
-        }
-        if !ids.insert(&plugin.manifest.id) {
+        if !ids.insert(plugin.manifest.id.clone()) {
             return Err("duplicate installed extension".into());
+        }
+    }
+    // One entry this host can no longer trust (a rotated key, a tampered proof, an API
+    // version it dropped) is disabled on its own instead of failing every other app.
+    for plugin in &mut state.plugins {
+        plugin.quarantined = reverify(plugin).err();
+        if plugin.quarantined.is_some() {
+            plugin.enabled = false;
         }
     }
     Ok(state)
 }
+fn reverify(plugin: &Installed) -> Result<(), String> {
+    plugin.manifest.validate()?;
+    if let Some(proof) = &plugin.signature_proof {
+        signing::verify(proof.manifest.as_bytes(), &proof.signature)?;
+        let parsed = Manifest::parse(&proof.manifest)?;
+        if serde_json::to_value(parsed).map_err(|e| e.to_string())?
+            != serde_json::to_value(&plugin.manifest).map_err(|e| e.to_string())?
+        {
+            return Err("Installed app does not match its signed manifest".into());
+        }
+    }
+    Ok(())
+}
 fn write(path: &Path, state: &Inventory) -> Result<(), String> {
-    let raw = serde_json::to_vec_pretty(state).map_err(|e| e.to_string())?;
+    // Quarantine is recomputed on every load. Persisting it would also make the file
+    // unreadable to hosts that predate the field.
+    let mut stored = serde_json::to_value(state).map_err(|e| e.to_string())?;
+    if let Some(plugins) = stored.get_mut("plugins").and_then(Value::as_array_mut) {
+        for plugin in plugins.iter_mut().filter_map(Value::as_object_mut) {
+            plugin.remove("quarantined");
+        }
+    }
+    let raw = serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())?;
     if raw.len() > 1024 * 1024 {
         return Err("extension inventory exceeds 1 MiB".into());
     }
@@ -296,6 +321,14 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 Some(SignatureProof { manifest: manifest.clone(), signature })
             } else { None };
             let manifest = Manifest::parse(&manifest)?;
+            // Without this, a pasted manifest could replace a signed app, or take an
+            // official ID and its logo, differing from the real one only by a label.
+            if signature_proof.is_none() && signing::reserved(&manifest.id) {
+                return Err(format!(
+                    "App ID {} is reserved for signed srelens releases. Install it from the Catalog, or give your local manifest its own ID.",
+                    manifest.id
+                ));
+            }
             validate_app(&manifest, &grants, core)?;
             let revision = state.next_revision;
             state.next_revision = revision
@@ -308,6 +341,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 .map(|i| state.plugins.remove(i));
             state.plugins.push(Installed {
                 signature_proof,
+                quarantined: None,
                 manifest,
                 grants,
                 enabled: true,
@@ -325,6 +359,11 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 .find(|p| p.manifest.id == id)
                 .ok_or("Extension is not installed")?;
             if enabled {
+                if let Some(reason) = &p.quarantined {
+                    return Err(format!(
+                        "This app can't be enabled: {reason}. Remove it or reinstall it from the Catalog."
+                    ));
+                }
                 validate_app(&p.manifest, &p.grants, core)?;
             }
             p.enabled = enabled;
@@ -485,10 +524,25 @@ mod tests {
         let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         stored["plugins"][0]["manifest"]["name"] = json!("Tampered");
         fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
-        assert!(read(&path).err().unwrap().contains("does not match"));
+        let state = read(&path).unwrap();
+        assert!(!state.plugins[0].enabled);
+        assert!(state.plugins[0]
+            .quarantined
+            .as_deref()
+            .unwrap()
+            .contains("does not match"));
     }
+    /// The example manifest under an unreserved ID, as a local author would install it.
     fn manifest() -> String {
-        include_str!("../../../examples/extensions/argocd.json").into()
+        include_str!("../../../examples/extensions/argocd.json")
+            .replace("\"org.srelens.argocd\"", "\"org.example.argocd\"")
+    }
+    fn signed_argocd() -> Configure {
+        Configure::Install {
+            signature: Some(include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec()),
+            manifest: include_str!("../../../examples/extensions/argocd.json").into(),
+            grants: vec!["k8s.listCustomResource".into()],
+        }
     }
     #[test]
     fn events_are_an_explicit_read_only_grant() {
@@ -567,11 +621,11 @@ mod tests {
             .invoke("extensions.list", json!({}))
             .await
             .unwrap();
-        assert_eq!(state["plugins"][0]["manifest"]["id"], "org.srelens.argocd");
+        assert_eq!(state["plugins"][0]["manifest"]["id"], "org.example.argocd");
         assert_eq!(state["plugins"][0]["enabled"], true);
         reg.invoke(
             "extensions.configure",
-            json!({"action":"settings","id":"org.srelens.argocd","settings":{"team":"platform"}}),
+            json!({"action":"settings","id":"org.example.argocd","settings":{"team":"platform"}}),
         )
         .await
         .unwrap();
@@ -582,7 +636,7 @@ mod tests {
         assert_eq!(state["plugins"][0]["settings"]["team"], "platform");
         reg.invoke(
             "extensions.configure",
-            json!({"action":"enable","id":"org.srelens.argocd","enabled":false}),
+            json!({"action":"enable","id":"org.example.argocd","enabled":false}),
         )
         .await
         .unwrap();
@@ -591,13 +645,13 @@ mod tests {
         assert!(reg
             .invoke(
                 "extensions.configure",
-                json!({"action":"enable","id":"org.srelens.argocd","enabled":true})
+                json!({"action":"enable","id":"org.example.argocd","enabled":true})
             )
             .await
             .is_ok());
         reg.invoke(
             "extensions.configure",
-            json!({"action":"remove","id":"org.srelens.argocd"}),
+            json!({"action":"remove","id":"org.example.argocd"}),
         )
         .await
         .unwrap();
@@ -659,7 +713,7 @@ mod tests {
         let revision = install(&path, core.clone());
         let mut reader = Registry::new();
         register(&mut reader, path.clone(), core.clone());
-        let args = json!({"id":"org.srelens.argocd","revision":revision,"capability":"applications","context":"staging","namespace":"argo"});
+        let args = json!({"id":"org.example.argocd","revision":revision,"capability":"applications","context":"staging","namespace":"argo"});
         let output = reader
             .invoke("extensions.read", args.clone())
             .await
@@ -698,7 +752,7 @@ mod tests {
             &path,
             core.clone(),
             Configure::Enable {
-                id: "org.srelens.argocd".into(),
+                id: "org.example.argocd".into(),
                 enabled: false,
             },
         )
@@ -711,7 +765,7 @@ mod tests {
             &path,
             core.clone(),
             Configure::Enable {
-                id: "org.srelens.argocd".into(),
+                id: "org.example.argocd".into(),
                 enabled: true,
             },
         )
@@ -721,7 +775,7 @@ mod tests {
             &path,
             core.clone(),
             Configure::Settings {
-                id: "org.srelens.argocd".into(),
+                id: "org.example.argocd".into(),
                 settings: json!({"team":"platform"}).as_object().unwrap().clone(),
             },
         )
@@ -743,7 +797,7 @@ mod tests {
             &path,
             core,
             Configure::Remove {
-                id: "org.srelens.argocd".into(),
+                id: "org.example.argocd".into(),
             },
         )
         .unwrap();
@@ -880,6 +934,140 @@ mod tests {
         let state = read(&path).unwrap();
         assert_eq!(state.plugins.len(), 9);
         assert_eq!(state.next_revision, 10);
+    }
+    fn find<'a>(state: &'a Inventory, id: &str) -> &'a Installed {
+        state.plugins.iter().find(|p| p.manifest.id == id).unwrap()
+    }
+    #[tokio::test]
+    async fn one_app_failing_reverification_is_quarantined_without_breaking_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let core = fake_core();
+        mutate(&path, core.clone(), signed_argocd()).unwrap();
+        let local = install(&path, core.clone());
+        let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let signed = stored["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|p| p["manifest"]["id"] == "org.srelens.argocd")
+            .unwrap();
+        let byte = &mut stored["plugins"][signed]["signatureProof"]["signature"][0];
+        *byte = json!(byte.as_u64().unwrap() ^ 1);
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let state = read(&path).unwrap();
+        let quarantined = find(&state, "org.srelens.argocd");
+        assert!(!quarantined.enabled);
+        let reason = quarantined.quarantined.clone().unwrap();
+        assert!(reason.contains("signature"), "{reason}");
+        let healthy = find(&state, "org.example.argocd");
+        assert!(healthy.enabled && healthy.quarantined.is_none());
+
+        let mut reg = Registry::new();
+        register(&mut reg, path.clone(), core.clone());
+        let listed = reg.invoke("extensions.list", json!({})).await.unwrap();
+        assert!(listed["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["quarantined"] == json!(reason)));
+        let read_args = |id: &str, revision: u64| json!({"id":id,"revision":revision,"capability":"applications","context":"staging","namespace":"argo"});
+        assert!(reg
+            .invoke("extensions.read", read_args("org.example.argocd", local))
+            .await
+            .is_ok());
+        assert!(reg
+            .invoke(
+                "extensions.read",
+                read_args("org.srelens.argocd", quarantined.revision)
+            )
+            .await
+            .is_err());
+        let refused = mutate(
+            &path,
+            core.clone(),
+            Configure::Enable {
+                id: "org.srelens.argocd".into(),
+                enabled: true,
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(refused.contains(&reason), "{refused}");
+
+        // Saving another change persists the disable, never the computed reason.
+        mutate(
+            &path,
+            core.clone(),
+            Configure::Settings {
+                id: "org.example.argocd".into(),
+                settings: Default::default(),
+            },
+        )
+        .unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(saved["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p.get("quarantined").is_none()));
+        assert_eq!(saved["plugins"][signed]["enabled"], false);
+
+        // Reinstalling the verified release clears the quarantine.
+        mutate(&path, core, signed_argocd()).unwrap();
+        let state = read(&path).unwrap();
+        let restored = find(&state, "org.srelens.argocd");
+        assert!(restored.enabled && restored.quarantined.is_none());
+    }
+    #[test]
+    fn a_manifest_this_host_no_longer_accepts_is_quarantined_but_duplicates_stay_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        install(&path, fake_core());
+        let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        stored["plugins"][0]["manifest"]["srelensApiVersion"] = json!("^99");
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        let state = read(&path).unwrap();
+        assert!(!state.plugins[0].enabled);
+        assert!(state.plugins[0]
+            .quarantined
+            .as_deref()
+            .unwrap()
+            .contains("requires API"));
+        let copy = stored["plugins"][0].clone();
+        stored["plugins"].as_array_mut().unwrap().push(copy);
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert!(read(&path).err().unwrap().contains("duplicate"));
+    }
+    #[test]
+    fn unsigned_installs_cannot_claim_the_reserved_official_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let core = fake_core();
+        let official = include_str!("../../../examples/extensions/argocd.json");
+        let unsigned = |manifest: &str| Configure::Install {
+            signature: None,
+            manifest: manifest.into(),
+            grants: vec!["k8s.listCustomResource".into()],
+        };
+        let refused = mutate(&path, core.clone(), unsigned(official))
+            .err()
+            .unwrap();
+        assert!(refused.contains("reserved"), "{refused}");
+        assert!(read(&path).unwrap().plugins.is_empty());
+
+        // A signed install cannot be replaced by an unsigned manifest under the same ID.
+        mutate(&path, core.clone(), signed_argocd()).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(mutate(&path, core.clone(), unsigned(official))
+            .err()
+            .unwrap()
+            .contains("reserved"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        let lookalike = official.replace("\"org.srelens.argocd\"", "\"org.srelensx.argocd\"");
+        assert!(mutate(&path, core, unsigned(&lookalike)).is_ok());
     }
     #[test]
     fn facade_refuses_a_host_reader_that_requires_stronger_consent() {
