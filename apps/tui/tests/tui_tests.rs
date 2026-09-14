@@ -5259,7 +5259,7 @@ mod tests {
         use ratatui::widgets::BorderType;
         use srelens_tui::theme::{HeaderStyle, Theme, ThemeId, ALL_THEMES};
 
-        assert_eq!(ALL_THEMES.len(), 12);
+        assert_eq!(ALL_THEMES.len(), 15);
 
         // Test theme lookup and setting by id/name
         let nord = Theme::set_theme_by_name("nord");
@@ -5326,6 +5326,23 @@ mod tests {
         assert_eq!(Theme::active_palette().id, ThemeId::OneDark);
         assert_eq!(Theme::header_style(), HeaderStyle::Standard);
         assert_eq!(Theme::border_type(), BorderType::Plain);
+
+        let sre_hc = Theme::set_theme_by_name("sre-high-contrast");
+        assert!(sre_hc.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::SreHighContrast);
+        assert_eq!(Theme::active_palette().label, ratatui::style::Color::Rgb(203, 213, 225));
+
+        let sre_alias = Theme::set_theme_by_name("contrast");
+        assert!(sre_alias.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::SreHighContrast);
+
+        let storm = Theme::set_theme_by_name("tokyo-storm");
+        assert!(storm.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::TokyoStorm);
+
+        let github = Theme::set_theme_by_name("github-dark-hc");
+        assert!(github.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::GitHubDarkHc);
 
         // Reset to default Mocha
         let mocha = Theme::set_theme_by_name("catppuccin-mocha");
@@ -7043,8 +7060,10 @@ mod tests {
         }));
 
         let mut argo_state = ArgoViewState::new();
+        let apps = vec![app1, app2];
         argo_state.set_applications(
-            vec![app1, app2],
+            apps.clone(),
+            apps,
             true,
             Some("mgmt-hub".to_string()),
         );

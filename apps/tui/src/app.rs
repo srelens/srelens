@@ -1326,7 +1326,9 @@ impl App {
         if let ActiveView::Argo(argo) = &mut self.active_view {
             self.argo_refreshing = false;
             argo.applications.clear();
+            argo.all_applications.clear();
             argo.is_loading = true;
+            self.refresh_argo_applications();
         }
         self.set_toast(format!("Switched to context '{}'", self.active_context), Theme::status_ok());
         self.refresh_cluster_info();
@@ -1663,6 +1665,9 @@ impl App {
                         KeyCode::Char('8') => {
                             self.modal = None;
                             self.switch_view_to_kind(ResourceKind::TuiConfig).await;
+                        }
+                        KeyCode::Char('9') => {
+                            self.set_toast("Already viewing feature banner (:banner)".to_string(), Theme::status_ok());
                         }
                         _ => {}
                     }
@@ -3649,6 +3654,11 @@ impl App {
                             self.open_argo_detail(app, hub_ctx);
                         }
                     }
+                    KeyCode::Char('x') => {
+                        if let Some(app) = sel_app {
+                            self.open_action_palette("Application".to_string(), app.name.clone(), Some(app.namespace.clone()));
+                        }
+                    }
                     KeyCode::Char('s') => {
                         if let Some(app) = sel_app {
                             self.modal = Some(Modal::Confirm {
@@ -3697,6 +3707,17 @@ impl App {
                             } else {
                                 self.set_toast("Application has no repoURL configured".to_string(), Theme::status_warn());
                             }
+                        }
+                    }
+                    KeyCode::Char('a') => {
+                        if argo.is_remote_hub {
+                            argo.toggle_show_all();
+                            let msg = if argo.show_all_hub_apps {
+                                "Showing all Hub cluster applications"
+                            } else {
+                                "Showing spoke cluster filtered applications"
+                            };
+                            self.set_toast(msg.to_string(), Theme::status_ok());
                         }
                     }
                     KeyCode::Char('r') => {
@@ -4973,6 +4994,40 @@ impl App {
                             let _ = copy_to_clipboard(&url_clone);
                         });
                         self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                    }
+                    KeyCode::Enter | KeyCode::Char('d') => {
+                        if let Some(res) = detail.selected_resource() {
+                            let name = res.name.clone();
+                            let kind = res.kind.clone();
+                            let ns = if res.namespace.is_empty() { None } else { Some(res.namespace.clone()) };
+                            self.open_describe_view(name, kind, ns).await;
+                        }
+                    }
+                    KeyCode::Char('y') | KeyCode::Char('v') => {
+                        if let Some(res) = detail.selected_resource() {
+                            let name = res.name.clone();
+                            let kind = res.kind.clone();
+                            let ns = if res.namespace.is_empty() { None } else { Some(res.namespace.clone()) };
+                            self.open_yaml_view(name, kind, ns).await;
+                        }
+                    }
+                    KeyCode::Char('x') => {
+                        let action_target = if let Some(res) = detail.selected_resource() {
+                            let ns = if res.namespace.is_empty() {
+                                Some(detail.app_namespace.clone())
+                            } else {
+                                Some(res.namespace.clone())
+                            };
+                            Some((res.kind.clone(), res.name.clone(), ns))
+                        } else if let Some(ref app) = app_opt {
+                            Some(("Application".to_string(), app.name.clone(), Some(app.namespace.clone())))
+                        } else {
+                            Some(("Application".to_string(), detail.app_name.clone(), Some(detail.app_namespace.clone())))
+                        };
+
+                        if let Some((kind, name, ns)) = action_target {
+                            self.open_action_palette(kind, name, ns);
+                        }
                     }
                     _ => {}
                 }
@@ -6487,6 +6542,15 @@ impl App {
                             return y;
                         }
                     }
+                } else if k.eq_ignore_ascii_case("application") || k.eq_ignore_ascii_case("applications") {
+                    let ar = srelens_kube::argo::argo_application_resource();
+                    let api: kube::Api<kube::core::DynamicObject> = kube::Api::namespaced_with(client, ns.as_deref().unwrap_or("argocd"), &ar);
+                    if let Ok(mut obj) = api.get(&n).await {
+                        obj.metadata.managed_fields = None;
+                        if let Ok(y) = serde_yaml::to_string(&obj) {
+                            return y;
+                        }
+                    }
                 }
             }
 
@@ -6576,8 +6640,15 @@ impl App {
 
             // 2. Pure Rust native describe fallback
             if let Ok(client) = cache.get(&ctx).await {
-                if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
-                    let ar = kube::core::ApiResource::from_gvk(&gvk);
+                let maybe_ar = if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
+                    Some((kube::core::ApiResource::from_gvk(&gvk), namespaced))
+                } else if k.eq_ignore_ascii_case("application") || k.eq_ignore_ascii_case("applications") {
+                    Some((srelens_kube::argo::argo_application_resource(), true))
+                } else {
+                    None
+                };
+
+                if let Some((ar, namespaced)) = maybe_ar {
                     let api: kube::Api<kube::core::DynamicObject> = if namespaced {
                         kube::Api::namespaced_with(client.clone(), ns.as_deref().unwrap_or("default"), &ar)
                     } else {
@@ -7011,6 +7082,7 @@ impl App {
             argo.error = None;
         }
         let current_context = self.active_context.clone();
+        let current_cluster_name = self.cluster_name.clone();
         // Do not restrict cluster-level ArgoCD application listings by Pod active_namespace,
         // which causes applications to vanish whenever viewing non-default namespaces
         // or switching to contexts with a default namespace configured in kubeconfig.
@@ -7037,6 +7109,7 @@ impl App {
             let res = srelens_kube::argo::fetch_argo_applications(
                 &cache,
                 &current_context,
+                Some(&current_cluster_name),
                 current_server_url.as_deref(),
                 hub_ctx_clone.as_deref(),
                 target_ns.as_deref(),
@@ -7045,12 +7118,13 @@ impl App {
             .await;
 
             match res {
-                Ok((apps, is_remote)) => {
+                Ok(fetch_res) => {
+                    let is_remote = fetch_res.is_remote_hub;
                     let _ = event_tx.send(crate::event::AppEvent::ArgoApplicationsResult {
                         context: current_context,
                         is_remote_hub: is_remote,
                         hub_context: hub_ctx_clone,
-                        result: Ok(apps),
+                        result: Ok(fetch_res),
                     });
                 }
                 Err(e) => {
@@ -7070,13 +7144,13 @@ impl App {
         context: &str,
         is_remote_hub: bool,
         hub_context: Option<String>,
-        result: Result<Vec<srelens_kube::argo::ArgoApplication>, String>,
+        result: Result<srelens_kube::argo::ArgoApplicationsFetchResult, String>,
     ) {
         self.argo_refreshing = false;
         if let ActiveView::Argo(argo) = &mut self.active_view {
             if self.active_context == context {
                 match result {
-                    Ok(apps) => argo.set_applications(apps, is_remote_hub, hub_context),
+                    Ok(fetch_res) => argo.set_applications(fetch_res.filtered_apps, fetch_res.all_apps, is_remote_hub, hub_context),
                     Err(err) => argo.set_error(err),
                 }
             } else {
@@ -7519,6 +7593,68 @@ impl App {
                     description: "Inspect node capacity, taints & conditions".to_string(),
                 },
             ],
+            "application" | "applications" | "argocd" => vec![
+                QuickActionItem {
+                    id: QuickActionId::AskAi,
+                    key_hint: "ai".to_string(),
+                    title: "🤖 Ask AI Assistant about this Application".to_string(),
+                    description: "Analyze sync status, health, drift and recommended fixes".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::PlaybookArgoProgressing,
+                    key_hint: "/argo".to_string(),
+                    title: "⚡ AI Diagnose Progressing / Stuck Sync / Degraded".to_string(),
+                    description: "Diagnose why application is stuck progressing, failing sync or degraded".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ArgoDetails,
+                    key_hint: "Enter".to_string(),
+                    title: "🔍 View Application Details".to_string(),
+                    description: "Inspect managed resources, manifest drift & history".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ArgoSync,
+                    key_hint: "s".to_string(),
+                    title: "🔄 Trigger Sync".to_string(),
+                    description: "Trigger ArgoCD application synchronization".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ArgoRefresh,
+                    key_hint: "R".to_string(),
+                    title: "⚡ Hard Refresh".to_string(),
+                    description: "Force controller to re-evaluate Git & cluster state".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ArgoOpenGit,
+                    key_hint: "g".to_string(),
+                    title: "🌐 Open Git Repository".to_string(),
+                    description: "Open target Git repository and revision in browser".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::RelationshipTree,
+                    key_hint: "t".to_string(),
+                    title: "🌳 Resource Relationship Tree".to_string(),
+                    description: "Trace managed cluster resources generated by this application".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Describe,
+                    key_hint: "d".to_string(),
+                    title: "📄 Describe Application".to_string(),
+                    description: "Inspect formatted Application CR describe details and conditions".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ViewYaml,
+                    key_hint: "y".to_string(),
+                    title: "📝 View Application YAML".to_string(),
+                    description: "Inspect live Kubernetes Application YAML manifest".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Delete,
+                    key_hint: "del".to_string(),
+                    title: "🗑️  Delete Application".to_string(),
+                    description: "Delete ArgoCD application from the cluster".to_string(),
+                },
+            ],
             _ => vec![
                 QuickActionItem {
                     id: QuickActionId::AskAi,
@@ -7597,15 +7733,177 @@ impl App {
                 use crate::ui::dialogs::QuickActionId;
                 match chosen.id {
                     QuickActionId::AskAi => {
-                        let prompt = format!(
-                            "Investigate {} '{}' in namespace '{}': what is its current health status, are there any errors, crash loops or restarts, and what are the recommended fixes?",
-                            resource_kind,
-                            resource_name,
-                            namespace.as_deref().unwrap_or("default")
-                        );
+                        let prompt = if resource_kind.eq_ignore_ascii_case("application") || resource_kind.eq_ignore_ascii_case("applications") {
+                            let app_opt = if let ActiveView::Argo(ref argo) = self.active_view {
+                                argo.applications.iter().find(|a| a.name == resource_name).cloned()
+                            } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                                detail.application.clone()
+                            } else {
+                                None
+                            };
+
+                            if let Some(app) = app_opt {
+                                let dest = if !app.destination_name.is_empty() {
+                                    &app.destination_name
+                                } else if !app.destination_server.is_empty() {
+                                    &app.destination_server
+                                } else {
+                                    "-"
+                                };
+                                let mut details = vec![
+                                    format!("Destination: {} / {}", dest, app.destination_namespace),
+                                    format!("Sync: {}", if app.sync_status.is_empty() { "Unknown" } else { &app.sync_status }),
+                                    format!("Health: {}", if app.health_status.is_empty() { "Unknown" } else { &app.health_status }),
+                                ];
+                                if !app.health_message.is_empty() {
+                                    details.push(format!("Health Message: {}", app.health_message));
+                                }
+                                if !app.operation_message.is_empty() {
+                                    details.push(format!("Operation Message: {}", app.operation_message));
+                                }
+                                let unhealthy: Vec<String> = app.resources.iter()
+                                    .filter(|r| r.health != "Healthy" && !r.health.is_empty())
+                                    .map(|r| if r.message.is_empty() {
+                                        format!("{}/{} [{}]", r.kind, r.name, r.health)
+                                    } else {
+                                        format!("{}/{} [{} - {}]", r.kind, r.name, r.health, r.message)
+                                    })
+                                    .collect();
+                                if !unhealthy.is_empty() {
+                                    details.push(format!("Stuck/Unhealthy Resources: {}", unhealthy.join("; ")));
+                                }
+
+                                format!(
+                                    "Investigate ArgoCD Application '{}' in namespace '{}' ({}): what is causing its current status, why are resources stuck or degraded, and what are the recommended steps to resolve it?",
+                                    resource_name,
+                                    namespace.as_deref().unwrap_or("argocd"),
+                                    details.join(", ")
+                                )
+                            } else {
+                                format!(
+                                    "Investigate ArgoCD Application '{}' in namespace '{}': what is its current sync and health status, are there any errors, and what are the recommended fixes?",
+                                    resource_name,
+                                    namespace.as_deref().unwrap_or("argocd")
+                                )
+                            }
+                        } else {
+                            format!(
+                                "Investigate {} '{}' in namespace '{}': what is its current health status, are there any errors, crash loops or restarts, and what are the recommended fixes?",
+                                resource_kind,
+                                resource_name,
+                                namespace.as_deref().unwrap_or("default")
+                            )
+                        };
                         self.assistant_state.input = prompt;
                         let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
                         self.nav_stack.push(old);
+                    }
+                    QuickActionId::PlaybookArgoProgressing => {
+                        let app_opt = if let ActiveView::Argo(ref argo) = self.active_view {
+                            argo.applications.iter().find(|a| a.name == resource_name).cloned()
+                        } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                            detail.application.clone()
+                        } else {
+                            None
+                        };
+
+                        let prompt = if let Some(app) = app_opt {
+                            let dest = if !app.destination_name.is_empty() {
+                                &app.destination_name
+                            } else if !app.destination_server.is_empty() {
+                                &app.destination_server
+                            } else {
+                                "-"
+                            };
+                            let mut details = vec![
+                                format!("Destination: {} / {}", dest, app.destination_namespace),
+                                format!("Sync: {}", if app.sync_status.is_empty() { "Unknown" } else { &app.sync_status }),
+                                format!("Health: {}", if app.health_status.is_empty() { "Unknown" } else { &app.health_status }),
+                            ];
+                            if !app.health_message.is_empty() {
+                                details.push(format!("Health Message: {}", app.health_message));
+                            }
+                            if !app.operation_message.is_empty() {
+                                details.push(format!("Operation Message: {}", app.operation_message));
+                            }
+                            let unhealthy: Vec<String> = app.resources.iter()
+                                .filter(|r| r.health != "Healthy" && !r.health.is_empty())
+                                .map(|r| if r.message.is_empty() {
+                                    format!("{}/{} [{}]", r.kind, r.name, r.health)
+                                } else {
+                                    format!("{}/{} [{} - {}]", r.kind, r.name, r.health, r.message)
+                                })
+                                .collect();
+                            if !unhealthy.is_empty() {
+                                details.push(format!("Stuck/Unhealthy Resources: {}", unhealthy.join("; ")));
+                            }
+
+                            format!(
+                                "/argo {} (Context: {})",
+                                resource_name,
+                                details.join(", ")
+                            )
+                        } else {
+                            format!("/argo {}", resource_name)
+                        };
+
+                        self.assistant_state.input = prompt;
+                        self.assistant_state.update_slash_suggestions();
+                        let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
+                        self.nav_stack.push(old);
+                    }
+                    QuickActionId::ArgoDetails => {
+                        let (app_opt, hub_ctx) = if let ActiveView::Argo(ref argo) = self.active_view {
+                            (argo.applications.iter().find(|a| a.name == resource_name).cloned(), argo.hub_context_name.clone())
+                        } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                            (detail.application.clone(), detail.hub_context.clone())
+                        } else {
+                            (None, None)
+                        };
+                        if let Some(app) = app_opt {
+                            self.open_argo_detail(app, hub_ctx);
+                        }
+                    }
+                    QuickActionId::ArgoSync => {
+                        let hub_ctx = if let ActiveView::Argo(ref argo) = self.active_view {
+                            argo.hub_context_name.clone()
+                        } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                            detail.hub_context.clone()
+                        } else {
+                            None
+                        };
+                        let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+                        let ns = namespace.unwrap_or_else(|| "argocd".to_string());
+                        self.modal = Some(Modal::Confirm {
+                            title: format!("Sync ArgoCD Application [{}]", resource_name),
+                            message: format!("Trigger sync for '{}/{}'? (Prune: false)", ns, resource_name),
+                            action_name: format!("argo_sync:{}:{}:{}:false:false", query_ctx, ns, resource_name),
+                            is_destructive: false,
+                        });
+                    }
+                    QuickActionId::ArgoRefresh => {
+                        let ns = namespace.unwrap_or_else(|| "argocd".to_string());
+                        self.set_toast(format!("Triggering hard refresh for '{}'...", resource_name), Theme::status_ok());
+                        self.trigger_argo_hard_refresh(&resource_name, &ns);
+                    }
+                    QuickActionId::ArgoOpenGit => {
+                        let app_opt = if let ActiveView::Argo(ref argo) = self.active_view {
+                            argo.applications.iter().find(|a| a.name == resource_name).cloned()
+                        } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                            detail.application.clone()
+                        } else {
+                            None
+                        };
+                        if let Some(app) = app_opt {
+                            if !app.repo_url.is_empty() {
+                                match open_browser_url(&app.repo_url) {
+                                    Ok(_) => self.set_toast(format!("Opened Git repo: {}", app.repo_url), Theme::status_ok()),
+                                    Err(err) => self.set_toast(format!("Could not open browser: {}", err), Theme::status_error()),
+                                }
+                            } else {
+                                self.set_toast("Application has no repoURL configured".to_string(), Theme::status_warn());
+                            }
+                        }
                     }
                     QuickActionId::PlaybookCrashLoop => {
                         self.assistant_state.input = format!("/crashloop {}", resource_name);
@@ -7794,6 +8092,8 @@ impl App {
                                 kind: crd.kind.clone(),
                                 plural: crd.plural.clone(),
                             }, crd.namespaced))
+                        } else if kind.eq_ignore_ascii_case("application") || kind.eq_ignore_ascii_case("applications") {
+                            Some((srelens_kube::argo::argo_application_resource(), true))
                         } else {
                             None
                         };
@@ -7817,6 +8117,17 @@ impl App {
                                         });
                                         let filter = self.filter_buffer.clone();
                                         table.apply_filter(&filter);
+                                    }
+                                    if let ActiveView::Argo(_) = &self.active_view {
+                                        self.refresh_argo_applications();
+                                    }
+                                    if let ActiveView::ArgoDetail(_) = &self.active_view {
+                                        if let Some(prev) = self.nav_stack.pop() {
+                                            self.active_view = prev;
+                                        } else {
+                                            self.switch_view_to_kind(ResourceKind::ArgoApplications).await;
+                                        }
+                                        self.refresh_argo_applications();
                                     }
                                 }
                                 Err(err) => {
@@ -8931,6 +9242,7 @@ impl App {
                 ("<:>", "Cmd"),
                 ("</>", "Filter"),
                 ("<Enter>", "Details"),
+                ("<x>", "Actions / AI"),
                 ("<s>", "Sync"),
                 ("<p>", "Auto-Sync"),
                 ("<R>", "Hard Refresh"),
@@ -8942,6 +9254,7 @@ impl App {
             ActiveView::ArgoDetail(_) => Some(&[
                 ("<:>", "Cmd"),
                 ("<1-4>", "Tabs"),
+                ("<x>", "Actions / AI"),
                 ("<s>", "Sync"),
                 ("<p>", "Auto-Sync"),
                 ("<R>", "Hard Refresh"),

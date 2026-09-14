@@ -54,7 +54,7 @@ pub enum AppEvent {
         context: String,
         is_remote_hub: bool,
         hub_context: Option<String>,
-        result: Result<Vec<srelens_kube::argo::ArgoApplication>, String>,
+        result: Result<srelens_kube::argo::ArgoApplicationsFetchResult, String>,
     },
     ArgoDetailResult {
         context: String,

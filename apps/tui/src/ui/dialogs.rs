@@ -88,6 +88,11 @@ pub enum QuickActionId {
     PlaybookRollout,
     PlaybookEndpoints,
     PlaybookNodePressure,
+    PlaybookArgoProgressing,
+    ArgoDetails,
+    ArgoSync,
+    ArgoRefresh,
+    ArgoOpenGit,
     RelationshipTree,
     ViewLogs,
     OpenShell,
@@ -759,7 +764,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
 pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: bool) {
     let modal_width = (area.width.saturating_sub(4)).clamp(48, 94).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(14, 22).min(area.height);
+    let modal_height = (area.height.saturating_sub(2)).clamp(15, 23).min(area.height);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
@@ -782,7 +787,7 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2), // Top description
-            Constraint::Min(8),   // Features list
+            Constraint::Min(9),   // Features list
             Constraint::Length(3), // Checkbox and key hints
         ])
         .split(inner);
@@ -797,7 +802,7 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
         ]),
         Line::from(vec![
             Span::styled(
-                "Key built-in features you should know (press [1-8] to jump directly, or type ':' for command prompt):",
+                "Key built-in features you should know (press [1-9] to jump directly, or type ':' for command prompt):",
                 Style::default().fg(Theme::dim()),
             ),
         ]),
@@ -814,6 +819,7 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
         ("[6]", ":ai",          "[AI Assistant]",  "Interactive AI troubleshooting chat for automated RCA",         ":ai"),
         ("[7]", ":ai-settings", "[AI Config]",     "Configure AI providers (Claude, OpenAI, Gemini), models & keys", ":ai-settings"),
         ("[8]", ":config",      "[Lens Settings]", "Lens settings: popup width, visible rows, text scale & banner",  ":config"),
+        ("[9]", ":banner",      "[Guide]",         "Re-display this feature highlights banner & startup guide",     ":banner"),
     ];
 
     let inner_w = chunks[1].width as usize;
@@ -869,7 +875,7 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
             Span::styled(", or ", Style::default().fg(Theme::dim())),
             Span::styled("q", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
             Span::styled(" to dismiss  |  Press ", Style::default().fg(Theme::dim())),
-            Span::styled("1-7", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled("1-9", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
             Span::styled(" to jump directly  |  ", Style::default().fg(Theme::dim())),
             Span::styled(":banner", Style::default().fg(Theme::accent())),
             Span::styled(" to reopen anytime", Style::default().fg(Theme::dim())),

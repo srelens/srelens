@@ -11,34 +11,53 @@ use crate::theme::Theme;
 
 pub struct ArgoViewState {
     pub applications: Vec<ArgoApplication>,
+    pub all_applications: Vec<ArgoApplication>,
     pub selected_idx: usize,
     pub is_loading: bool,
     pub error: Option<String>,
     pub filter_query: String,
     pub is_remote_hub: bool,
     pub hub_context_name: Option<String>,
+    pub show_all_hub_apps: bool,
 }
 
 impl ArgoViewState {
     pub fn new() -> Self {
         Self {
             applications: Vec::new(),
+            all_applications: Vec::new(),
             selected_idx: 0,
             is_loading: true,
             error: None,
             filter_query: String::new(),
             is_remote_hub: false,
             hub_context_name: None,
+            show_all_hub_apps: false,
         }
+    }
+
+    pub fn displayed_applications(&self) -> &[ArgoApplication] {
+        if self.is_remote_hub && self.show_all_hub_apps {
+            &self.all_applications
+        } else {
+            &self.applications
+        }
+    }
+
+    pub fn toggle_show_all(&mut self) {
+        self.show_all_hub_apps = !self.show_all_hub_apps;
+        self.selected_idx = 0;
     }
 
     pub fn set_applications(
         &mut self,
         apps: Vec<ArgoApplication>,
+        all_apps: Vec<ArgoApplication>,
         is_remote_hub: bool,
         hub_context_name: Option<String>,
     ) {
         if self.applications == apps
+            && self.all_applications == all_apps
             && self.is_remote_hub == is_remote_hub
             && self.hub_context_name == hub_context_name
         {
@@ -48,6 +67,7 @@ impl ArgoViewState {
         }
         let sel_target = self.selected_application().map(|a| (a.name.clone(), a.namespace.clone()));
         self.applications = apps;
+        self.all_applications = all_apps;
         self.is_remote_hub = is_remote_hub;
         self.hub_context_name = hub_context_name;
         self.is_loading = false;
@@ -55,7 +75,7 @@ impl ArgoViewState {
         let indices = self.filtered_indices();
         if let Some((name, ns)) = sel_target {
             if let Some(pos) = indices.iter().position(|&idx| {
-                self.applications
+                self.displayed_applications()
                     .get(idx)
                     .map(|a| a.name == name && a.namespace == ns)
                     .unwrap_or(false)
@@ -76,12 +96,12 @@ impl ArgoViewState {
     }
 
     pub fn filtered_indices(&self) -> Vec<usize> {
+        let apps = self.displayed_applications();
         if self.filter_query.is_empty() {
-            return (0..self.applications.len()).collect();
+            return (0..apps.len()).collect();
         }
         let q = self.filter_query.to_lowercase();
-        self.applications
-            .iter()
+        apps.iter()
             .enumerate()
             .filter(|(_, a)| {
                 a.name.to_lowercase().contains(&q)
@@ -115,7 +135,7 @@ impl ArgoViewState {
     pub fn selected_application(&self) -> Option<&ArgoApplication> {
         let indices = self.filtered_indices();
         let idx = *indices.get(self.selected_idx)?;
-        self.applications.get(idx)
+        self.displayed_applications().get(idx)
     }
 }
 
@@ -154,23 +174,38 @@ fn health_status_badge(health: &str) -> (&'static str, Style) {
 }
 
 pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
+    let displayed = state.displayed_applications();
     let filtered = state.filtered_indices();
     let count_text = if state.filter_query.is_empty() {
-        format!("{}", state.applications.len())
+        format!("{}", displayed.len())
     } else {
-        format!("{}/{}", filtered.len(), state.applications.len())
+        format!("{}/{}", filtered.len(), displayed.len())
     };
 
     let hub_tag = if state.is_remote_hub {
         let name = state.hub_context_name.as_deref().unwrap_or("Hub");
-        format!(" [Hub: {}] ", name)
+        if state.show_all_hub_apps {
+            format!(" [Hub: {} · All Hub Apps] ", name)
+        } else {
+            format!(" [Hub: {} · Spoke Filtered] ", name)
+        }
     } else {
         String::new()
     };
 
+    let toggle_hint = if state.is_remote_hub {
+        if state.show_all_hub_apps {
+            " <a> Current Spoke "
+        } else {
+            " <a> View All Hub Apps "
+        }
+    } else {
+        ""
+    };
+
     let title = format!(
-        " 🐙 ArgoCD Applications [{}] {}(<Enter> Details  <s> Sync  <p> Toggle Auto-Sync  <R> Hard Refresh  <g> Git  <c> Config Hub  <r> Reload  <Esc> Back) ",
-        count_text, hub_tag
+        " 🐙 ArgoCD Applications [{}] {}(<Enter> Details  <x> Actions / AI{} <s> Sync  <p> Toggle Auto-Sync  <R> Hard Refresh  <g> Git  <c> Config Hub  <r> Reload  <Esc> Back) ",
+        count_text, hub_tag, toggle_hint
     );
 
     let block = Block::default()
@@ -216,9 +251,13 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
         return;
     }
 
-    if state.applications.is_empty() {
+    if displayed.is_empty() {
         let msg = if state.is_remote_hub {
-            "No ArgoCD applications found targeting this cluster on the Hub."
+            if !state.all_applications.is_empty() && !state.show_all_hub_apps {
+                "No ArgoCD applications found targeting this cluster on the Hub. Press <a> to view all Hub applications."
+            } else {
+                "No ArgoCD applications found targeting this cluster on the Hub."
+            }
         } else {
             "No ArgoCD applications found in cluster."
         };
@@ -239,39 +278,95 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
 
     let is_remote = state.is_remote_hub;
 
-    let headers = if is_remote {
-        Row::new(vec![
+    let mut max_dest = "DEST CLUSTER".len();
+    let mut max_dest_ns = "DEST NS".len();
+    let mut max_ns = "NAMESPACE".len();
+    let mut max_name = "APPLICATION".len();
+    let mut max_project = "PROJECT".len();
+    let mut max_sync = "SYNC".len();
+    let mut max_health = "HEALTH".len();
+    let mut max_auto_sync = "AUTO-SYNC".len();
+    let mut max_last_sync = "LAST SYNC".len();
+    let mut max_age = "AGE".len();
+
+    for &real_idx in &filtered {
+        let app = &displayed[real_idx];
+        let (sync_text, _) = sync_status_badge(&app.sync_status);
+        let (health_text, _) = health_status_badge(&app.health_status);
+        let auto_sync_len = if app.auto_sync_enabled { 7 } else { 6 };
+        let last_sync_len = if app.last_sync_time.is_empty() { 1 } else { format_iso_age(&app.last_sync_time).len() };
+        let age_len = format_iso_age(&app.created_at).len();
+
+        let dest_str = if !app.destination_name.is_empty() {
+            app.destination_name.as_str()
+        } else if !app.destination_server.is_empty() {
+            app.destination_server.as_str()
+        } else {
+            "-"
+        };
+
+        max_dest = max_dest.max(dest_str.len());
+        max_dest_ns = max_dest_ns.max(app.destination_namespace.len());
+        max_ns = max_ns.max(app.namespace.len());
+        max_name = max_name.max(app.name.len());
+        max_project = max_project.max(app.project.len());
+        max_sync = max_sync.max(sync_text.chars().count());
+        max_health = max_health.max(health_text.chars().count());
+        max_auto_sync = max_auto_sync.max(auto_sync_len);
+        max_last_sync = max_last_sync.max(last_sync_len);
+        max_age = max_age.max(age_len);
+    }
+
+    let col_first = (if is_remote { max_dest } else { max_ns } + 2) as u16;
+    let col_second = (if is_remote { max_dest_ns } else { max_name } + 2) as u16;
+    let col_third = (if is_remote { max_name } else { max_project } + 2) as u16;
+    let col_sync = (max_sync + 2) as u16;
+    let col_health = (max_health + 2) as u16;
+    let col_auto = (max_auto_sync + 2) as u16;
+    let col_last_sync = (max_last_sync + 2) as u16;
+    let col_age = (max_age + 2) as u16;
+
+    let primary_width = col_first + col_second + col_third + col_sync + col_health;
+    let secondary_width = col_auto + col_last_sync + col_age;
+    let total_all = primary_width + secondary_width;
+
+    let avail_w = inner.width;
+    let show_secondary = avail_w >= total_all;
+    let show_source = avail_w >= total_all + 15;
+
+    let mut header_cells = if is_remote {
+        vec![
             Cell::from("DEST CLUSTER").style(Theme::table_header()),
             Cell::from("DEST NS").style(Theme::table_header()),
             Cell::from("APPLICATION").style(Theme::table_header()),
             Cell::from("SYNC").style(Theme::table_header()),
             Cell::from("HEALTH").style(Theme::table_header()),
-            Cell::from("SOURCE / PATH").style(Theme::table_header()),
-            Cell::from("AUTO-SYNC").style(Theme::table_header()),
-            Cell::from("LAST SYNC").style(Theme::table_header()),
-            Cell::from("AGE").style(Theme::table_header()),
-        ])
+        ]
     } else {
-        Row::new(vec![
+        vec![
             Cell::from("NAMESPACE").style(Theme::table_header()),
             Cell::from("APPLICATION").style(Theme::table_header()),
             Cell::from("PROJECT").style(Theme::table_header()),
             Cell::from("SYNC").style(Theme::table_header()),
             Cell::from("HEALTH").style(Theme::table_header()),
-            Cell::from("SOURCE / PATH").style(Theme::table_header()),
-            Cell::from("AUTO-SYNC").style(Theme::table_header()),
-            Cell::from("LAST SYNC").style(Theme::table_header()),
-            Cell::from("AGE").style(Theme::table_header()),
-        ])
+        ]
+    };
+
+    if show_source {
+        header_cells.push(Cell::from("SOURCE / PATH").style(Theme::table_header()));
     }
-    .height(1)
-    .bottom_margin(1);
+    if show_secondary {
+        header_cells.push(Cell::from("AUTO-SYNC").style(Theme::table_header()));
+        header_cells.push(Cell::from("LAST SYNC").style(Theme::table_header()));
+        header_cells.push(Cell::from("AGE").style(Theme::table_header()));
+    }
+    let headers = Row::new(header_cells).height(1).bottom_margin(1);
 
     let rows: Vec<Row> = filtered
         .iter()
         .enumerate()
         .map(|(display_idx, &real_idx)| {
-            let app = &state.applications[real_idx];
+            let app = &displayed[real_idx];
             let is_selected = display_idx == state.selected_idx;
 
             let (sync_text, sync_style) = sync_status_badge(&app.sync_status);
@@ -283,32 +378,7 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
                 Style::default()
             };
 
-            let source_display = if app.path.is_empty() {
-                app.target_revision.clone()
-            } else {
-                format!("{}:{}", app.target_revision, app.path)
-            };
-
-            let auto_sync_str = if app.auto_sync_enabled {
-                "Enabled"
-            } else {
-                "Paused"
-            };
-            let auto_sync_style = if app.auto_sync_enabled {
-                Style::default().fg(Theme::green())
-            } else {
-                Style::default().fg(Theme::yellow())
-            };
-
-            let last_sync = if app.last_sync_time.is_empty() {
-                "-".to_string()
-            } else {
-                format_iso_age(&app.last_sync_time)
-            };
-
-            let age = format_iso_age(&app.created_at);
-
-            if is_remote {
+            let mut cells = if is_remote {
                 let dest = if !app.destination_name.is_empty() {
                     app.destination_name.as_str()
                 } else if !app.destination_server.is_empty() {
@@ -317,60 +387,76 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
                     "-"
                 };
 
-                Row::new(vec![
+                vec![
                     Cell::from(dest),
                     Cell::from(app.destination_namespace.as_str()),
                     Cell::from(app.name.as_str()),
                     Cell::from(sync_text).style(sync_style),
                     Cell::from(health_text).style(health_style),
-                    Cell::from(source_display),
-                    Cell::from(auto_sync_str).style(auto_sync_style),
-                    Cell::from(last_sync),
-                    Cell::from(age),
-                ])
-                .style(row_style)
+                ]
             } else {
-                Row::new(vec![
+                vec![
                     Cell::from(app.namespace.as_str()),
                     Cell::from(app.name.as_str()),
                     Cell::from(app.project.as_str()),
                     Cell::from(sync_text).style(sync_style),
                     Cell::from(health_text).style(health_style),
-                    Cell::from(source_display),
-                    Cell::from(auto_sync_str).style(auto_sync_style),
-                    Cell::from(last_sync),
-                    Cell::from(age),
-                ])
-                .style(row_style)
+                ]
+            };
+
+            if show_source {
+                let source_display = if app.path.is_empty() {
+                    app.target_revision.clone()
+                } else {
+                    format!("{}:{}", app.target_revision, app.path)
+                };
+                cells.push(Cell::from(source_display));
             }
+
+            if show_secondary {
+                let auto_sync_str = if app.auto_sync_enabled {
+                    "Enabled"
+                } else {
+                    "Paused"
+                };
+                let auto_sync_style = if app.auto_sync_enabled {
+                    Style::default().fg(Theme::green())
+                } else {
+                    Style::default().fg(Theme::yellow())
+                };
+
+                let last_sync = if app.last_sync_time.is_empty() {
+                    "-".to_string()
+                } else {
+                    format_iso_age(&app.last_sync_time)
+                };
+
+                let age = format_iso_age(&app.created_at);
+
+                cells.push(Cell::from(auto_sync_str).style(auto_sync_style));
+                cells.push(Cell::from(last_sync));
+                cells.push(Cell::from(age));
+            }
+
+            Row::new(cells).style(row_style)
         })
         .collect();
 
-    let widths = if is_remote {
-        [
-            Constraint::Length(16),
-            Constraint::Length(14),
-            Constraint::Min(20),
-            Constraint::Length(14),
-            Constraint::Length(16),
-            Constraint::Min(25),
-            Constraint::Length(11),
-            Constraint::Length(11),
-            Constraint::Length(7),
-        ]
-    } else {
-        [
-            Constraint::Length(14),
-            Constraint::Min(20),
-            Constraint::Length(12),
-            Constraint::Length(14),
-            Constraint::Length(16),
-            Constraint::Min(25),
-            Constraint::Length(11),
-            Constraint::Length(11),
-            Constraint::Length(7),
-        ]
-    };
+    let mut widths = vec![
+        Constraint::Length(col_first),
+        Constraint::Length(col_second),
+        Constraint::Length(col_third),
+        Constraint::Length(col_sync),
+        Constraint::Length(col_health),
+    ];
+    if show_source {
+        widths.push(Constraint::Fill(1));
+    }
+    if show_secondary {
+        widths.push(Constraint::Length(col_auto));
+        widths.push(Constraint::Length(col_last_sync));
+        widths.push(Constraint::Length(col_age));
+    }
 
     let table = Table::new(rows, widths).header(headers);
     f.render_widget(table, inner);

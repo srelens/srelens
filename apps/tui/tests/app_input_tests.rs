@@ -1871,7 +1871,16 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
 
     // Stale result from cluster-1 arrives
     let app1 = make_app("app-1", "cluster-1");
-    app.handle_argo_applications_result("cluster-1", false, None, Ok(vec![app1]));
+    app.handle_argo_applications_result(
+        "cluster-1",
+        false,
+        None,
+        Ok(srelens_kube::argo::ArgoApplicationsFetchResult {
+            all_apps: vec![app1.clone()],
+            filtered_apps: vec![app1.clone()],
+            is_remote_hub: false,
+        }),
+    );
 
     // Stale result must NOT be accepted on cluster-2
     if let ActiveView::Argo(ref argo) = app.active_view {
@@ -1880,13 +1889,34 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
 
     // The real result for cluster-2 arrives
     let app2 = make_app("app-2", "cluster-2");
-    app.handle_argo_applications_result("cluster-2", true, Some("tools".to_string()), Ok(vec![app2.clone()]));
+    app.handle_argo_applications_result(
+        "cluster-2",
+        true,
+        Some("tools".to_string()),
+        Ok(srelens_kube::argo::ArgoApplicationsFetchResult {
+            all_apps: vec![app1.clone(), app2.clone()],
+            filtered_apps: vec![app2.clone()],
+            is_remote_hub: true,
+        }),
+    );
 
-    if let ActiveView::Argo(ref argo) = app.active_view {
+    if let ActiveView::Argo(ref mut argo) = app.active_view {
         assert_eq!(argo.applications.len(), 1);
         assert_eq!(argo.applications[0].name, "app-2");
+        assert_eq!(argo.all_applications.len(), 2);
+        assert_eq!(argo.displayed_applications().len(), 1);
         assert!(!argo.is_loading);
         assert!(argo.is_remote_hub);
+
+        // Toggle 'a' to show all hub apps
+        argo.toggle_show_all();
+        assert_eq!(argo.displayed_applications().len(), 2);
+        assert_eq!(argo.displayed_applications()[0].name, "app-1");
+        assert_eq!(argo.displayed_applications()[1].name, "app-2");
+
+        // Toggle back to spoke filtered apps
+        argo.toggle_show_all();
+        assert_eq!(argo.displayed_applications().len(), 1);
     } else {
         panic!("expected ActiveView::Argo");
     }
@@ -1896,12 +1926,22 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
     assert_eq!(app.active_context, "cluster-1");
     if let ActiveView::Argo(ref argo) = app.active_view {
         assert!(argo.applications.is_empty());
+        assert!(argo.all_applications.is_empty());
         assert!(argo.is_loading);
     }
 
     // Cluster-1 result arrives
     let app1 = make_app("app-1", "cluster-1");
-    app.handle_argo_applications_result("cluster-1", true, Some("tools".to_string()), Ok(vec![app1.clone()]));
+    app.handle_argo_applications_result(
+        "cluster-1",
+        true,
+        Some("tools".to_string()),
+        Ok(srelens_kube::argo::ArgoApplicationsFetchResult {
+            all_apps: vec![app1.clone(), app2.clone()],
+            filtered_apps: vec![app1.clone()],
+            is_remote_hub: true,
+        }),
+    );
     if let ActiveView::Argo(ref argo) = app.active_view {
         assert_eq!(argo.applications.len(), 1);
         assert_eq!(argo.applications[0].name, "app-1");
@@ -3796,6 +3836,11 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
     press(&mut app, key(KeyCode::Enter)).await;
     assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
 
+    // Press '9' keeps banner open and shows a toast
+    press(&mut app, ch('9')).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+    assert!(app.toast.as_ref().unwrap().0.contains("Already viewing feature banner"));
+
     // Dismiss with Esc
     press(&mut app, key(KeyCode::Esc)).await;
     assert!(app.modal.is_none());
@@ -3884,3 +3929,421 @@ async fn tui_config_hub_dialog_left_right_cursor_and_paste() {
 
     std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
 }
+
+#[tokio::test]
+async fn argo_detail_view_managed_resources_enter_opens_describe_and_esc_returns() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+        "my-app".to_string(),
+        "argocd".to_string(),
+        None,
+    );
+
+    let mut app_data = srelens_kube::argo::ArgoApplication::from_json(&serde_json::json!({
+        "metadata": { "name": "my-app", "namespace": "argocd" }
+    }));
+    app_data.resources = vec![
+        srelens_kube::argo::ArgoResourceItem {
+            group: "apps".to_string(),
+            version: "v1".to_string(),
+            kind: "Deployment".to_string(),
+            namespace: "trv-data-apps".to_string(),
+            name: "data-cards-ui-app".to_string(),
+            status: "Synced".to_string(),
+            health: "Healthy".to_string(),
+            message: String::new(),
+            hook: None,
+        },
+        srelens_kube::argo::ArgoResourceItem {
+            group: "".to_string(),
+            version: "v1".to_string(),
+            kind: "Service".to_string(),
+            namespace: "trv-data-apps".to_string(),
+            name: "data-cards-ui".to_string(),
+            status: "Synced".to_string(),
+            health: "Healthy".to_string(),
+            message: String::new(),
+            hook: None,
+        },
+    ];
+    state.set_application(app_data);
+    state.active_tab = srelens_tui::views::argo_detail_view::ArgoDetailTab::ManagedResources;
+
+    // Verify selected_resource helper
+    assert_eq!(state.selected_resource().unwrap().name, "data-cards-ui-app");
+    assert_eq!(state.selected_resource().unwrap().kind, "Deployment");
+
+    app.active_view = ActiveView::ArgoDetail(state);
+
+    // Press Enter to open describe view
+    press(&mut app, key(KeyCode::Enter)).await;
+    match &app.active_view {
+        ActiveView::Describe(desc) => {
+            assert_eq!(desc.resource_name, "data-cards-ui-app");
+            assert_eq!(desc.resource_kind, "Deployment");
+            assert_eq!(desc.namespace.as_deref(), Some("trv-data-apps"));
+        }
+        other => panic!("expected Describe view, got {:?}", std::mem::discriminant(other)),
+    }
+
+    // Press Esc to return to ArgoDetail
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::ArgoDetail(_)));
+
+    // Select second item ('j')
+    press(&mut app, ch('j')).await;
+    if let ActiveView::ArgoDetail(ref detail) = app.active_view {
+        assert_eq!(detail.selected_resource().unwrap().name, "data-cards-ui");
+        assert_eq!(detail.selected_resource().unwrap().kind, "Service");
+    }
+
+    // Press 'd' to open describe view
+    press(&mut app, ch('d')).await;
+    match &app.active_view {
+        ActiveView::Describe(desc) => {
+            assert_eq!(desc.resource_name, "data-cards-ui");
+            assert_eq!(desc.resource_kind, "Service");
+        }
+        _ => panic!("expected Describe view"),
+    }
+
+    // Press Esc to return
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::ArgoDetail(_)));
+
+    // Press 'y' to open YAML view
+    press(&mut app, ch('y')).await;
+    match &app.active_view {
+        ActiveView::Yaml(yaml) => {
+            assert_eq!(yaml.resource_name, "data-cards-ui");
+            assert_eq!(yaml.resource_kind, "Service");
+        }
+        _ => panic!("expected Yaml view"),
+    }
+
+    // Press Esc to return
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::ArgoDetail(_)));
+}
+
+#[tokio::test]
+async fn argo_detail_revision_history_renders_long_path_without_truncation() {
+    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+        "my-app".to_string(),
+        "argocd".to_string(),
+        None,
+    );
+
+    let long_path = "kubernetes/manifests/prod/europe-dus1/datacards/deploy";
+    let mut app_data = srelens_kube::argo::ArgoApplication::from_json(&serde_json::json!({
+        "metadata": { "name": "my-app", "namespace": "argocd" }
+    }));
+    app_data.sync_history = vec![
+        srelens_kube::argo::ArgoSyncHistoryItem {
+            id: 1,
+            revision: "32945947352e".to_string(),
+            deployed_at: "2026-07-08T16:13:05Z".to_string(),
+            repo_url: "https://github.com/trivago/gcp-data-cards-webapp.git".to_string(),
+            path: long_path.to_string(),
+        },
+    ];
+    state.set_application(app_data);
+    state.active_tab = srelens_tui::views::argo_detail_view::ArgoDetailTab::RevisionHistory;
+
+    let text = common::render_text(180, 25, |f| {
+        srelens_tui::views::argo_detail_view::render_argo_detail_view(f, f.area(), &state);
+    });
+
+    assert!(text.contains(long_path), "rendered text should contain the full path without truncation, got:\n{}", text);
+    assert!(text.contains("32945947352e"));
+    assert!(text.contains("gcp-data-cards-webapp.git"));
+}
+
+#[tokio::test]
+async fn argo_detail_managed_resources_renders_long_kind_without_truncation() {
+    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+        "my-app".to_string(),
+        "argocd".to_string(),
+        None,
+    );
+
+    let mut app_data = srelens_kube::argo::ArgoApplication::from_json(&serde_json::json!({
+        "metadata": { "name": "my-app", "namespace": "argocd" }
+    }));
+    app_data.resources = vec![
+        srelens_kube::argo::ArgoResourceItem {
+            group: "policy".to_string(),
+            version: "v1".to_string(),
+            kind: "PodDisruptionBudget".to_string(),
+            namespace: "agentgateway-production-namespace".to_string(),
+            name: "dcr-shim-default-super-long-name".to_string(),
+            status: "Synced".to_string(),
+            health: "Healthy".to_string(),
+            message: String::new(),
+            hook: None,
+        },
+    ];
+    state.set_application(app_data);
+    state.active_tab = srelens_tui::views::argo_detail_view::ArgoDetailTab::ManagedResources;
+
+    let text = common::render_text(180, 25, |f| {
+        srelens_tui::views::argo_detail_view::render_argo_detail_view(f, f.area(), &state);
+    });
+
+    assert!(text.contains("PodDisruptionBudget"), "rendered text must contain full 'PodDisruptionBudget' without cut, got:\n{}", text);
+    assert!(text.contains("agentgateway-production-namespace"), "rendered text must contain full namespace without cut, got:\n{}", text);
+    assert!(text.contains("dcr-shim-default-super-long-name"), "rendered text must contain full resource name without cut, got:\n{}", text);
+}
+
+#[tokio::test]
+async fn argo_view_x_opens_action_palette_with_ai_diagnose_and_actions() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    let mut argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
+    let app_json = serde_json::json!({
+        "metadata": {
+            "name": "payment-processor",
+            "namespace": "argocd",
+            "creationTimestamp": "2026-05-10T10:00:00Z"
+        },
+        "spec": {
+            "project": "fintech-prod",
+            "source": {
+                "repoURL": "https://github.com/myorg/payment-service.git",
+                "targetRevision": "main",
+                "path": "deploy/k8s"
+            },
+            "destination": {
+                "name": "prod-dus1-k8s",
+                "namespace": "payments"
+            },
+            "syncPolicy": {
+                "automated": {
+                    "prune": false,
+                    "selfHeal": true
+                }
+            }
+        },
+        "status": {
+            "sync": {
+                "status": "OutOfSync",
+                "revision": "abc1234"
+            },
+            "health": {
+                "status": "Progressing",
+                "message": "Deployment payments/payment-api has 1/3 replicas available"
+            },
+            "operationState": {
+                "phase": "Running",
+                "message": "Sync operation in progress: applying Deployment/payment-api"
+            },
+            "resources": [
+                {
+                    "group": "apps",
+                    "version": "v1",
+                    "kind": "Deployment",
+                    "namespace": "payments",
+                    "name": "payment-api",
+                    "status": "OutOfSync",
+                    "health": { "status": "Progressing", "message": "Waiting for rollout to finish: 1 of 3 updated replicas are available..." }
+                }
+            ]
+        }
+    });
+
+    let app_obj = srelens_kube::argo::ArgoApplication::from_json(&app_json);
+    argo_state.set_applications(vec![app_obj.clone()], vec![app_obj], false, None);
+    app.active_view = ActiveView::Argo(argo_state);
+
+    // Press 'x' on the selected application
+    press(&mut app, ch('x')).await;
+
+    // Verify ActionPalette modal is open for this application
+    match &app.modal {
+        Some(Modal::ActionPalette { resource_kind, resource_name, namespace, actions, .. }) => {
+            assert_eq!(resource_kind, "Application");
+            assert_eq!(resource_name, "payment-processor");
+            assert_eq!(namespace.as_deref(), Some("argocd"));
+
+            // Check actions
+            let action_ids: Vec<_> = actions.iter().map(|a| a.id).collect();
+            assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::AskAi));
+            assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::PlaybookArgoProgressing));
+            assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::ArgoDetails));
+            assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::ArgoSync));
+            assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::ArgoRefresh));
+            assert!(action_ids.contains(&srelens_tui::ui::dialogs::QuickActionId::ArgoOpenGit));
+        }
+        other => panic!("expected ActionPalette modal, got {:?}", other),
+    }
+
+    // Execute first action: AskAi
+    app.execute_action_palette().await;
+
+    // Verify view changed to Assistant with rich context in input
+    match &app.active_view {
+        ActiveView::Assistant => {
+            assert!(app.assistant_state.input.contains("payment-processor"), "input must contain app name");
+            assert!(app.assistant_state.input.contains("OutOfSync"), "input must contain sync status");
+            assert!(app.assistant_state.input.contains("Progressing"), "input must contain health status");
+            assert!(app.assistant_state.input.contains("prod-dus1-k8s"), "input must contain destination");
+        }
+        other => panic!("expected Assistant view, got {:?}", std::mem::discriminant(other)),
+    }
+}
+
+#[tokio::test]
+async fn argo_view_x_playbook_argo_progressing_seeds_assistant() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    let mut argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
+    let app_json = serde_json::json!({
+        "metadata": {
+            "name": "cart-checkout",
+            "namespace": "argocd"
+        },
+        "spec": {
+            "project": "ecommerce",
+            "destination": {
+                "name": "prod-cluster-east",
+                "namespace": "shop"
+            }
+        },
+        "status": {
+            "sync": { "status": "Synced" },
+            "health": { "status": "Degraded", "message": "CrashLoopBackOff in pod cart-checkout-7df84" }
+        }
+    });
+
+    let app_obj = srelens_kube::argo::ArgoApplication::from_json(&app_json);
+    argo_state.set_applications(vec![app_obj.clone()], vec![app_obj], false, None);
+    app.active_view = ActiveView::Argo(argo_state);
+
+    // Press 'x' to open ActionPalette
+    press(&mut app, ch('x')).await;
+
+    // Select second item: PlaybookArgoProgressing
+    if let Some(Modal::ActionPalette { ref mut selected_idx, .. }) = app.modal {
+        *selected_idx = 1; // PlaybookArgoProgressing
+    }
+
+    // Execute action
+    app.execute_action_palette().await;
+
+    // Verify view changed to Assistant with /argo command
+    match &app.active_view {
+        ActiveView::Assistant => {
+            assert!(app.assistant_state.input.starts_with("/argo cart-checkout"), "prompt must begin with /argo slash command, got: {}", app.assistant_state.input);
+            assert!(app.assistant_state.input.contains("Degraded"), "prompt must contain health state");
+        }
+        _ => panic!("expected Assistant view"),
+    }
+}
+
+#[tokio::test]
+async fn argo_detail_view_x_opens_action_palette_for_resource_and_app() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+        "auth-service".to_string(),
+        "argocd".to_string(),
+        None,
+    );
+
+    let mut app_data = srelens_kube::argo::ArgoApplication::from_json(&serde_json::json!({
+        "metadata": { "name": "auth-service", "namespace": "argocd" }
+    }));
+    app_data.resources = vec![
+        srelens_kube::argo::ArgoResourceItem {
+            group: "apps".to_string(),
+            version: "v1".to_string(),
+            kind: "StatefulSet".to_string(),
+            namespace: "auth-prod".to_string(),
+            name: "auth-redis".to_string(),
+            status: "Synced".to_string(),
+            health: "Healthy".to_string(),
+            message: String::new(),
+            hook: None,
+        },
+    ];
+    state.set_application(app_data);
+    state.active_tab = srelens_tui::views::argo_detail_view::ArgoDetailTab::ManagedResources;
+
+    app.active_view = ActiveView::ArgoDetail(state);
+
+    // On ManagedResources tab with resource selected: 'x' opens palette for StatefulSet
+    press(&mut app, ch('x')).await;
+    match &app.modal {
+        Some(Modal::ActionPalette { resource_kind, resource_name, namespace, .. }) => {
+            assert_eq!(resource_kind, "StatefulSet");
+            assert_eq!(resource_name, "auth-redis");
+            assert_eq!(namespace.as_deref(), Some("auth-prod"));
+        }
+        other => panic!("expected ActionPalette modal for StatefulSet, got {:?}", other),
+    }
+
+    // Dismiss modal
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(app.modal.is_none());
+
+    // Switch to Overview tab ('1')
+    press(&mut app, ch('1')).await;
+
+    // Press 'x' on Overview tab: opens palette for Application
+    press(&mut app, ch('x')).await;
+    match &app.modal {
+        Some(Modal::ActionPalette { resource_kind, resource_name, namespace, .. }) => {
+            assert_eq!(resource_kind, "Application");
+            assert_eq!(resource_name, "auth-service");
+            assert_eq!(namespace.as_deref(), Some("argocd"));
+        }
+        other => panic!("expected ActionPalette modal for Application, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn argo_view_column_prioritization_and_no_clipping() {
+    let mut argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
+    argo_state.is_remote_hub = true;
+
+    let app_json = serde_json::json!({
+        "metadata": {
+            "name": "super-long-mission-critical-application-gateway",
+            "namespace": "argocd",
+            "creationTimestamp": "2026-05-10T10:00:00Z"
+        },
+        "spec": {
+            "project": "global-infrastructure",
+            "source": {
+                "repoURL": "https://github.com/myorg/giant-monorepo.git",
+                "targetRevision": "feature/refactor-v2-production-stable-branch",
+                "path": "kubernetes/deployments/production/clusters/europe-west1/gateways/app"
+            },
+            "destination": {
+                "name": "gke-production-cluster-eu-west1-prod-01",
+                "namespace": "enterprise-gateway-production-namespace"
+            }
+        },
+        "status": {
+            "sync": { "status": "Synced" },
+            "health": { "status": "Healthy" }
+        }
+    });
+
+    let app_obj = srelens_kube::argo::ArgoApplication::from_json(&app_json);
+    argo_state.set_applications(vec![app_obj.clone()], vec![app_obj], true, Some("hub-cluster".to_string()));
+
+    // Render in a 180-column terminal (constrained width for these long strings: 152 primary vs 185 all)
+    let text = common::render_text(180, 25, |f| {
+        srelens_tui::views::argo_view::render_argo_view(f, f.area(), &argo_state);
+    });
+
+    // Primary identifying columns MUST NOT be clipped!
+    assert!(text.contains("gke-production-cluster-eu-west1-prod-01"), "DEST CLUSTER must be shown in full without cut, got:\n{}", text);
+    assert!(text.contains("enterprise-gateway-production-namespace"), "DEST NS must be shown in full without cut, got:\n{}", text);
+    assert!(text.contains("super-long-mission-critical-application-gateway"), "APPLICATION name must be shown in full without cut, got:\n{}", text);
+}
+
+
+

@@ -4,8 +4,11 @@
 //! where a management cluster (with arbitrary name) manages workloads
 //! deployed to remote spoke clusters.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
+use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, ApiResource, DynamicObject, ListParams, Patch, PatchParams};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -188,25 +191,176 @@ pub fn normalize_server_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_lowercase()
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArgoClusterMapping {
+    /// Maps cluster name (lowercase) -> normalized server URL
+    pub name_to_server: HashMap<String, String>,
+    /// Maps normalized server URL -> cluster name (lowercase)
+    pub server_to_name: HashMap<String, String>,
+}
+
+impl ArgoClusterMapping {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, name: &str, server: &str) {
+        let n = name.trim().to_lowercase();
+        let s = normalize_server_url(server);
+        if !n.is_empty() && !s.is_empty() {
+            self.name_to_server.insert(n.clone(), s.clone());
+            self.server_to_name.insert(s, n);
+        }
+    }
+
+    pub fn server_for_name(&self, name: &str) -> Option<&str> {
+        self.name_to_server.get(&name.trim().to_lowercase()).map(|s| s.as_str())
+    }
+
+    pub fn name_for_server(&self, server: &str) -> Option<&str> {
+        let norm = normalize_server_url(server);
+        self.server_to_name.get(&norm).map(|s| s.as_str())
+    }
+}
+
+fn extract_secret_str(secret: &Secret, key: &str) -> Option<String> {
+    if let Some(ref data) = secret.data {
+        if let Some(bs) = data.get(key) {
+            if let Ok(s) = String::from_utf8(bs.0.clone()) {
+                let trimmed = s.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Some(trimmed);
+                }
+            }
+        }
+    }
+    if let Some(ref string_data) = secret.string_data {
+        if let Some(s) = string_data.get(key) {
+            let trimmed = s.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
+static CLUSTER_MAPPING_CACHE: RwLock<Option<HashMap<String, (Instant, ArgoClusterMapping)>>> =
+    RwLock::new(None);
+const CLUSTER_MAPPING_TTL: Duration = Duration::from_secs(300);
+
+pub fn invalidate_argo_cluster_mapping_cache() {
+    if let Ok(mut guard) = CLUSTER_MAPPING_CACHE.write() {
+        *guard = None;
+    }
+}
+
+pub async fn get_or_fetch_argo_cluster_mapping(
+    client: &kube::Client,
+    hub_context: &str,
+) -> ArgoClusterMapping {
+    if let Ok(guard) = CLUSTER_MAPPING_CACHE.read() {
+        if let Some(ref map) = *guard {
+            if let Some((fetched_at, mapping)) = map.get(hub_context) {
+                if fetched_at.elapsed() < CLUSTER_MAPPING_TTL {
+                    return mapping.clone();
+                }
+            }
+        }
+    }
+
+    let mapping = fetch_argo_cluster_mapping(client).await;
+    if let Ok(mut guard) = CLUSTER_MAPPING_CACHE.write() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.insert(hub_context.to_string(), (Instant::now(), mapping.clone()));
+    }
+    mapping
+}
+
+pub async fn fetch_argo_cluster_mapping(client: &kube::Client) -> ArgoClusterMapping {
+    let mut mapping = ArgoClusterMapping::new();
+    mapping.insert("in-cluster", "https://kubernetes.default.svc");
+
+    let api: Api<Secret> = Api::all(client.clone());
+    let lp = ListParams::default().labels("argocd.argoproj.io/secret-type=cluster");
+
+    if let Ok(list) = api.list(&lp).await {
+        for secret in list.items {
+            let name_opt = extract_secret_str(&secret, "name");
+            let server_opt = extract_secret_str(&secret, "server");
+            if let (Some(name), Some(server)) = (name_opt, server_opt) {
+                mapping.insert(&name, &server);
+            }
+        }
+    }
+    mapping
+}
+
 pub fn matches_destination(
     app: &ArgoApplication,
     current_context: &str,
+    current_cluster_name: Option<&str>,
     current_server_url: Option<&str>,
+    cluster_mapping: Option<&ArgoClusterMapping>,
     match_by_name: bool,
 ) -> bool {
-    let name_matches = |dest_name: &str| -> bool {
-        if dest_name.is_empty() {
+    let name_matches = |candidate: &str, dest_name: &str| -> bool {
+        if candidate.is_empty() || dest_name.is_empty() {
             return false;
         }
-        dest_name == current_context
-            || current_context.ends_with(&format!("_{}", dest_name))
-            || current_context.ends_with(&format!("-{}", dest_name))
-            || current_context.ends_with(&format!("/{}", dest_name))
+        let c_lower = candidate.to_lowercase();
+        let d_lower = dest_name.to_lowercase();
+        c_lower == d_lower
+            || c_lower.ends_with(&format!("_{}", d_lower))
+            || c_lower.ends_with(&format!("-{}", d_lower))
+            || c_lower.ends_with(&format!("/{}", d_lower))
+            || d_lower.ends_with(&format!("_{}", c_lower))
+            || d_lower.ends_with(&format!("-{}", c_lower))
+            || d_lower.ends_with(&format!("/{}", c_lower))
     };
 
-    if match_by_name && name_matches(&app.destination_name) {
-        return true;
+    let app_dest_name = &app.destination_name;
+
+    // 1. Direct match by destination_name against context or cluster name
+    if !app_dest_name.is_empty() {
+        if name_matches(current_context, app_dest_name) {
+            return true;
+        }
+        if let Some(c_cluster) = current_cluster_name {
+            if name_matches(c_cluster, app_dest_name) {
+                return true;
+            }
+        }
     }
+
+    // 2. Correlate with ArgoCD cluster secrets mapping
+    if let Some(mapping) = cluster_mapping {
+        if let Some(curr_server) = current_server_url {
+            let norm_curr = normalize_server_url(curr_server);
+            if !app_dest_name.is_empty() {
+                if let Some(mapped_server) = mapping.server_for_name(app_dest_name) {
+                    if normalize_server_url(mapped_server) == norm_curr {
+                        return true;
+                    }
+                }
+            }
+            if let Some(mapped_name) = mapping.name_for_server(curr_server) {
+                if !app_dest_name.is_empty() && name_matches(mapped_name, app_dest_name) {
+                    return true;
+                }
+                if name_matches(mapped_name, current_context) {
+                    return true;
+                }
+                if let Some(c_cluster) = current_cluster_name {
+                    if name_matches(mapped_name, c_cluster) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Direct match by destination_server URL
     if let Some(server) = current_server_url {
         let norm_current = normalize_server_url(server);
         let norm_dest = normalize_server_url(&app.destination_server);
@@ -214,10 +368,30 @@ pub fn matches_destination(
             return true;
         }
     }
-    if name_matches(&app.destination_name) {
-        return true;
+
+    // 4. Fallback match_by_name if enabled
+    if match_by_name && !app_dest_name.is_empty() {
+        if name_matches(current_context, app_dest_name) {
+            return true;
+        }
+        if let Some(c_cluster) = current_cluster_name {
+            if name_matches(c_cluster, app_dest_name) {
+                return true;
+            }
+        }
     }
+
     false
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ArgoApplicationsFetchResult {
+    /// All applications fetched from the cluster.
+    pub all_apps: Vec<ArgoApplication>,
+    /// Applications filtered for the active spoke cluster / namespace.
+    pub filtered_apps: Vec<ArgoApplication>,
+    /// Whether the result was fetched from a remote Hub cluster.
+    pub is_remote_hub: bool,
 }
 
 /// Fetch applications for the given context.
@@ -228,11 +402,12 @@ pub fn matches_destination(
 pub async fn fetch_argo_applications(
     cache: &Arc<ClientCache>,
     current_context: &str,
+    current_cluster_name: Option<&str>,
     current_server_url: Option<&str>,
     hub_context: Option<&str>,
     target_namespace: Option<&str>,
     match_by_name: bool,
-) -> Result<(Vec<ArgoApplication>, bool), String> {
+) -> Result<ArgoApplicationsFetchResult, String> {
     let (query_context, is_remote_hub) = match hub_context {
         Some(hub) if hub != current_context => (hub, true),
         _ => (current_context, false),
@@ -242,6 +417,12 @@ pub async fn fetch_argo_applications(
         .get(query_context)
         .await
         .map_err(|e| format!("Failed to connect to cluster '{}': {}", query_context, e))?;
+
+    let cluster_mapping = if is_remote_hub {
+        Some(get_or_fetch_argo_cluster_mapping(&client, query_context).await)
+    } else {
+        None
+    };
 
     let ar = argo_application_resource();
     let api: Api<DynamicObject> = if is_remote_hub {
@@ -284,9 +465,16 @@ pub async fn fetch_argo_applications(
 
     if is_remote_hub {
         let filtered: Vec<ArgoApplication> = all_apps
-            .into_iter()
+            .iter()
             .filter(|app| {
-                if !matches_destination(app, current_context, current_server_url, match_by_name) {
+                if !matches_destination(
+                    app,
+                    current_context,
+                    current_cluster_name,
+                    current_server_url,
+                    cluster_mapping.as_ref(),
+                    match_by_name,
+                ) {
                     return false;
                 }
                 if let Some(ns) = target_namespace {
@@ -296,10 +484,19 @@ pub async fn fetch_argo_applications(
                 }
                 true
             })
+            .cloned()
             .collect();
-        Ok((filtered, true))
+        Ok(ArgoApplicationsFetchResult {
+            all_apps,
+            filtered_apps: filtered,
+            is_remote_hub: true,
+        })
     } else {
-        Ok((all_apps, false))
+        Ok(ArgoApplicationsFetchResult {
+            all_apps: all_apps.clone(),
+            filtered_apps: all_apps,
+            is_remote_hub: false,
+        })
     }
 }
 
@@ -562,17 +759,92 @@ mod tests {
         };
 
         // Match by server URL (with trailing slash differences)
-        assert!(matches_destination(&app, "any-context", Some("https://api.prod.example.com:6443"), false));
-        assert!(matches_destination(&app, "any-context", Some("https://api.prod.example.com:6443/"), false));
+        assert!(matches_destination(&app, "any-context", None, Some("https://api.prod.example.com:6443"), None, false));
+        assert!(matches_destination(&app, "any-context", None, Some("https://api.prod.example.com:6443/"), None, false));
 
         // Match by cluster name and suffix (e.g. GKE / EKS context name)
-        assert!(matches_destination(&app, "prod-cluster", None, true));
-        assert!(matches_destination(&app, "prod-cluster", Some("https://other-url.com"), true));
-        assert!(matches_destination(&app, "gke_org-prod_us-east1_prod-cluster", None, true));
-        assert!(matches_destination(&app, "arn:aws:eks:us-east-1:123456789012:cluster/prod-cluster", None, true));
+        assert!(matches_destination(&app, "prod-cluster", None, None, None, true));
+        assert!(matches_destination(&app, "prod-cluster", None, Some("https://other-url.com"), None, true));
+        assert!(matches_destination(&app, "gke_org-prod_us-east1_prod-cluster", None, None, None, true));
+        assert!(matches_destination(&app, "arn:aws:eks:us-east-1:123456789012:cluster/prod-cluster", None, None, None, true));
+
+        // Match by explicit cluster name
+        assert!(matches_destination(&app, "some-generic-context", Some("prod-cluster"), None, None, false));
 
         // Mismatches
-        assert!(!matches_destination(&app, "staging", Some("https://api.staging.example.com:6443"), false));
-        assert!(!matches_destination(&app, "gke_org-prod_us-east1_staging-cluster", None, true));
+        assert!(!matches_destination(&app, "staging", None, Some("https://api.staging.example.com:6443"), None, false));
+        assert!(!matches_destination(&app, "gke_org-prod_us-east1_staging-cluster", None, None, None, true));
+    }
+
+    #[test]
+    fn correlation_matches_via_cluster_mapping() {
+        // Application has empty destination_server, only destination_name
+        let app = ArgoApplication {
+            name: "backend-service".into(),
+            namespace: "argocd".into(),
+            project: "default".into(),
+            destination_server: "".into(),
+            destination_name: "search-backend-prod0-eu-w4".into(),
+            destination_namespace: "default".into(),
+            repo_url: "".into(),
+            target_revision: "".into(),
+            path: "".into(),
+            sync_status: "Synced".into(),
+            health_status: "Healthy".into(),
+            health_message: "".into(),
+            sync_revision: "".into(),
+            operation_phase: "".into(),
+            operation_message: "".into(),
+            auto_sync_enabled: true,
+            self_heal_enabled: false,
+            prune_enabled: false,
+            last_sync_time: "".into(),
+            created_at: "".into(),
+            resources: vec![],
+            sync_history: vec![],
+        };
+
+        let mut mapping = ArgoClusterMapping::new();
+        mapping.insert("search-backend-prod0-eu-w4", "https://10.245.248.2");
+
+        // When current_context is arbitrary, but server matches registered cluster secret server URL
+        assert!(matches_destination(
+            &app,
+            "arbitrary-context-name",
+            None,
+            Some("https://10.245.248.2"),
+            Some(&mapping),
+            false,
+        ));
+
+        // When server has trailing slash
+        assert!(matches_destination(
+            &app,
+            "arbitrary-context-name",
+            None,
+            Some("https://10.245.248.2/"),
+            Some(&mapping),
+            false,
+        ));
+
+        // When cluster secret name matches the active cluster name
+        assert!(matches_destination(
+            &app,
+            "some-ctx",
+            Some("search-backend-prod0-eu-w4"),
+            None,
+            Some(&mapping),
+            false,
+        ));
+
+        // Non-matching server URL
+        assert!(!matches_destination(
+            &app,
+            "arbitrary-context-name",
+            None,
+            Some("https://10.245.248.99"),
+            Some(&mapping),
+            false,
+        ));
     }
 }

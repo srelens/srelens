@@ -169,6 +169,15 @@ impl ArgoDetailViewState {
             }
         }
     }
+
+    pub fn selected_resource(&self) -> Option<&ArgoResourceItem> {
+        let app = self.application.as_ref()?;
+        match self.active_tab {
+            ArgoDetailTab::ManagedResources => app.resources.get(self.selected_resource_idx),
+            ArgoDetailTab::Drift => self.drift_items().get(self.selected_drift_idx).copied(),
+            _ => None,
+        }
+    }
 }
 
 fn sync_status_badge(status: &str) -> (&'static str, Style) {
@@ -195,9 +204,14 @@ fn health_status_badge(health: &str) -> (&'static str, Style) {
 pub fn render_argo_detail_view(f: &mut Frame, area: Rect, state: &ArgoDetailViewState) {
     let drift_count = state.drift_items().len();
 
+    let extra_hints = match state.active_tab {
+        ArgoDetailTab::ManagedResources | ArgoDetailTab::Drift => "  <Enter/d> Describe  <y> YAML  <x> Actions / AI ",
+        _ => "  <x> Actions / AI ",
+    };
+
     let title = format!(
-        " 🐙 ArgoCD Application: {}/{} (<1-4> Tabs  <s> Sync  <p> Auto-Sync  <R> Hard Refresh  <g> Git  <r> Reload  <Esc> Back) ",
-        state.app_namespace, state.app_name
+        " 🐙 ArgoCD Application: {}/{} (<1-4> Tabs  <s> Sync  <p> Auto-Sync  <R> Hard Refresh  <g> Git  <r> Reload{}<Esc> Back) ",
+        state.app_namespace, state.app_name, extra_hints
     );
 
     let block = Block::default()
@@ -253,7 +267,7 @@ pub fn render_argo_detail_view(f: &mut Frame, area: Rect, state: &ArgoDetailView
                 .border_style(Style::default().fg(Theme::border())),
         )
         .select(state.active_tab as usize)
-        .style(Style::default().fg(Theme::dim()))
+        .style(Style::default().fg(Theme::label()))
         .highlight_style(
             Style::default()
                 .fg(Theme::accent())
@@ -303,21 +317,21 @@ fn render_overview_tab(
         Line::from(vec![
             Span::styled("Sync Status: ", Theme::header_label()),
             Span::styled(sync_badge, sync_style),
-            Span::raw(" (Revision: "),
+            Span::styled(" (Revision: ", Theme::header_label()),
             Span::styled(
                 if app.sync_revision.is_empty() {
                     "-"
                 } else {
                     &app.sync_revision
                 },
-                Style::default().fg(Theme::dim()),
+                Style::default().fg(Theme::label()),
             ),
-            Span::raw(")"),
+            Span::styled(")", Theme::header_label()),
             Span::raw("    "),
             Span::styled("Health: ", Theme::header_label()),
             Span::styled(health_badge, health_style),
             Span::raw("  "),
-            Span::styled(&app.health_message, Theme::dim()),
+            Span::styled(&app.health_message, Style::default().fg(Theme::label())),
         ]),
         Line::from(vec![
             Span::styled("Created At: ", Theme::header_label()),
@@ -411,9 +425,9 @@ fn render_overview_tab(
         Line::from(vec![
             Span::styled("Target Cluster: ", Theme::header_label()),
             Span::styled(dest_name, Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" ("),
-            Span::styled(dest_server, Theme::dim()),
-            Span::raw(")    "),
+            Span::styled(" (", Theme::header_label()),
+            Span::styled(dest_server, Style::default().fg(Theme::label())),
+            Span::styled(")    ", Theme::header_label()),
             Span::styled("Target Namespace: ", Theme::header_label()),
             Span::styled(&app.destination_namespace, Style::default().fg(Theme::cyan())),
         ]),
@@ -427,12 +441,13 @@ fn render_overview_tab(
     );
     f.render_widget(p2, chunks[1]);
 
-    // 3. Operation status
+    // 3. Last Operation Details
     let op_phase = if app.operation_phase.is_empty() {
-        "Succeeded"
+        "None"
     } else {
         &app.operation_phase
     };
+
     let op_style = match op_phase {
         "Succeeded" => Theme::status_ok(),
         "Failed" | "Error" => Theme::status_error(),
@@ -465,7 +480,7 @@ fn render_overview_tab(
                 if app.operation_phase == "Failed" {
                     Style::default().fg(Theme::red())
                 } else {
-                    Style::default().fg(Theme::dim())
+                    Style::default().fg(Theme::label())
                 },
             ),
         ]),
@@ -533,6 +548,28 @@ fn render_resources_tab(
     .height(1)
     .bottom_margin(1);
 
+    let mut max_kind = "KIND".len();
+    let mut max_ns = "NAMESPACE".len();
+    let mut max_name = "NAME".len();
+    let mut max_status = "STATUS".len();
+    let mut max_health = "HEALTH".len();
+    let mut max_hook = "HOOK".len();
+    let mut max_msg = "MESSAGE".len();
+
+    for res in &app.resources {
+        let (sync_badge, _) = sync_status_badge(&res.status);
+        let (health_badge, _) = health_status_badge(&res.health);
+        let hook_str = res.hook.as_deref().unwrap_or("-");
+
+        max_kind = max_kind.max(res.kind.len());
+        max_ns = max_ns.max(res.namespace.len());
+        max_name = max_name.max(res.name.len());
+        max_status = max_status.max(sync_badge.chars().count());
+        max_health = max_health.max(health_badge.chars().count());
+        max_hook = max_hook.max(hook_str.len());
+        max_msg = max_msg.max(res.message.len());
+    }
+
     let rows: Vec<Row> = app
         .resources
         .iter()
@@ -562,13 +599,13 @@ fn render_resources_tab(
         .collect();
 
     let widths = [
-        Constraint::Length(16),
-        Constraint::Length(16),
-        Constraint::Length(28),
-        Constraint::Length(14),
-        Constraint::Length(16),
-        Constraint::Length(10),
-        Constraint::Min(30),
+        Constraint::Length((max_kind + 2) as u16),
+        Constraint::Length((max_ns + 2) as u16),
+        Constraint::Length((max_name + 2) as u16),
+        Constraint::Length((max_status + 2) as u16),
+        Constraint::Length((max_health + 2) as u16),
+        Constraint::Length((max_hook + 2) as u16),
+        Constraint::Min((max_msg + 2).max(20) as u16),
     ];
 
     let table = Table::new(rows, widths).header(headers);
@@ -613,6 +650,32 @@ fn render_drift_tab(
     .height(1)
     .bottom_margin(1);
 
+    let mut max_kind = "KIND".len();
+    let mut max_ns = "NAMESPACE".len();
+    let mut max_name = "NAME".len();
+    let mut max_status = "STATUS".len();
+    let mut max_health = "HEALTH".len();
+    let mut max_reason = "DRIFT / ERROR REASON".len();
+
+    for res in &drift {
+        let (sync_badge, _) = sync_status_badge(&res.status);
+        let (health_badge, _) = health_status_badge(&res.health);
+        let reason_len = if !res.message.is_empty() {
+            res.message.len()
+        } else if res.status == "OutOfSync" {
+            "Resource configuration drifted from Git commit".len()
+        } else {
+            1
+        };
+
+        max_kind = max_kind.max(res.kind.len());
+        max_ns = max_ns.max(res.namespace.len());
+        max_name = max_name.max(res.name.len());
+        max_status = max_status.max(sync_badge.chars().count());
+        max_health = max_health.max(health_badge.chars().count());
+        max_reason = max_reason.max(reason_len);
+    }
+
     let rows: Vec<Row> = drift
         .iter()
         .enumerate()
@@ -648,12 +711,12 @@ fn render_drift_tab(
         .collect();
 
     let widths = [
-        Constraint::Length(16),
-        Constraint::Length(16),
-        Constraint::Length(28),
-        Constraint::Length(14),
-        Constraint::Length(16),
-        Constraint::Min(40),
+        Constraint::Length((max_kind + 2) as u16),
+        Constraint::Length((max_ns + 2) as u16),
+        Constraint::Length((max_name + 2) as u16),
+        Constraint::Length((max_status + 2) as u16),
+        Constraint::Length((max_health + 2) as u16),
+        Constraint::Min((max_reason + 2).max(25) as u16),
     ];
 
     let table = Table::new(rows, widths).header(headers);
@@ -683,6 +746,20 @@ fn render_history_tab(
     .height(1)
     .bottom_margin(1);
 
+    let mut max_id = "ID".len();
+    let mut max_rev = "REVISION".len();
+    let mut max_dep = "DEPLOYED AT".len();
+    let mut max_repo = "REPO URL".len();
+    let mut max_path = "PATH".len();
+
+    for hist in &app.sync_history {
+        max_id = max_id.max(hist.id.to_string().len());
+        max_rev = max_rev.max(hist.revision.len());
+        max_dep = max_dep.max(hist.deployed_at.len());
+        max_repo = max_repo.max(hist.repo_url.len());
+        max_path = max_path.max(hist.path.len());
+    }
+
     let rows: Vec<Row> = app
         .sync_history
         .iter()
@@ -707,11 +784,11 @@ fn render_history_tab(
         .collect();
 
     let widths = [
-        Constraint::Length(6),
-        Constraint::Length(14),
-        Constraint::Length(25),
-        Constraint::Min(35),
-        Constraint::Length(20),
+        Constraint::Length((max_id + 2) as u16),
+        Constraint::Length((max_rev + 2) as u16),
+        Constraint::Length((max_dep + 2) as u16),
+        Constraint::Length((max_repo + 2) as u16),
+        Constraint::Min((max_path + 2) as u16),
     ];
 
     let table = Table::new(rows, widths).header(headers);
