@@ -111,10 +111,10 @@ export function Nav({ contexts }: NavProps) {
 
   const nodes = useMemo<ResourceNode[]>(
     () => [
-      ...kindNodes(),
+      ...kindNodes().slice(0, 1),
       ...(ctx && extensions.data && extensions.data.plugins.some(p => p.enabled && p.manifest.contributions.pages.length)
         ? [{
-            id: "extensions", label: "Apps", icon: Icons.crds,
+            id: "extensions", label: "Apps", icon: Icons.apps,
             children: extensions.data.plugins.filter(p => p.enabled && p.manifest.contributions.pages.length).map(p => ({
               id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: extensionLogoIcon(p.manifest.id, p.manifest.name),
               children: p.manifest.contributions.pages.flatMap((page, index, pages) => {
@@ -130,6 +130,7 @@ export function Nav({ contexts }: NavProps) {
             })),
           }]
         : []),
+      ...kindNodes().slice(1),
       { id: "crds", label: "Custom resources", icon: Icons.crds, defaultExpanded: false, children: crdChildren },
       {
         id: "investigate",

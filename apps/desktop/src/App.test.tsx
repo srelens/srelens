@@ -81,12 +81,14 @@ vi.mock("./components/Sidebar", () => ({
   Sidebar: ({
     onSelect,
     onOpenApp,
+    activeKind,
     activeCluster,
   }: {
     onSelect: (c: string, k: string) => void;
     onOpenApp: (c:string,id:string,page:string) => void;
+    activeKind?:string;
     activeCluster: string;
-  }) => <><button onClick={() => onSelect(activeCluster, "services")}>nav-services</button><button onClick={()=>onOpenApp(activeCluster,"org.srelens.flux","kustomizations")}>nav-app</button></>,
+  }) => <><span data-testid="sidebar-active-kind">{activeKind}</span><button onClick={() => onSelect(activeCluster, "services")}>nav-services</button><button onClick={()=>onOpenApp(activeCluster,"org.srelens.flux","kustomizations")}>nav-app</button></>,
 }));
 vi.mock("./components/Extensions",()=>({ClassicAppPage:({context,id,page}:{context:string;id:string;page:string})=><div data-testid="app-page">{context}:{id}:{page}</div>}));
 vi.mock("./components/ClusterOverview", () => ({
@@ -658,6 +660,8 @@ it("does not show an app developer banner on the landing screen or settings", ()
 it("opens classic app pages in distinct cluster-bound tabs without replacing Overview",()=>{
  render(<App/>);fireEvent.click(screen.getByText("open-kind-dev"));fireEvent.click(screen.getByText("nav-app"));
  expect(screen.getByTestId("app-page").textContent).toBe("kind-dev:org.srelens.flux:kustomizations");
+ expect(screen.getByTestId("sidebar-active-kind").textContent).toBe("");
+ expect(screen.getByText("kustomizations")).toBeTruthy();
  fireEvent.click(screen.getByText("open-prod"));fireEvent.click(screen.getByText("nav-app"));
  expect(screen.getByTestId("app-page").textContent).toBe("prod:org.srelens.flux:kustomizations");
  fireEvent.click(screen.getByRole("tab",{name:/kustomizations · kind-dev/}));

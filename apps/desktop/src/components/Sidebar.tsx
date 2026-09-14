@@ -101,7 +101,7 @@ export function Sidebar({
 }: {
   clusters: string[];
   activeCluster?: string | null;
-  activeKind: ResourceKind;
+  activeKind?: ResourceKind;
   activeCrd?: CrdRef | null;
   onSelect: (cluster: string, kind: ResourceKind) => void;
   onSelectCrd: (cluster: string, crd: CrdRef) => void;
@@ -178,7 +178,7 @@ export function Sidebar({
               NAV_SECTIONS.map((section) => {
                 const gkey = `${cluster}|${section.heading}`;
                 const openByDefault =
-                  cluster === activeCluster && section.kinds.includes(activeKind);
+                  cluster === activeCluster && activeKind !== undefined && section.kinds.includes(activeKind);
                 const open = groupOpen(gkey, openByDefault);
                 return (
                   <React.Fragment key={section.heading}>
@@ -213,11 +213,11 @@ export function Sidebar({
                           </button>
                         );
                       })}
+                    {section.heading === "Cluster" && onOpenApp && <ClassicAppsNav context={cluster} onOpen={onOpenApp}/>}
                   </React.Fragment>
                 );
               })}
 
-            {clusterOpen(cluster) && onOpenApp && <ClassicAppsNav context={cluster} onOpen={onOpenApp}/>}
             {/* Custom Resources (level 1, lazy-loaded per cluster, default collapsed) */}
             {clusterOpen(cluster) && (
               <CustomResourceGroup

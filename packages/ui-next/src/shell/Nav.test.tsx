@@ -236,6 +236,9 @@ it("groups app pages under their display name", async () => {
   ] };
   render(<Nav contexts={[PROD]} />);
   await userEvent.click(await screen.findByRole("treeitem", { name: "Apps" }));
+  const apps = screen.getByRole("treeitem", {name:"Apps"});
+  expect(screen.getByRole("treeitem",{name:"Cluster"}).compareDocumentPosition(apps) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(apps.compareDocumentPosition(screen.getByRole("treeitem",{name:"Workloads"})) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   const fluxNode = await screen.findByRole("treeitem", { name: "Flux" });
   expect(fluxNode.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("org.srelens.flux");
   await userEvent.click(fluxNode);

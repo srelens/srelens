@@ -5,6 +5,7 @@ import {
 } from "@srelens/ui-next/extensions";
 import { Button, Combobox, Tabs } from "../ui";
 import type { ComponentProps } from "react";
+import { LayoutGrid } from "lucide-react";
 
 // Keep each design's controls and stylesheet; only the extension behavior is shared.
 const controls = { Button, Combobox, Tabs };
@@ -30,7 +31,7 @@ export function ClassicAppsNav({context,onOpen}:{context:string;onOpen(context:s
   const inventory=useExtensions();
   const apps=inventory.data?.plugins.filter(p=>p.enabled && p.manifest.contributions.pages.length)??[];
   if(!apps.length)return null;
-  return <details className="pl-3 py-1 text-sm"><summary className="cursor-pointer text-muted-foreground">Apps</summary>{apps.map(app=><details key={app.manifest.id} className="pl-2 py-1"><summary className="cursor-pointer"><ExtensionLogo id={app.manifest.id} name={app.manifest.name} size={16}/> {app.manifest.name}</summary>{app.manifest.contributions.pages.map(page=><button type="button" key={page.id} aria-label={`Open ${page.title}`} className="block w-full truncate px-3 py-1 text-left hover:bg-muted" onClick={()=>onOpen(context,app.manifest.id,page.id)}>{page.group?`${page.group} · ${page.title}`:page.title}</button>)}</details>)}</details>;
+  return <details className="pl-3 py-1 text-sm"><summary className="cursor-pointer text-muted-foreground"><LayoutGrid size={16} className="inline-block align-middle mr-1" aria-hidden="true"/>Apps</summary>{apps.map(app=><details key={app.manifest.id} className="pl-2 py-1"><summary className="cursor-pointer"><ExtensionLogo id={app.manifest.id} name={app.manifest.name} size={16}/> {app.manifest.name}</summary>{app.manifest.contributions.pages.map(page=><button type="button" key={page.id} aria-label={`Open ${page.title}`} className="block w-full truncate px-3 py-1 text-left hover:bg-muted" onClick={()=>onOpen(context,app.manifest.id,page.id)}>{page.group?`${page.group} · ${page.title}`:page.title}</button>)}</details>)}</details>;
 }
 export function ClassicAppPage({context,id,page,namespace="",resourceName,onOpenResource,onPage}:{context:string;id:string;page:string;namespace?:string;resourceName?:string;onOpenResource?(name:string,namespace:string):void;onPage(page:string,namespace?:string):void}) {
   const inventory=useExtensions();

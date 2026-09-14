@@ -1049,7 +1049,7 @@ export function App() {
         <Sidebar
           clusters={clusters}
           activeCluster={activeCluster}
-          activeKind={activeKind}
+          activeKind={activeTab?.app ? undefined : activeKind}
           activeCrd={activeCrd}
           onSelect={(c, k) => openView(c, k)}
           onSelectCrd={(c, crd) => openCrdView(c, crd)}
@@ -1251,7 +1251,7 @@ export function App() {
       <StatusBar
         activeCluster={activeCluster}
         activeLabel={
-          activeTab ? (activeTab.crd ? activeTab.crd.kind : RESOURCE_LABELS[activeKind]) : undefined
+          activeTab ? (activeTab.app ? (activeTab.app.resourceName ?? activeTab.app.page) : activeTab.crd ? activeTab.crd.kind : RESOURCE_LABELS[activeKind]) : undefined
         }
         tabCount={tabs.length}
         // Every configured context, not just the active tab's: a shell for a

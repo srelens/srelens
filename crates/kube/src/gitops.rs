@@ -163,11 +163,18 @@ fn guard_action(current: &Value, uid: &str, version: &str, action: &str) -> Resu
     Ok(())
 }
 async fn inspect(client: Client, r: &ResourceIn) -> Result<ResourceOut, String> {
+    inspect_with_timeout(client, r, request_timeout()).await
+}
+async fn inspect_with_timeout(
+    client: Client,
+    r: &ResourceIn,
+    timeout: std::time::Duration,
+) -> Result<ResourceOut, String> {
     r.validate()?;
-    let object = r
-        .api(client.clone())
-        .get(&r.name)
+    let api = r.api(client.clone());
+    let object = tokio::time::timeout(timeout, api.get(&r.name))
         .await
+        .map_err(|_| "Resource request timed out".to_string())?
         .map_err(|e| e.to_string())?;
     let mut resource = serde_json::to_value(object).map_err(|e| e.to_string())?;
     if let Some(meta) = resource.get_mut("metadata").and_then(Value::as_object_mut) {
@@ -182,9 +189,10 @@ async fn inspect(client: Client, r: &ResourceIn) -> Result<ResourceOut, String> 
     let (events, events_error) = if uid.is_empty() {
         (vec![], Some("Resource UID is unavailable".into()))
     } else {
-        match events_api.list(&kube::api::ListParams::default().fields(&format!("involvedObject.uid={uid}")).limit(100)).await {
-            Ok(list) => (list.items.into_iter().map(|e| json!({"type":e.type_,"reason":e.reason,"message":e.message,"count":e.count})).collect(),None),
-            Err(e) => (vec![],Some(e.to_string())),
+        match tokio::time::timeout(timeout, events_api.list(&kube::api::ListParams::default().fields(&format!("involvedObject.uid={uid}")).limit(100))).await {
+            Ok(Ok(list)) => (list.items.into_iter().map(|e| json!({"type":e.type_,"reason":e.reason,"message":e.message,"count":e.count})).collect(),None),
+            Ok(Err(e)) => (vec![],Some(e.to_string())),
+            Err(_) => (vec![],Some("Events request timed out".into())),
         }
     };
     Ok(ResourceOut {
@@ -237,9 +245,8 @@ pub fn resource_capability(cache: Arc<ClientCache>) -> Capability {
                     .get(&input.context)
                     .await
                     .map_err(CapabilityError::Handler)?;
-                tokio::time::timeout(request_timeout(), inspect(client, &input))
+                inspect(client, &input)
                     .await
-                    .map_err(|_| CapabilityError::Handler("Resource request timed out".into()))?
                     .map_err(CapabilityError::Handler)
             }
         },
@@ -364,6 +371,9 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push((format!("{method} {uri}"), value));
+                if uri.contains("/events") && events_status == 0 {
+                    std::future::pending::<()>().await;
+                }
                 let status = if method == "PATCH" {
                     patch_status
                 } else if uri.contains("/events") {
@@ -432,6 +442,25 @@ mod tests {
                 if version == "2" { 2 } else { 1 }
             );
         }
+    }
+    #[tokio::test]
+    async fn event_timeouts_preserve_the_already_fetched_resource() {
+        let (client, requests) = mock_client(200, 0);
+        let result = inspect_with_timeout(
+            client,
+            &resource("argoproj.io", "Application", "applications"),
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.resource["metadata"]["name"], "apps");
+        assert!(!result.actions.is_empty());
+        assert!(result.events.is_empty());
+        assert_eq!(
+            result.events_error.as_deref(),
+            Some("Events request timed out")
+        );
+        assert_eq!(requests.lock().unwrap().len(), 2);
     }
     #[tokio::test]
     async fn event_permission_errors_preserve_resource_details_and_filter_events_by_uid() {
