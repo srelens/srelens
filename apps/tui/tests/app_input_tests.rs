@@ -1826,6 +1826,89 @@ async fn switch_context_while_in_logs_stops_stream() {
     );
 }
 
+#[tokio::test]
+async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes() {
+    let (mut app, _rx) = common::app().await;
+    let argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
+    app.active_view = ActiveView::Argo(argo_state);
+    app.active_context = "cluster-1".to_string();
+    app.argo_refreshing = true; // In-flight refresh for cluster-1
+
+    let make_app = |name: &str, dest: &str| srelens_kube::argo::ArgoApplication {
+        name: name.to_string(),
+        namespace: "argocd".to_string(),
+        project: "default".to_string(),
+        destination_server: "".to_string(),
+        destination_name: dest.to_string(),
+        destination_namespace: "default".to_string(),
+        repo_url: "https://github.com/example/repo".to_string(),
+        target_revision: "HEAD".to_string(),
+        path: "apps".to_string(),
+        sync_status: "Synced".to_string(),
+        health_status: "Healthy".to_string(),
+        health_message: "".to_string(),
+        sync_revision: "123".to_string(),
+        operation_phase: "".to_string(),
+        operation_message: "".to_string(),
+        auto_sync_enabled: true,
+        self_heal_enabled: false,
+        prune_enabled: false,
+        last_sync_time: "".to_string(),
+        created_at: "".to_string(),
+        resources: vec![],
+        sync_history: vec![],
+    };
+
+    // Switch to cluster-2
+    app.switch_context("cluster-2".to_string()).await;
+    assert_eq!(app.active_context, "cluster-2");
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert!(argo.applications.is_empty(), "apps cleared on context switch");
+        assert!(argo.is_loading, "loading true on context switch");
+    } else {
+        panic!("expected ActiveView::Argo");
+    }
+
+    // Stale result from cluster-1 arrives
+    let app1 = make_app("app-1", "cluster-1");
+    app.handle_argo_applications_result("cluster-1", false, None, Ok(vec![app1]));
+
+    // Stale result must NOT be accepted on cluster-2
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert!(argo.applications.is_empty(), "stale cluster-1 apps must not populate cluster-2");
+    }
+
+    // The real result for cluster-2 arrives
+    let app2 = make_app("app-2", "cluster-2");
+    app.handle_argo_applications_result("cluster-2", true, Some("tools".to_string()), Ok(vec![app2.clone()]));
+
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert_eq!(argo.applications.len(), 1);
+        assert_eq!(argo.applications[0].name, "app-2");
+        assert!(!argo.is_loading);
+        assert!(argo.is_remote_hub);
+    } else {
+        panic!("expected ActiveView::Argo");
+    }
+
+    // Switch back to cluster-1
+    app.switch_context("cluster-1".to_string()).await;
+    assert_eq!(app.active_context, "cluster-1");
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert!(argo.applications.is_empty());
+        assert!(argo.is_loading);
+    }
+
+    // Cluster-1 result arrives
+    let app1 = make_app("app-1", "cluster-1");
+    app.handle_argo_applications_result("cluster-1", true, Some("tools".to_string()), Ok(vec![app1.clone()]));
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert_eq!(argo.applications.len(), 1);
+        assert_eq!(argo.applications[0].name, "app-1");
+        assert!(!argo.is_loading);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Help, quit, toasts, assistant drawer, settings
 // ---------------------------------------------------------------------------

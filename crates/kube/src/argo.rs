@@ -194,10 +194,18 @@ pub fn matches_destination(
     current_server_url: Option<&str>,
     match_by_name: bool,
 ) -> bool {
-    if match_by_name {
-        if !app.destination_name.is_empty() && app.destination_name == current_context {
-            return true;
+    let name_matches = |dest_name: &str| -> bool {
+        if dest_name.is_empty() {
+            return false;
         }
+        dest_name == current_context
+            || current_context.ends_with(&format!("_{}", dest_name))
+            || current_context.ends_with(&format!("-{}", dest_name))
+            || current_context.ends_with(&format!("/{}", dest_name))
+    };
+
+    if match_by_name && name_matches(&app.destination_name) {
+        return true;
     }
     if let Some(server) = current_server_url {
         let norm_current = normalize_server_url(server);
@@ -206,7 +214,7 @@ pub fn matches_destination(
             return true;
         }
     }
-    if !app.destination_name.is_empty() && app.destination_name == current_context {
+    if name_matches(&app.destination_name) {
         return true;
     }
     false
@@ -236,9 +244,16 @@ pub async fn fetch_argo_applications(
         .map_err(|e| format!("Failed to connect to cluster '{}': {}", query_context, e))?;
 
     let ar = argo_application_resource();
-    let api: Api<DynamicObject> = match target_namespace {
-        Some(ns) if !ns.is_empty() => Api::namespaced_with(client, ns, &ar),
-        _ => Api::all_with(client, &ar),
+    let api: Api<DynamicObject> = if is_remote_hub {
+        // In Hub-and-Spoke mode, the Hub cluster hosts Application CRs in its own
+        // control plane namespace (e.g. `argocd`), NOT in the spoke cluster's workload namespaces.
+        // Therefore, we must always query the Hub cluster across all namespaces.
+        Api::all_with(client, &ar)
+    } else {
+        match target_namespace {
+            Some(ns) if !ns.is_empty() => Api::namespaced_with(client, ns, &ar),
+            _ => Api::all_with(client, &ar),
+        }
     };
 
     let list = api
@@ -270,7 +285,17 @@ pub async fn fetch_argo_applications(
     if is_remote_hub {
         let filtered: Vec<ArgoApplication> = all_apps
             .into_iter()
-            .filter(|app| matches_destination(app, current_context, current_server_url, match_by_name))
+            .filter(|app| {
+                if !matches_destination(app, current_context, current_server_url, match_by_name) {
+                    return false;
+                }
+                if let Some(ns) = target_namespace {
+                    if !ns.is_empty() && app.destination_namespace != ns && app.namespace != ns {
+                        return false;
+                    }
+                }
+                true
+            })
             .collect();
         Ok((filtered, true))
     } else {
@@ -540,11 +565,14 @@ mod tests {
         assert!(matches_destination(&app, "any-context", Some("https://api.prod.example.com:6443"), false));
         assert!(matches_destination(&app, "any-context", Some("https://api.prod.example.com:6443/"), false));
 
-        // Match by cluster name
+        // Match by cluster name and suffix (e.g. GKE / EKS context name)
         assert!(matches_destination(&app, "prod-cluster", None, true));
         assert!(matches_destination(&app, "prod-cluster", Some("https://other-url.com"), true));
+        assert!(matches_destination(&app, "gke_org-prod_us-east1_prod-cluster", None, true));
+        assert!(matches_destination(&app, "arn:aws:eks:us-east-1:123456789012:cluster/prod-cluster", None, true));
 
         // Mismatches
         assert!(!matches_destination(&app, "staging", Some("https://api.staging.example.com:6443"), false));
+        assert!(!matches_destination(&app, "gke_org-prod_us-east1_staging-cluster", None, true));
     }
 }

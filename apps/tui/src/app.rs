@@ -1324,6 +1324,7 @@ impl App {
             helm.is_loading = true;
         }
         if let ActiveView::Argo(argo) = &mut self.active_view {
+            self.argo_refreshing = false;
             argo.applications.clear();
             argo.is_loading = true;
         }
@@ -7010,11 +7011,10 @@ impl App {
             argo.error = None;
         }
         let current_context = self.active_context.clone();
-        let target_ns = if self.active_namespace.is_empty() {
-            None
-        } else {
-            Some(self.active_namespace.clone())
-        };
+        // Do not restrict cluster-level ArgoCD application listings by Pod active_namespace,
+        // which causes applications to vanish whenever viewing non-default namespaces
+        // or switching to contexts with a default namespace configured in kubeconfig.
+        let target_ns: Option<String> = None;
 
         let hub_context = self.tui_config.resolved_argo_hub_context();
         let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
@@ -7079,6 +7079,10 @@ impl App {
                     Ok(apps) => argo.set_applications(apps, is_remote_hub, hub_context),
                     Err(err) => argo.set_error(err),
                 }
+            } else {
+                // Received result for an older context from before context switch;
+                // trigger a fresh query for the now-active context.
+                self.refresh_argo_applications();
             }
         }
     }
