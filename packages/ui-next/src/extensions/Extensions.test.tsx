@@ -481,6 +481,8 @@ it("opens a clicked resource in its selected namespace and drops detail state on
   const view=render(<ExtensionResults plugin={app} capability="list" context="cluster/a"/>);
   fireEvent.click(await screen.findByRole("button",{name:"apps"}));
   expect(await screen.findByText("Build failed")).toBeTruthy();
+  expect(screen.getByRole("button",{name:"apps"})).toBeTruthy();
+  expect(screen.getByRole("region",{name:"apps"})).toBeTruthy();
   expect(inspectExtensionResource).toHaveBeenCalledWith({id:plugin.manifest.id,revision:plugin.revision,capability:"list",context:"cluster/a",namespace:"team",name:"apps"});
   view.rerender(<ExtensionResults plugin={app} capability="list" context="cluster/b"/>);
   expect(screen.queryByText("Build failed")).toBeNull();

@@ -71,3 +71,10 @@ it("sends a host-selected app resource and the reviewed resourceVersion for acti
   await actOnExtensionResource(resource,"suspend","uid","12");
   expect(invokeCapability).toHaveBeenLastCalledWith("extensions.action",{resource,action:"suspend",uid:"uid",resourceVersion:"12"});
 });
+
+it("gives each app resource its own cluster, page, namespace and name route", async () => {
+  const {extensionResourceRoute}=await import("./extensions");
+  const route=extensionResourceRoute("cluster/a","org.srelens.flux","kustomizations","team","apps");
+  expect(parseExtensionRoute(route)).toEqual({context:"cluster/a",id:"org.srelens.flux",page:"kustomizations",namespace:"team",resourceName:"apps"});
+  expect(route).not.toBe(extensionResourceRoute("cluster/b","org.srelens.flux","kustomizations","team","apps"));
+});

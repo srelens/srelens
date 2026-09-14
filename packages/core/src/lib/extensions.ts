@@ -93,12 +93,14 @@ export function extensionRoute(
 }
 export function parseExtensionRoute(route: string) {
   const pieces = route.split("/");
-  if (pieces.length !== 6 || pieces[1] !== "extensions") return null;
+  if ((pieces.length !== 6 && pieces.length !== 7) || pieces[1] !== "extensions") return null;
   try {
     const [context, id, page, namespace] = pieces
       .slice(2)
       .map(decodeURIComponent);
-    return context && id && page ? { context, id, page, namespace } : null;
+    const resourceName = pieces.length === 7 ? decodeURIComponent(pieces[6]) : undefined;
+    if (pieces.length === 7 && !resourceName) return null;
+    return context && id && page ? { context, id, page, namespace, ...(resourceName ? { resourceName } : {}) } : null;
   } catch {
     return null;
   }
@@ -142,3 +144,7 @@ export interface ExtensionResourceDetail {
 }
 export const inspectExtensionResource = (resource: ExtensionResourceSelection) => invokeCapability<ExtensionResourceDetail>("extensions.resource", resource);
 export const actOnExtensionResource = (resource: ExtensionResourceSelection, action: string, uid: string, resourceVersion: string) => invokeCapability<{requested: boolean}>("extensions.action", {resource, action, uid, resourceVersion});
+
+export function extensionResourceRoute(context:string,id:string,page:string,namespace:string,name:string) {
+  return `${extensionRoute(context,id,page,namespace)}/${encodeURIComponent(name)}`;
+}

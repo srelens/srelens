@@ -709,11 +709,11 @@ export function App() {
     setActiveTabId(id);
   }
 
-  function openAppPage(cluster:string, appId:string, page:string, namespace="") {
-    const existing=tabs.find(t=>t.cluster===cluster && t.app?.id===appId && t.app.page===page && (t.namespace??"")===namespace);
+  function openAppPage(cluster:string, appId:string, page:string, namespace="", resourceName?:string) {
+    const existing=tabs.find(t=>t.cluster===cluster && t.app?.id===appId && t.app.page===page && (t.namespace??"")===namespace && t.app.resourceName===resourceName);
     if(existing){setActiveTabId(existing.id);return;}
     const id=tabIdRef.current++;
-    setTabs(ts=>[...ts,{id,cluster,clusterId:stableIdOf(cluster),kind:"overview",namespace,app:{id:appId,page}}]);
+    setTabs(ts=>[...ts,{id,cluster,clusterId:stableIdOf(cluster),kind:"overview",namespace,app:{id:appId,page,resourceName}}]);
     setActiveTabId(id);
   }
 
@@ -1023,7 +1023,7 @@ export function App() {
     label: t.edit
       ? `edit: ${t.edit.kind}/${t.edit.name}`
       : t.cluster
-        ? `${t.app ? t.app.page : t.crd ? t.crd.kind : RESOURCE_LABELS[t.kind]} · ${contextDisplayName(t.cluster, contextProfiles[t.cluster])}`
+        ? `${t.app ? (t.app.resourceName ?? t.app.page) : t.crd ? t.crd.kind : RESOURCE_LABELS[t.kind]} · ${contextDisplayName(t.cluster, contextProfiles[t.cluster])}`
         : RESOURCE_LABELS[t.kind],
   }));
 
@@ -1074,7 +1074,7 @@ export function App() {
             {activeTab && (
               <>
                 <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-                  {activeTab.app && activeCluster ? <ClassicAppPage key={activeTab.id} context={activeCluster} id={activeTab.app.id} page={activeTab.app.page} namespace={activeTab.namespace} onPage={(page,namespace)=>openAppPage(activeCluster,activeTab.app!.id,page,namespace)}/> : activeKind === "settings" ? (
+                  {activeTab.app && activeCluster ? <ClassicAppPage key={activeTab.id} context={activeCluster} id={activeTab.app.id} page={activeTab.app.page} namespace={activeTab.namespace} resourceName={activeTab.app.resourceName} onOpenResource={(name,namespace)=>openAppPage(activeCluster,activeTab.app!.id,activeTab.app!.page,namespace,name)} onPage={(page,namespace)=>openAppPage(activeCluster,activeTab.app!.id,page,namespace)}/> : activeKind === "settings" ? (
                     <SettingsView
                       key={`${activeTab.id}:${settingsSectionNonce}`}
                       initialSection={settingsInitialSection}

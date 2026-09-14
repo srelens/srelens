@@ -20,7 +20,7 @@ export interface ViewTab {
   /** Present when the tab is a custom-resource (CRD) view. */
   crd?: CrdRef;
   /** Native app page, pinned to this tab’s cluster. */
-  app?: { id: string; page: string };
+  app?: { id: string; page: string; resourceName?: string };
   /** Deep-link target from global search (opens the resource's detail). */
   focus?: { name: string; namespace: string | null; nonce: number };
   /** For a "new resource" tab: its starting kind and in-memory working copy. */

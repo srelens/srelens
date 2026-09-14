@@ -1,4 +1,6 @@
-import { extensionRoute, parseExtensionRoute } from "@srelens/core";
+import { ExtensionResourceDetails } from "../extensions/ExtensionResourceDetails";
+import { ExtensionResourceNavigation } from "../extensions/resourceNavigation";
+import { extensionRoute, extensionResourceRoute, parseExtensionRoute } from "@srelens/core";
 import { Button, Screen } from "@srelens/ui-kit";
 import { useExtensions } from "../extensions/Extensions";
 import { ExtensionWorkspace } from "../extensions/ExtensionWorkspace";
@@ -24,11 +26,11 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
   const cluster = contexts.find((c) => c.name === target.context);
   return (
     <Screen
-      title={page?.title ?? "App"}
+      title={target.resourceName ?? page?.title ?? "App"}
       eyebrow={getContextLabel(cluster?.stableId ?? "", target.context)}
       fill
     >
-      <div className="scroll min-h-0 min-w-0 flex-1">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {inventory.status === "loading" ? (
           <p className="extension-message" role="status">
             Loading app…
@@ -39,7 +41,8 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             <Button onClick={inventory.reload}>Retry</Button>
           </div>
         ) : plugin && page ? (
-          <ExtensionWorkspace
+          <ExtensionResourceNavigation.Provider value={resource=>openTab(extensionResourceRoute(target.context,target.id,target.page,resource.namespace,resource.name),{clusterName:target.context})}>
+          {target.resourceName ? <ExtensionResourceDetails fullPage key={route} selection={{id:target.id,revision:plugin.revision,capability:page.capability,context:target.context,namespace:target.namespace,name:target.resourceName}} onChanged={()=>{}}/> : <ExtensionWorkspace
             plugin={plugin}
             page={page}
             onPage={(id, namespace) =>
@@ -49,7 +52,8 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             }
             context={target.context}
             namespace={target.namespace}
-          />
+          />}
+          </ExtensionResourceNavigation.Provider>
         ) : (
           <p className="extension-message">
             This app page is disabled, removed, or no longer available.

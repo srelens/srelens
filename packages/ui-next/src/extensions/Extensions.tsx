@@ -360,3 +360,6 @@ export function ExtensionResourceSlot({
 
 export { ExtensionWorkspace } from "./ExtensionWorkspace";
 export { ExtensionLogo } from "./ExtensionLogo";
+
+export { ExtensionResourceNavigation } from "./resourceNavigation";
+export { ExtensionResourceDetails } from "./ExtensionResourceDetails";

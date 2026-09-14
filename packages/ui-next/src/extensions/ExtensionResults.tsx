@@ -1,6 +1,9 @@
 import { AgeCell } from "../lib/ageCell";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
-import { useContext, useState } from "react";
+import { ResizeHandle } from "@srelens/ui-kit";
+import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
+import { ExtensionResourceNavigation } from "./resourceNavigation";
+import { useContext, useRef, useState } from "react";
 import {
   describeError,
   readExtension,
@@ -94,6 +97,10 @@ export function ExtensionResults({
   hideToolbar?: boolean;
 }) {
   const { Button } = useContext(ExtensionControls);
+  const openResource = useContext(ExtensionResourceNavigation);
+  const rowButtons = useRef(new Map<string,HTMLButtonElement>());
+  const listRow = usePeekBounds();
+  const peekWidth = clampPeekWidth(usePeekWidth(), listRow.bounds);
   const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,namespace]);
   const [selected,setSelected] = useState<{scope:string;name:string;namespace:string}|null>(null);
   const data = useResource(
@@ -122,14 +129,13 @@ export function ExtensionResults({
   const columns = Array.isArray(binding?.arguments.printerColumns)
     ? (binding.arguments.printerColumns as Array<{ name: string }>)
     : [];
-  if (selected?.scope === scope) return <ExtensionResourceDetails key={`${scope}/${selected.namespace}/${selected.name}`} selection={{id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:selected.namespace,name:selected.name}} onClose={()=>{setSelected(null);data.reload();}} onChanged={()=>{}} />;
   if (!context)
     return (
       <p className="extension-message">
         Choose a cluster before opening an app page.
       </p>
     );
-  if (data.status === "error") {
+  if (data.status === "error" && selected?.scope !== scope) {
     // A 404 identifies an unavailable endpoint, not why it is unavailable.
     // Name the required API without claiming that discovery proved it absent.
     const args = binding?.arguments;
@@ -157,7 +163,7 @@ export function ExtensionResults({
       />
     );
   }
-  if (data.status === "loading")
+  if (data.status === "loading" && selected?.scope !== scope)
     return (
       <p role="status" className="extension-message">
         Loading app resources…
@@ -170,7 +176,8 @@ export function ExtensionResults({
       .includes(search.toLowerCase()),
   );
   return (
-    <section className="extension-results">
+    <section className="extension-results" ref={listRow.ref}>
+      <div className="extension-resource-list">
       {!hideToolbar && (
         <div className="extension-toolbar">
           <span>
@@ -185,7 +192,7 @@ export function ExtensionResults({
           </Button>
         </div>
       )}
-      {rows.length ? (
+      {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <ErrorNotice cluster message={data.error} retry={data.reload}/> : rows.length ? (
         <div className="extension-table-scroll">
           <table>
             <thead>
@@ -200,9 +207,9 @@ export function ExtensionResults({
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={`${row.namespace}/${row.name}`} onClick={binding?.target === "k8s.listCustomResource" ? ()=>setSelected({scope,name:row.name,namespace:row.namespace}):undefined}>
+                <tr key={`${row.namespace}/${row.name}`} aria-selected={selected?.scope===scope && selected.name===row.name && selected.namespace===row.namespace} onDoubleClick={openResource && binding?.target === "k8s.listCustomResource" ? ()=>openResource({id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:row.namespace,name:row.name}):undefined} onClick={binding?.target === "k8s.listCustomResource" ? ()=>setSelected({scope,name:row.name,namespace:row.namespace}):undefined}>
                   <td>
-                    {binding?.target === "k8s.listCustomResource" ? <button className="extension-resource-link" onClick={()=>setSelected({scope,name:row.name,namespace:row.namespace})}>{row.name}</button> : <span className="extension-resource-name" title={row.name}>{row.name}</span>}
+                    {binding?.target === "k8s.listCustomResource" ? <button className="extension-resource-link" ref={node=>{const key=`${row.namespace}/${row.name}`;if(node)rowButtons.current.set(key,node);else rowButtons.current.delete(key);}} onKeyDown={e=>{if(e.key==="Enter" && openResource){e.preventDefault();openResource({id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:row.namespace,name:row.name});}}} onClick={()=>setSelected({scope,name:row.name,namespace:row.namespace})}>{row.name}</button> : <span className="extension-resource-name" title={row.name}>{row.name}</span>}
                   </td>
                   <td className="extension-namespace">
                     {row.namespace || "—"}
@@ -226,6 +233,11 @@ export function ExtensionResults({
           {data.data?.items.length ? "No matching resources." : "No resources returned by this app."}
         </p>
       )}
+      </div>
+      {selected?.scope === scope && <div className="extension-detail-peek" style={{width:peekWidth}}>
+        <ResizeHandle label="the resource details" width={peekWidth} minWidth={listRow.bounds.minWidth} maxWidth={listRow.bounds.maxWidth} edge="left" onResize={setPeekWidth} onCommit={savePeekWidth}/>
+        <ExtensionResourceDetails key={`${scope}/${selected.namespace}/${selected.name}`} selection={{id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:selected.namespace,name:selected.name}} onClose={()=>{setSelected(null);rowButtons.current.get(`${selected.namespace}/${selected.name}`)?.focus();}} onChanged={data.reload} />
+      </div>}
     </section>
   );
 }

@@ -120,7 +120,7 @@ function decodedSegment(raw: string): string {
  */
 export function describe(route: string, clusterName?: string): RouteInfo {
   const extension = parseExtensionRoute(route);
-  if (extension) return { route, title: extension.page, sub: extension.context, kind: "resource" };
+  if (extension) return { route, title: extension.resourceName ?? extension.page, sub: extension.context, kind: "resource" };
   const sub = clusterName || undefined;
   if (route.startsWith("/resources/")) {
     const [, , rawName, suffix] = route.split("/");
