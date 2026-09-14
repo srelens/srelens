@@ -146,6 +146,8 @@ pub struct TuiConfig {
     #[serde(alias = "commandPopupTextScale")]
     pub command_popup_density: CommandPopupDensity,
     pub show_feature_banner: bool,
+    pub argo_hub_context: Option<String>,
+    pub argo_hub_kubeconfig: Option<PathBuf>,
 }
 
 impl Default for TuiConfig {
@@ -155,6 +157,8 @@ impl Default for TuiConfig {
             command_popup_max_visible: DEFAULT_COMMAND_POPUP_MAX_VISIBLE,
             command_popup_density: CommandPopupDensity::default(),
             show_feature_banner: DEFAULT_SHOW_FEATURE_BANNER,
+            argo_hub_context: None,
+            argo_hub_kubeconfig: None,
         }
     }
 }
@@ -177,6 +181,26 @@ impl TuiConfig {
         self.command_popup_density = CommandPopupDensity::from_scale(
             scale.clamp(MIN_COMMAND_POPUP_TEXT_SCALE, MAX_COMMAND_POPUP_TEXT_SCALE),
         );
+    }
+
+    pub fn resolved_argo_hub_context(&self) -> Option<String> {
+        if let Ok(val) = std::env::var("SRELENS_ARGO_HUB_CONTEXT") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        self.argo_hub_context.clone()
+    }
+
+    pub fn resolved_argo_hub_kubeconfig(&self) -> Option<PathBuf> {
+        if let Ok(val) = std::env::var("SRELENS_ARGO_HUB_KUBECONFIG") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(PathBuf::from(trimmed));
+            }
+        }
+        self.argo_hub_kubeconfig.clone()
     }
 
     pub fn config_file_path() -> PathBuf {

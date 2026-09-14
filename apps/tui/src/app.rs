@@ -40,6 +40,8 @@ pub enum ActiveView {
     PortForwards(PortForwardViewState),
     Helm(HelmViewState),
     HelmDetail(HelmDetailViewState),
+    Argo(argo_view::ArgoViewState),
+    ArgoDetail(argo_detail_view::ArgoDetailViewState),
     Overview(OverviewViewState),
     Toolbox(ToolboxViewState),
     Assistant,
@@ -100,6 +102,8 @@ pub struct App {
     pub node_metrics_tick_counter: usize,
     pub helm_tick_counter: usize,
     pub helm_refreshing: bool,
+    pub argo_tick_counter: usize,
+    pub argo_refreshing: bool,
     pub node_metrics_history: HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
     pub pod_metrics_history: HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
     pub cluster_overview_data: Option<crate::views::overview_view::ClusterOverviewData>,
@@ -137,6 +141,37 @@ pub fn delete_prev_word(s: &mut String) {
         } else {
             break;
         }
+    }
+}
+
+pub fn open_browser_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(&["/c", "start", url])
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err("Unsupported operating system for opening browser".to_string())
     }
 }
 
@@ -267,6 +302,8 @@ impl App {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -364,6 +401,16 @@ impl App {
             }
         } else {
             self.helm_tick_counter = 0;
+        }
+
+        // Periodically refresh ArgoCD applications every ~4 seconds (40 ticks at 100ms)
+        if matches!(self.active_view, ActiveView::Argo(_)) {
+            self.argo_tick_counter = self.argo_tick_counter.saturating_add(1);
+            if self.argo_tick_counter % 40 == 1 && !self.argo_refreshing {
+                self.refresh_argo_applications();
+            }
+        } else {
+            self.argo_tick_counter = 0;
         }
     }
 
@@ -1274,6 +1321,10 @@ impl App {
             helm.releases.clear();
             helm.is_loading = true;
         }
+        if let ActiveView::Argo(argo) = &mut self.active_view {
+            argo.applications.clear();
+            argo.is_loading = true;
+        }
         self.set_toast(format!("Switched to context '{}'", self.active_context), Theme::status_ok());
         self.refresh_cluster_info();
         self.refresh_cluster_overview();
@@ -1347,6 +1398,18 @@ impl App {
             let name = detail.release_name.clone();
             let ns = detail.namespace.clone();
             self.reload_helm_detail(&name, &ns);
+            return;
+        }
+
+        if matches!(self.active_view, ActiveView::Argo(_)) {
+            self.refresh_argo_applications();
+            return;
+        }
+
+        if let ActiveView::ArgoDetail(detail) = &self.active_view {
+            let name = detail.app_name.clone();
+            let ns = detail.app_namespace.clone();
+            self.reload_argo_detail(&name, &ns);
             return;
         }
 
@@ -2487,6 +2550,8 @@ impl App {
                     ActiveView::Top(top) => self.filter_buffer = top.filter.clone(),
                     ActiveView::Helm(helm) => self.filter_buffer = helm.filter_query.clone(),
                     ActiveView::HelmDetail(detail) => self.filter_buffer = detail.search_query.clone(),
+                    ActiveView::Argo(argo) => self.filter_buffer = argo.filter_query.clone(),
+                    ActiveView::ArgoDetail(detail) => self.filter_buffer = detail.search_query.clone(),
                     _ => {}
                 }
             }
@@ -2636,6 +2701,10 @@ impl App {
                     return;
                 }
                 if let ActiveView::HelmDetail(ref mut detail) = self.active_view {
+                    detail.next_tab();
+                    return;
+                }
+                if let ActiveView::ArgoDetail(ref mut detail) = self.active_view {
                     detail.next_tab();
                     return;
                 }
@@ -3521,6 +3590,92 @@ impl App {
                             } else {
                                 self.set_toast(format!("Release '{}' is at revision 1 (no previous revision)", rel.name), Theme::status_warn());
                             }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ActiveView::Argo(argo) => {
+                let sel_app = argo.selected_application().cloned();
+                let hub_ctx = argo.hub_context_name.clone();
+                let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+
+                match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => argo.select_next(),
+                    KeyCode::Char('k') | KeyCode::Up => argo.select_prev(),
+                    KeyCode::Enter => {
+                        if let Some(app) = sel_app {
+                            self.open_argo_detail(app, hub_ctx);
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        if let Some(app) = sel_app {
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Sync ArgoCD Application [{}]", app.name),
+                                message: format!("Trigger sync for '{}/{}'? (Prune: false)", app.namespace, app.name),
+                                action_name: format!("argo_sync:{}:{}:{}:false:false", query_ctx, app.namespace, app.name),
+                                is_destructive: false,
+                            });
+                        }
+                    }
+                    KeyCode::Char('S') => {
+                        if let Some(app) = sel_app {
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Sync ArgoCD Application with Prune [{}]", app.name),
+                                message: format!("Trigger sync with PRUNE for '{}/{}'?", app.namespace, app.name),
+                                action_name: format!("argo_sync:{}:{}:{}:true:false", query_ctx, app.namespace, app.name),
+                                is_destructive: true,
+                            });
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        if let Some(app) = sel_app {
+                            let enable = !app.auto_sync_enabled;
+                            let label = if enable { "Enable Auto-Sync" } else { "Pause Auto-Sync (Incident Lever)" };
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("{} [{}]", label, app.name),
+                                message: format!("{} for '{}/{}'?", label, app.namespace, app.name),
+                                action_name: format!("argo_toggle_auto:{}:{}:{}:{}", query_ctx, app.namespace, app.name, enable),
+                                is_destructive: !enable,
+                            });
+                        }
+                    }
+                    KeyCode::Char('R') => {
+                        if let Some(app) = sel_app {
+                            self.set_toast(format!("Triggering hard refresh for '{}'...", app.name), Theme::status_ok());
+                            self.trigger_argo_hard_refresh(&app.name, &app.namespace);
+                        }
+                    }
+                    KeyCode::Char('g') => {
+                        if let Some(app) = sel_app {
+                            if !app.repo_url.is_empty() {
+                                match open_browser_url(&app.repo_url) {
+                                    Ok(_) => self.set_toast(format!("Opened Git repo: {}", app.repo_url), Theme::status_ok()),
+                                    Err(err) => self.set_toast(format!("Could not open browser: {}", err), Theme::status_error()),
+                                }
+                            } else {
+                                self.set_toast("Application has no repoURL configured".to_string(), Theme::status_warn());
+                            }
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        self.refresh_argo_applications();
+                        self.set_toast("Refreshing ArgoCD applications...".to_string(), Theme::status_ok());
+                    }
+                    KeyCode::Char('c') => {
+                        if let Some(app) = sel_app {
+                            let link = crate::deep_link::DeepLink::Resource {
+                                context: self.active_context.clone(),
+                                namespace: Some(app.namespace.clone()),
+                                kind: "Application".to_string(),
+                                name: app.name.clone(),
+                            };
+                            let url = link.to_url();
+                            let url_clone = url.clone();
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&url_clone);
+                            });
+                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
                         }
                     }
                     _ => {}
@@ -4574,6 +4729,106 @@ impl App {
                     _ => {}
                 }
             }
+            ActiveView::ArgoDetail(detail) => {
+                let hub_ctx = detail.hub_context.clone();
+                let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+                let app_opt = detail.application.clone();
+
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        if let Some(prev) = self.nav_stack.pop() {
+                            self.active_view = prev;
+                        } else {
+                            self.switch_view_to_kind(ResourceKind::ArgoApplications).await;
+                        }
+                    }
+                    KeyCode::Tab => detail.next_tab(),
+                    KeyCode::BackTab => detail.prev_tab(),
+                    KeyCode::Right | KeyCode::Char('l') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        detail.next_tab();
+                    }
+                    KeyCode::Left | KeyCode::Char('h') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        detail.prev_tab();
+                    }
+                    KeyCode::Char('1') => detail.set_tab(argo_detail_view::ArgoDetailTab::Overview),
+                    KeyCode::Char('2') => detail.set_tab(argo_detail_view::ArgoDetailTab::ManagedResources),
+                    KeyCode::Char('3') => detail.set_tab(argo_detail_view::ArgoDetailTab::Drift),
+                    KeyCode::Char('4') => detail.set_tab(argo_detail_view::ArgoDetailTab::RevisionHistory),
+                    KeyCode::Up | KeyCode::Char('k') => detail.select_prev(),
+                    KeyCode::Down | KeyCode::Char('j') => detail.select_next(),
+                    KeyCode::Char('s') => {
+                        if let Some(ref app) = app_opt {
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Sync ArgoCD Application [{}]", app.name),
+                                message: format!("Trigger sync for '{}/{}'? (Prune: false)", app.namespace, app.name),
+                                action_name: format!("argo_sync:{}:{}:{}:false:false", query_ctx, app.namespace, app.name),
+                                is_destructive: false,
+                            });
+                        }
+                    }
+                    KeyCode::Char('S') => {
+                        if let Some(ref app) = app_opt {
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Sync ArgoCD Application with Prune [{}]", app.name),
+                                message: format!("Trigger sync with PRUNE for '{}/{}'?", app.namespace, app.name),
+                                action_name: format!("argo_sync:{}:{}:{}:true:false", query_ctx, app.namespace, app.name),
+                                is_destructive: true,
+                            });
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        if let Some(ref app) = app_opt {
+                            let enable = !app.auto_sync_enabled;
+                            let label = if enable { "Enable Auto-Sync" } else { "Pause Auto-Sync (Incident Lever)" };
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("{} [{}]", label, app.name),
+                                message: format!("{} for '{}/{}'?", label, app.namespace, app.name),
+                                action_name: format!("argo_toggle_auto:{}:{}:{}:{}", query_ctx, app.namespace, app.name, enable),
+                                is_destructive: !enable,
+                            });
+                        }
+                    }
+                    KeyCode::Char('R') => {
+                        if let Some(ref app) = app_opt {
+                            self.set_toast(format!("Triggering hard refresh for '{}'...", app.name), Theme::status_ok());
+                            self.trigger_argo_hard_refresh(&app.name, &app.namespace);
+                        }
+                    }
+                    KeyCode::Char('g') => {
+                        if let Some(ref app) = app_opt {
+                            if !app.repo_url.is_empty() {
+                                match open_browser_url(&app.repo_url) {
+                                    Ok(_) => self.set_toast(format!("Opened Git repo: {}", app.repo_url), Theme::status_ok()),
+                                    Err(err) => self.set_toast(format!("Could not open browser: {}", err), Theme::status_error()),
+                                }
+                            } else {
+                                self.set_toast("Application has no repoURL configured".to_string(), Theme::status_warn());
+                            }
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        let name = detail.app_name.clone();
+                        let ns = detail.app_namespace.clone();
+                        self.reload_argo_detail(&name, &ns);
+                        self.set_toast("Refreshing application details...".to_string(), Theme::status_ok());
+                    }
+                    KeyCode::Char('c') => {
+                        let link = crate::deep_link::DeepLink::Resource {
+                            context: self.active_context.clone(),
+                            namespace: Some(detail.app_namespace.clone()),
+                            kind: "Application".to_string(),
+                            name: detail.app_name.clone(),
+                        };
+                        let url = link.to_url();
+                        let url_clone = url.clone();
+                        tokio::spawn(async move {
+                            let _ = copy_to_clipboard(&url_clone);
+                        });
+                        self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -5037,6 +5292,16 @@ impl App {
             ActiveView::HelmDetail(detail) => {
                 detail.set_search_query(&filter);
             }
+            ActiveView::Argo(argo) => {
+                argo.filter_query = filter;
+                let count = argo.filtered_indices().len();
+                if argo.selected_idx >= count {
+                    argo.selected_idx = count.saturating_sub(1);
+                }
+            }
+            ActiveView::ArgoDetail(detail) => {
+                detail.search_query = filter;
+            }
             _ => {}
         }
     }
@@ -5066,6 +5331,12 @@ impl App {
             }
             ActiveView::HelmDetail(detail) => {
                 detail.clear_search();
+            }
+            ActiveView::Argo(argo) => {
+                argo.filter_query.clear();
+            }
+            ActiveView::ArgoDetail(detail) => {
+                detail.search_query.clear();
             }
             _ => {}
         }
@@ -5470,6 +5741,10 @@ impl App {
             ResourceKind::HelmReleases => {
                 self.refresh_helm_releases();
                 ActiveView::Helm(HelmViewState::new())
+            }
+            ResourceKind::ArgoApplications => {
+                self.refresh_argo_applications();
+                ActiveView::Argo(argo_view::ArgoViewState::new())
             }
             ResourceKind::Overview => {
                 let mut initial_data = self.cluster_overview_data.clone().unwrap_or_default();
@@ -6566,6 +6841,230 @@ impl App {
         }
     }
 
+    pub fn refresh_argo_applications(&mut self) {
+        if self.argo_refreshing {
+            return;
+        }
+        self.argo_refreshing = true;
+        if let ActiveView::Argo(argo) = &mut self.active_view {
+            if argo.applications.is_empty() {
+                argo.is_loading = true;
+            }
+            argo.error = None;
+        }
+        let current_context = self.active_context.clone();
+        let target_ns = if self.active_namespace.is_empty() {
+            None
+        } else {
+            Some(self.active_namespace.clone())
+        };
+
+        let hub_context = self.tui_config.resolved_argo_hub_context();
+        let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
+
+        let current_server_url = self
+            .contexts
+            .iter()
+            .find(|c| c.name == current_context)
+            .map(|c| c.server.clone());
+
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let hub_ctx_clone = hub_context.clone();
+
+        tokio::spawn(async move {
+            if let Some(ref path) = hub_kubeconfig {
+                cache.ensure_paths(vec![path.clone()]).await;
+            }
+
+            let res = srelens_kube::argo::fetch_argo_applications(
+                &cache,
+                &current_context,
+                current_server_url.as_deref(),
+                hub_ctx_clone.as_deref(),
+                target_ns.as_deref(),
+                true,
+            )
+            .await;
+
+            match res {
+                Ok((apps, is_remote)) => {
+                    let _ = event_tx.send(crate::event::AppEvent::ArgoApplicationsResult {
+                        context: current_context,
+                        is_remote_hub: is_remote,
+                        hub_context: hub_ctx_clone,
+                        result: Ok(apps),
+                    });
+                }
+                Err(e) => {
+                    let _ = event_tx.send(crate::event::AppEvent::ArgoApplicationsResult {
+                        context: current_context,
+                        is_remote_hub: false,
+                        hub_context: hub_ctx_clone,
+                        result: Err(e),
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn handle_argo_applications_result(
+        &mut self,
+        context: &str,
+        is_remote_hub: bool,
+        hub_context: Option<String>,
+        result: Result<Vec<srelens_kube::argo::ArgoApplication>, String>,
+    ) {
+        self.argo_refreshing = false;
+        if let ActiveView::Argo(argo) = &mut self.active_view {
+            if self.active_context == context {
+                match result {
+                    Ok(apps) => argo.set_applications(apps, is_remote_hub, hub_context),
+                    Err(err) => argo.set_error(err),
+                }
+            }
+        }
+    }
+
+    pub fn open_argo_detail(&mut self, app: srelens_kube::argo::ArgoApplication, hub_context: Option<String>) {
+        let hub_ctx = hub_context.or_else(|| self.tui_config.resolved_argo_hub_context());
+        let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
+
+        let mut detail_state = argo_detail_view::ArgoDetailViewState::new(
+            app.name.clone(),
+            app.namespace.clone(),
+            hub_ctx.clone(),
+        );
+        detail_state.set_application(app.clone());
+
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+        let app_name = app.name.clone();
+        let app_ns = app.namespace.clone();
+
+        tokio::spawn(async move {
+            if let Some(ref path) = hub_kubeconfig {
+                cache.ensure_paths(vec![path.clone()]).await;
+            }
+            let res = srelens_kube::argo::fetch_argo_application_detail(
+                &cache,
+                &query_ctx,
+                &app_name,
+                &app_ns,
+            )
+            .await;
+            let _ = event_tx.send(crate::event::AppEvent::ArgoDetailResult {
+                context: query_ctx,
+                namespace: app_ns,
+                name: app_name,
+                result: res,
+            });
+        });
+
+        let old_view = std::mem::replace(&mut self.active_view, ActiveView::ArgoDetail(detail_state));
+        self.nav_stack.push(old_view);
+    }
+
+    pub fn reload_argo_detail(&mut self, name: &str, namespace: &str) {
+        if let ActiveView::ArgoDetail(detail) = &mut self.active_view {
+            detail.is_loading = true;
+            detail.error = None;
+        }
+        let hub_ctx = self.tui_config.resolved_argo_hub_context();
+        let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
+        let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let name_c = name.to_string();
+        let ns_c = namespace.to_string();
+
+        tokio::spawn(async move {
+            if let Some(ref path) = hub_kubeconfig {
+                cache.ensure_paths(vec![path.clone()]).await;
+            }
+            let res = srelens_kube::argo::fetch_argo_application_detail(
+                &cache,
+                &query_ctx,
+                &name_c,
+                &ns_c,
+            )
+            .await;
+            let _ = event_tx.send(crate::event::AppEvent::ArgoDetailResult {
+                context: query_ctx,
+                namespace: ns_c,
+                name: name_c,
+                result: res,
+            });
+        });
+    }
+
+    pub fn handle_argo_detail_result(
+        &mut self,
+        context: &str,
+        namespace: &str,
+        name: &str,
+        result: Result<srelens_kube::argo::ArgoApplication, String>,
+    ) {
+        if let ActiveView::ArgoDetail(detail) = &mut self.active_view {
+            let expected_ctx = detail.hub_context.as_deref().unwrap_or(&self.active_context);
+            if expected_ctx == context && detail.app_namespace == namespace && detail.app_name == name {
+                match result {
+                    Ok(app) => detail.set_application(app),
+                    Err(err) => detail.set_error(err),
+                }
+            }
+        }
+    }
+
+    pub fn trigger_argo_hard_refresh(&mut self, name: &str, namespace: &str) {
+        let hub_ctx = self.tui_config.resolved_argo_hub_context();
+        let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let name_c = name.to_string();
+        let ns_c = namespace.to_string();
+        let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
+
+        tokio::spawn(async move {
+            if let Some(ref path) = hub_kubeconfig {
+                cache.ensure_paths(vec![path.clone()]).await;
+            }
+            let res = srelens_kube::argo::trigger_argo_hard_refresh(
+                &cache,
+                &query_ctx,
+                &name_c,
+                &ns_c,
+            )
+            .await;
+            let action = format!("Hard Refresh '{}'", name_c);
+            let _ = event_tx.send(crate::event::AppEvent::ArgoActionResult {
+                action,
+                result: res.map(|_| format!("Hard refresh initiated for '{}'", name_c)),
+            });
+        });
+    }
+
+    pub fn handle_argo_action_result(&mut self, action: &str, result: Result<String, String>) {
+        match result {
+            Ok(msg) => {
+                self.set_toast(format!("✓ {}", msg), Theme::status_ok());
+                match &self.active_view {
+                    ActiveView::Argo(_) => self.refresh_argo_applications(),
+                    ActiveView::ArgoDetail(d) => {
+                        let name = d.app_name.clone();
+                        let ns = d.app_namespace.clone();
+                        self.reload_argo_detail(&name, &ns);
+                    }
+                    _ => {}
+                }
+            }
+            Err(err) => {
+                self.set_toast(format!("⚠ {} failed: {}", action, err), Theme::status_error());
+            }
+        }
+    }
+
     pub fn open_action_palette(&mut self, kind: String, name: String, namespace: Option<String>) {
         use crate::ui::dialogs::{QuickActionId, QuickActionItem};
 
@@ -7361,6 +7860,85 @@ impl App {
                 });
                 self.set_toast(format!("Uninstalling release '{}'...", name), Theme::status_warn());
             }
+        } else if action_name.starts_with("argo_sync:") {
+            let parts: Vec<&str> = action_name.splitn(6, ':').collect();
+            if parts.len() >= 6 {
+                let ctx = parts[1].to_string();
+                let ns = parts[2].to_string();
+                let name = parts[3].to_string();
+                let prune = parts[4] == "true";
+                let dry_run = parts[5] == "true";
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+                let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
+                let app_name = name.clone();
+
+                tokio::spawn(async move {
+                    if let Some(ref path) = hub_kubeconfig {
+                        cache.ensure_paths(vec![path.clone()]).await;
+                    }
+                    let res = srelens_kube::argo::trigger_argo_sync(
+                        &cache,
+                        &ctx,
+                        &app_name,
+                        &ns,
+                        prune,
+                        dry_run,
+                    ).await;
+                    let action = format!("Sync '{}'", app_name);
+                    let _ = event_tx.send(crate::event::AppEvent::ArgoActionResult {
+                        action,
+                        result: res.map(|_| format!("Sync initiated for '{}' (prune={})", app_name, prune)),
+                    });
+                });
+                self.set_toast(format!("Triggering sync for '{}'...", name), Theme::status_warn());
+            }
+        } else if action_name.starts_with("argo_toggle_auto:") {
+            let parts: Vec<&str> = action_name.splitn(5, ':').collect();
+            if parts.len() >= 5 {
+                let ctx = parts[1].to_string();
+                let ns = parts[2].to_string();
+                let name = parts[3].to_string();
+                let enable = parts[4] == "true";
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+                let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
+                let app_name = name.clone();
+
+                tokio::spawn(async move {
+                    if let Some(ref path) = hub_kubeconfig {
+                        cache.ensure_paths(vec![path.clone()]).await;
+                    }
+                    let res = srelens_kube::argo::toggle_argo_auto_sync(
+                        &cache,
+                        &ctx,
+                        &app_name,
+                        &ns,
+                        enable,
+                    ).await;
+                    let action = if enable {
+                        format!("Enable Auto-Sync for '{}'", app_name)
+                    } else {
+                        format!("Pause Auto-Sync for '{}'", app_name)
+                    };
+                    let _ = event_tx.send(crate::event::AppEvent::ArgoActionResult {
+                        action,
+                        result: res.map(|en| {
+                            if en {
+                                format!("Auto-sync enabled for '{}'", app_name)
+                            } else {
+                                format!("Auto-sync suspended / paused for '{}'", app_name)
+                            }
+                        }),
+                    });
+                });
+                let toast_msg = if enable {
+                    format!("Enabling auto-sync for '{}'...", name)
+                } else {
+                    format!("Pausing auto-sync for '{}'...", name)
+                };
+                self.set_toast(toast_msg, Theme::status_warn());
+            }
         }
     }
 
@@ -7699,6 +8277,13 @@ impl App {
                 HelmDetailTab::Manifest => "Helm: Rendered Manifest",
                 HelmDetailTab::Notes => "Helm: Release Notes",
             },
+            ActiveView::Argo(_) => "ArgoCD Applications",
+            ActiveView::ArgoDetail(detail) => match detail.active_tab {
+                argo_detail_view::ArgoDetailTab::Overview => "ArgoCD: Overview",
+                argo_detail_view::ArgoDetailTab::ManagedResources => "ArgoCD: Managed Resources",
+                argo_detail_view::ArgoDetailTab::Drift => "ArgoCD: Drift / Out-of-Sync",
+                argo_detail_view::ArgoDetailTab::RevisionHistory => "ArgoCD: Revision History",
+            },
             ActiveView::Overview(_) => "Overview",
             ActiveView::Toolbox(_) => "Toolbox",
             ActiveView::Assistant => "AI Assistant",
@@ -7780,6 +8365,8 @@ impl App {
             ActiveView::PortForwards(pf) => render_port_forward_view(f, chunks[1], pf),
             ActiveView::Helm(helm) => render_helm_view(f, chunks[1], helm),
             ActiveView::HelmDetail(detail) => render_helm_detail_view(f, chunks[1], detail),
+            ActiveView::Argo(argo) => argo_view::render_argo_view(f, chunks[1], argo),
+            ActiveView::ArgoDetail(detail) => argo_detail_view::render_argo_detail_view(f, chunks[1], detail),
             ActiveView::Overview(ov) => render_overview_view(f, chunks[1], ov),
             ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
             ActiveView::Assistant => render_assistant_view(f, chunks[1], &self.assistant_state, &self.ai_settings),
@@ -7799,8 +8386,10 @@ impl App {
             ActiveView::Yaml(yaml) => (yaml.search_matches.len(), yaml.lines.len(), true),
             ActiveView::Logs(logs) => (logs.search_matches.len(), logs.lines.len(), true),
             ActiveView::Helm(helm) => (helm.filtered_indices().len(), helm.releases.len(), false),
+            ActiveView::Argo(argo) => (argo.filtered_indices().len(), argo.applications.len(), false),
             ActiveView::Top(top) => (top.visible_count(), if top.active_tab == top_view::TopTab::Pods { top.pods.len() } else { top.nodes.len() }, false),
             ActiveView::HelmDetail(detail) => (detail.search_matches.len(), detail.total_lines_for_active_tab(), true),
+            ActiveView::ArgoDetail(_) => (0, 0, false),
             _ => (0, 0, false),
         };
 
@@ -8167,6 +8756,29 @@ impl App {
                 ("<:>", "Cmd"),
                 ("</>", "Search"),
                 ("<n/N>", "Next/Prev"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::Argo(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("</>", "Filter"),
+                ("<Enter>", "Details"),
+                ("<s>", "Sync"),
+                ("<p>", "Auto-Sync"),
+                ("<R>", "Hard Refresh"),
+                ("<g>", "Git"),
+                ("<r>", "Reload"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::ArgoDetail(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<1-4>", "Tabs"),
+                ("<s>", "Sync"),
+                ("<p>", "Auto-Sync"),
+                ("<R>", "Hard Refresh"),
+                ("<g>", "Git"),
+                ("<r>", "Reload"),
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),

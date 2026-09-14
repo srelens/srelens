@@ -198,6 +198,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -296,6 +298,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -406,6 +410,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -590,6 +596,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -806,6 +814,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1004,6 +1014,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1146,6 +1158,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1471,6 +1485,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1602,6 +1618,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1700,6 +1718,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1790,6 +1810,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1921,6 +1943,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2056,6 +2080,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2216,6 +2242,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2322,6 +2350,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2734,6 +2764,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2858,6 +2890,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3089,6 +3123,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3207,6 +3243,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3322,6 +3360,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3532,6 +3572,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3735,6 +3777,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -4581,6 +4625,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -4776,6 +4822,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -5009,6 +5057,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -5148,6 +5198,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -5975,6 +6027,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -6171,6 +6225,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -6314,6 +6370,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -6485,6 +6543,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -6889,6 +6949,201 @@ mod tests {
         assert!(detail_state.search_query.is_empty());
         assert!(detail_state.search_matches.is_empty());
         assert!(detail_state.current_match_idx.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_argo_views_navigation_and_interactions() {
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::Modal;
+        use srelens_tui::views::argo_detail_view::ArgoDetailTab;
+        use srelens_tui::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        let app1 = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {
+                "name": "payment-service",
+                "namespace": "argocd",
+            },
+            "spec": {
+                "project": "default",
+                "source": {
+                    "repoURL": "https://github.com/acme/infra.git",
+                    "targetRevision": "HEAD",
+                    "path": "services/payment",
+                },
+                "destination": {
+                    "server": "https://kubernetes.default.svc",
+                    "namespace": "prod",
+                },
+                "syncPolicy": {
+                    "automated": {
+                        "prune": true,
+                        "selfHeal": true,
+                    }
+                }
+            },
+            "status": {
+                "sync": {
+                    "status": "Synced",
+                },
+                "health": {
+                    "status": "Healthy",
+                }
+            }
+        }));
+
+        let app2 = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {
+                "name": "auth-api",
+                "namespace": "argocd",
+            },
+            "spec": {
+                "project": "default",
+                "source": {
+                    "repoURL": "https://github.com/acme/infra.git",
+                    "targetRevision": "v1.2.0",
+                    "path": "services/auth",
+                },
+                "destination": {
+                    "server": "https://10.0.0.1:6443",
+                    "name": "staging-cluster",
+                    "namespace": "staging",
+                },
+            },
+            "status": {
+                "sync": {
+                    "status": "OutOfSync",
+                },
+                "health": {
+                    "status": "Degraded",
+                }
+            }
+        }));
+
+        let mut argo_state = ArgoViewState::new();
+        argo_state.set_applications(
+            vec![app1, app2],
+            true,
+            Some("mgmt-hub".to_string()),
+        );
+        app.active_view = ActiveView::Argo(argo_state);
+
+        // 1. Navigate down
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        if let ActiveView::Argo(ref argo) = app.active_view {
+            assert_eq!(argo.selected_application().unwrap().name, "auth-api");
+        }
+
+        // 2. Open detail view on Enter
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        match &app.active_view {
+            ActiveView::ArgoDetail(detail) => {
+                assert_eq!(detail.app_name, "auth-api");
+                assert_eq!(detail.active_tab, ArgoDetailTab::Overview);
+                assert_eq!(detail.hub_context.as_deref(), Some("mgmt-hub"));
+            }
+            _ => panic!("Expected ActiveView::ArgoDetail"),
+        }
+
+        // 3. Cycle tabs with Tab key
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref detail) = app.active_view {
+            assert_eq!(detail.active_tab, ArgoDetailTab::ManagedResources);
+        }
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref detail) = app.active_view {
+            assert_eq!(detail.active_tab, ArgoDetailTab::Drift);
+        }
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref detail) = app.active_view {
+            assert_eq!(detail.active_tab, ArgoDetailTab::RevisionHistory);
+        }
+
+        // Jump directly with number keys
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref detail) = app.active_view {
+            assert_eq!(detail.active_tab, ArgoDetailTab::Overview);
+        }
+
+        // 4. Test SRE Emergency Lever: 's' key triggers Sync modal confirmation
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        assert!(app.modal.is_some());
+        if let Some(Modal::Confirm { ref action_name, .. }) = app.modal {
+            assert!(action_name.starts_with("argo_sync:mgmt-hub:argocd:auth-api:false:false"));
+        } else {
+            panic!("Expected Modal::Confirm for argo_sync");
+        }
+        app.modal = None;
+
+        // Test Prune Sync Lever: 'S' key triggers Sync with prune=true modal
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT)).await;
+        assert!(app.modal.is_some());
+        if let Some(Modal::Confirm { ref action_name, .. }) = app.modal {
+            assert!(action_name.starts_with("argo_sync:mgmt-hub:argocd:auth-api:true:false"));
+        } else {
+            panic!("Expected Modal::Confirm for argo_sync with prune");
+        }
+        app.modal = None;
+
+        // Test Auto-Sync Pause Lever: 'p' key triggers Pause/Resume modal
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)).await;
+        assert!(app.modal.is_some());
+        if let Some(Modal::Confirm { ref action_name, .. }) = app.modal {
+            assert!(action_name.starts_with("argo_toggle_auto:mgmt-hub:argocd:auth-api:true"));
+        } else {
+            panic!("Expected Modal::Confirm for argo_toggle_auto");
+        }
+        app.modal = None;
+
+        // 5. Esc exits detail view back to Argo list view
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        match &app.active_view {
+            ActiveView::Argo(state) => {
+                assert_eq!(state.selected_application().unwrap().name, "auth-api");
+            }
+            _ => panic!("Expected ActiveView::Argo after Esc"),
+        }
+    }
+
+    #[test]
+    fn test_argo_hub_spoke_configuration_resolution() {
+        use srelens_tui::tui_config::TuiConfig;
+        use std::path::PathBuf;
+
+        // When unset
+        let mut cfg = TuiConfig::default();
+        assert_eq!(cfg.resolved_argo_hub_context(), None);
+        assert_eq!(cfg.resolved_argo_hub_kubeconfig(), None);
+
+        // When configured in TuiConfig
+        cfg.argo_hub_context = Some("platform-mgmt".to_string());
+        cfg.argo_hub_kubeconfig = Some(PathBuf::from("/etc/kube/mgmt.yaml"));
+        assert_eq!(cfg.resolved_argo_hub_context(), Some("platform-mgmt".to_string()));
+        assert_eq!(cfg.resolved_argo_hub_kubeconfig(), Some(PathBuf::from("/etc/kube/mgmt.yaml")));
+
+        // Environment variables override config
+        std::env::set_var("SRELENS_ARGO_HUB_CONTEXT", "env-override-hub");
+        std::env::set_var("SRELENS_ARGO_HUB_KUBECONFIG", "/env/kubeconfig");
+        assert_eq!(cfg.resolved_argo_hub_context(), Some("env-override-hub".to_string()));
+        assert_eq!(cfg.resolved_argo_hub_kubeconfig(), Some(PathBuf::from("/env/kubeconfig")));
+
+        // Clean up environment variables
+        std::env::remove_var("SRELENS_ARGO_HUB_CONTEXT");
+        std::env::remove_var("SRELENS_ARGO_HUB_KUBECONFIG");
+        assert_eq!(cfg.resolved_argo_hub_context(), Some("platform-mgmt".to_string()));
     }
 }
 

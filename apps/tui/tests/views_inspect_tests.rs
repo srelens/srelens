@@ -2114,6 +2114,8 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         command_popup_max_visible: 8,
         command_popup_density: CommandPopupDensity::Compact,
         show_feature_banner: true,
+        argo_hub_context: None,
+        argo_hub_kubeconfig: None,
     };
 
     // Wide render (120x30)

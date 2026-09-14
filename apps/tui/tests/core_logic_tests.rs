@@ -1967,6 +1967,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_max_visible: 12,
         command_popup_density: CommandPopupDensity::Large,
         show_feature_banner: true,
+        argo_hub_context: None,
+        argo_hub_kubeconfig: None,
     };
     cfg.save().expect("save succeeds");
     assert!(file.is_file());
@@ -1983,6 +1985,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_max_visible: 1,
         command_popup_density: CommandPopupDensity::Compact,
         show_feature_banner: true,
+        argo_hub_context: None,
+        argo_hub_kubeconfig: None,
     };
     clamped.clamp();
     assert_eq!(clamped.command_popup_max_width, 200);
@@ -1995,6 +1999,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_max_visible: 99,
         command_popup_density: CommandPopupDensity::Large,
         show_feature_banner: false,
+        argo_hub_context: None,
+        argo_hub_kubeconfig: None,
     };
     low.clamp();
     assert_eq!(low.command_popup_max_width, 40);
