@@ -51,8 +51,10 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
   const {reload}=data;
   // An accepted action from this view or any other view of the same resource refreshes it.
   useEffect(()=>onExtensionResourceChanged(changed=>{
-    if(changed.id===selection.id && changed.context===selection.context && changed.namespace===selection.namespace && changed.name===selection.name) reload();
-  }),[selection.id,selection.context,selection.namespace,selection.name,reload]);
+    // The binding is part of the identity: one app can expose a GitRepository and a
+    // Kustomization with the same namespace and name.
+    if(changed.id===selection.id && changed.capability===selection.capability && changed.context===selection.context && changed.namespace===selection.namespace && changed.name===selection.name) reload();
+  }),[selection.id,selection.capability,selection.context,selection.namespace,selection.name,reload]);
   const [tab,setTab]=useState("overview");
   const [pending,setPending]=useState<string|null>(null);
   const [busy,setBusy]=useState(false);
@@ -105,7 +107,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
         {Array.isArray(resource.status?.conditions)&&resource.status.conditions.length?<div className="extension-condition-list">{resource.status.conditions.map((c:any,i:number)=><article key={i}><strong>{c.type} · {c.status}</strong><div>{c.reason||"—"}</div><p>{c.message||"—"}</p></article>)}</div>:<p className="extension-message">No conditions reported.</p>}
         <h4 className="extension-detail-heading">Status</h4><Fields value={Object.fromEntries(Object.entries(resource.status??{}).filter(([key])=>key!=="conditions"))}/>
         <h4 className="extension-detail-heading">Events</h4>
-        {data.data?.eventsError ? <ErrorNotice cluster message={data.data.eventsError} retry={data.reload}/> : data.data?.events?.length ? <>{data.data.eventsPartial?<p className="extension-message">Showing the newest 100 of the first 5,000 events read. This resource has more events that were not read.</p>:data.data.eventsTruncated&&<p className="extension-message">Showing the latest 100 events.</p>}<div className="extension-condition-list">{data.data.events.map((event,i)=><article key={i}><strong>{event.type} · {event.reason}</strong><p>{event.message}</p><span>Count: {event.count??1}</span></article>)}</div></> : <p className="extension-message">No events reported.</p>}
+        {data.data?.eventsError ? <ErrorNotice cluster message={data.data.eventsError} retry={data.reload}/> : data.data?.events?.length ? <>{data.data.eventsPartial?<p className="extension-message">{`Showing the newest ${data.data.events.length.toLocaleString("en-US")}${data.data.eventsRead===undefined?"":` of ${data.data.eventsRead.toLocaleString("en-US")}`} events read. This resource has more events that were not read.`}</p>:data.data.eventsTruncated&&<p className="extension-message">Showing the latest 100 events.</p>}<div className="extension-condition-list">{data.data.events.map((event,i)=><article key={i}><strong>{event.type} · {event.reason}</strong><p>{event.message}</p><span>Count: {event.count??1}</span></article>)}</div></> : <p className="extension-message">No events reported.</p>}
         <details className="extension-detail-metadata"><summary>Labels and annotations</summary><Fields value={{labels:resource.metadata.labels??{},annotations:resource.metadata.annotations??{}}}/></details>
       </>}
     </>}

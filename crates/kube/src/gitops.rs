@@ -100,6 +100,10 @@ pub struct ResourceOut {
     /// newest of those read rather than of all.
     #[serde(rename = "eventsPartial")]
     pub events_partial: bool,
+    /// How many events were read before the newest were chosen. A page holds at most
+    /// `EVENT_PAGE` events, so this is the real count, not pages times the page size.
+    #[serde(rename = "eventsRead")]
+    pub events_read: usize,
     #[serde(rename = "eventsError")]
     pub events_error: Option<String>,
 }
@@ -219,24 +223,27 @@ async fn inspect_with_timeout(
         Api::all(client)
     };
     let uid = resource["metadata"]["uid"].as_str().unwrap_or("");
-    let (events, events_truncated, events_partial, events_error) = if uid.is_empty() {
+    let (events, events_truncated, events_partial, events_read, events_error) = if uid.is_empty() {
         (
             vec![],
             false,
             false,
+            0,
             Some("Resource UID is unavailable".into()),
         )
     } else {
         match tokio::time::timeout(timeout, list_events(&events_api, uid)).await {
             Ok(Ok((items, partial))) => {
+                let read = items.len();
                 let (events, truncated) = newest_events(items, partial);
-                (events, truncated, partial, None)
+                (events, truncated, partial, read, None)
             }
-            Ok(Err(e)) => (vec![], false, false, Some(e.to_string())),
+            Ok(Err(e)) => (vec![], false, false, 0, Some(e.to_string())),
             Err(_) => (
                 vec![],
                 false,
                 false,
+                0,
                 Some("Events request timed out".into()),
             ),
         }
@@ -247,6 +254,7 @@ async fn inspect_with_timeout(
         events,
         events_truncated,
         events_partial,
+        events_read,
         events_error,
     })
 }
@@ -671,6 +679,7 @@ mod tests {
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(value["eventsTruncated"], false);
         assert_eq!(value["eventsPartial"], false);
+        assert_eq!(value["eventsRead"], 5);
         let requests = requests.lock().unwrap();
         let listed: Vec<&String> = requests
             .iter()
@@ -691,6 +700,12 @@ mod tests {
         let (client, requests) = mock_client_with_events(200, 200, vec![endless]);
         let result = inspect(client, &argo).await.unwrap();
         assert!(result.events_partial && result.events_truncated);
+        // Ten one-event pages: the count read is ten, not ten times the page size.
+        assert_eq!(result.events_read, EVENT_PAGES);
+        assert_eq!(
+            serde_json::to_value(&result).unwrap()["eventsRead"],
+            EVENT_PAGES
+        );
         assert_eq!(
             requests
                 .lock()
@@ -711,6 +726,7 @@ mod tests {
         let result = inspect(client, &argo).await.unwrap();
         assert_eq!(result.events.len(), 100);
         assert!(result.events_truncated && !result.events_partial);
+        assert_eq!(result.events_read, 150);
         assert_eq!(result.events[0]["reason"], "e149");
     }
     #[tokio::test]

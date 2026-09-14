@@ -298,7 +298,10 @@ The versioning policy for future API bumps is tracked in
   - GitOps actions are offered only for the API versions listed under
     [host actions](#resource-inspection-and-host-actions).
   - A Suspend of a suspended resource, or a Resume of one that is not suspended, is refused.
-  - Resource events are newest first across every page read (up to 5,000), ranking a recurring series by its latest occurrence, and capped at 100. `eventsTruncated` says when older ones were left out, and `eventsPartial` says when pages remained unread.
+  - Resource events are newest first across every page read (up to 10 pages), ranking a recurring series by its latest occurrence, and capped at 100.
+    - `eventsTruncated` says when older ones were left out.
+    - `eventsPartial` says when pages remained unread.
+    - `eventsRead` counts the events actually read.
   - An accepted action refreshes every open list, dashboard and detail view of that resource.
   - `k8s.gitOpsAction` is refused on the web host.
 
@@ -383,9 +386,9 @@ resource-UID-filtered events. Events are newest first by when they were last see
 including the latest occurrence of a recurring event series. At most 100 are shown,
 and the panel says when older ones were left out.
 
-To choose them, the host reads up to 5,000 events (10 pages of 500). For a resource
-with more than that, the panel says it shows the newest of the events it read,
-rather than claiming they are the latest. Event RBAC failures are shown separately
+To choose them, the host reads up to 10 pages of at most 500 events each. If pages
+remain after that, the panel says how many events it read and that it shows the
+newest of those, rather than claiming they are the latest. Event RBAC failures are shown separately
 and preserve the overview. The list stays visible beside the shared Inspector; Open
 tab promotes details to an independent resource tab. Existing native manifests
 need no update.

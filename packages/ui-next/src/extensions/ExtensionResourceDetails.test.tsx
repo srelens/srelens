@@ -57,16 +57,19 @@ it("says when the host returned only the latest events",async()=>{
   expect(screen.getByText("Showing the latest 100 events.")).toBeTruthy();
 });
 it("does not claim the latest events when the host stopped before reading them all",async()=>{
-  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,events:[{type:"Normal",reason:"Progressing",message:"Applied revision",count:1}],eventsTruncated:true,eventsPartial:true});
+  // The host reports what it actually read; the panel must not invent a total.
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,events:[{type:"Normal",reason:"Progressing",message:"Applied revision",count:1}],eventsTruncated:true,eventsPartial:true,eventsRead:5000});
   render(<ExtensionResourceDetails selection={selection}/>);
   expect(await screen.findByText("Applied revision")).toBeTruthy();
-  expect(screen.getByText(/newest 100 of the first 5,000 events read/)).toBeTruthy();
+  expect(screen.getByText("Showing the newest 1 of 5,000 events read. This resource has more events that were not read.")).toBeTruthy();
   expect(screen.queryByText("Showing the latest 100 events.")).toBeNull();
 });
 it("refreshes when any view reports an accepted action on this same resource",async()=>{
   render(<ExtensionResourceDetails selection={selection} fullPage/>);
   expect(await screen.findByText("Missing source")).toBeTruthy();
   const changed=(detail:object)=>window.dispatchEvent(new CustomEvent(EXTENSION_RESOURCE_CHANGED,{detail}));
+  // Same app, cluster, namespace and name, but a different kind (e.g. a GitRepository).
+  changed({...selection,capability:"gitrepositories"});
   changed({...selection,name:"other"});
   changed({...selection,context:"cluster/b"});
   changed({...selection,id:"org.other.app"});
