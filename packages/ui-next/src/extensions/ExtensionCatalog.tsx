@@ -6,7 +6,7 @@ import { ExtensionControls } from "./ExtensionControls";
 export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
   autoLoad?: boolean;
   installed: InstalledExtension[];
-  onReview: (manifest: string) => void;
+  onReview: (manifest: string, signature?: number[]) => void;
 }) {
   const { Button } = useContext(ExtensionControls);
   const [data, setData] = useState<ExtensionCatalogSnapshot>();
@@ -42,7 +42,7 @@ export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
     {data && <>
       <p className="extension-message extension-catalog-meta">{data.stale ? "Cached catalog" : "Catalog checked"} · {new Date(data.fetchedAt * 1000).toLocaleString()} · Host API {data.hostApiVersion}</p>
       {data.error && <p className="extension-warning" role="alert">Refresh failed: {data.error}. Showing the cached catalog.</p>}
-      <p className="extension-message">Releases are unsigned. Review permissions before installing.</p>
+      <p className="extension-message">Official srelens app signatures are verified before installation review. Review permissions before installing.</p>
       {entries?.length === 0 && <p className="extension-message">No matching apps.</p>}
       {entries?.map(entry => {
         const current = installed.find(p => p.manifest.id === entry.id);
@@ -61,7 +61,7 @@ export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
               const request = ++generation.current;
               void run(async () => {
                 const result = await reviewCatalogExtension(entry.id, entry.release.sha256);
-                if (request === generation.current) onReview(result.manifest);
+                if (request === generation.current) onReview(result.manifest, result.signature ?? undefined);
               });
             }}>{current ? "Review replacement" : "Review installation"}</Button>
           </div>

@@ -1,6 +1,7 @@
 //! Durable, native declarative extensions for desktop hosts.
 mod catalog;
 mod resource;
+mod signing;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -16,11 +17,19 @@ use std::{
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Installed {
+    #[serde(default, rename = "signatureProof", skip_serializing_if = "Option::is_none")]
+    signature_proof: Option<SignatureProof>,
     manifest: Manifest,
     grants: Vec<String>,
     enabled: bool,
     revision: u64,
     settings: serde_json::Map<String, Value>,
+}
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SignatureProof {
+    manifest: String,
+    signature: Vec<u8>,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +54,8 @@ impl Default for Inventory {
 enum Configure {
     #[serde(rename = "install")]
     Install {
+        #[serde(default)]
+        signature: Option<Vec<u8>>,
         manifest: String,
         grants: Vec<String>,
     },
@@ -121,6 +132,13 @@ fn read(path: &Path) -> Result<Inventory, String> {
     let mut ids = std::collections::BTreeSet::new();
     for plugin in &state.plugins {
         plugin.manifest.validate()?;
+        if let Some(proof) = &plugin.signature_proof {
+            signing::verify(proof.manifest.as_bytes(), &proof.signature)?;
+            let parsed = Manifest::parse(&proof.manifest)?;
+            if serde_json::to_value(parsed).map_err(|e| e.to_string())? != serde_json::to_value(&plugin.manifest).map_err(|e| e.to_string())? {
+                return Err("Installed app does not match its signed manifest".into());
+            }
+        }
         if !ids.insert(&plugin.manifest.id) {
             return Err("duplicate installed extension".into());
         }
@@ -270,7 +288,11 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
     let _lock = super::settings::write_lock(path)?;
     let mut state = read(path)?;
     match input {
-        Configure::Install { manifest, grants } => {
+        Configure::Install { manifest, grants, signature } => {
+            let signature_proof = if let Some(signature) = signature {
+                signing::verify(manifest.as_bytes(), &signature)?;
+                Some(SignatureProof { manifest: manifest.clone(), signature })
+            } else { None };
             let manifest = Manifest::parse(&manifest)?;
             validate_app(&manifest, &grants, core)?;
             let revision = state.next_revision;
@@ -283,6 +305,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 .position(|p| p.manifest.id == manifest.id)
                 .map(|i| state.plugins.remove(i));
             state.plugins.push(Installed {
+                signature_proof,
                 manifest,
                 grants,
                 enabled: true,
@@ -437,6 +460,24 @@ mod tests {
         let mut reg = Registry::new();
         register(&mut reg, path.to_path_buf(), std::sync::Arc::new(core));
         reg
+    }
+    #[test]
+    fn signed_install_rechecks_and_persists_proof_without_trusting_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let source = include_str!("../../../examples/extensions/argocd.json");
+        let signature = include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec();
+        let install = |manifest: String, signature: Vec<u8>| serde_json::from_value::<Configure>(json!({
+            "action": "install", "manifest": manifest,
+            "signature": signature, "grants": ["k8s.listCustomResource"]
+        })).unwrap();
+        mutate(&path, fake_core(), install(source.into(), signature.clone())).unwrap();
+        assert!(read(&path).unwrap().plugins[0].signature_proof.is_some());
+        assert!(mutate(&path, fake_core(), install(format!("{source} "), signature)).is_err());
+        let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        stored["plugins"][0]["manifest"]["name"] = json!("Tampered");
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert!(read(&path).err().unwrap().contains("does not match"));
     }
     fn manifest() -> String {
         include_str!("../../../examples/extensions/argocd.json").into()
@@ -594,7 +635,7 @@ mod tests {
             path,
             core,
             Configure::Install {
-                manifest: manifest(),
+                    signature: None,                manifest: manifest(),
                 grants: vec!["k8s.listCustomResource".into()],
             },
         )
@@ -711,7 +752,7 @@ mod tests {
                 &path,
                 core.clone(),
                 Configure::Install {
-                    manifest: source.to_string(),
+                    signature: None,                    manifest: source.to_string(),
                     grants: vec!["k8s.listCustomResource".into()]
                 }
             )
@@ -733,7 +774,7 @@ mod tests {
                 &path,
                 core.clone(),
                 Configure::Install {
-                    manifest: source.to_string(),
+                    signature: None,                    manifest: source.to_string(),
                     grants: vec!["k8s.listCustomResource".into()]
                 }
             )
@@ -813,7 +854,7 @@ mod tests {
                         path,
                         core,
                         Configure::Install {
-                            manifest: source.to_string(),
+                    signature: None,                            manifest: source.to_string(),
                             grants: vec!["k8s.listCustomResource".into()],
                         },
                     )

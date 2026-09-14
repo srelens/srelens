@@ -18,7 +18,7 @@ it("browses on demand, searches, and reviews exact verified bytes before any ins
   expect(screen.getByText("No matching apps.")).toBeTruthy();
   fireEvent.change(screen.getByLabelText("Find an app"), { target: { value: "flux" } });
   fireEvent.click(screen.getByText("Review installation"));
-  await waitFor(() => expect(review).toHaveBeenCalledWith('{"name":"Flux","permissions":[]}'));
+  await waitFor(() => expect(review).toHaveBeenCalledWith('{"name":"Flux","permissions":[]}', undefined));
   expect(reviewCatalogExtension).toHaveBeenCalledWith(entry.id, "abc");
 });
 it("shows cached refresh failures and keeps incompatible releases disabled", async () => {
@@ -50,4 +50,12 @@ it("reports a first-load failure with retry, not an empty catalog", async () => 
   expect(screen.queryByText("No matching apps.")).toBeNull();
   fireEvent.click(screen.getByText("Browse catalog"));
   expect(await screen.findByText("Flux")).toBeTruthy();
+});
+
+it("passes the backend-verified signature into installation review",async()=>{
+ const review=vi.fn();
+ vi.mocked(reviewCatalogExtension).mockResolvedValue({manifest:'{"name":"Flux","permissions":[]}',signature:[1,2,3]});
+ render(<ExtensionCatalog onReview={review} installed={[]} autoLoad/>);
+ fireEvent.click(await screen.findByText("Review installation"));
+ await waitFor(()=>expect(review).toHaveBeenCalledWith('{"name":"Flux","permissions":[]}',[1,2,3]));
 });

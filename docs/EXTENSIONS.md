@@ -105,8 +105,24 @@ updates or downgrade decisions.
 
 API-incompatible releases stay visible but cannot be installed. Preview labels
 come from catalog metadata. `testedHost.revision` records test provenance, not an
-exact-build restriction. These manifests remain unsigned; installation requires permission review.
-A checksum is not a publisher signature.
+exact-build restriction. Official Flux and Argo CD releases carry a detached
+Ed25519 signature (`manifest.json.sig`) over the exact manifest bytes. The host
+pins the public key and the app ID/repository mapping; catalog metadata cannot
+supply a trusted key. Missing signatures, modified bytes and repository
+substitution are rejected before review. Installation re-verifies the proof,
+persists it, and checks it against the installed manifest when loading inventory.
+Permission review is still required. A checksum alone is not a publisher signature.
+
+Unsigned local manifests remain explicitly labelled as unsigned. Existing installs
+do not gain a signed label automatically: review a catalog replacement to install
+the signed release. A local replacement clears any previous signature proof.
+
+Release workflows in both app repositories require `APP_SIGNING_PRIVATE_KEY`
+(PKCS#8 Ed25519 PEM) in GitHub Actions secrets, check it against
+`signing-public.pem`, and publish a 64-byte binary signature. The private key must
+never be committed. Key rotation requires a host trust-key update before new
+release signatures are published. The current public key is also stored as raw
+32 bytes in `crates/registry/src/extensions/srelens-apps.pub`.
 
 `extensions.catalog` and `extensions.catalogManifest` are read-only capabilities.
 Both are refused on the web host. Downloads accept only the fixed catalog URL,
@@ -202,7 +218,7 @@ The current PR includes the broker and local declarative app lifecycle. #163 sta
 1. **Native contract and broker (implemented):** executable manifest examples,
    collision/permission/input validation, revocation and real MCP consent tests.
 2. **Application lifecycle and declarative UI (local desktop implemented):** backend-owned install inventory,
-   grants and per-extension settings; atomic save/update/remove; explicit installation review; signed distributed packages remain pending;
+   grants and per-extension settings; atomic save/update/remove; explicit installation review; official distributed manifests are signature-verified;
    enable/disable and contribution removal in both classic and new UI. One sample
    must visibly add a page, detail tab and menu action without editing app source.
    Cluster identity belongs in extension routes and broker calls. Web instances

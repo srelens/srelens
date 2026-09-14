@@ -29,6 +29,7 @@ tokio = { version = "1", features = ["rt"] }
 
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 sha2 = "0.10"
+ring = "0.17"
 semver = "1"
 
 [dev-dependencies]

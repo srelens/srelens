@@ -31,6 +31,7 @@ export function ExtensionManager() {
   const [removing, setRemoving] = useState<InstalledExtension | null>(null);
   const [review, setReview] = useState<{
     source: string;
+    signature?: number[];
     name: string;
     permissions: string[];
   } | null>(null);
@@ -88,7 +89,7 @@ export function ExtensionManager() {
         {review && (
           <section className="extension-install extension-permission-review" aria-label="Review app permissions">
             <p>
-              <strong>{review.name}</strong> requests:{" "}
+              <strong>{review.name}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) requests:{" "}
               {review.permissions.join(", ")}. Installing an existing ID
               replaces its manifest and refreshes its open pages.
             </p>
@@ -98,6 +99,7 @@ export function ExtensionManager() {
                 void change({
                   action: "install",
                   manifest: review.source,
+                  ...(review.signature ? {signature: review.signature} : {}),
                   grants: review.permissions,
                 })
               }
@@ -111,9 +113,9 @@ export function ExtensionManager() {
         )}
       <div hidden={tab !== "catalog"}>
         {catalogOpened && (
-      <ExtensionCatalog autoLoad installed={state.plugins} onReview={(manifest) => {
+      <ExtensionCatalog autoLoad installed={state.plugins} onReview={(manifest, signature) => {
         const parsed = JSON.parse(manifest);
-        setReview({ source: manifest, name: parsed.name, permissions: parsed.permissions });
+        setReview({ source: manifest, signature, name: parsed.name, permissions: parsed.permissions });
         setError("");
       }} />
         )}
@@ -168,7 +170,7 @@ export function ExtensionManager() {
           <div className="extension-toolbar">
             <ExtensionLogo id={plugin.manifest.id} name={plugin.manifest.name} size={24} />
             <strong>{plugin.manifest.name}</strong>
-            <span>{plugin.manifest.version} · Unsigned local</span>
+            <span>{plugin.manifest.version} · {plugin.signatureProof ? "Signed by srelens" : "Unsigned local"}</span>
             <label>
               <input
                 aria-label={`Enable ${plugin.manifest.name}`}

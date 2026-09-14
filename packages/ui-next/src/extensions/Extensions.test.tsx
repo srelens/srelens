@@ -436,10 +436,10 @@ it("queues lifecycle refreshes behind one pending poll and discards its stale re
   expect(screen.queryByText("Installed plugin")).toBeNull();
 });
 
-it("installs catalog bytes only after explicit review and grants", async () => {
+it.each([undefined, [1,2,3]])("installs catalog bytes and signature %j only after explicit review and grants", async (signature) => {
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] });
   const source = JSON.stringify(plugin.manifest);
-  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source });
+  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source, signature });
   vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [{ id: plugin.manifest.id, name: "Catalog GitOps", description: "GitOps resources", repository: "https://github.com/example/gitops", license: "MIT", release: { version: "0.1.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: true } }] }, fetchedAt: 1, stale: false, error: null, hostApiVersion: "0.1.0", incompatible: [] } as any);
   render(<ExtensionManager />);
   fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
@@ -448,7 +448,7 @@ it("installs catalog bytes only after explicit review and grants", async () => {
   expect(configureExtensions).not.toHaveBeenCalled();
   expect(readExtension).not.toHaveBeenCalled();
   fireEvent.click(install);
-  await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions }));
+  await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions, ...(signature ? {signature} : {}) }));
 });
 
 it("separates installed apps from the catalog and collapses local installation by default", async () => {

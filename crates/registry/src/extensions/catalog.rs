@@ -1,4 +1,4 @@
-//! A fixed public catalog; downloaded manifests remain unsigned and require grants.
+//! A fixed public catalog; official manifests require a pinned publisher signature.
 use super::*;
 use sha2::{Digest, Sha256};
 use srelens_plugin_host::{API_VERSION, MAX_MANIFEST_BYTES};
@@ -70,9 +70,10 @@ struct ManifestIn {
     id: String,
     sha256: String,
 }
-#[derive(Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct Review {
     manifest: String,
+    signature: Option<Vec<u8>>,
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -283,6 +284,40 @@ fn verify_manifest(entry: &Entry, raw: &[u8]) -> Result<String, String> {
     }
     Ok(source.into())
 }
+fn signature_url(entry: &Entry) -> Result<Option<String>, String> {
+    let official = entry.id.starts_with("org.srelens.")
+        || entry.repository.starts_with("https://github.com/srelens/");
+    if !official {
+        return Ok(None);
+    }
+    let repository =
+        super::signing::repository(&entry.id).ok_or("Unknown official app signing identity")?;
+    let expected = format!(
+        "{repository}/releases/download/v{}/manifest.json",
+        entry.release.version
+    );
+    if entry.repository != repository || entry.release.manifest_url != expected {
+        return Err("Official app release does not match its trusted repository".into());
+    }
+    Ok(Some(format!("{expected}.sig")))
+}
+fn verify_release(entry: &Entry, raw: &[u8], signature: Option<Vec<u8>>) -> Result<Review, String> {
+    let manifest = verify_manifest(entry, raw)?;
+    if signature_url(entry)?.is_some() {
+        super::signing::verify(
+            raw,
+            signature
+                .as_deref()
+                .ok_or("Official app publisher signature is missing")?,
+        )?;
+    } else if signature.is_some() {
+        return Err("Unrecognized app publisher signature".into());
+    }
+    Ok(Review {
+        manifest,
+        signature,
+    })
+}
 pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
     let p = path.clone();
     reg.register(Capability::typed::<ListIn, Snapshot, _, _>(
@@ -305,10 +340,12 @@ pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
             let state = load(&path, false)?;
             let entry = state.catalog.extensions.iter().find(|e| e.id == input.id && e.release.sha256 == input.sha256).ok_or("Catalog release changed; refresh and review it again")?;
             if !compatible(&entry.release.srelens_api_version) { return Err("Extension requires a different host API version".to_string()); }
-            let manifest = verify_manifest(entry, &download(&entry.release.manifest_url, MAX_MANIFEST_BYTES)?)?;
+            let signature = signature_url(entry)?.map(|url| download(&url, 64)).transpose()?;
+            let review = verify_release(entry, &download(&entry.release.manifest_url, MAX_MANIFEST_BYTES)?, signature)?;
+            let manifest = &review.manifest;
             let parsed = Manifest::parse(&manifest)?;
             super::validate_app(&parsed, &parsed.permissions, core)?;
-            Ok(Review { manifest })
+            Ok(review)
         }).await.map_err(|e| CapabilityError::Handler(e.to_string()))?.map_err(CapabilityError::Handler) }
     }));
 }
@@ -345,6 +382,27 @@ mod tests {
         assert!(verify_manifest(&entry, raw)
             .unwrap_err()
             .contains("identity"));
+    }
+    #[test]
+    fn official_releases_require_the_pinned_signature_and_repository() {
+        let mut entry = parse_catalog(&fixture()).unwrap().extensions.remove(0);
+        let raw = include_bytes!("../../../../examples/extensions/argocd.json");
+        let sig = include_bytes!("../../tests/fixtures/argocd-manifest.sig").to_vec();
+        entry.release.sha256 = format!("{:x}", Sha256::digest(raw));
+        assert!(verify_release(&entry, raw, Some(sig.clone())).is_ok());
+        assert!(verify_release(&entry, raw, None)
+            .unwrap_err()
+            .contains("missing"));
+        let mut changed = raw.to_vec();
+        changed.push(b' ');
+        entry.release.sha256 = format!("{:x}", Sha256::digest(&changed));
+        assert!(verify_release(&entry, &changed, Some(sig))
+            .unwrap_err()
+            .contains("signature"));
+        entry.repository = "https://github.com/attacker/extension-argocd".into();
+        assert!(signature_url(&entry).is_err());
+        entry.id = "org.srelens.unknown".into();
+        assert!(signature_url(&entry).is_err());
     }
     #[test]
     fn rejects_private_downloads_and_redirects() {
@@ -449,7 +507,10 @@ mod tests {
         assert!(!state.catalog.extensions.is_empty());
         for entry in state.catalog.extensions {
             let raw = download(&entry.release.manifest_url, MAX_MANIFEST_BYTES).unwrap();
-            let source = verify_manifest(&entry, &raw).unwrap();
+            let signature = signature_url(&entry)
+                .unwrap()
+                .map(|url| download(&url, 64).unwrap());
+            let source = verify_release(&entry, &raw, signature).unwrap().manifest;
             let parsed = Manifest::parse(&source).unwrap();
             super::super::validate_app(&parsed, &parsed.permissions, core.clone()).unwrap();
             println!("Verified {} {}", entry.id, entry.release.version);

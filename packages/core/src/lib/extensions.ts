@@ -32,6 +32,7 @@ export interface ExtensionManifest {
   };
 }
 export interface InstalledExtension {
+  signatureProof?: {manifest:string;signature:number[]};
   manifest: ExtensionManifest;
   enabled: boolean;
   revision: number;
@@ -44,7 +45,7 @@ export interface ExtensionInventory {
   plugins: InstalledExtension[];
 }
 export type ExtensionChange =
-  | { action: "install"; manifest: string; grants: string[] }
+  | { action: "install"; manifest: string; grants: string[]; signature?: number[] }
   | { action: "enable"; id: string; enabled: boolean }
   | { action: "remove"; id: string }
   | { action: "settings"; id: string; settings: Record<string, unknown> };
@@ -130,7 +131,7 @@ export const listExtensionCatalog = (refresh = false) =>
   invokeCapability<ExtensionCatalogSnapshot>("extensions.catalog", { refresh });
 /** Returns the exact checksum-verified bytes for explicit permission review. */
 export const reviewCatalogExtension = (id: string, sha256: string) =>
-  invokeCapability<{ manifest: string }>("extensions.catalogManifest", { id, sha256 });
+  invokeCapability<{ manifest: string; signature?: number[] | null }>("extensions.catalogManifest", { id, sha256 });
 
 /** Host-selected resource identity; API group/kind are resolved from the installed app. */
 export interface ExtensionResourceSelection {
