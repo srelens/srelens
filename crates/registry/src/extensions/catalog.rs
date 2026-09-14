@@ -46,7 +46,7 @@ struct Release {
     prerelease: bool,
 }
 // Also the on-disk cache. Its host fields are recomputed on every load, so a cache written
-// by an older host (with `hostApiVersion`) is still read rather than refetched.
+// by an older host (without `hostApiVersions`) is still read rather than refetched.
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct Snapshot {
     catalog: Catalog,
@@ -55,6 +55,10 @@ struct Snapshot {
     stale: bool,
     error: Option<String>,
     /// Every extension API version this host supports, oldest first.
+    /// The newest supported extension API version. Deprecated in favour of
+    /// `host_api_versions`, and kept for API 0.1 clients until a new API line removes it.
+    #[serde(rename = "hostApiVersion", default)]
+    host_api_version: String,
     #[serde(rename = "hostApiVersions", default)]
     host_api_versions: Vec<String>,
     incompatible: Vec<String>,
@@ -109,6 +113,13 @@ fn allowed_download(url: &reqwest::Url) -> bool {
 }
 fn compatible(range: &str) -> bool {
     semver::VersionReq::parse(range).is_ok_and(|range| negotiate_api_version(&range).is_some())
+}
+fn newest_api_version() -> String {
+    SUPPORTED_API_VERSIONS
+        .last()
+        .copied()
+        .unwrap_or_default()
+        .to_owned()
 }
 fn host_api_versions() -> Vec<String> {
     SUPPORTED_API_VERSIONS
@@ -223,6 +234,7 @@ fn load_with(
             .filter(|e| !compatible(&e.release.srelens_api_version))
             .map(|e| e.id.clone())
             .collect();
+        state.host_api_version = newest_api_version();
         state.host_api_versions = host_api_versions();
         Some(state)
     });
@@ -258,6 +270,7 @@ fn load_with(
         fetched_at: now(),
         stale: false,
         error: None,
+        host_api_version: newest_api_version(),
         host_api_versions: host_api_versions(),
     };
     let mut file =
@@ -528,7 +541,9 @@ mod tests {
         let value = serde_json::to_value(&state).unwrap();
         let supported = json!(srelens_plugin_host::SUPPORTED_API_VERSIONS);
         assert_eq!(value["hostApiVersions"], supported);
-        assert!(value.get("hostApiVersion").is_none());
+        // The singular field stays for API 0.1 clients, as the newest supported version.
+        let newest = json!(srelens_plugin_host::SUPPORTED_API_VERSIONS.last().unwrap());
+        assert_eq!(value["hostApiVersion"], newest);
         // A cache written before the list existed is still used rather than refetched.
         let mut legacy = value;
         legacy.as_object_mut().unwrap().remove("hostApiVersions");
@@ -541,6 +556,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&cached).unwrap()["hostApiVersions"],
             supported
+        );
+        assert_eq!(
+            serde_json::to_value(&cached).unwrap()["hostApiVersion"],
+            newest
         );
     }
     #[test]

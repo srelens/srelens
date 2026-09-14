@@ -85,8 +85,13 @@ turns that into a clear "requires API 0.x" message.
   [Versioning](#versioning): at least two srelens minor releases, and never before its
   replacement has shipped.
 
-Planned: `rowActions` becomes `detailLinks`
-([#537](https://github.com/srelens/srelens/issues/537)).
+Deprecated or planned:
+
+- `hostApiVersion` in the `extensions.catalog` output is deprecated in favour of
+  `hostApiVersions`. It stays, set to the newest supported version, until a new API
+  line removes it.
+- `rowActions` becomes `detailLinks`
+  ([#537](https://github.com/srelens/srelens/issues/537)).
 
 ## Unknown fields
 
@@ -165,4 +170,4 @@ receive without an update.
 - **#530:**
   - The host declares a set of supported API versions and serves each manifest under the highest version its range matches.
   - A manifest whose range the host does not support is rejected with the versions it needs and the host supports, before strict schema checks.
-  - `extensions.catalog` reports `hostApiVersions` (a list) in place of `hostApiVersion`.
+  - `extensions.catalog` also reports `hostApiVersions`, the full list. `hostApiVersion` stays, set to the newest supported version, and is deprecated (see [Deprecation](#deprecation)).
