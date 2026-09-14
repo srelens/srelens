@@ -2630,7 +2630,10 @@ impl App {
                 self.show_help = true;
             }
             // Toggle All Namespaces vs Active Namespace (or Summarise in Overview)
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('a')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !matches!(self.active_view, ActiveView::Assistant) =>
+            {
                 if matches!(self.active_view, ActiveView::Overview(_)) {
                     self.handle_view_key_event(key).await;
                     return;
@@ -3831,7 +3834,9 @@ impl App {
                     self.switch_view_to_kind(ResourceKind::Settings).await;
                     return;
                 }
-                if key.code == KeyCode::Char('e') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if (key.code == KeyCode::Char('o') || key.code == KeyCode::Char('O'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
                     let prov = self.ai_settings.default_provider;
                     let prov_name = crate::ai_config::provider_display_name(prov);
                     let model = self.ai_settings.get_model(prov);
@@ -3846,7 +3851,9 @@ impl App {
                     self.set_toast("✓ Conversation cleared".to_string(), Theme::status_ok());
                     return;
                 }
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C'))
+                    && (key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER))
+                {
                     if let Some(selected) = ai.get_selected_text() {
                         let _ = copy_to_clipboard(&selected);
                         self.set_toast("✓ Copied selection to clipboard".to_string(), Theme::status_ok());
@@ -3889,16 +3896,56 @@ impl App {
                         ai.history_down();
                     }
 
-                    // Cursor Navigation inside Input
-                    KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Cursor Navigation inside Input:
+                    // 1. Skip word left: Option+Left, Ctrl+Left, or Alt+b / Alt+B (standard macOS/Unix terminal)
+                    KeyCode::Left
+                        if key.modifiers.contains(KeyModifiers::ALT)
+                            || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
                         ai.move_cursor_word_left();
                     }
-                    KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char('b') | KeyCode::Char('B')
+                        if key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        ai.move_cursor_word_left();
+                    }
+
+                    // 2. Skip word right: Option+Right, Ctrl+Right, or Alt+f / Alt+F (standard macOS/Unix terminal)
+                    KeyCode::Right
+                        if key.modifiers.contains(KeyModifiers::ALT)
+                            || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
                         ai.move_cursor_word_right();
                     }
+                    KeyCode::Char('f') | KeyCode::Char('F')
+                        if key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        ai.move_cursor_word_right();
+                    }
+
+                    // 3. Start of Text: Ctrl+A or Cmd+Left
+                    KeyCode::Char('a') | KeyCode::Char('A')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        ai.move_cursor_home();
+                    }
+                    KeyCode::Left if key.modifiers.contains(KeyModifiers::SUPER) => {
+                        ai.move_cursor_home();
+                    }
+
+                    // 4. End of Text: Ctrl+E or Cmd+Right
+                    KeyCode::Char('e') | KeyCode::Char('E')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        ai.move_cursor_end();
+                    }
+                    KeyCode::Right if key.modifiers.contains(KeyModifiers::SUPER) => {
+                        ai.move_cursor_end();
+                    }
+
+                    // 5. Single character Left / Right
                     KeyCode::Left => ai.move_cursor_left(),
                     KeyCode::Right => ai.move_cursor_right(),
-                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.move_cursor_home(),
 
                     // Viewport Scrolling & Cursor Home/End
                     KeyCode::Home => {
@@ -3929,7 +3976,10 @@ impl App {
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::ALT) => {
                         ai.clear_input();
                     }
-                    KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char('v') | KeyCode::Char('V')
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            || key.modifiers.contains(KeyModifiers::SUPER) =>
+                    {
                         if let Some(clip) = get_clipboard_text() {
                             let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
                             ai.insert_str(&cleaned);
@@ -3941,7 +3991,11 @@ impl App {
                     KeyCode::Delete => {
                         ai.delete();
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                    KeyCode::Char(c)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT)
+                            && !key.modifiers.contains(KeyModifiers::SUPER) =>
+                    {
                         ai.insert_char(c);
                     }
                     KeyCode::Enter => {

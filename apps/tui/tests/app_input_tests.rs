@@ -2073,6 +2073,60 @@ async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_i
     }
 }
 
+#[tokio::test]
+async fn assistant_view_cursor_navigation_and_word_skipping() {
+    let (mut app, _rx) = common::app().await;
+    app.active_view = ActiveView::Assistant;
+    app.active_namespace = "default".to_string();
+
+    app.assistant_state.input = "hello world foo".to_string();
+    app.assistant_state.input_cursor = None; // Cursor at end (15)
+    assert_eq!(app.assistant_state.cursor_pos(), 15);
+
+    // 1. Option+Left (Alt+Left) skips word left -> before "foo" (index 12)
+    press(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)).await;
+    assert_eq!(app.assistant_state.cursor_pos(), 12);
+
+    // 2. Alt+b (macOS terminal word left) -> before "world" (index 6)
+    press(&mut app, KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT)).await;
+    assert_eq!(app.assistant_state.cursor_pos(), 6);
+
+    // 3. Ctrl+Left (Windows/Linux word left) -> start of "hello" (index 0)
+    press(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL)).await;
+    assert_eq!(app.assistant_state.cursor_pos(), 0);
+
+    // 4. Option+Right (Alt+Right) skips word right -> start of "world" (index 6)
+    press(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::ALT)).await;
+    assert_eq!(app.assistant_state.cursor_pos(), 6);
+
+    // 5. Alt+f (macOS terminal word right) -> start of "foo" (index 12)
+    press(&mut app, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT)).await;
+    assert_eq!(app.assistant_state.cursor_pos(), 12);
+
+    // 6. Ctrl+A moves cursor to start (0) and does NOT toggle cluster namespace
+    let ns_before = app.active_namespace.clone();
+    press(&mut app, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)).await;
+    assert_eq!(app.assistant_state.cursor_pos(), 0, "Ctrl+A must move cursor to start of text");
+    assert_eq!(app.active_namespace, ns_before, "Ctrl+A in Assistant must not toggle cluster namespace");
+
+    // 7. Ctrl+E moves cursor to end (15) and does NOT trigger conversation save
+    press(&mut app, KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)).await;
+    assert_eq!(app.assistant_state.cursor_pos(), 15, "Ctrl+E must move cursor to end of text");
+    assert!(app.toast.is_none(), "Ctrl+E must not trigger conversation save toast");
+
+    // 8. Cmd+Left (Super+Left on macOS) moves cursor to start (0)
+    press(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER)).await;
+    assert_eq!(app.assistant_state.cursor_pos(), 0, "Cmd+Left must move cursor to start");
+
+    // 9. Cmd+Right (Super+Right on macOS) moves cursor to end (15)
+    press(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER)).await;
+    assert_eq!(app.assistant_state.cursor_pos(), 15, "Cmd+Right must move cursor to end");
+
+    // 10. Ctrl+O triggers conversation save and displays toast
+    press(&mut app, KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)).await;
+    assert!(app.toast.is_some(), "Ctrl+O must trigger conversation save");
+}
+
 // ---------------------------------------------------------------------------
 // Help, quit, toasts, assistant drawer, settings
 // ---------------------------------------------------------------------------
