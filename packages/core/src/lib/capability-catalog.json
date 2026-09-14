@@ -1,5 +1,17 @@
 [
   {
+    "id": "extensions.catalog",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
+    "id": "extensions.catalogManifest",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
     "id": "extensions.configure",
     "readOnly": false,
     "destructive": false,

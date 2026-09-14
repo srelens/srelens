@@ -1,4 +1,5 @@
 //! Durable, developer-mode declarative extensions for desktop hosts.
+mod catalog;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -325,6 +326,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
     Ok(state)
 }
 pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
+    catalog::register(reg, path.with_extension("catalog.json"), core.clone());
     let p = path.clone();
     reg.register(Capability::typed::<Empty, Inventory, _, _>(
         "extensions.list",
@@ -766,9 +768,11 @@ mod tests {
                 .annotations
                 .requires_confirm
         );
-        assert!(reg.get("extensions.read").unwrap().annotations.read_only);
+        for id in ["extensions.read", "extensions.catalog", "extensions.catalogManifest"] {
+            assert!(reg.get(id).unwrap().annotations.read_only);
+        }
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 3);
+        assert_eq!(mcp.list_tools().len(), 5);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"developerMode","enabled":true}),

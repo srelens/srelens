@@ -108,3 +108,26 @@ export function parseExtensionRoute(route: string) {
 export function contributionKind(kind: string, group = "") {
   return kind.includes("/") ? kind : `${group}/${kind}`;
 }
+
+export interface ExtensionCatalogEntry {
+  id: string;
+  name: string;
+  description: string;
+  repository: string;
+  license: string;
+  release: { version: string; manifestUrl: string; sha256: string; srelensApiVersion: string; prerelease: boolean };
+  testedHost: { repository: string; revision: string };
+}
+export interface ExtensionCatalogSnapshot {
+  catalog: { schemaVersion: number; extensions: ExtensionCatalogEntry[] };
+  fetchedAt: number;
+  stale: boolean;
+  error: string | null;
+  hostApiVersion: string;
+  incompatible: string[];
+}
+export const listExtensionCatalog = (refresh = false) =>
+  invokeCapability<ExtensionCatalogSnapshot>("extensions.catalog", { refresh });
+/** Returns the exact checksum-verified bytes for explicit permission review. */
+export const reviewCatalogExtension = (id: string, sha256: string) =>
+  invokeCapability<{ manifest: string }>("extensions.catalogManifest", { id, sha256 });

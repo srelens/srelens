@@ -55,13 +55,45 @@ mutating and uses the normal MCP consent gate. App-installed operations currentl
 use the `extensions.read` facade with installation ID, revision, operation and
 context; individual `plugin/...` tool discovery remains a developer-harness
 feature. The app facade refuses a host reader with stronger consent annotations.
-All three capabilities are unavailable on the multi-user web host until per-user
+All extension capabilities are unavailable on the multi-user web host until per-user
 extension state is implemented.
 
-No third-party code, subprocess, iframe, download, npm install or lifecycle script
-is executed. Only native srelens manifests are accepted. Signed distribution,
+No third-party code, subprocess, iframe, npm install or lifecycle script
+is executed. Catalog downloads contain JSON data only. Only native srelens manifests are accepted. Signed distribution,
 executable runtimes and sandboxing remain future work; local developer-mode
 support does not claim those protections.
+
+## Browse the native catalog
+
+In either desktop design, open **Settings → Extensions → Browse catalog**.
+The catalog comes from [srelens/extensions](https://github.com/srelens/extensions);
+each entry points to its own repository and versioned GitHub release asset.
+The initial entries are [Flux](https://github.com/srelens/extension-flux) and
+[Argo CD](https://github.com/srelens/extension-argocd). Search by name, ID or description.
+
+The backend caches validated metadata for 24 hours alongside the inventory in
+`*.extensions.catalog.json`. **Refresh catalog** checks immediately. A failed
+refresh retains the cache and displays the failure and original timestamp.
+Catalog browsing does not connect clusters or install extensions.
+
+**Review installation** downloads a size-bounded manifest over HTTPS, checks its
+SHA-256 against the selected catalog release, verifies ID/version/API identity,
+and validates the app's read-only capability contract. The exact verified bytes
+then go through the existing permission review and install action. A catalog
+change invalidates the selected checksum and requires a new review. Replacing
+an installed ID is explicit and preserves its settings. There are no automatic
+updates or downgrade decisions.
+
+API-incompatible releases stay visible but cannot be installed. Preview labels
+come from catalog metadata. `testedHost.revision` records test provenance, not an
+exact-build restriction. These manifests remain unsigned and require developer
+mode; a checksum is not a publisher signature.
+
+`extensions.catalog` and `extensions.catalogManifest` are read-only capabilities.
+Both are refused on the web host. Downloads accept only the fixed catalog URL,
+GitHub release assets and GitHub's release-asset redirects, with bounded sizes,
+timeouts and redirect counts. The frontend never fetches catalog URLs or writes
+catalog caches to browser storage.
 
 ## Try a native extension
 

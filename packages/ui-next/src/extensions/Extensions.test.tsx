@@ -3,11 +3,15 @@ import { beforeEach, expect, it, vi } from "vitest";
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
   isTauri: () => true,
+  listExtensionCatalog: vi.fn(),
+  reviewCatalogExtension: vi.fn(),
   listExtensions: vi.fn(),
   configureExtensions: vi.fn(),
   readExtension: vi.fn(),
 }));
 import {
+  listExtensionCatalog,
+  reviewCatalogExtension,
   listExtensions,
   configureExtensions,
   readExtension,
@@ -436,4 +440,19 @@ it("queues lifecycle refreshes behind one pending poll and discards its stale re
   await act(async()=>{finish!({developerMode:true,plugins:[plugin]});});
   expect(listExtensions).toHaveBeenCalledTimes(2);
   expect(screen.queryByText(/Unsigned local extensions enabled/)).toBeNull();
+});
+
+it("installs catalog bytes only after explicit review and grants", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, developerMode: true, nextRevision: 1, plugins: [] });
+  const source = JSON.stringify(plugin.manifest);
+  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source });
+  vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [{ id: plugin.manifest.id, name: "Catalog GitOps", description: "GitOps resources", repository: "https://github.com/example/gitops", license: "MIT", release: { version: "0.1.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: true } }] }, fetchedAt: 1, stale: false, error: null, hostApiVersion: "0.1.0", incompatible: [] } as any);
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByText("Browse catalog"));
+  fireEvent.click(await screen.findByText("Review installation"));
+  const install = await screen.findByText("Install and grant permissions");
+  expect(configureExtensions).not.toHaveBeenCalled();
+  expect(readExtension).not.toHaveBeenCalled();
+  fireEvent.click(install);
+  await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions }));
 });

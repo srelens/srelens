@@ -54,3 +54,11 @@ it("matches explicit API identity, including custom and unmapped built-in kinds"
   expect(contributionKind("ResourceQuota", "")).toBe("/ResourceQuota");
   expect(contributionKind("Deployment", "example.io")).toBe("example.io/Deployment");
 });
+
+it("uses backend catalog payloads without sending URLs or connecting a cluster", async () => {
+  const { listExtensionCatalog, reviewCatalogExtension } = await import("./extensions");
+  await listExtensionCatalog(true);
+  expect(invokeCapability).toHaveBeenCalledWith("extensions.catalog", { refresh: true });
+  await reviewCatalogExtension("org.srelens.flux", "abc");
+  expect(invokeCapability).toHaveBeenCalledWith("extensions.catalogManifest", { id: "org.srelens.flux", sha256: "abc" });
+});

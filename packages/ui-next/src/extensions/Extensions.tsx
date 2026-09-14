@@ -8,6 +8,7 @@ import {
   type InstalledExtension,
 } from "@srelens/core";
 
+import { ExtensionCatalog } from "./ExtensionCatalog";
 import { ExtensionControls } from "./ExtensionControls";
 export { ExtensionControlsProvider } from "./ExtensionControls";
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
@@ -115,6 +116,12 @@ export function ExtensionManager({
           {error}
         </p>
       )}
+      <ExtensionCatalog developerMode={state.developerMode} installed={state.plugins} onReview={(manifest) => {
+        const parsed = JSON.parse(manifest);
+        setSource(manifest);
+        setReview({ source: manifest, name: parsed.name, permissions: parsed.permissions });
+        setError("");
+      }} />
       <div className="extension-install">
         <label htmlFor="extension-manifest">
           Local extension manifest (JSON)
@@ -158,7 +165,7 @@ export function ExtensionManager({
               replaces its manifest and refreshes its open pages.
             </p>
             <Button
-              disabled={busy}
+              disabled={busy || !state.developerMode}
               onClick={() =>
                 void change({
                   action: "install",
