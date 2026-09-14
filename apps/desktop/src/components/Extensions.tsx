@@ -24,3 +24,19 @@ export function ExtensionResourceSlot(
     </ExtensionControlsProvider>
   );
 }
+
+import { ExtensionWorkspace, ExtensionLogo, useExtensions } from "@srelens/ui-next/extensions";
+export function ClassicAppsNav({context,onOpen}:{context:string;onOpen(context:string,id:string,page:string):void}) {
+  const inventory=useExtensions();
+  const apps=inventory.data?.plugins.filter(p=>p.enabled && p.manifest.contributions.pages.length)??[];
+  if(!apps.length)return null;
+  return <details className="pl-3 py-1 text-sm"><summary className="cursor-pointer text-muted-foreground">Apps</summary>{apps.map(app=><details key={app.manifest.id} className="pl-2 py-1"><summary className="cursor-pointer"><ExtensionLogo id={app.manifest.id} name={app.manifest.name} size={16}/> {app.manifest.name}</summary>{app.manifest.contributions.pages.map(page=><button type="button" key={page.id} aria-label={`Open ${page.title}`} className="block w-full truncate px-3 py-1 text-left hover:bg-muted" onClick={()=>onOpen(context,app.manifest.id,page.id)}>{page.group?`${page.group} · ${page.title}`:page.title}</button>)}</details>)}</details>;
+}
+export function ClassicAppPage({context,id,page,namespace="",onPage}:{context:string;id:string;page:string;namespace?:string;onPage(page:string,namespace?:string):void}) {
+  const inventory=useExtensions();
+  const plugin=inventory.data?.plugins.find(p=>p.enabled && p.manifest.id===id);
+  const contribution=plugin?.manifest.contributions.pages.find(p=>p.id===page);
+  return <ExtensionControlsProvider value={controls}><div className="flex min-h-0 flex-1 flex-col overflow-auto">
+    {inventory.status==="loading"?<p className="p-3">Loading app…</p>:inventory.status==="error"?<div role="alert" className="p-3">{inventory.error}<Button onClick={inventory.reload}>Retry</Button></div>:plugin&&contribution?<ExtensionWorkspace key={`${context}/${id}/${plugin.revision}`} context={context} plugin={plugin} page={contribution} namespace={namespace} onPage={onPage}/>:<p className="p-3">This app page is unavailable. Manage it in Settings → Apps.</p>}
+  </div></ExtensionControlsProvider>;
+}

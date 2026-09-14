@@ -1,5 +1,6 @@
 //! Durable, native declarative extensions for desktop hosts.
 mod catalog;
+mod resource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -325,6 +326,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
 }
 pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
     catalog::register(reg, path.with_extension("catalog.json"), core.clone());
+    resource::register(reg, path.clone(), core.clone());
     let p = path.clone();
     reg.register(Capability::typed::<Empty, Inventory, _, _>(
         "extensions.list",
@@ -577,7 +579,7 @@ mod tests {
             json!([])
         );
     }
-    fn fake_core() -> Arc<Registry> {
+    pub(super) fn fake_core() -> Arc<Registry> {
         let mut core = crate::build_registry_with_paths(
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             vec![],
@@ -587,7 +589,7 @@ mod tests {
         core.register(cap);
         Arc::new(core)
     }
-    fn install(path: &Path, core: Arc<Registry>) -> u64 {
+    pub(super) fn install(path: &Path, core: Arc<Registry>) -> u64 {
         mutate(
             path,
             core,
@@ -777,7 +779,7 @@ mod tests {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 5);
+        assert_eq!(mcp.list_tools().len(), 7);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

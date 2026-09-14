@@ -171,7 +171,7 @@ it("filters events by API group and search, not just a matching kind name", asyn
   expect(await screen.findByText("Reconciliation succeeded")).toBeTruthy();
   expect(screen.queryByText("Unrelated event")).toBeNull();
   fireEvent.change(
-    screen.getByRole("textbox", { name: "Search extension resources" }),
+    screen.getByRole("textbox", { name: "Search app resources" }),
     { target: { value: "does not match" } },
   );
   expect(await screen.findByText("No matching events.")).toBeTruthy();
@@ -206,7 +206,7 @@ it("filters resource rows without a second cluster read", async () => {
   );
   expect(await screen.findByRole("cell", { name: "apps" })).toBeTruthy();
   fireEvent.change(
-    screen.getByRole("textbox", { name: "Search extension resources" }),
+    screen.getByRole("textbox", { name: "Search app resources" }),
     { target: { value: "missing" } },
   );
   expect(screen.queryByRole("cell", { name: "apps" })).toBeNull();
@@ -227,7 +227,7 @@ it("reloads the selected namespace without changing the pinned cluster", async (
   );
   await screen.findByRole("cell", { name: "apps" });
   fireEvent.click(
-    screen.getByRole("combobox", { name: "Extension namespace" }),
+    screen.getByRole("combobox", { name: "App namespace" }),
   );
   fireEvent.click(await screen.findByRole("option", { name: "flux-system" }));
   await waitFor(() =>
@@ -254,7 +254,7 @@ it("carries the selected namespace into group navigation", async () => {
   const onPage=vi.fn();
   render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" onPage={onPage}/>);
   await screen.findByRole("cell",{name:"apps"});
-  fireEvent.click(screen.getByRole("combobox",{name:"Extension namespace"}));
+  fireEvent.click(screen.getByRole("combobox",{name:"App namespace"}));
   fireEvent.click(await screen.findByRole("option",{name:"team"}));
   fireEvent.click(screen.getByRole("button",{name:"Sources"}));
   expect(onPage).toHaveBeenCalledWith("repos","team");
@@ -277,7 +277,7 @@ it("ticks event first and last occurrence ages without reloading events", async 
   } finally {view!?.unmount();vi.useRealTimers();}
 });
 
-it("shows unsupported-cluster requirements without reading extension resources", async () => {
+it("shows unsupported-cluster requirements without reading app resources", async () => {
   const requiring = structuredClone(plugin);
   requiring.manifest.capabilities[0].target = "k8s.listCustomResource";
   Object.assign(requiring.manifest.capabilities[0].arguments, { group: "kustomize.toolkit.fluxcd.io", version: "v1", plural: "kustomizations", kind: "Kustomization" });

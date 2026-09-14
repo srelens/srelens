@@ -62,3 +62,12 @@ it("uses backend catalog payloads without sending URLs or connecting a cluster",
   await reviewCatalogExtension("org.srelens.flux", "abc");
   expect(invokeCapability).toHaveBeenCalledWith("extensions.catalogManifest", { id: "org.srelens.flux", sha256: "abc" });
 });
+
+it("sends a host-selected app resource and the reviewed resourceVersion for actions", async () => {
+  const {inspectExtensionResource,actOnExtensionResource}=await import("./extensions");
+  const resource={id:"org.srelens.flux",revision:3,capability:"kustomizations",context:"cluster/a",namespace:"team",name:"apps"};
+  await inspectExtensionResource(resource);
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.resource",resource);
+  await actOnExtensionResource(resource,"suspend","uid","12");
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.action",{resource,action:"suspend",uid:"uid",resourceVersion:"12"});
+});

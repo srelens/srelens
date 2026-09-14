@@ -30,20 +30,20 @@ export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
   }
   useEffect(() => { if (autoLoad) load(false); }, [autoLoad]);
   const entries = data?.catalog.extensions.filter(e => `${e.name} ${e.id} ${e.description}`.toLowerCase().includes(query.toLowerCase()));
-  return <section className="extension-catalog" aria-label="Extension catalog">
+  return <section className="extension-catalog" aria-label="App catalog">
     <div className="extension-toolbar">
-      <strong>Available extensions</strong>
-      {data && <input className="extension-catalog-search" aria-label="Find an extension" placeholder="Find an extension…" value={query} onChange={e => setQuery(e.target.value)} />}
+      <strong>Available apps</strong>
+      {data && <input className="extension-catalog-search" aria-label="Find an app" placeholder="Find an app…" value={query} onChange={e => setQuery(e.target.value)} />}
       <Button variant="secondary" disabled={busy} onClick={() => load(Boolean(data))}>{data ? "Refresh catalog" : "Browse catalog"}</Button>
     </div>
-    {!data && <p className="extension-message">Discover native extensions from the srelens catalog. Each extension is maintained in its own repository.</p>}
+    {!data && <p className="extension-message">Discover native apps from the srelens catalog. Each app is maintained in its own repository.</p>}
     {busy && <p className="extension-message" role="status">Loading…</p>}
     {error && <p className="extension-error" role="alert">{error}</p>}
     {data && <>
       <p className="extension-message extension-catalog-meta">{data.stale ? "Cached catalog" : "Catalog checked"} · {new Date(data.fetchedAt * 1000).toLocaleString()} · Host API {data.hostApiVersion}</p>
       {data.error && <p className="extension-warning" role="alert">Refresh failed: {data.error}. Showing the cached catalog.</p>}
       <p className="extension-message">Releases are unsigned. Review permissions before installing.</p>
-      {entries?.length === 0 && <p className="extension-message">No matching extensions.</p>}
+      {entries?.length === 0 && <p className="extension-message">No matching apps.</p>}
       {entries?.map(entry => {
         const current = installed.find(p => p.manifest.id === entry.id);
         const incompatible = data.incompatible.includes(entry.id);

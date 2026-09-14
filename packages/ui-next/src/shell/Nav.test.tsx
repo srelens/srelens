@@ -227,7 +227,7 @@ describe("Nav", () => {
   });
 });
 
-it("groups extension pages under their display name", async () => {
+it("groups app pages under their display name", async () => {
   extensionState.data = { plugins: [
     { enabled: true, manifest: { id: "org.srelens.flux", name: "Flux", contributions: { pages: [
       { id: "kustomizations", title: "Kustomizations" },
@@ -235,7 +235,7 @@ it("groups extension pages under their display name", async () => {
     ] } } },
   ] };
   render(<Nav contexts={[PROD]} />);
-  await userEvent.click(await screen.findByRole("treeitem", { name: "Extensions" }));
+  await userEvent.click(await screen.findByRole("treeitem", { name: "Apps" }));
   const fluxNode = await screen.findByRole("treeitem", { name: "Flux" });
   expect(fluxNode.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("org.srelens.flux");
   await userEvent.click(fluxNode);

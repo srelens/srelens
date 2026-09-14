@@ -28,7 +28,7 @@ export function ExtensionRequirements({ plugin, page, context, refresh, children
   }, [key, refresh]);
   if (!context || !required.length) return <>{children}</>;
   if (result.status === "loading" || result.data?.key !== key)
-    return <p className="extension-message" role="status">Checking extension requirements…</p>;
+    return <p className="extension-message" role="status">Checking app requirements…</p>;
   const error = result.data?.error;
   const requirements = required.map(r => {
     const crd = result.data?.crds?.find(c => c.group === r.group && c.plural === r.plural && c.kind === r.kind);

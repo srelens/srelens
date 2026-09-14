@@ -56,13 +56,13 @@ export function ExtensionManager() {
   if (!isTauri())
     return (
       <p className="extension-message">
-        Local extensions are available in the desktop app.
+        Local apps are available in the desktop app.
       </p>
     );
   if (inventory.status === "loading")
     return (
       <p role="status" className="extension-message">
-        Loading extensions…
+        Loading apps…
       </p>
     );
   if (inventory.status === "error")
@@ -71,7 +71,7 @@ export function ExtensionManager() {
   return (
     <div className="extension-manager">
       <div className="extension-toolbar">
-        <strong>Extensions</strong>
+        <strong>Apps</strong>
         <Button variant="secondary" onClick={inventory.reload}>
           Refresh
         </Button>
@@ -81,12 +81,12 @@ export function ExtensionManager() {
           {error}
         </p>
       )}
-      <Tabs variant="underline" label="Extension settings" tabs={[
-        { id: "installed", label: "Extensions" },
+      <Tabs variant="underline" label="App settings" tabs={[
+        { id: "installed", label: "Apps" },
         { id: "catalog", label: "Catalog" },
       ]} active={tab} onChange={(next) => { setTab(next); if (next === "catalog") setCatalogOpened(true); }} />
         {review && (
-          <section className="extension-install extension-permission-review" aria-label="Review extension permissions">
+          <section className="extension-install extension-permission-review" aria-label="Review app permissions">
             <p>
               <strong>{review.name}</strong> requests:{" "}
               {review.permissions.join(", ")}. Installing an existing ID
@@ -123,7 +123,7 @@ export function ExtensionManager() {
         <summary>Install a local manifest</summary>
       <div className="extension-install">
         <label htmlFor="extension-manifest">
-          Local extension manifest (JSON)
+          Local app manifest (JSON)
         </label>
         <textarea
           id="extension-manifest"
@@ -159,9 +159,9 @@ export function ExtensionManager() {
       </div>
       </details>
 
-      <p className="extension-message extension-catalog-meta">Extensions are installed app-wide and available across clusters. Each page checks the APIs it needs when opened.</p>
+      <p className="extension-message extension-catalog-meta">Apps are installed app-wide and available across clusters. Each page checks the APIs it needs when opened.</p>
       {state.plugins.length === 0 && (
-        <p className="extension-message">No extensions installed.</p>
+        <p className="extension-message">No apps installed.</p>
       )}
       {state.plugins.map((plugin) => (
         <section className="extension-installed" key={plugin.manifest.id}>
@@ -211,17 +211,17 @@ export function ExtensionManager() {
         </section>
       ))}
       {removing && (
-        <section className="extension-install" role="alertdialog" aria-label="Remove extension" onKeyDown={e=>{if(e.key==="Escape" && !busy)setRemoving(null);}}>
+        <section className="extension-install" role="alertdialog" aria-label="Remove app" onKeyDown={e=>{if(e.key==="Escape" && !busy)setRemoving(null);}}>
           <strong>Remove {removing.manifest.name}?</strong>
-          <p>This removes the extension and its saved settings.</p>
+          <p>This removes the app and its saved settings.</p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={()=>setRemoving(null)}>Cancel</Button>
-          <Button variant="danger" disabled={busy} onClick={()=>{void change({action:"remove",id:removing.manifest.id}).then(removed=>{if(removed)setRemoving(null);});}}>Remove extension</Button>
+          <Button variant="danger" disabled={busy} onClick={()=>{void change({action:"remove",id:removing.manifest.id}).then(removed=>{if(removed)setRemoving(null);});}}>Remove app</Button>
         </section>
       )}
       {settings && (
         <section className="extension-install">
           <label htmlFor="extension-settings">
-            Extension settings (JSON object)
+            App settings (JSON object)
           </label>
           <textarea
             id="extension-settings"
@@ -315,10 +315,10 @@ export function ExtensionResourceSlot({
   return (
     <section className="extension-installed extension-resource-slot">
       <div className="extension-toolbar">
-        <strong>Extensions</strong>
+        <strong>Apps</strong>
         {actions.length > 0 && (
           <details>
-            <summary>Extension actions</summary>
+            <summary>App actions</summary>
             {actions.map((c) => (
               <Button
                 variant="secondary"
@@ -334,7 +334,7 @@ export function ExtensionResourceSlot({
       {panelTabs.length > 0 && (
         <Tabs
           variant="underline"
-          label="Extension views"
+          label="App views"
           tabs={panelTabs.map((c) => ({
             id: c.id,
             label: c.contribution.title,
@@ -357,3 +357,6 @@ export function ExtensionResourceSlot({
     </section>
   );
 }
+
+export { ExtensionWorkspace } from "./ExtensionWorkspace";
+export { ExtensionLogo } from "./ExtensionLogo";

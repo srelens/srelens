@@ -114,7 +114,7 @@ export function Nav({ contexts }: NavProps) {
       ...kindNodes(),
       ...(ctx && extensions.data && extensions.data.plugins.some(p => p.enabled && p.manifest.contributions.pages.length)
         ? [{
-            id: "extensions", label: "Extensions", icon: Icons.crds,
+            id: "extensions", label: "Apps", icon: Icons.crds,
             children: extensions.data.plugins.filter(p => p.enabled && p.manifest.contributions.pages.length).map(p => ({
               id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: extensionLogoIcon(p.manifest.id, p.manifest.name),
               children: p.manifest.contributions.pages.flatMap((page, index, pages) => {

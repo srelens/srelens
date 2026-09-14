@@ -277,7 +277,8 @@
 .extension-catalog-meta {
   color: var(--ink-muted, var(--fl-color-text-muted));
   font-size: var(--text-caption, 0.75rem);
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-x: auto;
 }
 .extension-catalog-entry > .extension-toolbar { border-bottom: 0; }
 .extension-catalog-entry .extension-catalog-meta { margin-top: 3px; }
@@ -289,3 +290,21 @@
 }
 
 .extension-logo { display: inline-block; flex-shrink: 0; vertical-align: middle; }
+
+.extension-resource-link { padding: 0; background: none; border: 0; color: var(--accent, var(--fl-color-primary)); font: inherit; cursor: pointer; text-align: left; }
+.extension-resource-link:hover { text-decoration: underline; }
+.extension-resource-link:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.extension-resource-detail { min-width: 0; overflow: auto; }
+.extension-resource-detail h3 { font-size: inherit; font-weight: 600; margin: 0 auto 0 0; }
+.extension-detail-heading { margin: 0; padding: 8px 12px; font-size: inherit; font-weight: 600; background: var(--surface, var(--fl-color-surface)); border-block: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-detail-fields { margin: 0; }
+.extension-detail-fields > div { display: grid; grid-template-columns: minmax(110px, 20%) minmax(0, 1fr); gap: 12px; padding: 7px 12px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-detail-fields dt { color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-detail-fields dd { margin: 0; min-width: 0; overflow: auto; }
+.extension-resource-detail pre { white-space: pre; overflow: auto; max-width: 100%; font-family: var(--font-mono); font-size: inherit; }
+.extension-detail-manifest, .extension-detail-metadata { padding: 12px; margin: 0; }
+.extension-resource-detail table { width: 100%; border-collapse: collapse; }
+.extension-resource-detail th, .extension-resource-detail td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-condition-message { white-space: normal; min-width: 180px; }
+.extension-action-review { padding: 12px; border-block: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }
+.extension-action-review .extension-toolbar { padding: 0; border: 0; }

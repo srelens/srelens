@@ -394,6 +394,8 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::schema::open_api_schema_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::gitops::resource_capability(cache.clone()));
+    reg.register(srelens_kube::gitops::action_capability(cache.clone()));
     reg.register(srelens_kube::crds::list_crds_capability(cache.clone()));
     reg.register(srelens_kube::crds::list_custom_resource_capability(
         cache.clone(),

@@ -1,5 +1,11 @@
 [
   {
+    "id": "extensions.action",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true
+  },
+  {
     "id": "extensions.catalog",
     "readOnly": true,
     "destructive": false,
@@ -25,6 +31,12 @@
   },
   {
     "id": "extensions.read",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
+    "id": "extensions.resource",
     "readOnly": true,
     "destructive": false,
     "requiresConfirm": false
@@ -126,6 +138,12 @@
     "requiresConfirm": true
   },
   {
+    "id": "k8s.getCustomResource",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
     "id": "k8s.getHelmRelease",
     "readOnly": true,
     "destructive": false,
@@ -146,6 +164,12 @@
   {
     "id": "k8s.getSecret",
     "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": true
+  },
+  {
+    "id": "k8s.gitOpsAction",
+    "readOnly": false,
     "destructive": false,
     "requiresConfirm": true
   },

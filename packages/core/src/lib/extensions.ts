@@ -129,3 +129,16 @@ export const listExtensionCatalog = (refresh = false) =>
 /** Returns the exact checksum-verified bytes for explicit permission review. */
 export const reviewCatalogExtension = (id: string, sha256: string) =>
   invokeCapability<{ manifest: string }>("extensions.catalogManifest", { id, sha256 });
+
+/** Host-selected resource identity; API group/kind are resolved from the installed app. */
+export interface ExtensionResourceSelection {
+  id: string; revision: number; capability: string; context: string; namespace: string; name: string;
+}
+export interface ExtensionResourceDetail {
+  resource: { apiVersion?: string; kind?: string; metadata: { name: string; namespace?: string; uid: string; resourceVersion: string; creationTimestamp?: string; labels?: Record<string,string>; annotations?: Record<string,string>; [key:string]: unknown }; spec?: Record<string, any>; status?: Record<string, any>; [key:string]: unknown };
+  actions: string[];
+  events?: Array<{type?:string;reason?:string;message?:string;count?:number}>;
+  eventsError?: string | null;
+}
+export const inspectExtensionResource = (resource: ExtensionResourceSelection) => invokeCapability<ExtensionResourceDetail>("extensions.resource", resource);
+export const actOnExtensionResource = (resource: ExtensionResourceSelection, action: string, uid: string, resourceVersion: string) => invokeCapability<{requested: boolean}>("extensions.action", {resource, action, uid, resourceVersion});

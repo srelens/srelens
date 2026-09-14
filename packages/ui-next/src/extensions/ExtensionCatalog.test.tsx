@@ -14,9 +14,9 @@ it("browses on demand, searches, and reviews exact verified bytes before any ins
   fireEvent.click(screen.getByText("Browse catalog"));
   expect(await screen.findByText("Flux")).toBeTruthy();
   expect(screen.getByText(/Preview/)).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("Find an extension"), { target: { value: "argo" } });
-  expect(screen.getByText("No matching extensions.")).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("Find an extension"), { target: { value: "flux" } });
+  fireEvent.change(screen.getByLabelText("Find an app"), { target: { value: "argo" } });
+  expect(screen.getByText("No matching apps.")).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Find an app"), { target: { value: "flux" } });
   fireEvent.click(screen.getByText("Review installation"));
   await waitFor(() => expect(review).toHaveBeenCalledWith('{"name":"Flux","permissions":[]}'));
   expect(reviewCatalogExtension).toHaveBeenCalledWith(entry.id, "abc");
@@ -47,7 +47,7 @@ it("reports a first-load failure with retry, not an empty catalog", async () => 
   render(<ExtensionCatalog onReview={vi.fn()} installed={[]} />);
   fireEvent.click(screen.getByText("Browse catalog"));
   expect(await screen.findByText("offline")).toBeTruthy();
-  expect(screen.queryByText("No matching extensions.")).toBeNull();
+  expect(screen.queryByText("No matching apps.")).toBeNull();
   fireEvent.click(screen.getByText("Browse catalog"));
   expect(await screen.findByText("Flux")).toBeTruthy();
 });

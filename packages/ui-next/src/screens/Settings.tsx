@@ -81,7 +81,7 @@ const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true
   { id: "logs", label: "Application logs" },
   { id: "updates", label: "Updates", desktopOnly: true },
   { id: "clusters", label: "Clusters" },
-  { id: "extensions", label: "Extensions", desktopOnly: true },
+  { id: "extensions", label: "Apps", desktopOnly: true },
 ];
 
 /**

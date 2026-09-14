@@ -1,5 +1,6 @@
 import { AgeCell } from "../lib/ageCell";
-import { useContext } from "react";
+import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
+import { useContext, useState } from "react";
 import {
   describeError,
   readExtension,
@@ -93,6 +94,8 @@ export function ExtensionResults({
   hideToolbar?: boolean;
 }) {
   const { Button } = useContext(ExtensionControls);
+  const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,namespace]);
+  const [selected,setSelected] = useState<{scope:string;name:string;namespace:string}|null>(null);
   const data = useResource(
     async () =>
       context
@@ -119,10 +122,11 @@ export function ExtensionResults({
   const columns = Array.isArray(binding?.arguments.printerColumns)
     ? (binding.arguments.printerColumns as Array<{ name: string }>)
     : [];
+  if (selected?.scope === scope) return <ExtensionResourceDetails key={`${scope}/${selected.namespace}/${selected.name}`} selection={{id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:selected.namespace,name:selected.name}} onClose={()=>{setSelected(null);data.reload();}} onChanged={()=>{}} />;
   if (!context)
     return (
       <p className="extension-message">
-        Choose a cluster before opening an extension page.
+        Choose a cluster before opening an app page.
       </p>
     );
   if (data.status === "error") {
@@ -156,7 +160,7 @@ export function ExtensionResults({
   if (data.status === "loading")
     return (
       <p role="status" className="extension-message">
-        Loading extension resources…
+        Loading app resources…
       </p>
     );
   const rows = (data.data?.items ?? []).filter((row) =>
@@ -196,11 +200,9 @@ export function ExtensionResults({
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={`${row.namespace}/${row.name}`}>
+                <tr key={`${row.namespace}/${row.name}`} onClick={binding?.target === "k8s.listCustomResource" ? ()=>setSelected({scope,name:row.name,namespace:row.namespace}):undefined}>
                   <td>
-                    <span className="extension-resource-name" title={row.name}>
-                      {row.name}
-                    </span>
+                    {binding?.target === "k8s.listCustomResource" ? <button className="extension-resource-link" onClick={()=>setSelected({scope,name:row.name,namespace:row.namespace})}>{row.name}</button> : <span className="extension-resource-name" title={row.name}>{row.name}</span>}
                   </td>
                   <td className="extension-namespace">
                     {row.namespace || "—"}
@@ -221,7 +223,7 @@ export function ExtensionResults({
         </div>
       ) : (
         <p className="extension-message">
-          {data.data?.items.length ? "No matching resources." : "No resources returned by this extension."}
+          {data.data?.items.length ? "No matching resources." : "No resources returned by this app."}
         </p>
       )}
     </section>

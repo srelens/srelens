@@ -261,7 +261,7 @@ export function ExtensionWorkspace({
   if (!context)
     return (
       <p className="extension-message">
-        Choose a cluster before opening an extension page.
+        Choose a cluster before opening an app page.
       </p>
     );
   return (
@@ -306,7 +306,7 @@ export function ExtensionWorkspace({
       <ExtensionRequirements plugin={plugin} page={current} context={context} refresh={refresh}>
       <div className="extension-toolbar extension-filters">
         {namespaces === null ? <Button variant="secondary" disabled>Loading namespaces…</Button> : <Combobox
-          ariaLabel="Extension namespace"
+          ariaLabel="App namespace"
           value={namespace}
           onValueChange={setNamespace}
           options={[
@@ -321,7 +321,7 @@ export function ExtensionWorkspace({
         />}
         <input
           className="extension-search"
-          aria-label="Search extension resources"
+          aria-label="Search app resources"
           placeholder={
             current.dashboard ? "Search events…" : "Search resources…"
           }

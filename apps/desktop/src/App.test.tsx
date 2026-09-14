@@ -6,7 +6,7 @@ import React from "react";
 // and a stub window so we can assert tab-close vs. window-close behavior.
 vi.mock("@srelens/ui-next/extensions", async original => ({
   ...await original<typeof import("@srelens/ui-next/extensions")>(),
-  ExtensionWarning: () => <div data-testid="extension-warning">Unsigned extension warning</div>,
+  ExtensionWarning: () => <div data-testid="extension-warning">Unsigned app warning</div>,
 }));
 const tauri = vi.hoisted(() => {
   const handlers = new Map<string, (e: { payload: unknown }) => void>();
@@ -80,12 +80,15 @@ vi.mock("./components/AssistantTab", () => ({
 vi.mock("./components/Sidebar", () => ({
   Sidebar: ({
     onSelect,
+    onOpenApp,
     activeCluster,
   }: {
     onSelect: (c: string, k: string) => void;
+    onOpenApp: (c:string,id:string,page:string) => void;
     activeCluster: string;
-  }) => <button onClick={() => onSelect(activeCluster, "services")}>nav-services</button>,
+  }) => <><button onClick={() => onSelect(activeCluster, "services")}>nav-services</button><button onClick={()=>onOpenApp(activeCluster,"org.srelens.flux","kustomizations")}>nav-app</button></>,
 }));
+vi.mock("./components/Extensions",()=>({ClassicAppPage:({context,id,page}:{context:string;id:string;page:string})=><div data-testid="app-page">{context}:{id}:{page}</div>}));
 vi.mock("./components/ClusterOverview", () => ({
   ClusterOverview: ({ context }: { context: string }) => (
     <div data-testid="overview">{context}</div>
@@ -645,9 +648,20 @@ describe("App", () => {
   });
 });
 
-it("does not show an extension developer banner on the landing screen or settings", () => {
+it("does not show an app developer banner on the landing screen or settings", () => {
   render(<App />);
   expect(screen.queryByTestId("extension-warning")).toBeNull();
   fireEvent.click(screen.getByText("open-settings"));
   expect(screen.queryByTestId("extension-warning")).toBeNull();
+});
+
+it("opens classic app pages in distinct cluster-bound tabs without replacing Overview",()=>{
+ render(<App/>);fireEvent.click(screen.getByText("open-kind-dev"));fireEvent.click(screen.getByText("nav-app"));
+ expect(screen.getByTestId("app-page").textContent).toBe("kind-dev:org.srelens.flux:kustomizations");
+ fireEvent.click(screen.getByText("open-prod"));fireEvent.click(screen.getByText("nav-app"));
+ expect(screen.getByTestId("app-page").textContent).toBe("prod:org.srelens.flux:kustomizations");
+ fireEvent.click(screen.getByRole("tab",{name:/kustomizations · kind-dev/}));
+ expect(screen.getByTestId("app-page").textContent).toContain("kind-dev:");
+ fireEvent.click(screen.getByRole("tab",{name:/Overview · kind-dev/}));
+ expect(screen.getByTestId("overview").textContent).toBe("kind-dev");
 });

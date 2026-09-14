@@ -24,14 +24,14 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
   const cluster = contexts.find((c) => c.name === target.context);
   return (
     <Screen
-      title={page?.title ?? "Extension"}
+      title={page?.title ?? "App"}
       eyebrow={getContextLabel(cluster?.stableId ?? "", target.context)}
       fill
     >
       <div className="scroll min-h-0 min-w-0 flex-1">
         {inventory.status === "loading" ? (
           <p className="extension-message" role="status">
-            Loading extension…
+            Loading app…
           </p>
         ) : inventory.status === "error" ? (
           <div role="alert" className="extension-message">
@@ -52,8 +52,8 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
           />
         ) : (
           <p className="extension-message">
-            This extension page is disabled, removed, or no longer available.
-            Manage it in Settings → Extensions.
+            This app page is disabled, removed, or no longer available.
+            Manage it in Settings → Apps.
           </p>
         )}
       </div>

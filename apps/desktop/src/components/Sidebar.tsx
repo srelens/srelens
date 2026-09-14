@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
+import { ClassicAppsNav } from "./Extensions";
 import { CustomResourceGroup } from "./CustomResourceGroup";
 import { iconForResourceKind, NavIcon } from "../ui/NavIcon";
 import { cn } from "@/ui/utils";
@@ -93,6 +94,7 @@ export function Sidebar({
   activeCrd,
   onSelect,
   onSelectCrd,
+  onOpenApp,
   width = 200,
   onResize,
   contextProfiles = {},
@@ -103,6 +105,7 @@ export function Sidebar({
   activeCrd?: CrdRef | null;
   onSelect: (cluster: string, kind: ResourceKind) => void;
   onSelectCrd: (cluster: string, crd: CrdRef) => void;
+  onOpenApp?: (context:string,id:string,page:string) => void;
   width?: number;
   onResize?: (width: number) => void;
   contextProfiles?: ContextProfiles;
@@ -214,6 +217,7 @@ export function Sidebar({
                 );
               })}
 
+            {clusterOpen(cluster) && onOpenApp && <ClassicAppsNav context={cluster} onOpen={onOpenApp}/>}
             {/* Custom Resources (level 1, lazy-loaded per cluster, default collapsed) */}
             {clusterOpen(cluster) && (
               <CustomResourceGroup

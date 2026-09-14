@@ -31,10 +31,10 @@ beforeEach(() => {
   });
   vi.mocked(readExtension).mockResolvedValue({ items: [] });
 });
-it("opens backend-owned extension settings through classic controls", async () => {
+it("opens backend-owned app settings through classic controls", async () => {
   render(<ExtensionManager />);
   fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-  fireEvent.change(screen.getByLabelText("Extension settings (JSON object)"), {
+  fireEvent.change(screen.getByLabelText("App settings (JSON object)"), {
     target: { value: '{"team":"classic"}' },
   });
   fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
@@ -65,8 +65,18 @@ it("renders the same namespace contribution using classic resource tabs", async 
       "argo",
     ),
   );
-  fireEvent.click(screen.getByText("Extension actions"));
+  fireEvent.click(screen.getByText("App actions"));
   expect(
     screen.getByRole("button", { name: "Inspect Argo CD resources" }),
   ).toBeTruthy();
+});
+
+it("opens native app pages from classic's connected-cluster navigation without a settings picker", async () => {
+  const {ClassicAppsNav}=await import("./Extensions");
+  const open=vi.fn();
+  render(<ClassicAppsNav context="cluster/a" onOpen={open}/>);
+  const apps=await screen.findByText("Apps"); fireEvent.click(apps);
+  fireEvent.click(await screen.findByRole("button",{name:"Open Applications"}));
+  expect(open).toHaveBeenCalledWith("cluster/a",manifest.id,manifest.contributions.pages[0].id);
+  expect(screen.queryByText("Choose a cluster")).toBeNull();
 });
