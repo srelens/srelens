@@ -103,6 +103,9 @@ pub fn check_api_fields_in(
     Ok(())
 }
 
+/// Whether `path` holds a value in `value`. Null, an empty array and an empty object count
+/// as absent: they contribute nothing, and a manifest loaded from storage serializes its
+/// unused collection fields as empty.
 fn field_present(value: &Value, path: &str) -> bool {
     let mut nodes = vec![value];
     for segment in path.split('.') {
@@ -123,7 +126,12 @@ fn field_present(value: &Value, path: &str) -> bool {
         }
         nodes = next;
     }
-    true
+    nodes.iter().any(|node| match node {
+        Value::Null => false,
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+        _ => true,
+    })
 }
 
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
@@ -276,18 +284,17 @@ impl Manifest {
             return Err("extension manifest exceeds 256 KiB".into());
         }
         // Check the API range before the strict schema, so a manifest written for a newer API
-        // is told which version it needs rather than which field this host does not know,
-        // and so it uses only fields every API version its range admits has.
+        // is told which version it needs rather than which field this host does not know.
         let raw = serde_json::from_str::<Value>(source).ok();
-        if let Some(raw) = &raw {
-            if let Some(range) = raw.get("srelensApiVersion").and_then(Value::as_str) {
-                if let Ok(req) = semver::VersionReq::parse(range) {
-                    let admitted = matching_api_versions_in(&req, SUPPORTED_API_VERSIONS);
-                    if admitted.is_empty() {
-                        return Err(unsupported_api(range));
-                    }
-                    check_api_fields_in(raw, &admitted, API_FIELDS)?;
-                }
+        if let Some(range) = raw
+            .as_ref()
+            .and_then(|raw| raw.get("srelensApiVersion"))
+            .and_then(Value::as_str)
+        {
+            if semver::VersionReq::parse(range)
+                .is_ok_and(|req| matching_api_versions_in(&req, SUPPORTED_API_VERSIONS).is_empty())
+            {
+                return Err(unsupported_api(range));
             }
         }
         let manifest: Self =
@@ -298,6 +305,17 @@ impl Manifest {
 
     pub fn schema() -> Value {
         serde_json::to_value(schemars::schema_for!(Self)).expect("manifest schema serializes")
+    }
+
+    /// Rejects a field the manifest uses that is missing from any version in `supported`
+    /// its range admits. It works on a manifest loaded from storage as well as a parsed one,
+    /// so inventory reverification applies the same rules as installation.
+    pub fn check_api_fields(&self, supported: &[&str], fields: &[ApiField]) -> Result<(), String> {
+        let range = semver::VersionReq::parse(&self.api_version)
+            .map_err(|e| format!("invalid srelensApiVersion: {e}"))?;
+        let admitted = matching_api_versions_in(&range, supported);
+        let value = serde_json::to_value(self).map_err(|e| e.to_string())?;
+        check_api_fields_in(&value, &admitted, fields)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -314,6 +332,9 @@ impl Manifest {
         if negotiate_api_version(&range).is_none() {
             return Err(unsupported_api(&self.api_version));
         }
+        // Stored manifests are rechecked here as well, so an app using a field a newer
+        // host no longer admits is quarantined rather than left enabled.
+        self.check_api_fields(SUPPORTED_API_VERSIONS, API_FIELDS)?;
         if self.capabilities.is_empty() || self.capabilities.len() > 32 {
             return Err("declare 1–32 capabilities".into());
         }

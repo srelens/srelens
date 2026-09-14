@@ -85,6 +85,11 @@ line removed or renamed, and a range that spans several lines: `>=0.1, <0.3` cla
 hosts, so it may not use a 0.2-only field. Otherwise the manifest would install on some
 hosts and fail on others that still match its range.
 
+The check runs at installation and again every time the inventory is loaded. An
+installed app that uses a field a newer host's supported versions no longer admit is
+quarantined rather than left enabled. A field that is null or an empty list or object
+does not count as used.
+
 A change that narrows the values a field accepts, rather than adding or removing the
 field, must add a check keyed on the negotiated API version in the same change.
 
