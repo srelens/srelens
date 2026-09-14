@@ -96,6 +96,10 @@ pub struct ResourceOut {
     pub events: Vec<Value>,
     #[serde(rename = "eventsTruncated")]
     pub events_truncated: bool,
+    /// True when `EVENT_PAGES` pages were read and more remained, so `events` are the
+    /// newest of those read rather than of all.
+    #[serde(rename = "eventsPartial")]
+    pub events_partial: bool,
     #[serde(rename = "eventsError")]
     pub events_error: Option<String>,
 }
@@ -215,24 +219,26 @@ async fn inspect_with_timeout(
         Api::all(client)
     };
     let uid = resource["metadata"]["uid"].as_str().unwrap_or("");
-    let (events, events_truncated, events_error) = if uid.is_empty() {
-        (vec![], false, Some("Resource UID is unavailable".into()))
+    let (events, events_truncated, events_partial, events_error) = if uid.is_empty() {
+        (
+            vec![],
+            false,
+            false,
+            Some("Resource UID is unavailable".into()),
+        )
     } else {
-        let params = kube::api::ListParams::default()
-            .fields(&format!("involvedObject.uid={uid}"))
-            .limit(EVENT_PAGE);
-        match tokio::time::timeout(timeout, events_api.list(&params)).await {
-            Ok(Ok(list)) => {
-                let more = list
-                    .metadata
-                    .continue_
-                    .as_deref()
-                    .is_some_and(|token| !token.is_empty());
-                let (events, truncated) = newest_events(list.items, more);
-                (events, truncated, None)
+        match tokio::time::timeout(timeout, list_events(&events_api, uid)).await {
+            Ok(Ok((items, partial))) => {
+                let (events, truncated) = newest_events(items, partial);
+                (events, truncated, partial, None)
             }
-            Ok(Err(e)) => (vec![], false, Some(e.to_string())),
-            Err(_) => (vec![], false, Some("Events request timed out".into())),
+            Ok(Err(e)) => (vec![], false, false, Some(e.to_string())),
+            Err(_) => (
+                vec![],
+                false,
+                false,
+                Some("Events request timed out".into()),
+            ),
         }
     };
     Ok(ResourceOut {
@@ -240,35 +246,71 @@ async fn inspect_with_timeout(
         actions: supported_actions(r),
         events,
         events_truncated,
+        events_partial,
         events_error,
     })
 }
-/// Events are listed in storage order, which says nothing about recency.
+/// Events are listed in storage order, which says nothing about recency, so every page
+/// is read before the newest are chosen, up to `EVENT_PAGES` pages.
 const EVENT_PAGE: u32 = 500;
+const EVENT_PAGES: usize = 10;
 const EVENTS_SHOWN: usize = 100;
-/// The newest `EVENTS_SHOWN` events by when they were last seen, and whether any were
-/// left out (more than that on this page, or a further page on the cluster).
+/// All of an object's events, and whether pages were left unread at the bound.
+async fn list_events(
+    api: &Api<k8s_openapi::api::core::v1::Event>,
+    uid: &str,
+) -> Result<(Vec<k8s_openapi::api::core::v1::Event>, bool), kube::Error> {
+    let mut items = Vec::new();
+    let mut token: Option<String> = None;
+    for _ in 0..EVENT_PAGES {
+        let mut params = kube::api::ListParams::default()
+            .fields(&format!("involvedObject.uid={uid}"))
+            .limit(EVENT_PAGE);
+        if let Some(token) = &token {
+            params = params.continue_token(token);
+        }
+        let page = api.list(&params).await?;
+        items.extend(page.items);
+        token = page.metadata.continue_.filter(|token| !token.is_empty());
+        if token.is_none() {
+            return Ok((items, false));
+        }
+    }
+    Ok((items, true))
+}
+/// The newest `EVENTS_SHOWN` events by when each was last seen, and whether any were left
+/// out (more than that were read, or pages remained unread).
 fn newest_events(
     mut items: Vec<k8s_openapi::api::core::v1::Event>,
-    more: bool,
+    partial: bool,
 ) -> (Vec<Value>, bool) {
-    // Compare parsed times: "…00.5Z" sorts before "…00Z" as text but is later.
+    // The latest of every time an event carries. A recurring series records its newest
+    // occurrence in `series.lastObservedTime` while `eventTime` stays its first. Times
+    // are compared parsed: "…00.5Z" sorts before "…00Z" as text but is later.
     let seen = |e: &k8s_openapi::api::core::v1::Event| {
-        e.last_timestamp
-            .as_ref()
-            .map(|t| t.0)
-            .or_else(|| e.event_time.as_ref().map(|t| t.0))
-            .or_else(|| e.first_timestamp.as_ref().map(|t| t.0))
-            .or_else(|| e.metadata.creation_timestamp.as_ref().map(|t| t.0))
+        [
+            e.series
+                .as_ref()
+                .and_then(|s| s.last_observed_time.as_ref())
+                .map(|t| t.0),
+            e.last_timestamp.as_ref().map(|t| t.0),
+            e.event_time.as_ref().map(|t| t.0),
+            e.first_timestamp.as_ref().map(|t| t.0),
+            e.metadata.creation_timestamp.as_ref().map(|t| t.0),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
     };
     items.sort_by_key(|e| std::cmp::Reverse(seen(e)));
-    let truncated = more || items.len() > EVENTS_SHOWN;
+    let truncated = partial || items.len() > EVENTS_SHOWN;
     let events = items
         .into_iter()
         .take(EVENTS_SHOWN)
         .map(|e| {
             let time = seen(&e).map(|t| t.to_string());
-            json!({"type":e.type_,"reason":e.reason,"message":e.message,"count":e.count,"time":time})
+            let count = e.count.or_else(|| e.series.as_ref().and_then(|s| s.count));
+            json!({"type":e.type_,"reason":e.reason,"message":e.message,"count":count,"time":time})
         })
         .collect();
     (events, truncated)
@@ -519,19 +561,23 @@ mod tests {
         mock_client_with_events(
             patch_status,
             events_status,
-            json!({"apiVersion":"v1","kind":"EventList","metadata":{},"items":[]}),
+            vec![json!({"apiVersion":"v1","kind":"EventList","metadata":{},"items":[]})],
         )
     }
     fn mock_client_with_events(
         patch_status: u16,
         events_status: u16,
-        events: Value,
+        pages: Vec<Value>,
     ) -> (Client, Requests) {
+        // Event list pages are served in request order; the last one repeats.
+        let pages = Arc::new(pages);
+        let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let requests = Arc::new(std::sync::Mutex::new(vec![]));
         let captured = requests.clone();
         let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
             let captured = captured.clone();
-            let events = events.clone();
+            let pages = pages.clone();
+            let served = served.clone();
             async move {
                 let method = request.method().to_string();
                 let uri = request.uri().to_string();
@@ -558,7 +604,8 @@ mod tests {
                 let body = if status >= 400 {
                     json!({"apiVersion":"v1","kind":"Status","status":"Failure","code":status,"reason":"Forbidden","message":"rejected by cluster"})
                 } else if uri.contains("/events") {
-                    events
+                    let page = served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    pages[page.min(pages.len() - 1)].clone()
                 } else {
                     json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"name":"apps","namespace":"team","uid":"u","resourceVersion":"2","managedFields":[]},"spec":{},"status":{}})
                 };
@@ -580,21 +627,33 @@ mod tests {
         json!({"apiVersion":"v1","kind":"EventList","metadata":{"continue":continue_token},"items":items})
     }
     #[tokio::test]
-    async fn events_are_newest_first_by_parsed_time_and_report_what_was_left_out() {
+    async fn events_are_newest_first_by_parsed_time_across_every_page() {
         let argo = resource("argoproj.io", "Application", "applications");
+        // A series first observed long ago whose newest occurrence is the most recent event.
+        let mut recurring = event("recurring", None, Some("2026-01-01T00:00:00.000000Z"));
+        recurring["series"] =
+            json!({"count": 7, "lastObservedTime": "2026-01-03T00:00:00.000000Z"});
         let (client, requests) = mock_client_with_events(
             200,
             200,
-            event_list(
-                vec![
-                    event("oldest", Some("2026-01-01T00:00:00Z"), None),
-                    event("second", Some("2026-01-02T00:00:00Z"), None),
-                    // Later than "second", although it sorts before it as text.
-                    event("newest", None, Some("2026-01-02T00:00:00.500000Z")),
-                    event("undated", None, None),
-                ],
-                None,
-            ),
+            vec![
+                event_list(
+                    vec![
+                        event("oldest", Some("2026-01-01T00:00:00Z"), None),
+                        event("second", Some("2026-01-02T00:00:00Z"), None),
+                        recurring,
+                    ],
+                    Some("page-2"),
+                ),
+                event_list(
+                    vec![
+                        // Later than "second", although it sorts before it as text.
+                        event("third", None, Some("2026-01-02T00:00:00.500000Z")),
+                        event("undated", None, None),
+                    ],
+                    None,
+                ),
+            ],
         );
         let result = inspect(client, &argo).await.unwrap();
         let order: Vec<&str> = result
@@ -602,24 +661,45 @@ mod tests {
             .iter()
             .map(|e| e["reason"].as_str().unwrap())
             .collect();
-        assert_eq!(order, ["newest", "second", "oldest", "undated"]);
-        assert!(!result.events_truncated);
+        assert_eq!(order, ["recurring", "third", "second", "oldest", "undated"]);
+        assert_eq!(result.events[0]["count"], 7);
+        assert!(result.events[0]["time"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-01-03T00:00:00"));
+        assert!(!result.events_truncated && !result.events_partial);
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["eventsTruncated"], false);
+        assert_eq!(value["eventsPartial"], false);
+        let requests = requests.lock().unwrap();
+        let listed: Vec<&String> = requests
+            .iter()
+            .map(|(request, _)| request)
+            .filter(|request| request.contains("/events"))
+            .collect();
+        assert_eq!(listed.len(), 2);
+        assert!(listed[0].contains("limit=500"));
+        assert!(listed[1].contains("continue=page-2"));
+    }
+    #[tokio::test]
+    async fn events_stop_at_the_page_bound_and_do_not_claim_to_be_the_latest() {
+        let argo = resource("argoproj.io", "Application", "applications");
+        let endless = event_list(
+            vec![event("again", Some("2026-01-01T00:00:00Z"), None)],
+            Some("more"),
+        );
+        let (client, requests) = mock_client_with_events(200, 200, vec![endless]);
+        let result = inspect(client, &argo).await.unwrap();
+        assert!(result.events_partial && result.events_truncated);
         assert_eq!(
-            serde_json::to_value(&result).unwrap()["eventsTruncated"],
-            false
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(request, _)| request.contains("/events"))
+                .count(),
+            EVENT_PAGES
         );
-        assert!(requests.lock().unwrap()[1].0.contains("limit=500"));
-
-        // A continuation token means the cluster holds more events than this page.
-        let (client, _) = mock_client_with_events(
-            200,
-            200,
-            event_list(
-                vec![event("only", Some("2026-01-01T00:00:00Z"), None)],
-                Some("next-page"),
-            ),
-        );
-        assert!(inspect(client, &argo).await.unwrap().events_truncated);
 
         let many = (0..150)
             .map(|i| {
@@ -627,10 +707,10 @@ mod tests {
                 event(&format!("e{i}"), Some(&time), None)
             })
             .collect();
-        let (client, _) = mock_client_with_events(200, 200, event_list(many, None));
+        let (client, _) = mock_client_with_events(200, 200, vec![event_list(many, None)]);
         let result = inspect(client, &argo).await.unwrap();
         assert_eq!(result.events.len(), 100);
-        assert!(result.events_truncated);
+        assert!(result.events_truncated && !result.events_partial);
         assert_eq!(result.events[0]["reason"], "e149");
     }
     #[tokio::test]

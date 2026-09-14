@@ -150,6 +150,8 @@ export interface ExtensionResourceDetail {
   events?: Array<{type?:string;reason?:string;message?:string;count?:number;time?:string|null}>;
   /** True when the host returned only the newest events. */
   eventsTruncated?: boolean;
+  /** True when the host stopped at its page bound: these are the newest of the events it read. */
+  eventsPartial?: boolean;
   eventsError?: string | null;
 }
 export const inspectExtensionResource = (resource: ExtensionResourceSelection) => invokeCapability<ExtensionResourceDetail>("extensions.resource", resource);

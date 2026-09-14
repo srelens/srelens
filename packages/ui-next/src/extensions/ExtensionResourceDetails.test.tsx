@@ -56,6 +56,13 @@ it("says when the host returned only the latest events",async()=>{
   expect(await screen.findByText("Applied revision")).toBeTruthy();
   expect(screen.getByText("Showing the latest 100 events.")).toBeTruthy();
 });
+it("does not claim the latest events when the host stopped before reading them all",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,events:[{type:"Normal",reason:"Progressing",message:"Applied revision",count:1}],eventsTruncated:true,eventsPartial:true});
+  render(<ExtensionResourceDetails selection={selection}/>);
+  expect(await screen.findByText("Applied revision")).toBeTruthy();
+  expect(screen.getByText(/newest 100 of the first 5,000 events read/)).toBeTruthy();
+  expect(screen.queryByText("Showing the latest 100 events.")).toBeNull();
+});
 it("refreshes when any view reports an accepted action on this same resource",async()=>{
   render(<ExtensionResourceDetails selection={selection} fullPage/>);
   expect(await screen.findByText("Missing source")).toBeTruthy();
