@@ -1949,6 +1949,130 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
     }
 }
 
+#[tokio::test]
+async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_is_set() {
+    let (mut app, _rx) = common::app().await;
+    app.active_context = "cluster-local".to_string();
+    app.tui_config.argo_hub_context = Some("tools-hub".to_string());
+
+    let argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
+    app.active_view = ActiveView::Argo(argo_state);
+
+    let local_app = srelens_kube::argo::ArgoApplication {
+        name: "local-app".to_string(),
+        namespace: "argocd".to_string(),
+        project: "default".to_string(),
+        destination_server: "https://kubernetes.default.svc".to_string(),
+        destination_name: "".to_string(),
+        destination_namespace: "default".to_string(),
+        repo_url: "https://github.com/example/repo".to_string(),
+        target_revision: "main".to_string(),
+        path: "k8s".to_string(),
+        sync_status: "Synced".to_string(),
+        health_status: "Healthy".to_string(),
+        health_message: "".to_string(),
+        sync_revision: "a1b2c3d".to_string(),
+        operation_phase: "".to_string(),
+        operation_message: "".to_string(),
+        auto_sync_enabled: true,
+        self_heal_enabled: true,
+        prune_enabled: false,
+        last_sync_time: "2026-03-01T10:00:00Z".to_string(),
+        created_at: "2026-01-01T10:00:00Z".to_string(),
+        resources: vec![],
+        sync_history: vec![],
+    };
+
+    // When ArgoCD is installed locally, is_remote_hub is false even though hub_context is set.
+    app.handle_argo_applications_result(
+        "cluster-local",
+        false,
+        Some("tools-hub".to_string()),
+        Ok(srelens_kube::argo::ArgoApplicationsFetchResult {
+            all_apps: vec![local_app.clone()],
+            filtered_apps: vec![local_app.clone()],
+            is_remote_hub: false,
+        }),
+    );
+
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert_eq!(argo.applications.len(), 1);
+        assert_eq!(argo.applications[0].name, "local-app");
+        assert!(!argo.is_remote_hub, "local cluster must not be treated as remote hub");
+        assert_eq!(argo.hub_context_name, None, "hub context name must be None for local cluster");
+    } else {
+        panic!("expected ActiveView::Argo");
+    }
+
+    // Opening detail for local app must have hub_context = None so queries target local cluster
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        let hub_ctx = argo.hub_context_name.clone();
+        app.open_argo_detail(local_app.clone(), hub_ctx);
+    }
+    if let ActiveView::ArgoDetail(ref detail) = app.active_view {
+        assert_eq!(detail.hub_context, None, "detail view for local app must have None hub_context");
+        assert_eq!(detail.app_name, "local-app");
+    } else {
+        panic!("expected ActiveView::ArgoDetail");
+    }
+
+    // Navigate back
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Argo(_)));
+
+    // Now test spoke cluster without local ArgoCD (falls back to hub, is_remote_hub = true)
+    let hub_app = srelens_kube::argo::ArgoApplication {
+        name: "spoke-app".to_string(),
+        namespace: "argocd".to_string(),
+        project: "default".to_string(),
+        destination_server: "https://10.0.0.2:6443".to_string(),
+        destination_name: "".to_string(),
+        destination_namespace: "default".to_string(),
+        repo_url: "https://github.com/example/repo".to_string(),
+        target_revision: "main".to_string(),
+        path: "k8s".to_string(),
+        sync_status: "Synced".to_string(),
+        health_status: "Healthy".to_string(),
+        health_message: "".to_string(),
+        sync_revision: "a1b2c3d".to_string(),
+        operation_phase: "".to_string(),
+        operation_message: "".to_string(),
+        auto_sync_enabled: true,
+        self_heal_enabled: true,
+        prune_enabled: false,
+        last_sync_time: "2026-03-01T10:00:00Z".to_string(),
+        created_at: "2026-01-01T10:00:00Z".to_string(),
+        resources: vec![],
+        sync_history: vec![],
+    };
+
+    app.handle_argo_applications_result(
+        "cluster-local",
+        true,
+        Some("tools-hub".to_string()),
+        Ok(srelens_kube::argo::ArgoApplicationsFetchResult {
+            all_apps: vec![hub_app.clone()],
+            filtered_apps: vec![hub_app.clone()],
+            is_remote_hub: true,
+        }),
+    );
+
+    if let ActiveView::Argo(ref argo) = app.active_view {
+        assert!(argo.is_remote_hub, "spoke cluster falling back to hub must have is_remote_hub = true");
+        assert_eq!(argo.hub_context_name.as_deref(), Some("tools-hub"));
+        let hub_ctx = argo.hub_context_name.clone();
+        app.open_argo_detail(hub_app.clone(), hub_ctx);
+    } else {
+        panic!("expected ActiveView::Argo");
+    }
+
+    if let ActiveView::ArgoDetail(ref detail) = app.active_view {
+        assert_eq!(detail.hub_context.as_deref(), Some("tools-hub"));
+    } else {
+        panic!("expected ActiveView::ArgoDetail");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Help, quit, toasts, assistant drawer, settings
 // ---------------------------------------------------------------------------

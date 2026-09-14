@@ -258,8 +258,8 @@ pub fn invalidate_argo_cluster_mapping_cache() {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ArgoAppsCacheKey {
-    query_context: String,
     current_context: String,
+    hub_context: Option<String>,
     current_cluster_name: Option<String>,
     current_server_url: Option<String>,
     target_namespace: Option<String>,
@@ -435,9 +435,11 @@ pub struct ArgoApplicationsFetchResult {
 
 /// Fetch applications for the given context.
 ///
-/// If `hub_context` is supplied and differs from `current_context`,
-/// SRElens queries the Hub cluster and filters applications targeting `current_context` / `current_server_url`.
-/// If `hub_context` matches `current_context` (or no hub is configured), it lists applications on the active cluster.
+/// If `current_context` has ArgoCD installed (`applications.argoproj.io` CRD exists),
+/// applications from `current_context` are returned directly with priority (`is_remote_hub = false`).
+/// If ArgoCD is NOT installed on `current_context` and a remote `hub_context` is configured,
+/// SRElens falls back to querying the Hub cluster (`is_remote_hub = true`) and filters
+/// applications targeting `current_context` / `current_server_url`.
 pub async fn fetch_argo_applications(
     cache: &Arc<ClientCache>,
     current_context: &str,
@@ -470,14 +472,9 @@ pub async fn fetch_argo_applications_cached(
     match_by_name: bool,
     force_refresh: bool,
 ) -> Result<ArgoApplicationsFetchResult, String> {
-    let (query_context, is_remote_hub) = match hub_context {
-        Some(hub) if hub != current_context => (hub, true),
-        _ => (current_context, false),
-    };
-
     let cache_key = ArgoAppsCacheKey {
-        query_context: query_context.to_string(),
         current_context: current_context.to_string(),
+        hub_context: hub_context.map(|s| s.to_string()),
         current_cluster_name: current_cluster_name.map(|s| s.to_string()),
         current_server_url: current_server_url.map(|s| s.to_string()),
         target_namespace: target_namespace.map(|s| s.to_string()),
@@ -495,112 +492,162 @@ pub async fn fetch_argo_applications_cached(
         }
     }
 
-    let client = cache
-        .get(query_context)
+    // 1. Connect to current_context to probe for local ArgoCD installation
+    let local_client = cache
+        .get(current_context)
         .await
-        .map_err(|e| format!("Failed to connect to cluster '{}': {}", query_context, e))?;
+        .map_err(|e| format!("Failed to connect to cluster '{}': {}", current_context, e))?;
 
     let ar = argo_application_resource();
-    let api: Api<DynamicObject> = if is_remote_hub {
-        // In Hub-and-Spoke mode, the Hub cluster hosts Application CRs in its own
-        // control plane namespace (e.g. `argocd`), NOT in the spoke cluster's workload namespaces.
-        // Therefore, we must always query the Hub cluster across all namespaces.
-        Api::all_with(client.clone(), &ar)
-    } else {
-        match target_namespace {
-            Some(ns) if !ns.is_empty() => Api::namespaced_with(client.clone(), ns, &ar),
-            _ => Api::all_with(client.clone(), &ar),
-        }
+    let local_api: Api<DynamicObject> = match target_namespace {
+        Some(ns) if !ns.is_empty() => Api::namespaced_with(local_client.clone(), ns, &ar),
+        _ => Api::all_with(local_client.clone(), &ar),
     };
 
-    // Run cluster secrets mapping and application listing concurrently via tokio::join!.
-    // This slashes total latency in half over HTTP/2 multiplexing compared to sequential execution.
-    let mapping_fut = async {
-        if is_remote_hub {
-            Some(get_or_fetch_argo_cluster_mapping(&client, query_context).await)
-        } else {
-            None
-        }
-    };
+    let timeout_dur = request_timeout();
+    let local_res = tokio::time::timeout(timeout_dur, local_api.list(&ListParams::default())).await;
 
-    let list_fut = async {
-        let timeout_dur = request_timeout();
-        match tokio::time::timeout(timeout_dur, api.list(&ListParams::default())).await {
-            Ok(res) => res.map_err(|e| {
-                let err_str = e.to_string();
-                let is_not_found = err_str.contains("404")
-                    || err_str.to_lowercase().contains("not found")
-                    || err_str.to_lowercase().contains("notfound");
-                if !is_remote_hub && is_not_found {
-                    "No ArgoCD deployment in this cluster AND no kubeconfig set to point to the ArgoCD cluster.".to_string()
-                } else if is_remote_hub && is_not_found {
-                    format!("Failed to list ArgoCD Applications on hub '{}': ArgoCD CRD (applications.argoproj.io) is not installed on the Hub cluster.", query_context)
-                } else {
-                    format!("Failed to list ArgoCD Applications on '{}': {}", query_context, e)
+    match local_res {
+        Ok(Ok(list)) => {
+            // ArgoCD is installed in the selected cluster! Priority is given to local cluster.
+            let all_apps: Vec<ArgoApplication> = list
+                .items
+                .into_iter()
+                .map(|item| {
+                    let val = serde_json::to_value(&item).unwrap_or_default();
+                    ArgoApplication::from_json(&val)
+                })
+                .collect();
+
+            let result = ArgoApplicationsFetchResult {
+                all_apps: all_apps.clone(),
+                filtered_apps: all_apps,
+                is_remote_hub: false,
+            };
+
+            if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
+                let map = guard.get_or_insert_with(HashMap::new);
+                map.insert(cache_key, (Instant::now(), result.clone()));
+            }
+
+            Ok(result)
+        }
+        Ok(Err(e)) => {
+            let err_str = e.to_string();
+            let is_not_found = match &e {
+                kube::Error::Api(resp) => resp.code == 404 || resp.reason == "NotFound",
+                _ => {
+                    err_str.contains("404")
+                        || err_str.to_lowercase().contains("not found")
+                        || err_str.to_lowercase().contains("notfound")
                 }
-            }),
-            Err(_) => Err(format!(
-                "Timed out after {}s waiting for ArgoCD Applications from '{}'.",
-                timeout_dur.as_secs(),
-                query_context
-            )),
-        }
-    };
+            };
 
-    let (cluster_mapping, list_res) = tokio::join!(mapping_fut, list_fut);
-    let list = list_res?;
+            if !is_not_found {
+                return Err(format!("Failed to list ArgoCD Applications on '{}': {}", current_context, e));
+            }
 
-    let all_apps: Vec<ArgoApplication> = list
-        .items
-        .into_iter()
-        .map(|item| {
-            let val = serde_json::to_value(&item).unwrap_or_default();
-            ArgoApplication::from_json(&val)
-        })
-        .collect();
-
-    let result = if is_remote_hub {
-        let filtered: Vec<ArgoApplication> = all_apps
-            .iter()
-            .filter(|app| {
-                if !matches_destination(
-                    app,
-                    current_context,
-                    current_cluster_name,
-                    current_server_url,
-                    cluster_mapping.as_ref(),
-                    match_by_name,
-                ) {
-                    return false;
+            // CRD is not installed on the selected cluster.
+            // Check if a remote hub cluster is configured.
+            let hub = match hub_context {
+                Some(h) if h != current_context => h,
+                _ => {
+                    return Err("No ArgoCD deployment in this cluster AND no kubeconfig set to point to the ArgoCD cluster.".to_string());
                 }
-                if let Some(ns) = target_namespace {
-                    if !ns.is_empty() && app.destination_namespace != ns && app.namespace != ns {
+            };
+
+            // Spoke cluster: fall back to the remote Hub cluster.
+            let hub_client = cache
+                .get(hub)
+                .await
+                .map_err(|e| format!("Failed to connect to cluster '{}': {}", hub, e))?;
+
+            let hub_api: Api<DynamicObject> = Api::all_with(hub_client.clone(), &ar);
+
+            let mapping_fut = async {
+                Some(get_or_fetch_argo_cluster_mapping(&hub_client, hub).await)
+            };
+
+            let list_fut = async {
+                match tokio::time::timeout(timeout_dur, hub_api.list(&ListParams::default())).await {
+                    Ok(res) => res.map_err(|he| {
+                        let herr_str = he.to_string();
+                        let his_not_found = match &he {
+                            kube::Error::Api(resp) => resp.code == 404 || resp.reason == "NotFound",
+                            _ => {
+                                herr_str.contains("404")
+                                    || herr_str.to_lowercase().contains("not found")
+                                    || herr_str.to_lowercase().contains("notfound")
+                            }
+                        };
+                        if his_not_found {
+                            format!("Failed to list ArgoCD Applications on hub '{}': ArgoCD CRD (applications.argoproj.io) is not installed on the Hub cluster.", hub)
+                        } else {
+                            format!("Failed to list ArgoCD Applications on hub '{}': {}", hub, he)
+                        }
+                    }),
+                    Err(_) => Err(format!(
+                        "Timed out after {}s waiting for ArgoCD Applications from hub '{}'.",
+                        timeout_dur.as_secs(),
+                        hub
+                    )),
+                }
+            };
+
+            let (cluster_mapping, list_res) = tokio::join!(mapping_fut, list_fut);
+            let list = list_res?;
+
+            let all_apps: Vec<ArgoApplication> = list
+                .items
+                .into_iter()
+                .map(|item| {
+                    let val = serde_json::to_value(&item).unwrap_or_default();
+                    ArgoApplication::from_json(&val)
+                })
+                .collect();
+
+            let filtered: Vec<ArgoApplication> = all_apps
+                .iter()
+                .filter(|app| {
+                    if !matches_destination(
+                        app,
+                        current_context,
+                        current_cluster_name,
+                        current_server_url,
+                        cluster_mapping.as_ref(),
+                        match_by_name,
+                    ) {
                         return false;
                     }
-                }
-                true
-            })
-            .cloned()
-            .collect();
-        ArgoApplicationsFetchResult {
-            all_apps,
-            filtered_apps: filtered,
-            is_remote_hub: true,
-        }
-    } else {
-        ArgoApplicationsFetchResult {
-            all_apps: all_apps.clone(),
-            filtered_apps: all_apps,
-            is_remote_hub: false,
-        }
-    };
+                    if let Some(ns) = target_namespace {
+                        if !ns.is_empty() && app.destination_namespace != ns && app.namespace != ns {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
 
-    if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
-        let map = guard.get_or_insert_with(HashMap::new);
-        map.insert(cache_key, (Instant::now(), result.clone()));
+            let result = ArgoApplicationsFetchResult {
+                all_apps,
+                filtered_apps: filtered,
+                is_remote_hub: true,
+            };
+
+            if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
+                let map = guard.get_or_insert_with(HashMap::new);
+                map.insert(cache_key, (Instant::now(), result.clone()));
+            }
+
+            Ok(result)
+        }
+        Err(_) => Err(format!(
+            "Timed out after {}s waiting for ArgoCD Applications from '{}'.",
+            timeout_dur.as_secs(),
+            current_context
+        )),
     }
-
-    Ok(result)
 }
 
 pub async fn fetch_argo_application_detail(
@@ -955,8 +1002,8 @@ mod tests {
     fn argo_applications_cache_stores_and_invalidates() {
         invalidate_argo_applications_cache();
         let key = ArgoAppsCacheKey {
-            query_context: "hub-cluster".to_string(),
             current_context: "spoke-cluster".to_string(),
+            hub_context: Some("hub-cluster".to_string()),
             current_cluster_name: Some("spoke-cluster".to_string()),
             current_server_url: Some("https://10.0.0.1:6443".to_string()),
             target_namespace: None,

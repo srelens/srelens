@@ -7152,7 +7152,7 @@ impl App {
                     let _ = event_tx.send(crate::event::AppEvent::ArgoApplicationsResult {
                         context: current_context,
                         is_remote_hub: is_remote,
-                        hub_context: hub_ctx_clone,
+                        hub_context: if is_remote { hub_ctx_clone } else { None },
                         result: Ok(fetch_res),
                     });
                 }
@@ -7160,7 +7160,7 @@ impl App {
                     let _ = event_tx.send(crate::event::AppEvent::ArgoApplicationsResult {
                         context: current_context,
                         is_remote_hub: false,
-                        hub_context: hub_ctx_clone,
+                        hub_context: None,
                         result: Err(e),
                     });
                 }
@@ -7171,7 +7171,7 @@ impl App {
     pub fn handle_argo_applications_result(
         &mut self,
         context: &str,
-        is_remote_hub: bool,
+        _is_remote_hub: bool,
         hub_context: Option<String>,
         result: Result<srelens_kube::argo::ArgoApplicationsFetchResult, String>,
     ) {
@@ -7179,7 +7179,10 @@ impl App {
         if let ActiveView::Argo(argo) = &mut self.active_view {
             if self.active_context == context {
                 match result {
-                    Ok(fetch_res) => argo.set_applications(fetch_res.filtered_apps, fetch_res.all_apps, is_remote_hub, hub_context),
+                    Ok(fetch_res) => {
+                        let effective_hub = if fetch_res.is_remote_hub { hub_context } else { None };
+                        argo.set_applications(fetch_res.filtered_apps, fetch_res.all_apps, fetch_res.is_remote_hub, effective_hub);
+                    }
                     Err(err) => argo.set_error(err),
                 }
             } else {
@@ -7191,8 +7194,12 @@ impl App {
     }
 
     pub fn open_argo_detail(&mut self, app: srelens_kube::argo::ArgoApplication, hub_context: Option<String>) {
-        let hub_ctx = hub_context.or_else(|| self.tui_config.resolved_argo_hub_context());
-        let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
+        let hub_ctx = hub_context.clone();
+        let hub_kubeconfig = if hub_ctx.is_some() {
+            self.tui_config.resolved_argo_hub_kubeconfig()
+        } else {
+            None
+        };
 
         let mut detail_state = argo_detail_view::ArgoDetailViewState::new(
             app.name.clone(),
@@ -7231,12 +7238,18 @@ impl App {
     }
 
     pub fn reload_argo_detail(&mut self, name: &str, namespace: &str) {
-        if let ActiveView::ArgoDetail(detail) = &mut self.active_view {
+        let hub_ctx = if let ActiveView::ArgoDetail(detail) = &mut self.active_view {
             detail.is_loading = true;
             detail.error = None;
-        }
-        let hub_ctx = self.tui_config.resolved_argo_hub_context();
-        let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
+            detail.hub_context.clone()
+        } else {
+            None
+        };
+        let hub_kubeconfig = if hub_ctx.is_some() {
+            self.tui_config.resolved_argo_hub_kubeconfig()
+        } else {
+            None
+        };
         let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
@@ -7282,13 +7295,21 @@ impl App {
     }
 
     pub fn trigger_argo_hard_refresh(&mut self, name: &str, namespace: &str) {
-        let hub_ctx = self.tui_config.resolved_argo_hub_context();
+        let hub_ctx = match &self.active_view {
+            ActiveView::Argo(argo) => argo.hub_context_name.clone(),
+            ActiveView::ArgoDetail(detail) => detail.hub_context.clone(),
+            _ => None,
+        };
+        let hub_kubeconfig = if hub_ctx.is_some() {
+            self.tui_config.resolved_argo_hub_kubeconfig()
+        } else {
+            None
+        };
         let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
         let name_c = name.to_string();
         let ns_c = namespace.to_string();
-        let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
 
         tokio::spawn(async move {
             if let Some(ref path) = hub_kubeconfig {
