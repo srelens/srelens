@@ -78,10 +78,12 @@ The host enforces this for fields. `API_FIELDS` in `crates/plugin-host/src/manif
 lists every manifest field added or removed after API 0.1, with the API versions it is
 available in. A rename is a removal plus an addition.
 
-A manifest that uses a field outside the version its range negotiates to is rejected,
-even by a host that knows the field. That covers a field a later line added, and one a
-later line removed or renamed. Otherwise the manifest would install on some hosts and
-fail on others that still match its range.
+A manifest may use a field only if the field is available in every supported API
+version its range admits, not just the one it negotiates to. Otherwise it is rejected,
+even by a host that knows the field. That covers a field a later line added, one a later
+line removed or renamed, and a range that spans several lines: `>=0.1, <0.3` claims 0.1
+hosts, so it may not use a 0.2-only field. Otherwise the manifest would install on some
+hosts and fail on others that still match its range.
 
 A change that narrows the values a field accepts, rather than adding or removing the
 field, must add a check keyed on the negotiated API version in the same change.
@@ -182,5 +184,5 @@ receive without an update.
 - **#530:**
   - The host declares a set of supported API versions and serves each manifest under the highest version its range matches.
   - A manifest whose range the host does not support is rejected with the versions it needs and the host supports, before strict schema checks.
-  - A manifest may use only the fields of the API version its range negotiates to (`API_FIELDS`, empty while 0.1 is the only version).
+  - A manifest may use only fields available in every supported API version its range admits (`API_FIELDS`, empty while 0.1 is the only version).
   - `extensions.catalog` also reports `hostApiVersions`, the full list. `hostApiVersion` stays, set to the newest supported version, and is deprecated (see [Deprecation](#deprecation)).

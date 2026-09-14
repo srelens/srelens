@@ -335,9 +335,13 @@ fn a_manifest_for_a_newer_api_is_told_the_version_it_needs_not_an_unknown_field(
 }
 
 #[test]
-fn fields_outside_the_negotiated_api_version_are_rejected() {
-    use srelens_plugin_host::{check_api_fields_in, ApiField, API_FIELDS, SUPPORTED_API_VERSIONS};
+fn fields_must_exist_in_every_api_version_the_range_admits() {
+    use srelens_plugin_host::{
+        check_api_fields_in, matching_api_versions_in, ApiField, API_FIELDS, SUPPORTED_API_VERSIONS,
+    };
     let version = |v: &str| semver::Version::parse(v).unwrap();
+    let range = |r: &str| semver::VersionReq::parse(r).unwrap();
+    let both = ["0.1.0", "0.2.0"];
     let fields = [
         ApiField {
             path: "contributions.dashboardCards",
@@ -364,31 +368,41 @@ fn fields_outside_the_negotiated_api_version_are_rejected() {
             .remove("rowActions");
         value
     };
-    assert!(check_api_fields_in(&manifest(), &version("0.1.0"), &fields).is_ok());
+    let admits = |r: &str| matching_api_versions_in(&range(r), &both);
+    assert_eq!(admits("^0.1"), [version("0.1.0")]);
+    assert_eq!(admits("^0.2"), [version("0.2.0")]);
+    assert_eq!(admits(">=0.1, <0.3"), [version("0.1.0"), version("0.2.0")]);
+    assert!(admits("^0.3").is_empty());
 
-    // Declaring ^0.1 while using a 0.2 field fails even on a host that knows the field.
+    assert!(check_api_fields_in(&manifest(), &admits("^0.1"), &fields).is_ok());
+
+    // A 0.2 field under ^0.1 fails even on a host that knows the field.
     let mut top_level = without_row_actions();
     top_level["contributions"]["dashboardCards"] = json!([]);
-    let error = check_api_fields_in(&top_level, &version("0.1.0"), &fields).unwrap_err();
+    let error = check_api_fields_in(&top_level, &admits("^0.1"), &fields).unwrap_err();
     assert!(
         error.contains("`contributions.dashboardCards` requires API 0.2.0"),
         "{error}"
     );
-    assert!(error.contains("served as API 0.1.0"), "{error}");
-    assert!(check_api_fields_in(&top_level, &version("0.2.0"), &fields).is_ok());
+    assert!(error.contains("admits API 0.1.0"), "{error}");
+    assert!(check_api_fields_in(&top_level, &admits("^0.2"), &fields).is_ok());
+    // A range spanning 0.1 and 0.2 still claims 0.1 hosts, so the 0.2 field is rejected.
+    let spanning = check_api_fields_in(&top_level, &admits(">=0.1, <0.3"), &fields).unwrap_err();
+    assert!(spanning.contains("admits API 0.1.0"), "{spanning}");
 
     let mut per_page = without_row_actions();
     per_page["contributions"]["pages"][0]["badges"] = json!([]);
-    assert!(check_api_fields_in(&per_page, &version("0.1.0"), &fields).is_err());
-    assert!(check_api_fields_in(&per_page, &version("0.2.0"), &fields).is_ok());
+    assert!(check_api_fields_in(&per_page, &admits("^0.1"), &fields).is_err());
+    assert!(check_api_fields_in(&per_page, &admits("^0.2"), &fields).is_ok());
 
-    // A field removed in 0.2 is still accepted under 0.1 and rejected under 0.2.
-    let removed = check_api_fields_in(&manifest(), &version("0.2.0"), &fields).unwrap_err();
+    // A field removed in 0.2 is accepted under ^0.1 and rejected by any range admitting 0.2.
+    let removed = check_api_fields_in(&manifest(), &admits("^0.2"), &fields).unwrap_err();
     assert!(
         removed.contains("`contributions.rowActions` was removed in API 0.2.0"),
         "{removed}"
     );
-    assert!(check_api_fields_in(&without_row_actions(), &version("0.2.0"), &fields).is_ok());
+    assert!(check_api_fields_in(&manifest(), &admits(">=0.1, <0.3"), &fields).is_err());
+    assert!(check_api_fields_in(&without_row_actions(), &admits("^0.2"), &fields).is_ok());
 
     // Every gated field names a supported version and is removed only after it arrived.
     for field in API_FIELDS {

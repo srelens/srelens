@@ -25,6 +25,20 @@ pub fn negotiate_api_version(range: &semver::VersionReq) -> Option<semver::Versi
     negotiate_api_version_in(range, SUPPORTED_API_VERSIONS)
 }
 
+/// Every version in `supported` that `range` matches, oldest first.
+pub fn matching_api_versions_in(
+    range: &semver::VersionReq,
+    supported: &[&str],
+) -> Vec<semver::Version> {
+    let mut versions: Vec<semver::Version> = supported
+        .iter()
+        .filter_map(|version| semver::Version::parse(version).ok())
+        .filter(|version| range.matches(version))
+        .collect();
+    versions.sort();
+    versions
+}
+
 fn unsupported_api(range: &str) -> String {
     format!(
         "extension requires API {range}; host supports {}",
@@ -48,10 +62,12 @@ pub struct ApiField {
 /// removal plus an addition. Empty while 0.1 is the only version.
 pub const API_FIELDS: &[ApiField] = &[];
 
-/// Rejects a field in `raw` that is not available in the `negotiated` API version.
+/// Rejects a field in `raw` that is missing from any of `versions`: every supported API
+/// version the manifest's range admits. A range that also admits an older line claims
+/// hosts on that line, so it may use only fields every admitted line has.
 pub fn check_api_fields_in(
     raw: &Value,
-    negotiated: &semver::Version,
+    versions: &[semver::Version],
     fields: &[ApiField],
 ) -> Result<(), String> {
     let parse = |field: &ApiField, version: &str| {
@@ -63,19 +79,24 @@ pub fn check_api_fields_in(
             continue;
         }
         let introduced = parse(field, field.introduced)?;
-        if *negotiated < introduced {
-            return Err(format!(
-                "`{}` requires API {introduced}; this manifest's srelensApiVersion is served as API {negotiated}",
-                field.path
-            ));
-        }
-        if let Some(removed) = field.removed {
-            let removed = parse(field, removed)?;
-            if *negotiated >= removed {
+        let removed = field
+            .removed
+            .map(|removed| parse(field, removed))
+            .transpose()?;
+        for version in versions {
+            if *version < introduced {
                 return Err(format!(
-                    "`{}` was removed in API {removed}; this manifest's srelensApiVersion is served as API {negotiated}",
+                    "`{}` requires API {introduced}, but this manifest's srelensApiVersion admits API {version}",
                     field.path
                 ));
+            }
+            if let Some(removed) = &removed {
+                if version >= removed {
+                    return Err(format!(
+                        "`{}` was removed in API {removed}, but this manifest's srelensApiVersion admits API {version}",
+                        field.path
+                    ));
+                }
             }
         }
     }
@@ -256,14 +277,16 @@ impl Manifest {
         }
         // Check the API range before the strict schema, so a manifest written for a newer API
         // is told which version it needs rather than which field this host does not know,
-        // and so it uses only the fields of the version its range negotiates to.
+        // and so it uses only fields every API version its range admits has.
         let raw = serde_json::from_str::<Value>(source).ok();
         if let Some(raw) = &raw {
             if let Some(range) = raw.get("srelensApiVersion").and_then(Value::as_str) {
                 if let Ok(req) = semver::VersionReq::parse(range) {
-                    let negotiated =
-                        negotiate_api_version(&req).ok_or_else(|| unsupported_api(range))?;
-                    check_api_fields_in(raw, &negotiated, API_FIELDS)?;
+                    let admitted = matching_api_versions_in(&req, SUPPORTED_API_VERSIONS);
+                    if admitted.is_empty() {
+                        return Err(unsupported_api(range));
+                    }
+                    check_api_fields_in(raw, &admitted, API_FIELDS)?;
                 }
             }
         }
