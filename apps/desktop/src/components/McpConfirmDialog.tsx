@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { respondToConfirm, type ConfirmRequest } from "@srelens/core";
+import { isTauri, respondToConfirm, type ConfirmRequest } from "@srelens/core";
 import { notify } from "@srelens/core";
 import { ConfirmDialog } from "../ui";
 
@@ -18,6 +18,13 @@ export function McpConfirmDialog() {
   const current = queue[0];
 
   useEffect(() => {
+    // Desktop only. On the web, AppGate renders classic App after sign-in and
+    // App mounts this dialog unconditionally -- and `listen()` from
+    // @tauri-apps/api reaches for `window.__TAURI_INTERNALS__` and throws in
+    // a browser. Two unguarded calls here were two uncaught rejections on
+    // every web page load (#512). There is no consent flow to subscribe to on
+    // the web anyway: the server denies every capability that would need one.
+    if (!isTauri()) return;
     const unlisten = listen<ConfirmRequest>("mcp://confirm-request", (event) => {
       setQueue((q) => [...q, event.payload]);
     });
