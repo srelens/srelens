@@ -759,7 +759,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
 pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: bool) {
     let modal_width = (area.width.saturating_sub(4)).clamp(48, 94).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(14, 21).min(area.height);
+    let modal_height = (area.height.saturating_sub(2)).clamp(14, 22).min(area.height);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
@@ -782,7 +782,7 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2), // Top description
-            Constraint::Min(7),   // Features list
+            Constraint::Min(8),   // Features list
             Constraint::Length(3), // Checkbox and key hints
         ])
         .split(inner);
@@ -797,7 +797,7 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
         ]),
         Line::from(vec![
             Span::styled(
-                "Key built-in features you should know (press [1-7] to jump directly, or type ':' for command prompt):",
+                "Key built-in features you should know (press [1-8] to jump directly, or type ':' for command prompt):",
                 Style::default().fg(Theme::dim()),
             ),
         ]),
@@ -810,9 +810,10 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
         ("[2]", ":overview",    "[Cluster]",       "Cluster overview, health summary & node/pod capacity",          ":overview"),
         ("[3]", ":gpuinfo",     "[Hardware]",      "GPU hardware inspector, specs & per-pod VRAM allocations",     ":gpuinfo"),
         ("[4]", ":workloads",   "[Workload]",      "Unified workloads view (Pods, Deployments, STS, DS, Jobs)",     ":workloads [ns]"),
-        ("[5]", ":ai",          "[AI Assistant]",  "Interactive AI troubleshooting chat for automated RCA",         ":ai"),
-        ("[6]", ":ai-settings", "[AI Config]",     "Configure AI providers (Claude, OpenAI, Gemini), models & keys", ":ai-settings"),
-        ("[7]", ":config",      "[Lens Settings]", "Lens settings: popup width, visible rows, text scale & banner",  ":config"),
+        ("[5]", ":argo",        "[GitOps]",        "ArgoCD applications, sync status, drift & GitOps control",      ":argo [ns]"),
+        ("[6]", ":ai",          "[AI Assistant]",  "Interactive AI troubleshooting chat for automated RCA",         ":ai"),
+        ("[7]", ":ai-settings", "[AI Config]",     "Configure AI providers (Claude, OpenAI, Gemini), models & keys", ":ai-settings"),
+        ("[8]", ":config",      "[Lens Settings]", "Lens settings: popup width, visible rows, text scale & banner",  ":config"),
     ];
 
     let inner_w = chunks[1].width as usize;

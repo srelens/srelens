@@ -244,7 +244,19 @@ pub async fn fetch_argo_applications(
     let list = api
         .list(&ListParams::default())
         .await
-        .map_err(|e| format!("Failed to list ArgoCD Applications on '{}': {}", query_context, e))?;
+        .map_err(|e| {
+            let err_str = e.to_string();
+            let is_not_found = err_str.contains("404")
+                || err_str.to_lowercase().contains("not found")
+                || err_str.to_lowercase().contains("notfound");
+            if !is_remote_hub && is_not_found {
+                "No ArgoCD deployment in this cluster AND no kubeconfig set to point to the ArgoCD cluster.".to_string()
+            } else if is_remote_hub && is_not_found {
+                format!("Failed to list ArgoCD Applications on hub '{}': ArgoCD CRD (applications.argoproj.io) is not installed on the Hub cluster.", query_context)
+            } else {
+                format!("Failed to list ArgoCD Applications on '{}': {}", query_context, e)
+            }
+        })?;
 
     let all_apps: Vec<ArgoApplication> = list
         .items

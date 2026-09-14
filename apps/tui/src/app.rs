@@ -1639,13 +1639,17 @@ impl App {
                         }
                         KeyCode::Char('5') => {
                             self.modal = None;
-                            self.switch_view_to_kind(ResourceKind::Assistant).await;
+                            self.switch_view_to_kind(ResourceKind::ArgoApplications).await;
                         }
                         KeyCode::Char('6') => {
                             self.modal = None;
-                            self.switch_view_to_kind(ResourceKind::Settings).await;
+                            self.switch_view_to_kind(ResourceKind::Assistant).await;
                         }
                         KeyCode::Char('7') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Settings).await;
+                        }
+                        KeyCode::Char('8') => {
                             self.modal = None;
                             self.switch_view_to_kind(ResourceKind::TuiConfig).await;
                         }
@@ -3677,6 +3681,13 @@ impl App {
                         self.set_toast("Refreshing ArgoCD applications...".to_string(), Theme::status_ok());
                     }
                     KeyCode::Char('c') => {
+                        let mut cfg = TuiConfigViewState::new();
+                        cfg.available_contexts = self.contexts.iter().map(|c| c.name.clone()).collect();
+                        cfg.selected_field = 4;
+                        let old_view = std::mem::replace(&mut self.active_view, ActiveView::TuiConfig(cfg));
+                        self.nav_stack.push(old_view);
+                    }
+                    KeyCode::Char('y') => {
                         if let Some(app) = sel_app {
                             let link = crate::deep_link::DeepLink::Resource {
                                 context: self.active_context.clone(),
@@ -4107,6 +4118,39 @@ impl App {
                 }
             }
             ActiveView::TuiConfig(cfg_state) => {
+                if cfg_state.is_editing {
+                    match key.code {
+                        KeyCode::Esc => {
+                            cfg_state.cancel_editing();
+                        }
+                        KeyCode::Enter => {
+                            match cfg_state.finish_editing(&mut self.tui_config) {
+                                Ok(()) => self.set_toast("Saved ArgoCD Hub setting".to_string(), Theme::status_ok()),
+                                Err(err) => self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error()),
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            cfg_state.edit_buffer.pop();
+                        }
+                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            cfg_state.edit_buffer.clear();
+                        }
+                        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            let trimmed = cfg_state.edit_buffer.trim_end();
+                            if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace() || c == '/' || c == '-') {
+                                cfg_state.edit_buffer.truncate(idx + 1);
+                            } else {
+                                cfg_state.edit_buffer.clear();
+                            }
+                        }
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                            cfg_state.edit_buffer.push(c);
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
                         if let Some(prev) = self.nav_stack.pop() {
@@ -4127,9 +4171,29 @@ impl App {
                             self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
                         }
                     }
-                    KeyCode::Enter | KeyCode::Char(' ') => {
+                    KeyCode::Enter => {
+                        if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
+                            cfg_state.start_editing(&self.tui_config);
+                        } else if let Err(err) = cfg_state.cycle_current(&mut self.tui_config) {
+                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                        }
+                    }
+                    KeyCode::Char(' ') => {
                         if let Err(err) = cfg_state.cycle_current(&mut self.tui_config) {
                             self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                        }
+                    }
+                    KeyCode::Char('e') | KeyCode::Char('E') => {
+                        if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
+                            cfg_state.start_editing(&self.tui_config);
+                        }
+                    }
+                    KeyCode::Char('c') | KeyCode::Char('C') => {
+                        if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
+                            match cfg_state.clear_current(&mut self.tui_config) {
+                                Ok(()) => self.set_toast("Cleared ArgoCD Hub setting".to_string(), Theme::status_ok()),
+                                Err(err) => self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error()),
+                            }
                         }
                     }
                     KeyCode::Char('[') | KeyCode::Char('{') => {
@@ -5791,7 +5855,11 @@ impl App {
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
             ResourceKind::Assistant => ActiveView::Assistant,
             ResourceKind::Settings => ActiveView::Settings(SettingsViewState::new()),
-            ResourceKind::TuiConfig => ActiveView::TuiConfig(TuiConfigViewState::new()),
+            ResourceKind::TuiConfig => {
+                let mut cfg = TuiConfigViewState::new();
+                cfg.available_contexts = self.contexts.iter().map(|c| c.name.clone()).collect();
+                ActiveView::TuiConfig(cfg)
+            }
             ResourceKind::Topology => {
                 let namespaces = if self.active_namespace.is_empty() {
                     vec![]
