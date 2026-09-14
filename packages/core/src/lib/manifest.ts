@@ -420,8 +420,13 @@ export interface EventSummary {
   type: string;
   reason: string;
   object: string;
+  firstAge?: string;
+  /** Raw first occurrence, falling back to the Event creation timestamp. */
+  firstCreated?: string | null;
+  objectApiVersion?: string;
+  source?: string;
   message: string;
-  /** `creationTimestamp` (RFC 3339), for a LIVE age. Prefer over `age`, which
+  /** Last-occurrence timestamp (RFC 3339), for a LIVE age. Prefer over `age`, which
    *  the backend renders once and which freezes (#405). */
   created?: string | null;
   age: string;

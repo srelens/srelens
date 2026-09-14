@@ -1,0 +1,69 @@
+{
+  "id": "org.srelens.argocd",
+  "name": "Argo CD",
+  "version": "0.1.0",
+  "srelensApiVersion": "^0.1",
+  "kind": "declarative",
+  "permissions": [
+    "k8s.listCustomResource"
+  ],
+  "capabilities": [
+    {
+      "name": "applications",
+      "title": "List Applications",
+      "target": "k8s.listCustomResource",
+      "arguments": {
+        "group": "argoproj.io",
+        "version": "v1alpha1",
+        "plural": "applications",
+        "kind": "Application",
+        "namespaced": true,
+        "printerColumns": [
+          {
+            "name": "Health",
+            "jsonPath": ".status.health.status",
+            "type": "string"
+          },
+          {
+            "name": "Sync",
+            "jsonPath": ".status.sync.status",
+            "type": "string"
+          }
+        ]
+      },
+      "inputs": [
+        "context",
+        "namespace"
+      ]
+    }
+  ],
+  "contributions": {
+    "pages": [
+      {
+        "id": "applications",
+        "title": "Applications",
+        "capability": "applications"
+      }
+    ],
+    "detailTabs": [
+      {
+        "id": "namespace-resources",
+        "title": "Argo CD",
+        "capability": "applications",
+        "forKinds": [
+          "/Namespace"
+        ]
+      }
+    ],
+    "rowActions": [
+      {
+        "id": "inspect-namespace",
+        "title": "Inspect Argo CD resources",
+        "capability": "applications",
+        "forKinds": [
+          "/Namespace"
+        ]
+      }
+    ]
+  }
+}

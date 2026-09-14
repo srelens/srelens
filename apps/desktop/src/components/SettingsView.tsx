@@ -1,3 +1,4 @@
+import { ExtensionManager } from "./Extensions";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Boxes,
@@ -100,6 +101,7 @@ export type SettingsSection =
   | "assistant"
   | "security"
   | "logs"
+  | "extensions"
   | "updates";
 
 type UpdatePhase =
@@ -130,6 +132,7 @@ const SETTINGS_SECTIONS: Array<{
   { id: "assistant", label: "Assistant", description: "srelens agent API keys and model", icon: Bot },
   { id: "security", label: "Security", description: "Master password and biometric unlock", icon: Shield },
   { id: "logs", label: "Application logs", description: "Diagnostics and log file", icon: ScrollText },
+  { id: "extensions", label: "Extensions", description: "Local extensions and permissions", icon: Plug },
   { id: "updates", label: "Updates", description: "App version and updates", icon: Download },
 ];
 
@@ -190,7 +193,7 @@ export function SettingsView({
   const visibleSections = isTauri()
     ? SETTINGS_SECTIONS
     : SETTINGS_SECTIONS.filter(
-        (s) => s.id !== "mcp" && s.id !== "assistant" && s.id !== "security" && s.id !== "updates",
+        (s) => s.id !== "mcp" && s.id !== "assistant" && s.id !== "security" && s.id !== "updates" && s.id !== "extensions",
       );
 
   const [section, setSection] = useState<SettingsSection>(initialSection);
@@ -1104,6 +1107,7 @@ export function SettingsView({
             </SectionPanel>
           )}
 
+          {section === "extensions" && isTauri() && <ExtensionManager contexts={(contexts ?? []).map(c => ({name: c.name, label: contextProfiles[c.name]?.shortName || contextDisplayName(c.name, contextProfiles[c.name])}))} />}
           {section === "updates" && isTauri() && (
             <SectionPanel title="Updates" description="Check for and install new versions of srelens.">
               <div className="fl-settings-update">

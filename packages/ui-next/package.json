@@ -5,7 +5,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.tsx",
-    "./styles": "./src/styles/next.css"
+    "./styles": "./src/styles/next.css",
+    "./extensions": "./src/extensions/Extensions.tsx",
+    "./extensions/styles": "./src/extensions/extensions.css"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
