@@ -414,8 +414,9 @@ whose schema carries the fields they write:
   unsupported actions.
 
 Each write requires a review naming the pinned cluster and namespace/resource.
-The backend checks UID and resourceVersion and includes both in its conditional
-PATCH, rejecting stale/replaced resources. It also rejects:
+The review keeps the UID and resourceVersion the reader saw, even if another view
+refreshes the resource while the review is open. The backend checks both and
+includes them in its conditional PATCH, rejecting stale/replaced resources. It also rejects:
 
 - a second Argo CD sync while an operation is already present
 - reconciliation while suspended

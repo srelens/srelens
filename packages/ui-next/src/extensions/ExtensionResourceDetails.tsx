@@ -1,6 +1,6 @@
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useEffect, useRef, useState } from "react";
-import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, type ExtensionResourceSelection } from "@srelens/core";
+import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, type ExtensionResourceDetail, type ExtensionResourceSelection } from "@srelens/core";
 import { Inspector, Button, CodeEditor, KV } from "@srelens/ui-kit";
 import { Icons } from "../lib/icons";
 import { ErrorNotice } from "./ExtensionResults";
@@ -44,6 +44,21 @@ function Fields({value,depth=0}:{value:Record<string,unknown>;depth?:number}) {
     return <KV key={key} k={label} v={<span className="extension-field-value">{typeof value === "boolean" ? value ? "Yes" : "No" : String(value ?? "—")}</span>}/>;
   })}</div>;
 }
+/** Says what the host read: an empty list is only "no events" when every page was read. */
+function Events({detail}:{detail?:ExtensionResourceDetail}) {
+  const events=detail?.events??[];
+  const count=(n:number)=>n.toLocaleString("en-US");
+  const unread="This resource has more events that were not read.";
+  const notice=detail?.eventsPartial
+    ? events.length
+      ? `Showing the newest ${count(events.length)}${detail.eventsRead===undefined?"":` of ${count(detail.eventsRead)}`} events read. ${unread}`
+      : `No events were returned before the host stopped reading. ${unread}`
+    : detail?.eventsTruncated ? "Showing the latest 100 events." : "";
+  return <>
+    {notice&&<p className="extension-message">{notice}</p>}
+    {events.length ? <div className="extension-condition-list">{events.map((event,i)=><article key={i}><strong>{event.type} · {event.reason}</strong><p>{event.message}</p><span>Count: {event.count??1}</span></article>)}</div> : !detail?.eventsPartial&&<p className="extension-message">No events reported.</p>}
+  </>;
+}
 export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{selection:ExtensionResourceSelection;onClose?():void;fullPage?:boolean}) {
   const openResource=useContext(ExtensionResourceNavigation);
 
@@ -56,7 +71,9 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
     if(changed.id===selection.id && changed.capability===selection.capability && changed.context===selection.context && changed.namespace===selection.namespace && changed.name===selection.name) reload();
   }),[selection.id,selection.capability,selection.context,selection.namespace,selection.name,reload]);
   const [tab,setTab]=useState("overview");
-  const [pending,setPending]=useState<string|null>(null);
+  // The review pins the UID and resourceVersion the reader saw. A refresh while it is open
+  // must not swap in a newer version, or the host's stale-review guard would pass it.
+  const [pending,setPending]=useState<{action:string;uid:string;resourceVersion:string}|null>(null);
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState("");
   const [message,setMessage]=useState("");
@@ -69,10 +86,10 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
   const cancel=()=>{if(!busy){setPending(null);trigger.current?.focus();}};
   const resource=data.data?.resource;
   const confirm=async()=>{
-    if(!pending || !resource || busy)return;
+    if(!pending || busy)return;
     setBusy(true);setError("");setMessage("");
     try {
-      const result=await actOnExtensionResource(selection,pending,resource.metadata.uid,resource.metadata.resourceVersion);
+      const result=await actOnExtensionResource(selection,pending.action,pending.uid,pending.resourceVersion);
       if(!result.requested)throw new Error("The action was not acknowledged; refresh to check the resource.");
       if(alive.current){setPending(null);setMessage("Request accepted. The controller will report progress in resource status.");}
     }catch(e){if(alive.current){setError(e instanceof Error?e.message:String(e));setPending(null);}}
@@ -91,15 +108,15 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
       activeTab={tab} onTabChange={setTab} tabsLabel="Resource views"
       footer={<div className="flex flex-wrap items-center gap-1.5">
         <Button variant="outline" size="xs" disabled={busy||!!pending} onClick={()=>{setError("");setMessage("");data.reload();}}>Refresh details</Button>
-        {data.status==="ready" && supported.map(action=><Button key={action} variant="outline" size="xs" disabled={busy || !!pending || !resource?.metadata.uid || !resource?.metadata.resourceVersion || (suspended&&["reconcile","force","reset"].includes(action))} onClick={()=>{trigger.current=document.activeElement as HTMLElement;setError("");setMessage("");setPending(action);}}>{actions[action].label}</Button>)}
+        {data.status==="ready" && resource && supported.map(action=><Button key={action} variant="outline" size="xs" disabled={busy || !!pending || !resource.metadata.uid || !resource.metadata.resourceVersion || (suspended&&["reconcile","force","reset"].includes(action))} onClick={()=>{trigger.current=document.activeElement as HTMLElement;setError("");setMessage("");setPending({action,uid:resource.metadata.uid,resourceVersion:resource.metadata.resourceVersion});}}>{actions[action].label}</Button>)}
       </div>}
     >
     {error&&<p role="alert" className="extension-error">{error}</p>}
     {message&&<p role="status" className="extension-message">{message}</p>}
     {data.status==="error"?<ErrorNotice cluster message={data.error} retry={data.reload}/>:data.status==="loading"?<p className="extension-message">Loading resource details…</p>:resource&&<>
-      {pending&&<div className="extension-action-review" role="dialog" aria-label={`Review ${actions[pending].label}`} tabIndex={-1} ref={review}>
-        <strong>{actions[pending].label}: {selection.namespace}/{selection.name}</strong><p>Cluster: {selection.context}</p><p>{actions[pending].description}</p>
-        <div className="extension-toolbar"><Button disabled={busy} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${actions[pending].label}`}</Button><Button variant="outline" disabled={busy} onClick={cancel}>Cancel</Button></div>
+      {pending&&<div className="extension-action-review" role="dialog" aria-label={`Review ${actions[pending.action].label}`} tabIndex={-1} ref={review}>
+        <strong>{actions[pending.action].label}: {selection.namespace}/{selection.name}</strong><p>Cluster: {selection.context}</p><p>{actions[pending.action].description}</p>
+        <div className="extension-toolbar"><Button disabled={busy} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${actions[pending.action].label}`}</Button><Button variant="outline" disabled={busy} onClick={cancel}>Cancel</Button></div>
       </div>}
       {tab==="manifest"?<div className="flex h-full min-h-0 flex-col"><div className="min-h-0 flex-1"><CodeEditor value={formatResourceManifest(resource)} readOnly language="yaml" fill ariaLabel={`${selection.name} manifest`}/></div></div>:<>
         <h4 className="extension-detail-heading">Overview</h4><Fields value={{Name:resource.metadata.name,Namespace:resource.metadata.namespace??"—",Kind:resource.kind,API:resource.apiVersion,Created:resource.metadata.creationTimestamp??"—",...(resource.spec??{})}}/>
@@ -107,7 +124,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
         {Array.isArray(resource.status?.conditions)&&resource.status.conditions.length?<div className="extension-condition-list">{resource.status.conditions.map((c:any,i:number)=><article key={i}><strong>{c.type} · {c.status}</strong><div>{c.reason||"—"}</div><p>{c.message||"—"}</p></article>)}</div>:<p className="extension-message">No conditions reported.</p>}
         <h4 className="extension-detail-heading">Status</h4><Fields value={Object.fromEntries(Object.entries(resource.status??{}).filter(([key])=>key!=="conditions"))}/>
         <h4 className="extension-detail-heading">Events</h4>
-        {data.data?.eventsError ? <ErrorNotice cluster message={data.data.eventsError} retry={data.reload}/> : data.data?.events?.length ? <>{data.data.eventsPartial?<p className="extension-message">{`Showing the newest ${data.data.events.length.toLocaleString("en-US")}${data.data.eventsRead===undefined?"":` of ${data.data.eventsRead.toLocaleString("en-US")}`} events read. This resource has more events that were not read.`}</p>:data.data.eventsTruncated&&<p className="extension-message">Showing the latest 100 events.</p>}<div className="extension-condition-list">{data.data.events.map((event,i)=><article key={i}><strong>{event.type} · {event.reason}</strong><p>{event.message}</p><span>Count: {event.count??1}</span></article>)}</div></> : <p className="extension-message">No events reported.</p>}
+        {data.data?.eventsError ? <ErrorNotice cluster message={data.data.eventsError} retry={data.reload}/> : <Events detail={data.data}/>}
         <details className="extension-detail-metadata"><summary>Labels and annotations</summary><Fields value={{labels:resource.metadata.labels??{},annotations:resource.metadata.annotations??{}}}/></details>
       </>}
     </>}

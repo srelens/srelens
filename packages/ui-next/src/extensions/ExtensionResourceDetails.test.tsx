@@ -56,6 +56,23 @@ it("says when the host returned only the latest events",async()=>{
   expect(await screen.findByText("Applied revision")).toBeTruthy();
   expect(screen.getByText("Showing the latest 100 events.")).toBeTruthy();
 });
+it("confirms against the version the reader reviewed even after another view refreshes it",async()=>{
+  render(<ExtensionResourceDetails selection={selection}/>);
+  fireEvent.click(await screen.findByRole("button",{name:"Suspend"}));
+  // Another view acts on the same resource while this review is still open.
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,metadata:{...detail.resource.metadata,resourceVersion:"13"}}});
+  window.dispatchEvent(new CustomEvent(EXTENSION_RESOURCE_CHANGED,{detail:selection}));
+  await waitFor(()=>expect(inspectExtensionResource).toHaveBeenCalledTimes(2));
+  fireEvent.click(await screen.findByRole("button",{name:"Confirm Suspend"}));
+  // The reviewed version goes to the host, whose stale-review guard then rejects it.
+  await waitFor(()=>expect(actOnExtensionResource).toHaveBeenCalledWith(selection,"suspend","uid-a","12"));
+});
+it("does not report no events when the host stopped before reading every page",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,events:[],eventsTruncated:true,eventsPartial:true,eventsRead:0});
+  render(<ExtensionResourceDetails selection={selection}/>);
+  expect(await screen.findByText("No events were returned before the host stopped reading. This resource has more events that were not read.")).toBeTruthy();
+  expect(screen.queryByText("No events reported.")).toBeNull();
+});
 it("does not claim the latest events when the host stopped before reading them all",async()=>{
   // The host reports what it actually read; the panel must not invent a total.
   vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,events:[{type:"Normal",reason:"Progressing",message:"Applied revision",count:1}],eventsTruncated:true,eventsPartial:true,eventsRead:5000});
