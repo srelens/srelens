@@ -1762,6 +1762,70 @@ async fn esc_in_text_views_clears_selection_and_search_before_popping_the_view()
     );
 }
 
+#[tokio::test]
+async fn q_in_logs_view_exits_and_stops_stream() {
+    let (mut app, _rx) = common::app().await;
+    let logs = LogsViewState::new("pod-1".into(), "default".into(), None, "logs:q-test".into());
+    let prev = std::mem::replace(&mut app.active_view, ActiveView::Logs(logs));
+    app.nav_stack.push(prev);
+    app.active_log_channel = Some("logs:q-test".into());
+
+    press(&mut app, ch('q')).await;
+    assert!(matches!(app.active_view, ActiveView::Table(_)));
+    assert!(
+        app.active_log_channel.is_none(),
+        "pressing q in logs view should exit and stop stream"
+    );
+}
+
+#[tokio::test]
+async fn switch_namespace_while_in_logs_stops_stream_and_returns_to_table() {
+    let (mut app, _rx) = common::app().await;
+    let logs = LogsViewState::new("istio-pod".into(), "istio-system".into(), None, "logs:istio".into());
+    let prev = std::mem::replace(&mut app.active_view, ActiveView::Logs(logs));
+    app.nav_stack.push(prev);
+    app.active_log_channel = Some("logs:istio".into());
+
+    app.switch_namespace("default".into()).await;
+    assert!(matches!(app.active_view, ActiveView::Table(_)));
+    assert!(
+        app.active_log_channel.is_none(),
+        "switching namespace should stop active log stream and leave logs view"
+    );
+    assert_eq!(app.active_namespace, "default");
+}
+
+#[tokio::test]
+async fn switch_view_to_kind_while_in_logs_stops_stream() {
+    let (mut app, _rx) = common::app().await;
+    let logs = LogsViewState::new("test-pod".into(), "default".into(), None, "logs:test".into());
+    let prev = std::mem::replace(&mut app.active_view, ActiveView::Logs(logs));
+    app.nav_stack.push(prev);
+    app.active_log_channel = Some("logs:test".into());
+
+    app.switch_view_to_kind(ResourceKind::Nodes).await;
+    assert!(matches!(app.active_view, ActiveView::Table(_)));
+    assert!(
+        app.active_log_channel.is_none(),
+        "switching view to another kind should stop active log stream"
+    );
+}
+
+#[tokio::test]
+async fn switch_context_while_in_logs_stops_stream() {
+    let (mut app, _rx) = common::app().await;
+    let logs = LogsViewState::new("test-pod".into(), "default".into(), None, "logs:test".into());
+    let prev = std::mem::replace(&mut app.active_view, ActiveView::Logs(logs));
+    app.nav_stack.push(prev);
+    app.active_log_channel = Some("logs:test".into());
+
+    app.switch_context("other-ctx".into()).await;
+    assert!(
+        app.active_log_channel.is_none(),
+        "switching context should stop active log stream"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Help, quit, toasts, assistant drawer, settings
 // ---------------------------------------------------------------------------

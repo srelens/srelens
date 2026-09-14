@@ -1269,6 +1269,8 @@ impl App {
             return;
         }
 
+        self.stop_active_log_stream();
+        self.logs_manager.shutdown_all();
         self.watch_manager.shutdown_all();
         self.active_watch_channels.clear();
         self.active_watch_pool.clear();
@@ -1333,6 +1335,14 @@ impl App {
     }
 
     pub async fn switch_namespace(&mut self, new_namespace: String) {
+        self.stop_active_log_stream();
+        if matches!(self.active_view, ActiveView::Logs(_)) {
+            if let Some(prev) = self.nav_stack.pop() {
+                self.active_view = prev;
+            } else {
+                self.active_view = ActiveView::Table(crate::views::ResourceTableState::new(crate::app::ResourceKind::Pods));
+            }
+        }
         if !new_namespace.is_empty() {
             self.last_active_namespace = new_namespace.clone();
         }
@@ -2667,9 +2677,7 @@ impl App {
                 if !self.filter_buffer.is_empty() || has_table_filter {
                     self.clear_current_filter();
                 } else if let Some(prev_view) = self.nav_stack.pop() {
-                    if let Some(ch) = self.active_log_channel.take() {
-                        self.logs_manager.stop(&ch);
-                    }
+                    self.stop_active_log_stream();
                     self.active_view = prev_view;
                     self.restart_active_watch().await;
                 } else if matches!(self.active_view, ActiveView::Top(_)) {
@@ -3417,6 +3425,20 @@ impl App {
             }
             ActiveView::Logs(logs) => {
                 match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        if !logs.search_query.is_empty() {
+                            logs.clear_search();
+                            self.filter_buffer.clear();
+                        } else {
+                            self.stop_active_log_stream();
+                            if let Some(prev) = self.nav_stack.pop() {
+                                self.active_view = prev;
+                            } else {
+                                self.switch_view_to_kind(ResourceKind::Pods).await;
+                            }
+                            self.restart_active_watch().await;
+                        }
+                    }
                     KeyCode::Char('j') | KeyCode::Down => logs.scroll_down(1),
                     KeyCode::Char('k') | KeyCode::Up => logs.scroll_up(1),
                     KeyCode::Char('g') | KeyCode::Home => logs.scroll_top(),
@@ -5772,6 +5794,7 @@ impl App {
     }
 
     pub async fn switch_view_to_crd(&mut self, mut crd: CrdMeta) {
+        self.stop_active_log_stream();
         if crd.printer_columns.is_empty() {
             if let Some(discovered) = self.crds.iter().find(|c| c.crd_name == crd.crd_name || (c.group == crd.group && c.kind == crd.kind)) {
                 crd.printer_columns = discovered.printer_columns.clone();
@@ -5868,6 +5891,7 @@ impl App {
     }
 
     pub async fn switch_view_to_kind(&mut self, kind: ResourceKind) {
+        self.stop_active_log_stream();
         let new_view = match kind {
             ResourceKind::PortForwards => ActiveView::PortForwards(PortForwardViewState::new()),
             ResourceKind::HelmReleases => {
@@ -6089,10 +6113,14 @@ impl App {
         }
     }
 
-    pub async fn open_logs_view(&mut self, pod_name: String, namespace: Option<String>, container: Option<String>) {
+    pub fn stop_active_log_stream(&mut self) {
         if let Some(prev_ch) = self.active_log_channel.take() {
             self.logs_manager.stop(&prev_ch);
         }
+    }
+
+    pub async fn open_logs_view(&mut self, pod_name: String, namespace: Option<String>, container: Option<String>) {
+        self.stop_active_log_stream();
 
         let channel = format!("logs:{}:{}", pod_name, uuid::Uuid::new_v4());
         self.active_log_channel = Some(channel.clone());
@@ -6138,9 +6166,7 @@ impl App {
         namespace: Option<String>,
         pod_names: Vec<String>,
     ) {
-        if let Some(prev_ch) = self.active_log_channel.take() {
-            self.logs_manager.stop(&prev_ch);
-        }
+        self.stop_active_log_stream();
 
         let channel = format!("logs:multi:{}:{}", target_name, uuid::Uuid::new_v4());
         self.active_log_channel = Some(channel.clone());
@@ -8279,6 +8305,20 @@ impl App {
     }
 
     pub fn handle_stream_event(&mut self, channel: String, payload: serde_json::Value) {
+        if channel.starts_with("logs:") {
+            if let ActiveView::Logs(logs) = &mut self.active_view {
+                if logs.channel == channel {
+                    let source = payload.get("source").and_then(|v| v.as_str()).map(String::from);
+                    if let Some(line) = payload.get("line").and_then(|v| v.as_str()) {
+                        logs.push_entry(source, line.to_string());
+                    } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
+                        logs.push_entry(source, format!("--- log status: {} ---", status));
+                    }
+                }
+            }
+            return;
+        }
+
         if channel.starts_with("forward:") {
             self.sync_port_forwards();
             if channel.starts_with("forward:closed:") {
@@ -8369,17 +8409,6 @@ impl App {
                 ns_list.sort();
                 if !ns_list.is_empty() {
                     self.namespaces = ns_list;
-                }
-            }
-        }
-
-        if let ActiveView::Logs(logs) = &mut self.active_view {
-            if logs.channel == channel {
-                let source = payload.get("source").and_then(|v| v.as_str()).map(String::from);
-                if let Some(line) = payload.get("line").and_then(|v| v.as_str()) {
-                    logs.push_entry(source, line.to_string());
-                } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
-                    logs.push_entry(source, format!("--- log status: {} ---", status));
                 }
             }
         }

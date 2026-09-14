@@ -246,8 +246,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while app.is_running {
         terminal.draw(|f| app.render(f))?;
 
-        if let Some(event) = events.recv().await {
-            match event {
+        if let Some(first_event) = events.recv().await {
+            let mut current_event = Some(first_event);
+            let mut batch_count = 0;
+
+            while let Some(event) = current_event {
+                match event {
                 AppEvent::Key(key) => {
                     app.handle_key_event(key).await;
                 }
@@ -444,7 +448,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.handle_argo_action_result(&action, result);
                 }
             }
+
+            if !app.is_running {
+                break;
+            }
+
+            batch_count += 1;
+            if batch_count >= 256 {
+                break;
+            }
+
+            current_event = events.try_recv().ok();
         }
+    }
 
         // Handle external tool suspend actions ($EDITOR, Pod shell, etc.)
         if let Some(action) = app.requires_terminal_suspend.take() {
