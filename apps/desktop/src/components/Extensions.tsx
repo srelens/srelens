@@ -8,10 +8,10 @@ import type { ComponentProps } from "react";
 
 // Keep each design's controls and stylesheet; only the extension behavior is shared.
 const controls = { Button, Combobox, Tabs };
-export function ExtensionManager(props: ComponentProps<typeof Manager>) {
+export function ExtensionManager() {
   return (
     <ExtensionControlsProvider value={controls}>
-      <Manager {...props} />
+      <Manager />
     </ExtensionControlsProvider>
   );
 }

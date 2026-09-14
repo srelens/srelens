@@ -26,7 +26,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
-    developerMode: true,
     nextRevision: 2,
     plugins: [plugin],
   });

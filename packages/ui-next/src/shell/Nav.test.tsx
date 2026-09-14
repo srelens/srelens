@@ -228,7 +228,7 @@ describe("Nav", () => {
 });
 
 it("groups extension pages under their display name", async () => {
-  extensionState.data = { developerMode: true, plugins: [
+  extensionState.data = { plugins: [
     { enabled: true, manifest: { id: "org.srelens.flux", name: "Flux", contributions: { pages: [
       { id: "kustomizations", title: "Kustomizations" },
       { id: "repositories", title: "Git repositories", group: "Sources" },

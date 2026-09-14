@@ -11,9 +11,9 @@ import {
 } from "./extensions";
 describe("extension contract", () => {
   it("uses the backend configure and read wire payloads", async () => {
-    await configureExtensions({ action: "developerMode", enabled: true });
+    await configureExtensions({ action: "enable", id: "org.test.app", enabled: true });
     expect(invokeCapability).toHaveBeenCalledWith("extensions.configure", {
-      action: "developerMode",
+      action: "enable", id: "org.test.app",
       enabled: true,
     });
     await readExtension("org.test.app", 2, "list", "cluster/a", "ns");

@@ -1,4 +1,4 @@
-//! Durable, developer-mode declarative extensions for desktop hosts.
+//! Durable, native declarative extensions for desktop hosts.
 mod catalog;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -26,8 +26,6 @@ pub struct Installed {
 pub struct Inventory {
     #[serde(rename = "schemaVersion")]
     schema_version: u32,
-    #[serde(rename = "developerMode")]
-    developer_mode: bool,
     #[serde(rename = "nextRevision")]
     next_revision: u64,
     plugins: Vec<Installed>,
@@ -36,7 +34,6 @@ impl Default for Inventory {
     fn default() -> Self {
         Self {
             schema_version: 1,
-            developer_mode: false,
             next_revision: 1,
             plugins: vec![],
         }
@@ -45,8 +42,6 @@ impl Default for Inventory {
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", deny_unknown_fields)]
 enum Configure {
-    #[serde(rename = "developerMode")]
-    DeveloperMode { enabled: bool },
     #[serde(rename = "install")]
     Install {
         manifest: String,
@@ -87,6 +82,26 @@ fn read(path: &Path) -> Result<Inventory, String> {
     }
     let mut stored: Value =
         serde_json::from_slice(&raw).map_err(|e| format!("parse extension inventory: {e}"))?;
+    let legacy_mode = stored
+        .as_object_mut()
+        .and_then(|fields| fields.remove("developerMode"));
+    if legacy_mode
+        .as_ref()
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err("invalid legacy extension developer mode".into());
+    }
+    if legacy_mode == Some(Value::Bool(false)) {
+        if let Some(plugins) = stored.get_mut("plugins").and_then(Value::as_array_mut) {
+            for plugin in plugins {
+                if let Some(enabled) = plugin.get_mut("enabled") {
+                    if enabled == &Value::Bool(true) {
+                        *enabled = json!(false);
+                    }
+                }
+            }
+        }
+    }
     // Retire archive installations without invalidating native manifests/settings.
     // The next atomic inventory save drops the old entries from disk as well.
     if let Some(plugins) = stored.get_mut("plugins").and_then(Value::as_array_mut) {
@@ -254,21 +269,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
     let _lock = super::settings::write_lock(path)?;
     let mut state = read(path)?;
     match input {
-        Configure::DeveloperMode { enabled } => {
-            state.developer_mode = enabled;
-            if !enabled {
-                for p in &mut state.plugins {
-                    p.enabled = false;
-                }
-            }
-        }
         Configure::Install { manifest, grants } => {
-            if !state.developer_mode {
-                return Err(
-                    "Enable extension developer mode before installing unsigned local manifests"
-                        .into(),
-                );
-            }
             let manifest = Manifest::parse(&manifest)?;
             validate_app(&manifest, &grants, core)?;
             let revision = state.next_revision;
@@ -292,9 +293,6 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 .sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
         }
         Configure::Enable { id, enabled } => {
-            if enabled && !state.developer_mode {
-                return Err("Unsigned extensions require developer mode".into());
-            }
             let p = state
                 .plugins
                 .iter_mut()
@@ -330,7 +328,7 @@ pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
     let p = path.clone();
     reg.register(Capability::typed::<Empty, Inventory, _, _>(
         "extensions.list",
-        "List installed declarative extensions and developer-mode state",
+        "List installed declarative extensions",
         Annotations::READ_ONLY,
         move |_| {
             let p = p.clone();
@@ -395,7 +393,6 @@ pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
                     .find(|p| {
                         p.manifest.id == input.id && p.enabled && p.revision == input.revision
                     })
-                    .filter(|_| state.developer_mode)
                     .ok_or_else(|| {
                         CapabilityError::Handler(
                             "Extension was disabled, removed or updated; refresh the view".into(),
@@ -479,23 +476,39 @@ mod tests {
         .is_err());
         assert!(setup(&path).get("extensions.freelensRead").is_none());
     }
+    #[test]
+    fn legacy_mode_migration_preserves_state_without_reactivating_disabled_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        install(&path, fake_core());
+        let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        stored["plugins"][0]["settings"] = json!({"team":"platform"});
+        for enabled in [true, false] {
+            stored["developerMode"] = json!(enabled);
+            fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+            let state = read(&path).unwrap();
+            assert_eq!(state.plugins[0].enabled, enabled);
+            assert_eq!(state.plugins[0].revision, 1);
+            assert_eq!(state.plugins[0].settings["team"], "platform");
+            write(&path, &state).unwrap();
+            let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert!(saved.get("developerMode").is_none());
+        }
+        stored["developerMode"] = json!("false");
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert!(read(&path).is_err());
+        stored["developerMode"] = json!(false);
+        stored["plugins"] = json!([42]);
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert!(read(&path).is_err());
+    }
     #[tokio::test]
-    async fn lifecycle_is_persisted_and_unsigned_extensions_require_developer_mode() {
+    async fn lifecycle_is_persisted_without_developer_mode() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("extensions.json");
         let reg = setup(&path);
         let install =
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]});
-        assert!(reg
-            .invoke("extensions.configure", install.clone())
-            .await
-            .is_err());
-        reg.invoke(
-            "extensions.configure",
-            json!({"action":"developerMode","enabled":true}),
-        )
-        .await
-        .unwrap();
         reg.invoke("extensions.configure", install.clone())
             .await
             .unwrap();
@@ -518,7 +531,7 @@ mod tests {
         assert_eq!(state["plugins"][0]["settings"]["team"], "platform");
         reg.invoke(
             "extensions.configure",
-            json!({"action":"developerMode","enabled":false}),
+            json!({"action":"enable","id":"org.srelens.argocd","enabled":false}),
         )
         .await
         .unwrap();
@@ -530,7 +543,7 @@ mod tests {
                 json!({"action":"enable","id":"org.srelens.argocd","enabled":true})
             )
             .await
-            .is_err());
+            .is_ok());
         reg.invoke(
             "extensions.configure",
             json!({"action":"remove","id":"org.srelens.argocd"}),
@@ -549,12 +562,6 @@ mod tests {
     async fn invalid_grants_and_non_crd_operations_cannot_be_installed() {
         let dir = tempfile::tempdir().unwrap();
         let reg = setup(&dir.path().join("extensions.json"));
-        reg.invoke(
-            "extensions.configure",
-            json!({"action":"developerMode","enabled":true}),
-        )
-        .await
-        .unwrap();
         assert!(reg
             .invoke(
                 "extensions.configure",
@@ -581,12 +588,6 @@ mod tests {
         Arc::new(core)
     }
     fn install(path: &Path, core: Arc<Registry>) -> u64 {
-        mutate(
-            path,
-            core.clone(),
-            Configure::DeveloperMode { enabled: true },
-        )
-        .unwrap();
         mutate(
             path,
             core,
@@ -748,7 +749,7 @@ mod tests {
         assert!(reg
             .invoke(
                 "extensions.configure",
-                json!({"action":"developerMode","enabled":true})
+                json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]})
             )
             .await
             .is_err());
@@ -768,15 +769,19 @@ mod tests {
                 .annotations
                 .requires_confirm
         );
-        for id in ["extensions.read", "extensions.catalog", "extensions.catalogManifest"] {
+        for id in [
+            "extensions.read",
+            "extensions.catalog",
+            "extensions.catalogManifest",
+        ] {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
         assert_eq!(mcp.list_tools().len(), 5);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
-            json!({"action":"developerMode","enabled":true}),
-            json!({"action":"developerMode","enabled":true,"_confirm":true}),
+            json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),
+            json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"],"_confirm":true}),
         ] {
             let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":args}});
             let denied = handle_request(&mcp, &request, Transport::Stdio)
@@ -785,8 +790,8 @@ mod tests {
             assert_eq!(denied["result"]["isError"], true, "{denied}");
         }
         assert_eq!(
-            mcp.call_tool("extensions.list", json!({})).await.unwrap()["developerMode"],
-            false
+            mcp.call_tool("extensions.list", json!({})).await.unwrap()["plugins"],
+            json!([])
         );
     }
     #[test]

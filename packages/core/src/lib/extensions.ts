@@ -40,12 +40,10 @@ export interface InstalledExtension {
 }
 export interface ExtensionInventory {
   schemaVersion: number;
-  developerMode: boolean;
   nextRevision: number;
   plugins: InstalledExtension[];
 }
 export type ExtensionChange =
-  | { action: "developerMode"; enabled: boolean }
   | { action: "install"; manifest: string; grants: string[] }
   | { action: "enable"; id: string; enabled: boolean }
   | { action: "remove"; id: string }

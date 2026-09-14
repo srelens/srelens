@@ -40,7 +40,6 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
-    developerMode: false,
     nextRevision: 1,
     plugins: [],
   } as any);
@@ -55,16 +54,13 @@ it("shows backend errors and retries instead of claiming no extensions", async (
   fireEvent.click(screen.getByText("Retry"));
   expect(await screen.findByText("No extensions installed.")).toBeTruthy();
 });
-it("persists developer mode only through the backend", async () => {
+it("offers native installation without a developer-mode toggle", async () => {
   render(<ExtensionManager />);
-  fireEvent.click(await screen.findByLabelText("Extension developer mode"));
-  await waitFor(() =>
-    expect(configureExtensions).toHaveBeenCalledWith({
-      action: "developerMode",
-      enabled: true,
-    }),
-  );
+  expect(await screen.findByText("Install a local manifest")).toBeTruthy();
+  expect(screen.queryByLabelText("Extension developer mode")).toBeNull();
+  expect(configureExtensions).not.toHaveBeenCalled();
 });
+
 it("reads the pinned context and distinguishes failed reads from empty results", async () => {
   vi.mocked(readExtension).mockRejectedValueOnce(new Error("Forbidden"));
   render(
@@ -88,7 +84,6 @@ it("reads the pinned context and distinguishes failed reads from empty results",
 it("reviews the exact manifest and reports rejected installs without claiming success", async () => {
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
-    developerMode: true,
     nextRevision: 1,
     plugins: [],
   });
@@ -116,7 +111,6 @@ it("reviews the exact manifest and reports rejected installs without claiming su
 it("persists settings, disable and remove through the backend", async () => {
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
-    developerMode: true,
     nextRevision: 2,
     plugins: [plugin],
   });
@@ -218,7 +212,6 @@ it("adds namespace detail views and actions, and removes them when disabled", as
   ];
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
-    developerMode: true,
     nextRevision: 2,
     plugins: [installed],
   });
@@ -245,7 +238,6 @@ it("adds namespace detail views and actions, and removes them when disabled", as
   fireEvent.click(screen.getByText("Inspect apps"));
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
-    developerMode: true,
     nextRevision: 2,
     plugins: [{ ...installed, enabled: false }],
   });
@@ -268,7 +260,6 @@ it("does not attach a custom kind contribution to a built-in with the same name"
   ];
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
-    developerMode: true,
     nextRevision: 2,
     plugins: [installed],
   });
@@ -359,7 +350,7 @@ it("renders readable conditions and short revisions while preserving the full va
 });
 
 it("requires confirmation and permits cancelling removal of stored settings", async () => {
-  vi.mocked(listExtensions).mockResolvedValue({developerMode:true,plugins:[plugin]} as any);
+  vi.mocked(listExtensions).mockResolvedValue({plugins:[plugin]} as any);
   render(<ExtensionManager />);
   fireEvent.click(await screen.findByRole("button", {name:"Remove"}));
   expect(configureExtensions).not.toHaveBeenCalled();
@@ -370,17 +361,18 @@ it("requires confirmation and permits cancelling removal of stored settings", as
   await waitFor(()=>expect(configureExtensions).toHaveBeenCalledWith({action:"remove",id:plugin.manifest.id}));
 });
 it("refreshes external lifecycle changes without unmounting enabled content", async () => {
-  const { ExtensionWarning } = await import("./Extensions");
-  vi.mocked(listExtensions).mockResolvedValue({developerMode:true,plugins:[plugin]} as any);
+  const { useExtensions } = await import("./Extensions");
+  const Consumer = () => <>{useExtensions().data?.plugins.map(p => <span key={p.manifest.id}>Installed plugin</span>)}</>;
+  vi.mocked(listExtensions).mockResolvedValue({plugins:[plugin]} as any);
   const {act}=await import("@testing-library/react");
   vi.useFakeTimers();
   let view: ReturnType<typeof render>;
   try {
-    await act(async()=>{view=render(<ExtensionWarning />);});
-    expect(screen.getByText(/Unsigned local extensions enabled/)).toBeTruthy();
-    vi.mocked(listExtensions).mockResolvedValue({developerMode:true,plugins:[]} as any);
+    await act(async()=>{view=render(<Consumer />);});
+    expect(screen.getByText("Installed plugin")).toBeTruthy();
+    vi.mocked(listExtensions).mockResolvedValue({plugins:[]} as any);
     await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
-    expect(screen.queryByText(/Unsigned local extensions enabled/)).toBeNull();
+    expect(screen.queryByText("Installed plugin")).toBeNull();
   } finally {view!.unmount();vi.useRealTimers();}
 });
 it("distinguishes filtered rows from an empty resource response", async () => {
@@ -427,23 +419,24 @@ it("shares one inventory poll and stops it after the last consumer unmounts", as
 });
 
 it("queues lifecycle refreshes behind one pending poll and discards its stale result", async () => {
-  const {ExtensionWarning}=await import("./Extensions");
+  const { useExtensions } = await import("./Extensions");
+  const Consumer = () => <>{useExtensions().data?.plugins.map(p => <span key={p.manifest.id}>Installed plugin</span>)}</>;
   const {act}=await import("@testing-library/react");
   const {EXTENSIONS_CHANGED}=await import("@srelens/core");
   let finish:(value:any)=>void;
   vi.mocked(listExtensions).mockReturnValueOnce(new Promise(resolve=>{finish=resolve;}));
-  vi.mocked(listExtensions).mockResolvedValue({developerMode:true,plugins:[]} as any);
-  render(<ExtensionWarning/>);
+  vi.mocked(listExtensions).mockResolvedValue({plugins:[]} as any);
+  render(<Consumer/>);
   fireEvent(window,new Event(EXTENSIONS_CHANGED));
   fireEvent(window,new Event(EXTENSIONS_CHANGED));
   expect(listExtensions).toHaveBeenCalledTimes(1);
-  await act(async()=>{finish!({developerMode:true,plugins:[plugin]});});
+  await act(async()=>{finish!({plugins:[plugin]});});
   expect(listExtensions).toHaveBeenCalledTimes(2);
-  expect(screen.queryByText(/Unsigned local extensions enabled/)).toBeNull();
+  expect(screen.queryByText("Installed plugin")).toBeNull();
 });
 
 it("installs catalog bytes only after explicit review and grants", async () => {
-  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, developerMode: true, nextRevision: 1, plugins: [] });
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] });
   const source = JSON.stringify(plugin.manifest);
   vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source });
   vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [{ id: plugin.manifest.id, name: "Catalog GitOps", description: "GitOps resources", repository: "https://github.com/example/gitops", license: "MIT", release: { version: "0.1.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: true } }] }, fetchedAt: 1, stale: false, error: null, hostApiVersion: "0.1.0", incompatible: [] } as any);
@@ -457,15 +450,24 @@ it("installs catalog bytes only after explicit review and grants", async () => {
   await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions }));
 });
 
-it("separates installed extensions from the catalog and hides developer tools by default", async () => {
+it("separates installed extensions from the catalog and collapses local installation by default", async () => {
   vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [] }, fetchedAt: 1, stale: false, error: null, hostApiVersion: "0.1.0", incompatible: [] } as any);
   render(<ExtensionManager />);
   expect((await screen.findByRole("tab", { name: "Extensions" })).getAttribute("aria-selected")).toBe("true");
-  expect(screen.queryByLabelText("Local extension manifest (JSON)")).toBeNull();
+  expect(screen.getByLabelText("Local extension manifest (JSON)").closest("details")?.open).toBe(false);
   expect(listExtensionCatalog).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("tab", { name: "Catalog" }));
   await waitFor(() => expect(listExtensionCatalog).toHaveBeenCalledWith(false));
   expect(screen.getByText("No extensions installed.").closest("[hidden]")).not.toBeNull();
   fireEvent.click(screen.getByRole("tab", { name: "Extensions" }));
   expect(screen.getByText("No extensions installed.").closest("[hidden]")).toBeNull();
+});
+
+it("keeps extension settings global without cluster selection or page launchers", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [plugin] });
+  render(<ExtensionManager />);
+  await screen.findByLabelText(`Enable ${plugin.manifest.name}`);
+  expect(screen.queryByLabelText("Extension cluster")).toBeNull();
+  expect(screen.queryByText("Extension pages")).toBeNull();
+  expect(screen.queryByText("Choose a cluster")).toBeNull();
 });

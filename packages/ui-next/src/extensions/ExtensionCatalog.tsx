@@ -3,9 +3,8 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type InstalledExtension } from "@srelens/core";
 import { ExtensionControls } from "./ExtensionControls";
 
-export function ExtensionCatalog({ developerMode, installed, onReview, autoLoad = false }: {
+export function ExtensionCatalog({ installed, onReview, autoLoad = false }: {
   autoLoad?: boolean;
-  developerMode: boolean;
   installed: InstalledExtension[];
   onReview: (manifest: string) => void;
 }) {
@@ -43,7 +42,7 @@ export function ExtensionCatalog({ developerMode, installed, onReview, autoLoad 
     {data && <>
       <p className="extension-message extension-catalog-meta">{data.stale ? "Cached catalog" : "Catalog checked"} · {new Date(data.fetchedAt * 1000).toLocaleString()} · Host API {data.hostApiVersion}</p>
       {data.error && <p className="extension-warning" role="alert">Refresh failed: {data.error}. Showing the cached catalog.</p>}
-      <p className="extension-message">Releases are unsigned. Review permissions before installing. {!developerMode && "Enable developer mode to install."}</p>
+      <p className="extension-message">Releases are unsigned. Review permissions before installing.</p>
       {entries?.length === 0 && <p className="extension-message">No matching extensions.</p>}
       {entries?.map(entry => {
         const current = installed.find(p => p.manifest.id === entry.id);
@@ -58,7 +57,7 @@ export function ExtensionCatalog({ developerMode, installed, onReview, autoLoad 
             </div>
             <span className="extension-catalog-meta">{entry.release.version}{entry.release.prerelease ? " · Preview" : ""} · {entry.license}</span>
             <Button variant="secondary" disabled={busy} onClick={() => void run(() => openExternal(entry.repository))}>Repository</Button>
-            <Button disabled={busy || !developerMode || incompatible} onClick={() => {
+            <Button disabled={busy || incompatible} onClick={() => {
               const request = ++generation.current;
               void run(async () => {
                 const result = await reviewCatalogExtension(entry.id, entry.release.sha256);

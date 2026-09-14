@@ -27,10 +27,10 @@ exists.
 
 Both desktop designs now load local declarative manifests through **Settings →
 Extensions**. The backend owns installation, grants, enable/disable, updates,
-removal and per-extension JSON settings. Developer mode is off by default;
-unsigned installs require enabling it and reviewing the requested capability
-before granting permission. An unsigned-extension notice remains visible while
-any extension is enabled. Turning developer mode off disables all extensions.
+removal and per-extension JSON settings. Installation requires explicit review
+and grants for the requested capabilities. Native declarative extensions do not
+require developer mode. Legacy inventories retain settings and revisions, and
+previously disabled extensions remain disabled.
 
 Installation and enablement are app-wide, not per kubeconfig context. Enabled
 pages remain available across clusters. When a page opens, the host checks the
@@ -69,13 +69,13 @@ extension state is implemented.
 
 No third-party code, subprocess, iframe, npm install or lifecycle script
 is executed. Catalog downloads contain JSON data only. Only native srelens manifests are accepted. Signed distribution,
-executable runtimes and sandboxing remain future work; local developer-mode
+executable runtimes and sandboxing remain future work; native declarative
 support does not claim those protections.
 
 ## Browse the native catalog
 
 In either desktop design, open **Settings → Extensions → Catalog**.
-The **Extensions** tab lists installed extensions. In developer mode, a collapsed
+The **Extensions** tab lists installed extensions. A collapsed
 **Install a local manifest** section exposes JSON installation tools. The
 **Catalog** tab loads discovery on first opening and keeps its search/list state
 when switching tabs.
@@ -105,8 +105,8 @@ updates or downgrade decisions.
 
 API-incompatible releases stay visible but cannot be installed. Preview labels
 come from catalog metadata. `testedHost.revision` records test provenance, not an
-exact-build restriction. These manifests remain unsigned and require developer
-mode; a checksum is not a publisher signature.
+exact-build restriction. These manifests remain unsigned; installation requires permission review.
+A checksum is not a publisher signature.
 
 `extensions.catalog` and `extensions.catalogManifest` are read-only capabilities.
 Both are refused on the web host. Downloads accept only the fixed catalog URL,
@@ -118,14 +118,13 @@ catalog caches to browser storage.
 
 In either desktop design:
 
-1. Open **Settings → Extensions** and enable developer mode.
+1. Open **Settings → Extensions → Install a local manifest**.
 2. Paste `examples/extensions/argocd.json` or `flux.json`, review the manifest,
    then install and grant `k8s.listCustomResource` (Flux also requests
    `k8s.listEvents` for its dashboard).
-3. Choose a cluster and open an extension page. The new design also adds pages
-   beneath **Extensions → extension name** in the cluster sidebar, with nested
-   page groups; its routes pin the cluster.
-   Classic opens pages inline in the manager with its own controls and theme.
+3. Open pages beneath **Extensions → extension name** in the connected cluster’s
+   sidebar in the new design. Routes pin the cluster. Settings has no cluster
+   selector or page launcher; it manages app-wide installation only.
 4. Open a Namespace's resource overview. Its **Extensions** section contains the
    declared detail view and an **Extension actions** menu, scoped to that namespace.
 5. Disable/remove the extension to remove its contributions, or install the same
@@ -203,8 +202,7 @@ The current PR includes the broker and local declarative app lifecycle. #163 sta
 1. **Native contract and broker (implemented):** executable manifest examples,
    collision/permission/input validation, revocation and real MCP consent tests.
 2. **Application lifecycle and declarative UI (local desktop implemented):** backend-owned install inventory,
-   grants and per-extension settings; atomic save/update/remove; developer mode
-   off by default for unsigned local manifests; signed distributed packages remain pending;
+   grants and per-extension settings; atomic save/update/remove; explicit installation review; signed distributed packages remain pending;
    enable/disable and contribution removal in both classic and new UI. One sample
    must visibly add a page, detail tab and menu action without editing app source.
    Cluster identity belongs in extension routes and broker calls. Web instances

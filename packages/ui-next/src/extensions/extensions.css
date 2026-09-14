@@ -74,12 +74,6 @@
   background: var(--surface, var(--fl-color-surface));
 }
 
-.extension-banner {
-  flex-shrink: 0;
-  padding: 4px 12px;
-  border-bottom: 1px solid var(--rule, var(--fl-color-border));
-  font-size: 0.75rem;
-}
 
 .extension-error pre {
   max-width: 100%;

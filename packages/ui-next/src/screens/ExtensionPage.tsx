@@ -13,7 +13,7 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
   const inventory = useExtensions();
   const contexts = useContexts();
   if (!target) return null;
-  const plugin = inventory.data?.developerMode
+  const plugin = inventory.data
     ? inventory.data.plugins.find(
         (p) => p.enabled && p.manifest.id === target.id,
       )

@@ -151,7 +151,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | --- | --- |
 | `extensions.catalog` | Browse the native extension catalog with a durable cache; never connects clusters |
 | `extensions.catalogManifest` | Download and checksum-verify a catalog manifest for permission review; does not install it |
-| `extensions.list` | List installed declarative extensions and developer-mode state |
+| `extensions.list` | List installed declarative extensions |
 | `extensions.read` | Read a declared custom-resource contribution from an enabled extension |
 | `ping` | health check; echoes the input back as { pong: <input> } |
 | `settings.get` | read durable desktop settings; omit key to return the complete map |

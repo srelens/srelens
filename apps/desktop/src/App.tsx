@@ -1,4 +1,3 @@
-import { ExtensionWarning } from "@srelens/ui-next/extensions";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -1051,7 +1050,6 @@ export function App() {
         />
       )}
       <div className="fl-main">
-        <ExtensionWarning />
         {tabs.length > 0 ? (
           <>
             <ResourceTabs

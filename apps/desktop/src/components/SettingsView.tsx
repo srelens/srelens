@@ -1107,7 +1107,7 @@ export function SettingsView({
             </SectionPanel>
           )}
 
-          {section === "extensions" && isTauri() && <ExtensionManager contexts={(contexts ?? []).map(c => ({name: c.name, label: contextProfiles[c.name]?.shortName || contextDisplayName(c.name, contextProfiles[c.name])}))} />}
+          {section === "extensions" && isTauri() && <ExtensionManager />}
           {section === "updates" && isTauri() && (
             <SectionPanel title="Updates" description="Check for and install new versions of srelens.">
               <div className="fl-settings-update">

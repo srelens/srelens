@@ -9,7 +9,7 @@ beforeEach(() => { vi.resetAllMocks(); vi.mocked(listExtensionCatalog).mockResol
 it("browses on demand, searches, and reviews exact verified bytes before any install", async () => {
   const review = vi.fn();
   vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: '{"name":"Flux","permissions":[]}' });
-  render(<ExtensionCatalog developerMode onReview={review} installed={[]} />);
+  render(<ExtensionCatalog onReview={review} installed={[]} />);
   expect(listExtensionCatalog).not.toHaveBeenCalled();
   fireEvent.click(screen.getByText("Browse catalog"));
   expect(await screen.findByText("Flux")).toBeTruthy();
@@ -23,19 +23,18 @@ it("browses on demand, searches, and reviews exact verified bytes before any ins
 });
 it("shows cached refresh failures and keeps incompatible releases disabled", async () => {
   vi.mocked(listExtensionCatalog).mockResolvedValue({ ...snapshot, stale: true, error: "offline", incompatible: [entry.id] } as any);
-  render(<ExtensionCatalog developerMode onReview={vi.fn()} installed={[]} />);
+  render(<ExtensionCatalog onReview={vi.fn()} installed={[]} />);
   fireEvent.click(screen.getByText("Browse catalog"));
   expect(await screen.findByText(/offline/)).toBeTruthy();
   expect((screen.getByText("Review installation") as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(screen.getByText("Refresh catalog"));
   await waitFor(() => expect(listExtensionCatalog).toHaveBeenLastCalledWith(true));
 });
-it("surfaces download and browser errors and requires developer mode", async () => {
-  const { rerender } = render(<ExtensionCatalog developerMode={false} onReview={vi.fn()} installed={[]} />);
+it("surfaces download and browser errors without a developer-mode gate", async () => {
+  render(<ExtensionCatalog onReview={vi.fn()} installed={[]} />);
   fireEvent.click(screen.getByText("Browse catalog"));
   await screen.findByText("Flux");
-  expect((screen.getByText("Review installation") as HTMLButtonElement).disabled).toBe(true);
-  rerender(<ExtensionCatalog developerMode onReview={vi.fn()} installed={[]} />);
+  expect((screen.getByText("Review installation") as HTMLButtonElement).disabled).toBe(false);
   vi.mocked(reviewCatalogExtension).mockRejectedValue(new Error("checksum mismatch"));
   fireEvent.click(screen.getByText("Review installation"));
   expect(await screen.findByText("checksum mismatch")).toBeTruthy();
@@ -45,7 +44,7 @@ it("surfaces download and browser errors and requires developer mode", async () 
 });
 it("reports a first-load failure with retry, not an empty catalog", async () => {
   vi.mocked(listExtensionCatalog).mockRejectedValueOnce(new Error("offline"));
-  render(<ExtensionCatalog developerMode onReview={vi.fn()} installed={[]} />);
+  render(<ExtensionCatalog onReview={vi.fn()} installed={[]} />);
   fireEvent.click(screen.getByText("Browse catalog"));
   expect(await screen.findByText("offline")).toBeTruthy();
   expect(screen.queryByText("No matching extensions.")).toBeNull();

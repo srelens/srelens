@@ -645,9 +645,9 @@ describe("App", () => {
   });
 });
 
-it("keeps the extension warning visible on the no-tab landing screen", () => {
+it("does not show an extension developer banner on the landing screen or settings", () => {
   render(<App />);
-  expect(screen.getByTestId("extension-warning")).toBeTruthy();
+  expect(screen.queryByTestId("extension-warning")).toBeNull();
   fireEvent.click(screen.getByText("open-settings"));
-  expect(screen.getAllByTestId("extension-warning")).toHaveLength(1);
+  expect(screen.queryByTestId("extension-warning")).toBeNull();
 });
