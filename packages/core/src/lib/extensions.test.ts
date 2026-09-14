@@ -76,6 +76,26 @@ it("sends a host-selected app resource and the reviewed resourceVersion for acti
   expect(invokeCapability).toHaveBeenLastCalledWith("extensions.action",{resource,action:"suspend",uid:"uid",resourceVersion:"12"});
 });
 
+it("announces only accepted actions so every open view of that resource can refresh", async () => {
+  const { actOnExtensionResource, EXTENSION_RESOURCE_CHANGED } = await import("./extensions");
+  const resource = { id: "org.srelens.flux", revision: 3, capability: "kustomizations", context: "cluster/a", namespace: "team", name: "apps" };
+  const seen: unknown[] = [];
+  const listener = (event: Event) => seen.push((event as CustomEvent).detail);
+  window.addEventListener(EXTENSION_RESOURCE_CHANGED, listener);
+  try {
+    vi.mocked(invokeCapability).mockResolvedValueOnce({ requested: false });
+    await actOnExtensionResource(resource, "suspend", "uid", "12");
+    vi.mocked(invokeCapability).mockRejectedValueOnce(new Error("Resource changed"));
+    await expect(actOnExtensionResource(resource, "suspend", "uid", "12")).rejects.toThrow("Resource changed");
+    expect(seen).toEqual([]);
+    vi.mocked(invokeCapability).mockResolvedValueOnce({ requested: true });
+    await actOnExtensionResource(resource, "suspend", "uid", "12");
+    expect(seen).toEqual([resource]);
+  } finally {
+    window.removeEventListener(EXTENSION_RESOURCE_CHANGED, listener);
+  }
+});
+
 it("gives each app resource its own cluster, page, namespace and name route", async () => {
   const {extensionResourceRoute}=await import("./extensions");
   const route=extensionResourceRoute("cluster/a","org.srelens.flux","kustomizations","team","apps");

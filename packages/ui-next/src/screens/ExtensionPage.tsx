@@ -42,7 +42,7 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
           </div>
         ) : plugin && page ? (
           <ExtensionResourceNavigation.Provider value={resource=>openTab(extensionResourceRoute(target.context,target.id,target.page,resource.namespace,resource.name),{clusterName:target.context})}>
-          {target.resourceName ? <ExtensionResourceDetails fullPage key={route} selection={{id:target.id,revision:plugin.revision,capability:page.capability,context:target.context,namespace:target.namespace,name:target.resourceName}} onChanged={()=>{}}/> : <ExtensionWorkspace
+          {target.resourceName ? <ExtensionResourceDetails fullPage key={route} selection={{id:target.id,revision:plugin.revision,capability:page.capability,context:target.context,namespace:target.namespace,name:target.resourceName}}/> : <ExtensionWorkspace
             plugin={plugin}
             page={page}
             onPage={(id, namespace) =>

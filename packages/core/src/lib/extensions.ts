@@ -146,11 +146,27 @@ export interface ExtensionResourceSelection {
 export interface ExtensionResourceDetail {
   resource: { apiVersion?: string; kind?: string; metadata: { name: string; namespace?: string; uid: string; resourceVersion: string; creationTimestamp?: string; labels?: Record<string,string>; annotations?: Record<string,string>; [key:string]: unknown }; spec?: Record<string, any>; status?: Record<string, any>; [key:string]: unknown };
   actions: string[];
-  events?: Array<{type?:string;reason?:string;message?:string;count?:number}>;
+  /** Newest first. */
+  events?: Array<{type?:string;reason?:string;message?:string;count?:number;time?:string|null}>;
+  /** True when the host returned only the newest events. */
+  eventsTruncated?: boolean;
   eventsError?: string | null;
 }
 export const inspectExtensionResource = (resource: ExtensionResourceSelection) => invokeCapability<ExtensionResourceDetail>("extensions.resource", resource);
-export const actOnExtensionResource = (resource: ExtensionResourceSelection, action: string, uid: string, resourceVersion: string) => invokeCapability<{requested: boolean}>("extensions.action", {resource, action, uid, resourceVersion});
+/** Dispatched on `window` after the host accepts an action; `detail` is the acted-on resource. */
+export const EXTENSION_RESOURCE_CHANGED = "srelens:extension-resource-changed";
+export async function actOnExtensionResource(resource: ExtensionResourceSelection, action: string, uid: string, resourceVersion: string) {
+  const result = await invokeCapability<{requested: boolean}>("extensions.action", {resource, action, uid, resourceVersion});
+  // Lists, dashboards and details of the same resource may be open in other tabs.
+  if (result.requested && typeof window !== "undefined")
+    window.dispatchEvent(new CustomEvent<ExtensionResourceSelection>(EXTENSION_RESOURCE_CHANGED, {detail: resource}));
+  return result;
+}
+export function onExtensionResourceChanged(listener: (resource: ExtensionResourceSelection) => void) {
+  const handle = (event: Event) => listener((event as CustomEvent<ExtensionResourceSelection>).detail);
+  window.addEventListener(EXTENSION_RESOURCE_CHANGED, handle);
+  return () => window.removeEventListener(EXTENSION_RESOURCE_CHANGED, handle);
+}
 
 export function extensionResourceRoute(context:string,id:string,page:string,namespace:string,name:string) {
   return `${extensionRoute(context,id,page,namespace)}/${encodeURIComponent(name)}`;

@@ -84,6 +84,11 @@ consent annotations. All `extensions.*` capabilities are unavailable on the
 multi-user web host until per-user extension state is implemented
 ([#515](https://github.com/srelens/srelens/issues/515)).
 
+The host GitOps write `k8s.gitOpsAction` is refused on the web as well. There, no
+installed app scopes it to a resource and there is no consent prompt.
+`k8s.getCustomResource` stays available on the web, because it is a read under the
+user's own kubeconfig and RBAC, like every other custom-resource read.
+
 No third-party code, subprocess, iframe, npm install or lifecycle script is
 executed. Catalog downloads contain JSON data only. Official catalog releases are
 signature-verified (below). Third-party publisher signing, key rotation,
@@ -289,6 +294,19 @@ The versioning policy for future API bumps is tracked in
   - IDs under `org.srelens.` reserved for signed releases.
   - An app that fails re-verification is quarantined individually.
   - Catalog metadata tolerates unknown fields.
+- **#529:**
+  - GitOps actions are offered only for the API versions listed under
+    [host actions](#resource-inspection-and-host-actions).
+  - A Suspend of a suspended resource, or a Resume of one that is not suspended, is refused.
+  - Resource events are newest first, capped at 100, and `eventsTruncated` says when older ones were left out.
+  - An accepted action refreshes every open list, dashboard and detail view of that resource.
+  - `k8s.gitOpsAction` is refused on the web host.
+
+**Downgrading.** Inventory changes are one-way. A host older than #511 cannot read an
+inventory written by #511 or later, because `developerMode` was removed and
+`signatureProof` added, and older hosts reject both. After such a downgrade,
+Settings → Apps reports the inventory as unreadable. Upgrade again, or move
+`settings.extensions.json` aside to start with no apps.
 
 ## Delivery plan
 
@@ -360,9 +378,10 @@ User-facing extension management is named **Apps**. Internal `extensions.*`
 capability IDs, manifest IDs and existing routes remain stable.
 
 Click a resource row to open its overview: metadata, spec, conditions, status,
-labels/annotations, a read-only YAML manifest in the shared CodeEditor, and up to
-100 resource-UID-filtered events. Event RBAC failures are shown separately and
-preserve the overview. The list stays visible beside the shared Inspector; Open
+labels/annotations, a read-only YAML manifest in the shared CodeEditor, and the
+resource-UID-filtered events. Events are newest first by when they were last seen.
+At most 100 are shown, and the panel says when older ones were left out. Event
+RBAC failures are shown separately and preserve the overview. The list stays visible beside the shared Inspector; Open
 tab promotes details to an independent resource tab. Existing native manifests
 need no update.
 
@@ -372,22 +391,33 @@ backend inventory and verify its revision and grants on every request. An app
 cannot rebind a reader to a write capability. These are host UI operations;
 installation does not grant extension code arbitrary patch access.
 
-Supported controls are resource-specific:
+Supported controls are resource-specific. They are offered only for the API versions
+whose schema carries the fields they write:
 
-- Flux Kustomizations, HelmReleases, sources, ImageRepositories and
-  ImageUpdateAutomations: Suspend, Resume, Reconcile.
-- Flux HelmReleases: also Force reconcile and Reset retries.
-- Argo CD Applications: Refresh status, Hard refresh, Sync. Sync does not enable
-  pruning; configured sync options and hooks still apply.
-- Other resources remain inspectable without invented or unsupported actions.
+- **Flux Kustomization, GitRepository, HelmRepository, HelmChart, Bucket,
+  ImageRepository and ImageUpdateAutomation** (`v1`, `v1beta2`, `v1beta1`) and
+  **OCIRepository** (`v1`, `v1beta2`): Suspend, Resume, Reconcile.
+- **Flux HelmRelease** `v2` and `v2beta2`: Suspend, Resume, Reconcile, Force
+  reconcile and Reset retries. On `v2beta1` only Suspend, Resume and Reconcile,
+  because force and reset arrived with `v2beta2`.
+- **Argo CD Application** (`v1alpha1`): Refresh status, Hard refresh, Sync. Sync
+  does not enable pruning; configured sync options and hooks still apply.
+- **Other resources and API versions** remain inspectable, without invented or
+  unsupported actions.
 
 Each write requires a review naming the pinned cluster and namespace/resource.
 The backend checks UID and resourceVersion and includes both in its conditional
-PATCH, rejecting stale/replaced resources. It rejects a second Argo CD sync
-while an operation is already present, reconciliation while suspended, and
-writes to a resource being deleted. Acknowledgement says **Request accepted**,
-not that reconciliation completed. API failures remain errors with no success
-message. Kubernetes RBAC still governs GET, events and PATCH.
+PATCH, rejecting stale/replaced resources. It also rejects:
+
+- a second Argo CD sync while an operation is already present
+- reconciliation while suspended
+- a Suspend of a suspended resource, or a Resume of one that is not suspended
+- writes to a resource being deleted
+
+Acknowledgement says **Request accepted**, not that reconciliation completed.
+Every open list, dashboard and detail view of that resource then refreshes. API
+failures remain errors with no success message. Kubernetes RBAC still governs GET,
+events and PATCH.
 
 The implementation follows [Flux reconciliation and Helm actions](https://fluxcd.io/flux/components/helm/helmreleases/)
 and [Argo CD operations through Kubernetes](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-kubectl/).

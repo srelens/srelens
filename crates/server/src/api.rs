@@ -33,6 +33,11 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     "extensions.read",
     "extensions.resource",
     "extensions.action",
+    // The host GitOps write. On the web no installed app scopes it to a resource
+    // and there is no consent prompt (#374), so a caller could name any allowlisted
+    // kind directly. `k8s.getCustomResource` stays allowed: it is a read under the
+    // user's own kubeconfig and RBAC, like every other custom-resource read.
+    "k8s.gitOpsAction",
     "k8s.deleteContext",
     "k8s.helmRepoAdd",
     "k8s.helmRepoUpdate",
@@ -440,6 +445,19 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
             assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
         }
+    }
+
+    #[tokio::test]
+    async fn gitops_writes_are_denied_on_web_but_custom_resource_reads_are_not() {
+        // No app binding scopes the host GitOps write on the web and there is no
+        // web consent prompt, so it is denied outright.
+        let (status, body) = post("/api/capability/k8s.gitOpsAction", Body::empty()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], json!("capability not available in web mode"));
+        // A read under the user's own kubeconfig and RBAC stays available: it reaches
+        // dispatch (404 in the test registry) instead of being denied.
+        let (status, _) = post("/api/capability/k8s.getCustomResource", Body::empty()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

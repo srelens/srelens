@@ -1,6 +1,6 @@
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useEffect, useRef, useState } from "react";
-import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, type ExtensionResourceSelection } from "@srelens/core";
+import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, type ExtensionResourceSelection } from "@srelens/core";
 import { Inspector, Button, CodeEditor, KV } from "@srelens/ui-kit";
 import { Icons } from "../lib/icons";
 import { ErrorNotice } from "./ExtensionResults";
@@ -44,10 +44,15 @@ function Fields({value,depth=0}:{value:Record<string,unknown>;depth?:number}) {
     return <KV key={key} k={label} v={<span className="extension-field-value">{typeof value === "boolean" ? value ? "Yes" : "No" : String(value ?? "—")}</span>}/>;
   })}</div>;
 }
-export function ExtensionResourceDetails({selection,onClose,onChanged,fullPage=false}:{selection:ExtensionResourceSelection;onClose?():void;onChanged():void;fullPage?:boolean}) {
+export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{selection:ExtensionResourceSelection;onClose?():void;fullPage?:boolean}) {
   const openResource=useContext(ExtensionResourceNavigation);
 
   const data=useResource(()=>inspectExtensionResource(selection),[selection.id,selection.revision,selection.capability,selection.context,selection.namespace,selection.name]);
+  const {reload}=data;
+  // An accepted action from this view or any other view of the same resource refreshes it.
+  useEffect(()=>onExtensionResourceChanged(changed=>{
+    if(changed.id===selection.id && changed.context===selection.context && changed.namespace===selection.namespace && changed.name===selection.name) reload();
+  }),[selection.id,selection.context,selection.namespace,selection.name,reload]);
   const [tab,setTab]=useState("overview");
   const [pending,setPending]=useState<string|null>(null);
   const [busy,setBusy]=useState(false);
@@ -67,7 +72,7 @@ export function ExtensionResourceDetails({selection,onClose,onChanged,fullPage=f
     try {
       const result=await actOnExtensionResource(selection,pending,resource.metadata.uid,resource.metadata.resourceVersion);
       if(!result.requested)throw new Error("The action was not acknowledged; refresh to check the resource.");
-      if(alive.current){setPending(null);setMessage("Request accepted. The controller will report progress in resource status.");data.reload();onChanged();}
+      if(alive.current){setPending(null);setMessage("Request accepted. The controller will report progress in resource status.");}
     }catch(e){if(alive.current){setError(e instanceof Error?e.message:String(e));setPending(null);}}
     finally{if(alive.current)setBusy(false);}
   };
@@ -100,7 +105,7 @@ export function ExtensionResourceDetails({selection,onClose,onChanged,fullPage=f
         {Array.isArray(resource.status?.conditions)&&resource.status.conditions.length?<div className="extension-condition-list">{resource.status.conditions.map((c:any,i:number)=><article key={i}><strong>{c.type} · {c.status}</strong><div>{c.reason||"—"}</div><p>{c.message||"—"}</p></article>)}</div>:<p className="extension-message">No conditions reported.</p>}
         <h4 className="extension-detail-heading">Status</h4><Fields value={Object.fromEntries(Object.entries(resource.status??{}).filter(([key])=>key!=="conditions"))}/>
         <h4 className="extension-detail-heading">Events</h4>
-        {data.data?.eventsError ? <ErrorNotice cluster message={data.data.eventsError} retry={data.reload}/> : data.data?.events?.length ? <div className="extension-condition-list">{data.data.events.map((event,i)=><article key={i}><strong>{event.type} · {event.reason}</strong><p>{event.message}</p><span>Count: {event.count??1}</span></article>)}</div> : <p className="extension-message">No events reported.</p>}
+        {data.data?.eventsError ? <ErrorNotice cluster message={data.data.eventsError} retry={data.reload}/> : data.data?.events?.length ? <>{data.data.eventsTruncated&&<p className="extension-message">Showing the latest 100 events.</p>}<div className="extension-condition-list">{data.data.events.map((event,i)=><article key={i}><strong>{event.type} · {event.reason}</strong><p>{event.message}</p><span>Count: {event.count??1}</span></article>)}</div></> : <p className="extension-message">No events reported.</p>}
         <details className="extension-detail-metadata"><summary>Labels and annotations</summary><Fields value={{labels:resource.metadata.labels??{},annotations:resource.metadata.annotations??{}}}/></details>
       </>}
     </>}
