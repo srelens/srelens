@@ -2060,22 +2060,53 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
 
     // Selected field 4: ArgoCD Hub Context cycling and editing
     state.available_contexts = vec!["ctx-mgmt".to_string(), "ctx-prod".to_string()];
-    state.adjust_current(1, &mut config);
+    let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.argo_hub_context.as_deref(), Some("ctx-mgmt"));
-    state.adjust_current(1, &mut config);
+    let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.argo_hub_context.as_deref(), Some("ctx-prod"));
-    state.adjust_current(1, &mut config);
+    let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.argo_hub_context, None); // cycled back to None
 
-    // Direct editing of field 4
+    // Direct editing of field 4 with cursor movement and insertion
     state.start_editing(&config);
     assert!(state.is_editing);
-    state.edit_buffer = "my-hub-cluster".to_string();
-    state.finish_editing(&mut config);
-    assert!(!state.is_editing);
-    assert_eq!(config.argo_hub_context.as_deref(), Some("my-hub-cluster"));
+    assert_eq!(state.cursor_pos(), 0);
+    state.insert_str("hub-prod");
+    assert_eq!(state.edit_buffer, "hub-prod");
+    assert_eq!(state.cursor_pos(), 8);
 
-    state.clear_current(&mut config);
+    // Left navigation
+    state.move_cursor_left();
+    state.move_cursor_left();
+    state.move_cursor_left();
+    state.move_cursor_left();
+    assert_eq!(state.cursor_pos(), 4);
+
+    // Insert in middle
+    state.insert_char('x');
+    assert_eq!(state.edit_buffer, "hub-xprod");
+    assert_eq!(state.cursor_pos(), 5);
+
+    // Delete at cursor
+    state.delete(); // deletes 'p'
+    assert_eq!(state.edit_buffer, "hub-xrod");
+
+    // Backspace before cursor
+    state.backspace(); // deletes 'x'
+    assert_eq!(state.edit_buffer, "hub-rod");
+    assert_eq!(state.cursor_pos(), 4);
+
+    // Home, End
+    state.move_cursor_home();
+    assert_eq!(state.cursor_pos(), 0);
+    state.move_cursor_end();
+    assert_eq!(state.cursor_pos(), 7);
+
+    let _ = state.finish_editing(&mut config);
+    assert!(!state.is_editing);
+    assert_eq!(config.argo_hub_context.as_deref(), Some("hub-rod"));
+
+    let _ = state.clear_current(&mut config);
     assert_eq!(config.argo_hub_context, None);
 
     // Selected field 5: ArgoCD Hub Kubeconfig Path editing and clearing
@@ -2084,13 +2115,13 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     state.start_editing(&config);
     assert!(state.is_editing);
     state.edit_buffer = "/path/to/custom/kubeconfig".to_string();
-    state.finish_editing(&mut config);
+    let _ = state.finish_editing(&mut config);
     assert_eq!(
         config.argo_hub_kubeconfig.as_ref().map(|p| p.to_string_lossy().into_owned()),
         Some("/path/to/custom/kubeconfig".to_string())
     );
 
-    state.clear_current(&mut config);
+    let _ = state.clear_current(&mut config);
     assert_eq!(config.argo_hub_kubeconfig, None);
 
     // Selected field 3: Startup Feature Banner toggle
@@ -2213,6 +2244,7 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
     edit_state.selected_field = 4;
     edit_state.is_editing = true;
     edit_state.edit_buffer = "my-argo-hub".to_string();
+    edit_state.edit_cursor = "my-argo-hub".chars().count();
     let edit_lines = common::render_lines(120, 30, |f| {
         render_tui_config_view(f, f.area(), &edit_state, &config)
     });

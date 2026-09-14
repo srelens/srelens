@@ -3655,3 +3655,85 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
 
     std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
 }
+
+#[tokio::test]
+async fn tui_config_hub_dialog_left_right_cursor_and_paste() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("tui.json");
+    std::env::set_var("SRELENS_TUI_CONFIG_PATH", cfg_path.to_str().unwrap());
+
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    // Navigate to :config
+    common::type_str(&mut app, ":config").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.active_view, ActiveView::TuiConfig(_)));
+
+    // Select field 4 (Hub Context)
+    if let ActiveView::TuiConfig(ref mut cfg) = app.active_view {
+        cfg.selected_field = 4;
+    }
+
+    // Press 'e' to start editing
+    press(&mut app, ch('e')).await;
+    if let ActiveView::TuiConfig(ref cfg) = app.active_view {
+        assert!(cfg.is_editing);
+    }
+
+    // Type "hub-prod"
+    common::type_str(&mut app, "hub-prod").await;
+    if let ActiveView::TuiConfig(ref cfg) = app.active_view {
+        assert_eq!(cfg.edit_buffer, "hub-prod");
+        assert_eq!(cfg.cursor_pos(), 8);
+    }
+
+    // Press Left arrow 4 times (cursor should be before "-prod", at pos 4)
+    press(&mut app, key(KeyCode::Left)).await;
+    press(&mut app, key(KeyCode::Left)).await;
+    press(&mut app, key(KeyCode::Left)).await;
+    press(&mut app, key(KeyCode::Left)).await;
+    if let ActiveView::TuiConfig(ref cfg) = app.active_view {
+        assert_eq!(cfg.cursor_pos(), 4);
+    }
+
+    // Type "-mgmt" in the middle
+    common::type_str(&mut app, "-mgmt").await;
+    if let ActiveView::TuiConfig(ref cfg) = app.active_view {
+        assert_eq!(cfg.edit_buffer, "hub--mgmtprod");
+        assert_eq!(cfg.cursor_pos(), 9);
+    }
+
+    // Press Left arrow 5 times, then Delete 1 time (to delete the extra '-')
+    for _ in 0..5 {
+        press(&mut app, key(KeyCode::Left)).await;
+    }
+    press(&mut app, key(KeyCode::Delete)).await;
+    if let ActiveView::TuiConfig(ref cfg) = app.active_view {
+        assert_eq!(cfg.edit_buffer, "hub-mgmtprod");
+    }
+
+    // Press End, then Left 4 times, then insert '-' so it becomes "hub-mgmt-prod"
+    press(&mut app, key(KeyCode::End)).await;
+    for _ in 0..4 {
+        press(&mut app, key(KeyCode::Left)).await;
+    }
+    press(&mut app, ch('-')).await;
+    if let ActiveView::TuiConfig(ref cfg) = app.active_view {
+        assert_eq!(cfg.edit_buffer, "hub-mgmt-prod");
+    }
+
+    // Test bracketed paste on TuiConfig edit mode
+    app.handle_paste("/custom/path/kubeconfig".to_string());
+    if let ActiveView::TuiConfig(ref cfg) = app.active_view {
+        assert!(cfg.edit_buffer.contains("/custom/path/kubeconfig"));
+    }
+
+    // Save with Enter
+    press(&mut app, key(KeyCode::Enter)).await;
+    if let ActiveView::TuiConfig(ref cfg) = app.active_view {
+        assert!(!cfg.is_editing);
+    }
+    assert!(app.tui_config.argo_hub_context.is_some());
+
+    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
+}

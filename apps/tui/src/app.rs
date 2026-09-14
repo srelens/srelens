@@ -4129,22 +4129,57 @@ impl App {
                                 Err(err) => self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error()),
                             }
                         }
+                        KeyCode::Left => {
+                            cfg_state.move_cursor_left();
+                        }
+                        KeyCode::Right => {
+                            cfg_state.move_cursor_right();
+                        }
+                        KeyCode::Home => {
+                            cfg_state.move_cursor_home();
+                        }
+                        KeyCode::End => {
+                            cfg_state.move_cursor_end();
+                        }
+                        _ if is_word_delete_key(&key) => {
+                            cfg_state.delete_word_back();
+                        }
                         KeyCode::Backspace => {
-                            cfg_state.edit_buffer.pop();
+                            cfg_state.backspace();
                         }
-                        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            cfg_state.edit_buffer.clear();
+                        KeyCode::Delete => {
+                            cfg_state.delete();
                         }
-                        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            let trimmed = cfg_state.edit_buffer.trim_end();
-                            if let Some(idx) = trimmed.rfind(|c: char| c.is_whitespace() || c == '/' || c == '-') {
-                                cfg_state.edit_buffer.truncate(idx + 1);
-                            } else {
-                                cfg_state.edit_buffer.clear();
+                        KeyCode::Char('v') | KeyCode::Char('V')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                || key.modifiers.contains(KeyModifiers::SUPER) =>
+                        {
+                            if let Some(clip) = get_clipboard_text() {
+                                let cleaned = clip.replace("\r\n", "").replace('\n', "");
+                                cfg_state.insert_str(&cleaned);
                             }
                         }
-                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
-                            cfg_state.edit_buffer.push(c);
+                        KeyCode::Char('a') | KeyCode::Char('A')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            cfg_state.move_cursor_home();
+                        }
+                        KeyCode::Char('e') | KeyCode::Char('E')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            cfg_state.move_cursor_end();
+                        }
+                        KeyCode::Char('u') | KeyCode::Char('U')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            cfg_state.clear_input();
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT)
+                                && !key.modifiers.contains(KeyModifiers::SUPER) =>
+                        {
+                            cfg_state.insert_char(c);
                         }
                         _ => {}
                     }
@@ -5453,6 +5488,13 @@ impl App {
             if settings.is_editing {
                 let cleaned = text.replace("\r\n", "").replace('\n', "");
                 settings.edit_buffer.push_str(&cleaned);
+                return;
+            }
+        }
+        if let ActiveView::TuiConfig(ref mut cfg) = self.active_view {
+            if cfg.is_editing {
+                let cleaned = text.replace("\r\n", "").replace('\n', "");
+                cfg.insert_str(&cleaned);
                 return;
             }
         }
