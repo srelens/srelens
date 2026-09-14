@@ -62,6 +62,8 @@ export async function configureExtensions(change: ExtensionChange) {
   return state;
 }
 export interface ExtensionResourceResult {
+  printerColumns?: Array<{name:string;jsonPath:string;type?:string}>;
+  columnsError?: string;
   items: Array<{
     name: string;
     namespace: string;
@@ -76,6 +78,7 @@ export const readExtension = <T = ExtensionResourceResult>(
   capability: string,
   context: string,
   namespace = "",
+  useCrdColumns = false,
 ) =>
   invokeCapability<T>("extensions.read", {
     id,
@@ -83,6 +86,7 @@ export const readExtension = <T = ExtensionResourceResult>(
     capability,
     context,
     namespace,
+    ...(useCrdColumns ? {useCrdColumns:true} : {}),
   });
 export function extensionRoute(
   context: string,

@@ -63,6 +63,7 @@ it("renders the same namespace contribution using classic resource tabs", async 
       "applications",
       "classic-cluster",
       "argo",
+      true,
     ),
   );
   fireEvent.click(screen.getByText("App actions"));

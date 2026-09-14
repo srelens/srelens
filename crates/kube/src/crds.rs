@@ -111,6 +111,9 @@ fn printer_columns(spec: &serde_json::Value) -> Vec<PrinterColumn> {
     let Some(version) = chosen_version(spec) else {
         return Vec::new();
     };
+    version_printer_columns(version)
+}
+fn version_printer_columns(version: &serde_json::Value) -> Vec<PrinterColumn> {
     let Some(columns) = version["additionalPrinterColumns"].as_array() else {
         return Vec::new();
     };
@@ -332,6 +335,8 @@ pub fn list_crds_capability(cache: Arc<ClientCache>) -> Capability {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ListCustomIn {
+    #[serde(default, rename = "useCrdColumns")]
+    pub use_crd_columns: bool,
     pub context: String,
     pub group: String,
     pub version: String,
@@ -367,11 +372,20 @@ pub struct CustomRow {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ListCustomOut {
+    #[serde(rename = "printerColumns", skip_serializing_if = "Option::is_none")]
+    pub printer_columns: Option<Vec<PrinterColumn>>,
+    #[serde(rename = "columnsError", skip_serializing_if = "Option::is_none")]
+    pub columns_error: Option<String>,
     pub items: Vec<CustomRow>,
 }
 
 /// Build a dynamic ApiResource for an arbitrary CRD GVK + plural.
-pub(crate) fn custom_api_resource(group: &str, version: &str, kind: &str, plural: &str) -> ApiResource {
+pub(crate) fn custom_api_resource(
+    group: &str,
+    version: &str,
+    kind: &str,
+    plural: &str,
+) -> ApiResource {
     let api_version = if group.is_empty() {
         version.to_string()
     } else {
@@ -386,6 +400,31 @@ pub(crate) fn custom_api_resource(group: &str, version: &str, kind: &str, plural
     }
 }
 
+async fn discover_columns(
+    client: kube::Client,
+    group: &str,
+    plural: &str,
+    version: &str,
+) -> Result<Vec<PrinterColumn>, String> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+        "apiextensions.k8s.io",
+        "v1",
+        "CustomResourceDefinition",
+    ));
+    let api: Api<DynamicObject> = Api::all_with(client, &ar);
+    let crd = tokio::time::timeout(request_timeout(), api.get(&format!("{plural}.{group}")))
+        .await
+        .map_err(|_| "CRD column discovery timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    columns_for_named_version(&crd.data["spec"], version)
+}
+fn columns_for_named_version(spec: &serde_json::Value, version: &str) -> Result<Vec<PrinterColumn>, String> {
+    let definition = spec["versions"].as_array()
+        .and_then(|versions| versions.iter().find(|v| v["name"] == version && v["served"] == true))
+        .ok_or_else(|| format!("CRD has no served version {version}"))?;
+    Ok(version_printer_columns(definition))
+}
+
 /// `k8s.listCustomResource` — list instances of a CRD by its GVK + plural.
 pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListCustomIn, ListCustomOut, _, _>(
@@ -398,15 +437,28 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                 let client = cache.get(&input.context).await.map_err(CapabilityError::Handler)?;
                 let ar = custom_api_resource(&input.group, &input.version, &input.kind, &input.plural);
                 let api: Api<DynamicObject> = if input.namespaced && !input.namespace.is_empty() {
-                    Api::namespaced_with(client, &input.namespace, &ar)
+                    Api::namespaced_with(client.clone(), &input.namespace, &ar)
                 } else {
-                    Api::all_with(client, &ar)
+                    Api::all_with(client.clone(), &ar)
                 };
-                let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("list custom resource timed out".into()))?
-                    .map_err(handler_err)?;
-                let columns = input.printer_columns;
+                let list =
+                    tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+                        .await
+                        .map_err(|_| {
+                            CapabilityError::Handler("list custom resource timed out".into())
+                        })?
+                        .map_err(handler_err)?;
+                let (columns, columns_error) = if input.use_crd_columns {
+                    match discover_columns(client, &input.group, &input.plural, &input.version)
+                        .await
+                    {
+                        Ok(columns) => (columns, None),
+                        Err(error) => (input.printer_columns, Some(error)),
+                    }
+                } else {
+                    (input.printer_columns, None)
+                };
+                let printer_columns = input.use_crd_columns.then(|| columns.clone());
                 let items = list
                     .items
                     .into_iter()
@@ -423,14 +475,20 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                         CustomRow {
                             name: o.metadata.name.clone().unwrap_or_default(),
                             namespace: o.metadata.namespace.clone().unwrap_or_default(),
-                            created: crate::creation_rfc3339(o.metadata.creation_timestamp.as_ref()),
+                            created: crate::creation_rfc3339(
+                                o.metadata.creation_timestamp.as_ref(),
+                            ),
                             age: crate::humanize_age(o.metadata.creation_timestamp.as_ref()),
                             columns: values,
                             sort_keys,
                         }
                     })
                     .collect();
-                Ok(ListCustomOut { items })
+                Ok(ListCustomOut {
+                    items,
+                    printer_columns,
+                    columns_error,
+                })
             }
         },
     )
@@ -578,6 +636,23 @@ mod tests {
         })
     }
 
+    #[test]
+    fn app_columns_use_the_requested_served_version_and_standard_filters() {
+        let spec = serde_json::json!({"versions":[
+            {"name":"v1","served":true,"additionalPrinterColumns":[{"name":"Source","jsonPath":".spec.sourceRef.name","type":"string"},{"name":"Age","jsonPath":".metadata.creationTimestamp","type":"date"},{"name":"Hidden","jsonPath":".status.secret","priority":1}]},
+            {"name":"v2","served":true,"storage":true,"additionalPrinterColumns":[{"name":"Revision","jsonPath":".status.revision","type":"string"}]},
+            {"name":"v3","served":true},
+            {"name":"v4","served":false}
+        ]});
+        let columns = columns_for_named_version(&spec, "v1").unwrap();
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name, "Source");
+        assert_eq!(render_column(&serde_json::json!({"spec":{"sourceRef":{"name":"platform"}}}), &columns[0]), "platform");
+        assert_eq!(columns_for_named_version(&spec, "v2").unwrap()[0].name, "Revision");
+        assert!(columns_for_named_version(&spec, "v3").unwrap().is_empty());
+        assert!(columns_for_named_version(&spec, "v4").is_err());
+        assert!(columns_for_named_version(&spec, "missing").is_err());
+    }
     #[test]
     fn takes_printer_columns_from_the_chosen_version() {
         let cols = printer_columns(&spec_with_columns());

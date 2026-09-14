@@ -306,3 +306,12 @@ message. Kubernetes RBAC still governs GET, events and PATCH.
 
 The implementation follows [Flux reconciliation and Helm actions](https://fluxcd.io/flux/components/helm/helmreleases/)
 and [Argo CD operations through Kubernetes](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-kubectl/).
+
+App resource lists request `useCrdColumns: true` through `extensions.read`.
+The host keeps the installed binding's API target and reads that CRD's
+`additionalPrinterColumns` for the exact served version. Columns use the same
+JSONPath renderer, priority filtering and Age deduplication as Custom Resources.
+The response includes column definitions alongside the rendered values so headers
+cannot drift from their data. If definition discovery fails, app-defined columns
+remain available with an explicit error notice. Dashboard reads retain their
+declared status-column mapping; signed manifests are not modified on disk.

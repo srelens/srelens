@@ -72,6 +72,8 @@ enum Configure {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Read {
+    #[serde(default, rename = "useCrdColumns")]
+    use_crd_columns: bool,
     id: String,
     revision: u64,
     capability: String,
@@ -425,9 +427,15 @@ pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
                     })?;
                 validate_app(&plugin.manifest, &plugin.grants, c.clone())
                     .map_err(CapabilityError::Handler)?;
+                let mut manifest = plugin.manifest.clone();
+                if input.use_crd_columns {
+                    if let Some(binding) = manifest.capabilities.iter_mut().find(|b| b.name == input.capability && b.target == "k8s.listCustomResource") {
+                        binding.arguments.insert("useCrdColumns".into(), json!(true));
+                    }
+                }
                 let mut registry = Registry::new();
                 let _registration = PluginHost::new(c)
-                    .register(&mut registry, plugin.manifest.clone(), &plugin.grants)
+                    .register(&mut registry, manifest, &plugin.grants)
                     .map_err(CapabilityError::Handler)?;
                 let mut args = json!({"context":input.context});
                 if plugin
@@ -659,6 +667,13 @@ mod tests {
         assert_eq!(output["group"], "argoproj.io");
         assert_eq!(output["context"], "staging");
         assert_eq!(output["namespace"], "argo");
+        assert!(output.get("useCrdColumns").is_none());
+        let mut column_args = args.clone();
+        column_args["useCrdColumns"] = json!(true);
+        let with_columns = reader.invoke("extensions.read", column_args).await.unwrap();
+        assert_eq!(with_columns["useCrdColumns"], true);
+        assert_eq!(with_columns["group"], "argoproj.io");
+        assert_eq!(with_columns["namespace"], "argo");
         let mut missing_context = args.clone();
         missing_context["context"] = json!("");
         assert!(reader

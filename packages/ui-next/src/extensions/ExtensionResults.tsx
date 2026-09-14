@@ -112,6 +112,7 @@ export function ExtensionResults({
             capability,
             context,
             namespace,
+            true,
           )
         : null,
     [
@@ -126,9 +127,9 @@ export function ExtensionResults({
   const binding = plugin.manifest.capabilities.find(
     (b) => b.name === capability,
   );
-  const columns = Array.isArray(binding?.arguments.printerColumns)
+  const columns = data.data?.printerColumns ?? (Array.isArray(binding?.arguments.printerColumns)
     ? (binding.arguments.printerColumns as Array<{ name: string }>)
-    : [];
+    : []);
   if (!context)
     return (
       <p className="extension-message">
@@ -178,6 +179,7 @@ export function ExtensionResults({
   return (
     <section className="extension-results" ref={listRow.ref}>
       <div className="extension-resource-list">
+      {data.data?.columnsError && <p className="extension-message" role="status">Could not load CRD columns: {data.data.columnsError}. Showing app-defined columns.</p>}
       {!hideToolbar && (
         <div className="extension-toolbar">
           <span>

@@ -25,6 +25,10 @@ describe("extension contract", () => {
       namespace: "ns",
     });
   });
+  it("requests CRD columns using the host camelCase contract",async()=>{
+    await readExtension("org.test.app",2,"list","cluster/a","ns",true);
+    expect(invokeCapability).toHaveBeenCalledWith("extensions.read",{id:"org.test.app",revision:2,capability:"list",context:"cluster/a",namespace:"ns",useCrdColumns:true});
+  });
   it("pins cluster and namespace in route identity", () => {
     const route = extensionRoute("cluster/a", "org.test.app", "page", "ns/a");
     expect(parseExtensionRoute(route)).toEqual({

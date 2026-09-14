@@ -237,6 +237,7 @@ it("reloads the selected namespace without changing the pinned cluster", async (
       "apps",
       "staging",
       "flux-system",
+      true,
     ),
   );
 });
@@ -245,7 +246,7 @@ it("uses the restricted namespace instead of an all-namespace resource read", as
   vi.mocked(listNamespaces).mockResolvedValue({error:'Forbidden: User "system:serviceaccount:team:reader" cannot list namespaces'} as any);
   vi.spyOn(await import("@srelens/core/lib/clusters"),"listContexts").mockResolvedValue({contexts:[{name:"staging",namespace:"team"}]} as any);
   render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" />);
-  await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(plugin.manifest.id,plugin.revision,"apps","staging","team"));
+  await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(plugin.manifest.id,plugin.revision,"apps","staging","team",true));
   expect(vi.mocked(readExtension).mock.calls.every(call=>call[4]==="team")).toBe(true);
 });
 

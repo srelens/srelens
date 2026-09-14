@@ -79,6 +79,7 @@ it("reads the pinned context and distinguishes failed reads from empty results",
     "list",
     "staging",
     "argo",
+    true,
   );
 });
 
@@ -173,6 +174,7 @@ it("keeps reads idle until a cluster is chosen and shows successful empty result
     "list",
     "prod",
     "",
+    true,
   );
 });
 it("renders printer-column values as text", async () => {
@@ -233,6 +235,7 @@ it("adds namespace detail views and actions, and removes them when disabled", as
       "list",
       "staging",
       "argo",
+      true,
     ),
   );
   fireEvent.click(screen.getByText("App actions"));
@@ -486,4 +489,18 @@ it("opens a clicked resource in its selected namespace and drops detail state on
   expect(inspectExtensionResource).toHaveBeenCalledWith({id:plugin.manifest.id,revision:plugin.revision,capability:"list",context:"cluster/a",namespace:"team",name:"apps"});
   view.rerender(<ExtensionResults plugin={app} capability="list" context="cluster/b"/>);
   expect(screen.queryByText("Build failed")).toBeNull();
+});
+
+it("uses CRD printer columns instead of app-defined generic columns",async()=>{
+ vi.mocked(readExtension).mockResolvedValue({printerColumns:[{name:"Source",jsonPath:".spec.sourceRef.name",type:"string"}],items:[{name:"apps",namespace:"team",age:"1d",columns:["platform-config"]}]});
+ render(<ExtensionResults plugin={plugin} capability="list" context="prod"/>);
+ expect(await screen.findByRole("columnheader",{name:"Source"})).toBeTruthy();
+ expect(screen.queryByRole("columnheader",{name:"Ready"})).toBeNull();
+ expect(screen.getByText("platform-config")).toBeTruthy();
+});
+it("reports CRD discovery failure while retaining the fallback resource columns",async()=>{
+ vi.mocked(readExtension).mockResolvedValue({printerColumns:[{name:"Ready",jsonPath:".status.ready"}],columnsError:"Forbidden",items:[{name:"apps",namespace:"team",age:"1d",columns:["True"]}]});
+ render(<ExtensionResults plugin={plugin} capability="list" context="prod"/>);
+ expect(await screen.findByText(/Could not load CRD columns: Forbidden/)).toBeTruthy();
+ expect(await screen.findByRole("columnheader",{name:"Ready"})).toBeTruthy();
 });
