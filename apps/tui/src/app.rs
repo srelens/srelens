@@ -324,6 +324,26 @@ impl App {
         app.refresh_cluster_overview();
         app.refresh_crds();
         app.restart_active_watch().await;
+
+        // Pre-warm ArgoCD Hub connection in the background if configured
+        if let Some(ref hub_kc) = app.tui_config.resolved_argo_hub_kubeconfig() {
+            let cache_init = app.client_cache.clone();
+            let path_clone = hub_kc.clone();
+            let hub_ctx_init = app.tui_config.resolved_argo_hub_context();
+            tokio::spawn(async move {
+                cache_init.ensure_paths(vec![path_clone]).await;
+                if let Some(ctx) = hub_ctx_init {
+                    let _ = cache_init.get(&ctx).await;
+                }
+            });
+        } else if let Some(ref hub_ctx) = app.tui_config.resolved_argo_hub_context() {
+            let cache_init = app.client_cache.clone();
+            let ctx_clone = hub_ctx.clone();
+            tokio::spawn(async move {
+                let _ = cache_init.get(&ctx_clone).await;
+            });
+        }
+
         Ok(app)
     }
 
@@ -3721,7 +3741,7 @@ impl App {
                         }
                     }
                     KeyCode::Char('r') => {
-                        self.refresh_argo_applications();
+                        self.refresh_argo_applications_ext(true);
                         self.set_toast("Refreshing ArgoCD applications...".to_string(), Theme::status_ok());
                     }
                     KeyCode::Char('c') => {
@@ -7071,10 +7091,18 @@ impl App {
     }
 
     pub fn refresh_argo_applications(&mut self) {
+        self.refresh_argo_applications_ext(false);
+    }
+
+    pub fn refresh_argo_applications_ext(&mut self, force_refresh: bool) {
         if self.argo_refreshing {
             return;
         }
         self.argo_refreshing = true;
+        if force_refresh {
+            srelens_kube::argo::invalidate_argo_applications_cache();
+            srelens_kube::argo::invalidate_argo_cluster_mapping_cache();
+        }
         if let ActiveView::Argo(argo) = &mut self.active_view {
             if argo.applications.is_empty() {
                 argo.is_loading = true;
@@ -7106,7 +7134,7 @@ impl App {
                 cache.ensure_paths(vec![path.clone()]).await;
             }
 
-            let res = srelens_kube::argo::fetch_argo_applications(
+            let res = srelens_kube::argo::fetch_argo_applications_cached(
                 &cache,
                 &current_context,
                 Some(&current_cluster_name),
@@ -7114,6 +7142,7 @@ impl App {
                 hub_ctx_clone.as_deref(),
                 target_ns.as_deref(),
                 true,
+                force_refresh,
             )
             .await;
 
@@ -7285,7 +7314,7 @@ impl App {
             Ok(msg) => {
                 self.set_toast(format!("✓ {}", msg), Theme::status_ok());
                 match &self.active_view {
-                    ActiveView::Argo(_) => self.refresh_argo_applications(),
+                    ActiveView::Argo(_) => self.refresh_argo_applications_ext(true),
                     ActiveView::ArgoDetail(d) => {
                         let name = d.app_name.clone();
                         let ns = d.app_namespace.clone();
@@ -8119,7 +8148,7 @@ impl App {
                                         table.apply_filter(&filter);
                                     }
                                     if let ActiveView::Argo(_) = &self.active_view {
-                                        self.refresh_argo_applications();
+                                        self.refresh_argo_applications_ext(true);
                                     }
                                     if let ActiveView::ArgoDetail(_) = &self.active_view {
                                         if let Some(prev) = self.nav_stack.pop() {
@@ -8127,7 +8156,7 @@ impl App {
                                         } else {
                                             self.switch_view_to_kind(ResourceKind::ArgoApplications).await;
                                         }
-                                        self.refresh_argo_applications();
+                                        self.refresh_argo_applications_ext(true);
                                     }
                                 }
                                 Err(err) => {
