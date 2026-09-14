@@ -32,6 +32,15 @@ unsigned installs require enabling it and reviewing the requested capability
 before granting permission. An unsigned-extension notice remains visible while
 any extension is enabled. Turning developer mode off disables all extensions.
 
+Installation and enablement are app-wide, not per kubeconfig context. Enabled
+pages remain available across clusters. When a page opens, the host checks the
+CRDs and served versions required by that page (including dashboard summaries).
+A missing CRD/version produces a requirements page with the exact API names and
+a **Check again** action; it does not uninstall or disable the extension. CRD
+discovery failures are reported as unverifiable requirements and do not prevent
+resource reads allowed by the user's existing RBAC. Switching clusters never
+reuses another cluster's discovery result.
+
 The app deliberately accepts a narrower surface than the developer broker:
 `k8s.listCustomResource` bindings with fixed, nonempty group/version/plural/kind
 and fixed resource scope, plus explicitly granted `k8s.listEvents` readers. Only `context` and `namespace` are forwarded from the
@@ -65,9 +74,19 @@ support does not claim those protections.
 
 ## Browse the native catalog
 
-In either desktop design, open **Settings → Extensions → Browse catalog**.
+In either desktop design, open **Settings → Extensions → Catalog**.
+The **Extensions** tab lists installed extensions. In developer mode, a collapsed
+**Install a local manifest** section exposes JSON installation tools. The
+**Catalog** tab loads discovery on first opening and keeps its search/list state
+when switching tabs.
+
 The catalog comes from [srelens/extensions](https://github.com/srelens/extensions);
 each entry points to its own repository and versioned GitHub release asset.
+Flux and Argo CD use locally bundled project logos in Settings and navigation.
+Other native extensions receive a name-based initials mark. Page icons follow
+their role (overview, sources, Helm, notifications) rather than repeating the
+extension glyph. Logos identify integrations and do not indicate trust/signing.
+
 The initial entries are [Flux](https://github.com/srelens/extension-flux) and
 [Argo CD](https://github.com/srelens/extension-argocd). Search by name, ID or description.
 

@@ -1,8 +1,10 @@
+import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useEffect, useRef, useState } from "react";
 import { listExtensionCatalog, reviewCatalogExtension, openExternal, type ExtensionCatalogSnapshot, type InstalledExtension } from "@srelens/core";
 import { ExtensionControls } from "./ExtensionControls";
 
-export function ExtensionCatalog({ developerMode, installed, onReview }: {
+export function ExtensionCatalog({ developerMode, installed, onReview, autoLoad = false }: {
+  autoLoad?: boolean;
   developerMode: boolean;
   installed: InstalledExtension[];
   onReview: (manifest: string) => void;
@@ -27,10 +29,11 @@ export function ExtensionCatalog({ developerMode, installed, onReview }: {
       if (request === generation.current) setData(result);
     });
   }
+  useEffect(() => { if (autoLoad) load(false); }, [autoLoad]);
   const entries = data?.catalog.extensions.filter(e => `${e.name} ${e.id} ${e.description}`.toLowerCase().includes(query.toLowerCase()));
-  return <section aria-label="Extension catalog">
+  return <section className="extension-catalog" aria-label="Extension catalog">
     <div className="extension-toolbar">
-      <strong>Native extension catalog</strong>
+      <strong>Available extensions</strong>
       {data && <input className="extension-catalog-search" aria-label="Find an extension" placeholder="Find an extension…" value={query} onChange={e => setQuery(e.target.value)} />}
       <Button variant="secondary" disabled={busy} onClick={() => load(Boolean(data))}>{data ? "Refresh catalog" : "Browse catalog"}</Button>
     </div>
@@ -38,17 +41,22 @@ export function ExtensionCatalog({ developerMode, installed, onReview }: {
     {busy && <p className="extension-message" role="status">Loading…</p>}
     {error && <p className="extension-error" role="alert">{error}</p>}
     {data && <>
-      <p className="extension-message">{data.stale ? "Cached catalog" : "Catalog checked"} · {new Date(data.fetchedAt * 1000).toLocaleString()} · Host API {data.hostApiVersion}</p>
+      <p className="extension-message extension-catalog-meta">{data.stale ? "Cached catalog" : "Catalog checked"} · {new Date(data.fetchedAt * 1000).toLocaleString()} · Host API {data.hostApiVersion}</p>
       {data.error && <p className="extension-warning" role="alert">Refresh failed: {data.error}. Showing the cached catalog.</p>}
       <p className="extension-message">Releases are unsigned. Review permissions before installing. {!developerMode && "Enable developer mode to install."}</p>
       {entries?.length === 0 && <p className="extension-message">No matching extensions.</p>}
       {entries?.map(entry => {
         const current = installed.find(p => p.manifest.id === entry.id);
         const incompatible = data.incompatible.includes(entry.id);
-        return <article className="extension-installed" key={entry.id}>
+        return <article className="extension-installed extension-catalog-entry" aria-label={entry.name} key={entry.id}>
           <div className="extension-toolbar">
-            <strong>{entry.name}</strong>
-            <span>{entry.release.version}{entry.release.prerelease ? " · Preview" : ""} · {entry.license}</span>
+            <ExtensionLogo id={entry.id} name={entry.name} size={28} />
+            <div className="extension-catalog-description">
+              <strong>{entry.name}</strong>
+              <p>{entry.description}</p>
+              <p className="extension-catalog-meta">{entry.id} · Requires API {entry.release.srelensApiVersion}{incompatible ? " · Incompatible with this app" : ""}{current ? ` · Installed ${current.manifest.version}` : ""}</p>
+            </div>
+            <span className="extension-catalog-meta">{entry.release.version}{entry.release.prerelease ? " · Preview" : ""} · {entry.license}</span>
             <Button variant="secondary" disabled={busy} onClick={() => void run(() => openExternal(entry.repository))}>Repository</Button>
             <Button disabled={busy || !developerMode || incompatible} onClick={() => {
               const request = ++generation.current;
@@ -58,8 +66,6 @@ export function ExtensionCatalog({ developerMode, installed, onReview }: {
               });
             }}>{current ? "Review replacement" : "Review installation"}</Button>
           </div>
-          <p className="extension-message">{entry.description}</p>
-          <p className="extension-message">{entry.id} · Requires API {entry.release.srelensApiVersion}{incompatible ? " · Incompatible with this app" : ""}{current ? ` · Installed ${current.manifest.version}` : ""}</p>
         </article>;
       })}
     </>}

@@ -1,3 +1,5 @@
+import { ExtensionLogo } from "./ExtensionLogo";
+import { ExtensionRequirements } from "./ExtensionRequirements";
 import { AgeCell } from "../lib/ageCell";
 import { useNamespaceOptions } from "@srelens/core/react";
 import { useContext, useState } from "react";
@@ -268,6 +270,7 @@ export function ExtensionWorkspace({
         className="extension-toolbar extension-navigation"
         aria-label={`${plugin.manifest.name} pages`}
       >
+        <ExtensionLogo id={plugin.manifest.id} name={plugin.manifest.name} />
         {groups.map((group) => (
           <Button
             key={group}
@@ -300,6 +303,7 @@ export function ExtensionWorkspace({
             ))}
         </nav>
       )}
+      <ExtensionRequirements plugin={plugin} page={current} context={context} refresh={refresh}>
       <div className="extension-toolbar extension-filters">
         {namespaces === null ? <Button variant="secondary" disabled>Loading namespaces…</Button> : <Combobox
           ariaLabel="Extension namespace"
@@ -377,6 +381,7 @@ export function ExtensionWorkspace({
           hideToolbar
         />
       )}
+      </ExtensionRequirements>
     </div>
   );
 }

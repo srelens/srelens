@@ -259,3 +259,39 @@
   color: inherit;
   font: inherit;
 }
+
+/* Settings uses the same body/meta scale as the owning design. */
+.extension-manager, .extension-catalog {
+  font-family: inherit;
+  font-size: var(--text-body, 0.8125rem);
+  line-height: 1.5;
+}
+.extension-manager strong { font-weight: 600; }
+.extension-manager [hidden] { display: none; }
+.extension-local-tools > summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-local-tools > summary:focus-visible {
+  outline: 2px solid var(--accent, var(--fl-color-primary));
+  outline-offset: -2px;
+}
+.extension-install > button { justify-self: start; }
+.extension-catalog-description { flex: 1 1 260px; min-width: 0; }
+.extension-catalog-description p { margin: 3px 0 0; }
+.extension-catalog-meta {
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  font-size: var(--text-caption, 0.75rem);
+  overflow-wrap: anywhere;
+}
+.extension-catalog-entry > .extension-toolbar { border-bottom: 0; }
+.extension-catalog-entry .extension-catalog-meta { margin-top: 3px; }
+.extension-permission-review { background: var(--surface, var(--fl-color-surface)); }
+
+.extension-requirements {
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+  font-size: var(--text-body, 0.8125rem);
+}
+
+.extension-logo { display: inline-block; flex-shrink: 0; vertical-align: middle; }

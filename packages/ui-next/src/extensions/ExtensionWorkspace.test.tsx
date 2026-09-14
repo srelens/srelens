@@ -2,10 +2,12 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { it, expect, vi, beforeEach } from "vitest";
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
+  listCrds: vi.fn(),
   readExtension: vi.fn(),
   listNamespaces: vi.fn(),
 }));
 import {
+  listCrds,
   readExtension,
   listNamespaces,
   type InstalledExtension,
@@ -273,4 +275,15 @@ it("ticks event first and last occurrence ages without reloading events", async 
     expect(screen.getByText("30s")).toBeTruthy();
     expect(readExtension).toHaveBeenCalledTimes(2);
   } finally {view!?.unmount();vi.useRealTimers();}
+});
+
+it("shows unsupported-cluster requirements without reading extension resources", async () => {
+  const requiring = structuredClone(plugin);
+  requiring.manifest.capabilities[0].target = "k8s.listCustomResource";
+  Object.assign(requiring.manifest.capabilities[0].arguments, { group: "kustomize.toolkit.fluxcd.io", version: "v1", plural: "kustomizations", kind: "Kustomization" });
+  vi.mocked(listCrds).mockResolvedValue({ crds: [] });
+  render(<ExtensionWorkspace plugin={requiring} page={requiring.manifest.contributions.pages[0]} context="staging" />);
+  expect(await screen.findByText("Missing requirements")).toBeTruthy();
+  expect(readExtension).not.toHaveBeenCalled();
+  expect(screen.getByRole("navigation", { name: "Flux pages" })).toBeTruthy();
 });

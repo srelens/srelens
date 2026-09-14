@@ -1,3 +1,5 @@
+import { ExtensionRequirements } from "./ExtensionRequirements";
+import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useState } from "react";
 import {
   configureExtensions,
@@ -29,7 +31,9 @@ export function ExtensionManager({
     context: string,
   ) => void;
 }) {
-  const { Button, Combobox } = useContext(ExtensionControls);
+  const { Button, Combobox, Tabs } = useContext(ExtensionControls);
+  const [tab, setTab] = useState("installed");
+  const [catalogOpened, setCatalogOpened] = useState(false);
   const inventory = useExtensions();
   const [source, setSource] = useState("");
   const [error, setError] = useState("");
@@ -54,6 +58,7 @@ export function ExtensionManager({
       await configureExtensions(action);
       inventory.reload();
       setReview(null);
+      if (action.action === "install") setTab("installed");
       return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -116,12 +121,46 @@ export function ExtensionManager({
           {error}
         </p>
       )}
-      <ExtensionCatalog developerMode={state.developerMode} installed={state.plugins} onReview={(manifest) => {
+      <Tabs variant="underline" label="Extension settings" tabs={[
+        { id: "installed", label: "Extensions" },
+        { id: "catalog", label: "Catalog" },
+      ]} active={tab} onChange={(next) => { setTab(next); if (next === "catalog") setCatalogOpened(true); }} />
+        {review && (
+          <section className="extension-install extension-permission-review" aria-label="Review extension permissions">
+            <p>
+              <strong>{review.name}</strong> requests:{" "}
+              {review.permissions.join(", ")}. Installing an existing ID
+              replaces its manifest and refreshes its open pages.
+            </p>
+            <Button
+              disabled={busy || !state.developerMode}
+              onClick={() =>
+                void change({
+                  action: "install",
+                  manifest: review.source,
+                  grants: review.permissions,
+                })
+              }
+            >
+              Install and grant permissions
+            </Button>
+            <Button variant="secondary" onClick={() => setReview(null)}>
+              Cancel
+            </Button>
+          </section>
+        )}
+      <div hidden={tab !== "catalog"}>
+        {catalogOpened && (
+      <ExtensionCatalog autoLoad developerMode={state.developerMode} installed={state.plugins} onReview={(manifest) => {
         const parsed = JSON.parse(manifest);
-        setSource(manifest);
         setReview({ source: manifest, name: parsed.name, permissions: parsed.permissions });
         setError("");
       }} />
+        )}
+      </div>
+      <div hidden={tab !== "installed"}>
+      {state.developerMode && <details className="extension-local-tools">
+        <summary>Install a local manifest</summary>
       <div className="extension-install">
         <label htmlFor="extension-manifest">
           Local extension manifest (JSON)
@@ -157,37 +196,17 @@ export function ExtensionManager({
         >
           Review manifest
         </Button>
-        {review && (
-          <section aria-label="Review extension permissions">
-            <p>
-              <strong>{review.name}</strong> requests:{" "}
-              {review.permissions.join(", ")}. Installing an existing ID
-              replaces its manifest and refreshes its open pages.
-            </p>
-            <Button
-              disabled={busy || !state.developerMode}
-              onClick={() =>
-                void change({
-                  action: "install",
-                  manifest: review.source,
-                  grants: review.permissions,
-                })
-              }
-            >
-              Install and grant permissions
-            </Button>
-            <Button variant="secondary" onClick={() => setReview(null)}>
-              Cancel
-            </Button>
-          </section>
-        )}
       </div>
+      </details>}
+
+      <p className="extension-message extension-catalog-meta">Extensions are installed app-wide and available across clusters. Each page checks the APIs it needs when opened.</p>
       {state.plugins.length === 0 && (
         <p className="extension-message">No extensions installed.</p>
       )}
       {state.plugins.map((plugin) => (
         <section className="extension-installed" key={plugin.manifest.id}>
           <div className="extension-toolbar">
+            <ExtensionLogo id={plugin.manifest.id} name={plugin.manifest.name} size={24} />
             <strong>{plugin.manifest.name}</strong>
             <span>{plugin.manifest.version} · Unsigned local</span>
             <label>
@@ -327,6 +346,7 @@ export function ExtensionManager({
           />
         </section>
       )}
+      </div>
     </div>
   );
 }
@@ -419,6 +439,7 @@ export function ExtensionResourceSlot({
         />
       )}
       {current && inventory.status !== "loading" && (
+        <ExtensionRequirements plugin={current.plugin} page={current.contribution} context={context} refresh={0}>
         <ExtensionResults
           key={`${context}/${kind}/${namespace}/${name}/${current.id}`}
           plugin={current.plugin}
@@ -426,6 +447,7 @@ export function ExtensionResourceSlot({
           context={context}
           namespace={ns}
         />
+        </ExtensionRequirements>
       )}
     </section>
   );

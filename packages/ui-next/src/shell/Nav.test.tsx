@@ -236,7 +236,9 @@ it("groups extension pages under their display name", async () => {
   ] };
   render(<Nav contexts={[PROD]} />);
   await userEvent.click(await screen.findByRole("treeitem", { name: "Extensions" }));
-  await userEvent.click(await screen.findByRole("treeitem", { name: "Flux" }));
+  const fluxNode = await screen.findByRole("treeitem", { name: "Flux" });
+  expect(fluxNode.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("org.srelens.flux");
+  await userEvent.click(fluxNode);
   await userEvent.click(await screen.findByRole("treeitem", { name: "Kustomizations" }));
   expect(tabFor("/extensions/prod-eu/org.srelens.flux/kustomizations/")?.sub).toBe("prod-eu");
   expect(screen.queryByText("org.srelens.flux")).toBeNull();
