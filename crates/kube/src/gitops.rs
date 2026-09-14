@@ -92,33 +92,63 @@ pub struct ActionIn {
 pub struct ResourceOut {
     pub resource: Value,
     pub actions: Vec<String>,
+    /// Newest first, at most `EVENTS_SHOWN`.
     pub events: Vec<Value>,
+    #[serde(rename = "eventsTruncated")]
+    pub events_truncated: bool,
+    /// True when `EVENT_PAGES` pages were read and more remained, so `events` are the
+    /// newest of those read rather than of all.
+    #[serde(rename = "eventsPartial")]
+    pub events_partial: bool,
+    /// How many events were read before the newest were chosen. A page holds at most
+    /// `EVENT_PAGE` events, so this is the real count, not pages times the page size.
+    #[serde(rename = "eventsRead")]
+    pub events_read: usize,
     #[serde(rename = "eventsError")]
     pub events_error: Option<String>,
 }
 
+/// Actions are offered only for the API versions whose schema carries the fields they
+/// write. Every listed Flux version has `spec.suspend` (per each controller's `api/`
+/// package; OCIRepository has no v1beta1), HelmRelease `forceAt`/`resetAt` arrived with
+/// v2beta2, and Argo CD's `operation` is a v1alpha1 field. An unlisted version, such as
+/// a future one that moves a field, gets no actions.
 pub fn supported_actions(r: &ResourceIn) -> Vec<String> {
     if !r.namespaced {
         return vec![];
     }
-    let mut actions: Vec<&str> = match (r.group.as_str(), r.kind.as_str(), r.plural.as_str()) {
-        ("kustomize.toolkit.fluxcd.io", "Kustomization", "kustomizations")
-        | ("source.toolkit.fluxcd.io", "GitRepository", "gitrepositories")
-        | ("source.toolkit.fluxcd.io", "HelmRepository", "helmrepositories")
-        | ("source.toolkit.fluxcd.io", "HelmChart", "helmcharts")
-        | ("source.toolkit.fluxcd.io", "Bucket", "buckets")
-        | ("source.toolkit.fluxcd.io", "OCIRepository", "ocirepositories")
-        | ("image.toolkit.fluxcd.io", "ImageRepository", "imagerepositories")
-        | ("image.toolkit.fluxcd.io", "ImageUpdateAutomation", "imageupdateautomations") => {
-            vec!["suspend", "resume", "reconcile"]
-        }
-        ("helm.toolkit.fluxcd.io", "HelmRelease", "helmreleases") => {
-            vec!["suspend", "resume", "reconcile", "force", "reset"]
-        }
-        ("argoproj.io", "Application", "applications") => vec!["refresh", "hard-refresh", "sync"],
-        _ => vec![],
-    };
-    actions.drain(..).map(str::to_owned).collect()
+    const FLUX: &[&str] = &["v1", "v1beta2", "v1beta1"];
+    const RECONCILE: &[&str] = &["suspend", "resume", "reconcile"];
+    let (versions, actions): (&[&str], &[&str]) =
+        match (r.group.as_str(), r.kind.as_str(), r.plural.as_str()) {
+            ("kustomize.toolkit.fluxcd.io", "Kustomization", "kustomizations")
+            | ("source.toolkit.fluxcd.io", "GitRepository", "gitrepositories")
+            | ("source.toolkit.fluxcd.io", "HelmRepository", "helmrepositories")
+            | ("source.toolkit.fluxcd.io", "HelmChart", "helmcharts")
+            | ("source.toolkit.fluxcd.io", "Bucket", "buckets")
+            | ("image.toolkit.fluxcd.io", "ImageRepository", "imagerepositories")
+            | ("image.toolkit.fluxcd.io", "ImageUpdateAutomation", "imageupdateautomations") => {
+                (FLUX, RECONCILE)
+            }
+            ("source.toolkit.fluxcd.io", "OCIRepository", "ocirepositories") => {
+                (&["v1", "v1beta2"], RECONCILE)
+            }
+            ("helm.toolkit.fluxcd.io", "HelmRelease", "helmreleases") => match r.version.as_str() {
+                "v2beta1" => (&["v2beta1"], RECONCILE),
+                _ => (
+                    &["v2", "v2beta2"],
+                    &["suspend", "resume", "reconcile", "force", "reset"],
+                ),
+            },
+            ("argoproj.io", "Application", "applications") => {
+                (&["v1alpha1"], &["refresh", "hard-refresh", "sync"])
+            }
+            _ => return vec![],
+        };
+    if !versions.contains(&r.version.as_str()) {
+        return vec![];
+    }
+    actions.iter().map(|action| (*action).to_owned()).collect()
 }
 fn action_patch(r: &ResourceIn, action: &str, token: &str) -> Result<Value, String> {
     if !supported_actions(r).iter().any(|a| a == action) {
@@ -154,6 +184,13 @@ fn guard_action(current: &Value, uid: &str, version: &str, action: &str) -> Resu
     if action == "sync" && !current["operation"].is_null() {
         return Err("An Argo CD operation is already in progress".into());
     }
+    // A request that would change nothing is refused rather than reported as accepted.
+    if action == "suspend" && current["spec"]["suspend"] == true {
+        return Err("This resource is already suspended".into());
+    }
+    if action == "resume" && current["spec"]["suspend"] != true {
+        return Err("This resource is not suspended".into());
+    }
     if matches!(action, "reconcile" | "force" | "reset") && current["spec"]["suspend"] == true {
         return Err("Resume this resource before requesting reconciliation".into());
     }
@@ -186,21 +223,105 @@ async fn inspect_with_timeout(
         Api::all(client)
     };
     let uid = resource["metadata"]["uid"].as_str().unwrap_or("");
-    let (events, events_error) = if uid.is_empty() {
-        (vec![], Some("Resource UID is unavailable".into()))
+    let (events, events_truncated, events_partial, events_read, events_error) = if uid.is_empty() {
+        (
+            vec![],
+            false,
+            false,
+            0,
+            Some("Resource UID is unavailable".into()),
+        )
     } else {
-        match tokio::time::timeout(timeout, events_api.list(&kube::api::ListParams::default().fields(&format!("involvedObject.uid={uid}")).limit(100))).await {
-            Ok(Ok(list)) => (list.items.into_iter().map(|e| json!({"type":e.type_,"reason":e.reason,"message":e.message,"count":e.count})).collect(),None),
-            Ok(Err(e)) => (vec![],Some(e.to_string())),
-            Err(_) => (vec![],Some("Events request timed out".into())),
+        match tokio::time::timeout(timeout, list_events(&events_api, uid)).await {
+            Ok(Ok((items, partial))) => {
+                let read = items.len();
+                let (events, truncated) = newest_events(items, partial);
+                (events, truncated, partial, read, None)
+            }
+            Ok(Err(e)) => (vec![], false, false, 0, Some(e.to_string())),
+            Err(_) => (
+                vec![],
+                false,
+                false,
+                0,
+                Some("Events request timed out".into()),
+            ),
         }
     };
     Ok(ResourceOut {
         resource,
         actions: supported_actions(r),
         events,
+        events_truncated,
+        events_partial,
+        events_read,
         events_error,
     })
+}
+/// Events are listed in storage order, which says nothing about recency, so every page
+/// is read before the newest are chosen, up to `EVENT_PAGES` pages.
+const EVENT_PAGE: u32 = 500;
+const EVENT_PAGES: usize = 10;
+const EVENTS_SHOWN: usize = 100;
+/// All of an object's events, and whether pages were left unread at the bound.
+async fn list_events(
+    api: &Api<k8s_openapi::api::core::v1::Event>,
+    uid: &str,
+) -> Result<(Vec<k8s_openapi::api::core::v1::Event>, bool), kube::Error> {
+    let mut items = Vec::new();
+    let mut token: Option<String> = None;
+    for _ in 0..EVENT_PAGES {
+        let mut params = kube::api::ListParams::default()
+            .fields(&format!("involvedObject.uid={uid}"))
+            .limit(EVENT_PAGE);
+        if let Some(token) = &token {
+            params = params.continue_token(token);
+        }
+        let page = api.list(&params).await?;
+        items.extend(page.items);
+        token = page.metadata.continue_.filter(|token| !token.is_empty());
+        if token.is_none() {
+            return Ok((items, false));
+        }
+    }
+    Ok((items, true))
+}
+/// The newest `EVENTS_SHOWN` events by when each was last seen, and whether any were left
+/// out (more than that were read, or pages remained unread).
+fn newest_events(
+    mut items: Vec<k8s_openapi::api::core::v1::Event>,
+    partial: bool,
+) -> (Vec<Value>, bool) {
+    // The latest of every time an event carries. A recurring series records its newest
+    // occurrence in `series.lastObservedTime` while `eventTime` stays its first. Times
+    // are compared parsed: "…00.5Z" sorts before "…00Z" as text but is later.
+    let seen = |e: &k8s_openapi::api::core::v1::Event| {
+        [
+            e.series
+                .as_ref()
+                .and_then(|s| s.last_observed_time.as_ref())
+                .map(|t| t.0),
+            e.last_timestamp.as_ref().map(|t| t.0),
+            e.event_time.as_ref().map(|t| t.0),
+            e.first_timestamp.as_ref().map(|t| t.0),
+            e.metadata.creation_timestamp.as_ref().map(|t| t.0),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+    };
+    items.sort_by_key(|e| std::cmp::Reverse(seen(e)));
+    let truncated = partial || items.len() > EVENTS_SHOWN;
+    let events = items
+        .into_iter()
+        .take(EVENTS_SHOWN)
+        .map(|e| {
+            let time = seen(&e).map(|t| t.to_string());
+            let count = e.count.or_else(|| e.series.as_ref().and_then(|s| s.count));
+            json!({"type":e.type_,"reason":e.reason,"message":e.message,"count":count,"time":time})
+        })
+        .collect();
+    (events, truncated)
 }
 async fn execute(client: Client, input: ActionIn) -> Result<Value, String> {
     input.resource.validate()?;
@@ -268,7 +389,100 @@ mod tests {
     use super::*;
     use serde_json::json;
     fn resource(group: &str, kind: &str, plural: &str) -> ResourceIn {
-        serde_json::from_value(json!({"context":"cluster/a","group":group,"version":"v1","kind":kind,"plural":plural,"namespaced":true,"namespace":"team","name":"apps"})).unwrap()
+        let version = match group {
+            "argoproj.io" => "v1alpha1",
+            "helm.toolkit.fluxcd.io" => "v2",
+            _ => "v1",
+        };
+        versioned(group, version, kind, plural)
+    }
+    fn versioned(group: &str, version: &str, kind: &str, plural: &str) -> ResourceIn {
+        serde_json::from_value(json!({"context":"cluster/a","group":group,"version":version,"kind":kind,"plural":plural,"namespaced":true,"namespace":"team","name":"apps"})).unwrap()
+    }
+    #[test]
+    fn actions_are_offered_only_for_api_versions_that_carry_their_fields() {
+        let actions = |group: &str, version: &str, kind: &str, plural: &str| {
+            supported_actions(&versioned(group, version, kind, plural))
+        };
+        for version in ["v1", "v1beta2", "v1beta1"] {
+            assert_eq!(
+                actions(
+                    "kustomize.toolkit.fluxcd.io",
+                    version,
+                    "Kustomization",
+                    "kustomizations"
+                ),
+                ["suspend", "resume", "reconcile"]
+            );
+        }
+        assert!(actions(
+            "kustomize.toolkit.fluxcd.io",
+            "v2",
+            "Kustomization",
+            "kustomizations"
+        )
+        .is_empty());
+        assert!(actions(
+            "source.toolkit.fluxcd.io",
+            "v1beta1",
+            "OCIRepository",
+            "ocirepositories"
+        )
+        .is_empty());
+        assert_eq!(
+            actions(
+                "source.toolkit.fluxcd.io",
+                "v1beta2",
+                "OCIRepository",
+                "ocirepositories"
+            )
+            .len(),
+            3
+        );
+        assert_eq!(
+            actions(
+                "helm.toolkit.fluxcd.io",
+                "v2beta2",
+                "HelmRelease",
+                "helmreleases"
+            ),
+            ["suspend", "resume", "reconcile", "force", "reset"]
+        );
+        // Force and reset arrived with v2beta2; a v2beta1-only controller ignores them.
+        let old_helm = versioned(
+            "helm.toolkit.fluxcd.io",
+            "v2beta1",
+            "HelmRelease",
+            "helmreleases",
+        );
+        assert_eq!(
+            supported_actions(&old_helm),
+            ["suspend", "resume", "reconcile"]
+        );
+        assert!(action_patch(&old_helm, "force", "token").is_err());
+        assert_eq!(
+            actions("argoproj.io", "v1alpha1", "Application", "applications"),
+            ["refresh", "hard-refresh", "sync"]
+        );
+        assert!(actions("argoproj.io", "v1beta1", "Application", "applications").is_empty());
+    }
+    #[test]
+    fn suspend_and_resume_refuse_requests_that_would_change_nothing() {
+        let current =
+            |spec: Value| json!({"metadata":{"uid":"u","resourceVersion":"2"},"spec":spec});
+        let refused = |spec: Value, action: &str| guard_action(&current(spec), "u", "2", action);
+        assert!(refused(json!({"suspend":true}), "suspend")
+            .unwrap_err()
+            .contains("already suspended"));
+        assert!(refused(json!({"suspend":false}), "resume")
+            .unwrap_err()
+            .contains("not suspended"));
+        assert!(refused(json!({}), "resume")
+            .unwrap_err()
+            .contains("not suspended"));
+        assert!(refused(json!({"suspend":false}), "suspend").is_ok());
+        assert!(refused(json!({}), "suspend").is_ok());
+        assert!(refused(json!({"suspend":true}), "resume").is_ok());
     }
     #[test]
     fn flux_actions_are_limited_to_supported_resources_and_fields() {
@@ -350,14 +564,28 @@ mod tests {
             .unwrap();
         assert!(serde_json::from_value::<ActionIn>(wrong).is_err());
     }
-    fn mock_client(
+    type Requests = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+    fn mock_client(patch_status: u16, events_status: u16) -> (Client, Requests) {
+        mock_client_with_events(
+            patch_status,
+            events_status,
+            vec![json!({"apiVersion":"v1","kind":"EventList","metadata":{},"items":[]})],
+        )
+    }
+    fn mock_client_with_events(
         patch_status: u16,
         events_status: u16,
-    ) -> (Client, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+        pages: Vec<Value>,
+    ) -> (Client, Requests) {
+        // Event list pages are served in request order; the last one repeats.
+        let pages = Arc::new(pages);
+        let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let requests = Arc::new(std::sync::Mutex::new(vec![]));
         let captured = requests.clone();
         let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
             let captured = captured.clone();
+            let pages = pages.clone();
+            let served = served.clone();
             async move {
                 let method = request.method().to_string();
                 let uri = request.uri().to_string();
@@ -384,9 +612,10 @@ mod tests {
                 let body = if status >= 400 {
                     json!({"apiVersion":"v1","kind":"Status","status":"Failure","code":status,"reason":"Forbidden","message":"rejected by cluster"})
                 } else if uri.contains("/events") {
-                    json!({"apiVersion":"v1","kind":"EventList","metadata":{},"items":[]})
+                    let page = served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    pages[page.min(pages.len() - 1)].clone()
                 } else {
-                    json!({"apiVersion":"argoproj.io/v1","kind":"Application","metadata":{"name":"apps","namespace":"team","uid":"u","resourceVersion":"2","managedFields":[]},"spec":{},"status":{}})
+                    json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"name":"apps","namespace":"team","uid":"u","resourceVersion":"2","managedFields":[]},"spec":{},"status":{}})
                 };
                 Ok::<_, std::convert::Infallible>(
                     http::Response::builder()
@@ -398,6 +627,107 @@ mod tests {
             }
         });
         (Client::new(service, "default"), requests)
+    }
+    fn event(reason: &str, last: Option<&str>, event_time: Option<&str>) -> Value {
+        json!({"metadata":{"name":reason,"namespace":"team"},"involvedObject":{},"reason":reason,"lastTimestamp":last,"eventTime":event_time})
+    }
+    fn event_list(items: Vec<Value>, continue_token: Option<&str>) -> Value {
+        json!({"apiVersion":"v1","kind":"EventList","metadata":{"continue":continue_token},"items":items})
+    }
+    #[tokio::test]
+    async fn events_are_newest_first_by_parsed_time_across_every_page() {
+        let argo = resource("argoproj.io", "Application", "applications");
+        // A series first observed long ago whose newest occurrence is the most recent event.
+        let mut recurring = event("recurring", None, Some("2026-01-01T00:00:00.000000Z"));
+        recurring["series"] =
+            json!({"count": 7, "lastObservedTime": "2026-01-03T00:00:00.000000Z"});
+        let (client, requests) = mock_client_with_events(
+            200,
+            200,
+            vec![
+                event_list(
+                    vec![
+                        event("oldest", Some("2026-01-01T00:00:00Z"), None),
+                        event("second", Some("2026-01-02T00:00:00Z"), None),
+                        recurring,
+                    ],
+                    Some("page-2"),
+                ),
+                event_list(
+                    vec![
+                        // Later than "second", although it sorts before it as text.
+                        event("third", None, Some("2026-01-02T00:00:00.500000Z")),
+                        event("undated", None, None),
+                    ],
+                    None,
+                ),
+            ],
+        );
+        let result = inspect(client, &argo).await.unwrap();
+        let order: Vec<&str> = result
+            .events
+            .iter()
+            .map(|e| e["reason"].as_str().unwrap())
+            .collect();
+        assert_eq!(order, ["recurring", "third", "second", "oldest", "undated"]);
+        assert_eq!(result.events[0]["count"], 7);
+        assert!(result.events[0]["time"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-01-03T00:00:00"));
+        assert!(!result.events_truncated && !result.events_partial);
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["eventsTruncated"], false);
+        assert_eq!(value["eventsPartial"], false);
+        assert_eq!(value["eventsRead"], 5);
+        let requests = requests.lock().unwrap();
+        let listed: Vec<&String> = requests
+            .iter()
+            .map(|(request, _)| request)
+            .filter(|request| request.contains("/events"))
+            .collect();
+        assert_eq!(listed.len(), 2);
+        assert!(listed[0].contains("limit=500"));
+        assert!(listed[1].contains("continue=page-2"));
+    }
+    #[tokio::test]
+    async fn events_stop_at_the_page_bound_and_do_not_claim_to_be_the_latest() {
+        let argo = resource("argoproj.io", "Application", "applications");
+        let endless = event_list(
+            vec![event("again", Some("2026-01-01T00:00:00Z"), None)],
+            Some("more"),
+        );
+        let (client, requests) = mock_client_with_events(200, 200, vec![endless]);
+        let result = inspect(client, &argo).await.unwrap();
+        assert!(result.events_partial && result.events_truncated);
+        // Ten one-event pages: the count read is ten, not ten times the page size.
+        assert_eq!(result.events_read, EVENT_PAGES);
+        assert_eq!(
+            serde_json::to_value(&result).unwrap()["eventsRead"],
+            EVENT_PAGES
+        );
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(request, _)| request.contains("/events"))
+                .count(),
+            EVENT_PAGES
+        );
+
+        let many = (0..150)
+            .map(|i| {
+                let time = format!("2026-01-01T00:{:02}:{:02}Z", i / 60, i % 60);
+                event(&format!("e{i}"), Some(&time), None)
+            })
+            .collect();
+        let (client, _) = mock_client_with_events(200, 200, vec![event_list(many, None)]);
+        let result = inspect(client, &argo).await.unwrap();
+        assert_eq!(result.events.len(), 100);
+        assert!(result.events_truncated && !result.events_partial);
+        assert_eq!(result.events_read, 150);
+        assert_eq!(result.events[0]["reason"], "e149");
     }
     #[tokio::test]
     async fn writes_use_selected_namespace_and_resource_version_precondition() {
@@ -415,11 +745,11 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert_eq!(
             requests[0].0,
-            "GET /apis/argoproj.io/v1/namespaces/team/applications/apps"
+            "GET /apis/argoproj.io/v1alpha1/namespaces/team/applications/apps"
         );
         assert!(requests[1]
             .0
-            .starts_with("PATCH /apis/argoproj.io/v1/namespaces/team/applications/apps"));
+            .starts_with("PATCH /apis/argoproj.io/v1alpha1/namespaces/team/applications/apps"));
         assert_eq!(
             requests[1].1["metadata"],
             json!({"uid":"u","resourceVersion":"2"})

@@ -72,6 +72,24 @@ it("says why an app was quarantined and does not offer to re-enable it", async (
   expect(toggle.disabled).toBe(true);
   expect(screen.getByText("Remove")).toBeTruthy();
 });
+it("refreshes an open list only when an action on one of its own resources is accepted", async () => {
+  const { EXTENSION_RESOURCE_CHANGED } = await import("@srelens/core");
+  vi.mocked(readExtension).mockResolvedValue({ items: [] } as any);
+  render(
+    <ExtensionResults plugin={plugin} capability="list" context="staging" namespace="argo" />,
+  );
+  await waitFor(() => expect(readExtension).toHaveBeenCalledTimes(1));
+  const changed = (detail: object) =>
+    window.dispatchEvent(new CustomEvent(EXTENSION_RESOURCE_CHANGED, { detail }));
+  const resource = { id: plugin.manifest.id, revision: 1, capability: "list", context: "staging", namespace: "argo", name: "web" };
+  changed({ ...resource, context: "prod" });
+  changed({ ...resource, id: "org.other.app" });
+  changed({ ...resource, capability: "other" });
+  changed({ ...resource, namespace: "other" });
+  expect(readExtension).toHaveBeenCalledTimes(1);
+  changed(resource);
+  await waitFor(() => expect(readExtension).toHaveBeenCalledTimes(2));
+});
 it("offers native installation without a developer-mode toggle", async () => {
   render(<ExtensionManager />);
   expect(await screen.findByText("Install a local manifest")).toBeTruthy();

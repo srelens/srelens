@@ -2,9 +2,10 @@ import { ExtensionLogo } from "./ExtensionLogo";
 import { ExtensionRequirements } from "./ExtensionRequirements";
 import { AgeCell } from "../lib/ageCell";
 import { useNamespaceOptions } from "@srelens/core/react";
-import { useContext, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import {
   loadKubeconfigFiles,
+  onExtensionResourceChanged,
   readExtension,
   type ExtensionContribution,
   type InstalledExtension,
@@ -77,6 +78,21 @@ function Summary({
       namespace,
       refresh,
     ],
+  );
+  const { reload } = data;
+  // Status counts change when an action on one of these resources is accepted.
+  useEffect(
+    () =>
+      onExtensionResourceChanged((changed) => {
+        if (
+          changed.id === plugin.manifest.id &&
+          changed.context === context &&
+          changed.capability === page.capability &&
+          (!namespace || changed.namespace === namespace)
+        )
+          reload();
+      }),
+    [plugin.manifest.id, context, page.capability, namespace, reload],
   );
   const counts = statuses.map(
     (status) =>

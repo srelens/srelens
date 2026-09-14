@@ -3,9 +3,10 @@ import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 import { ResizeHandle } from "@srelens/ui-kit";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
 import { ExtensionResourceNavigation } from "./resourceNavigation";
-import { useContext, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import {
   describeError,
+  onExtensionResourceChanged,
   readExtension,
   type InstalledExtension,
 } from "@srelens/core";
@@ -124,6 +125,21 @@ export function ExtensionResults({
       refresh,
     ],
   );
+  const { reload } = data;
+  // Refresh when an action on one of this list's resources is accepted, from any view.
+  useEffect(
+    () =>
+      onExtensionResourceChanged((changed) => {
+        if (
+          changed.id === plugin.manifest.id &&
+          changed.context === context &&
+          changed.capability === capability &&
+          (!namespace || changed.namespace === namespace)
+        )
+          reload();
+      }),
+    [plugin.manifest.id, context, capability, namespace, reload],
+  );
   const binding = plugin.manifest.capabilities.find(
     (b) => b.name === capability,
   );
@@ -238,7 +254,7 @@ export function ExtensionResults({
       </div>
       {selected?.scope === scope && <div className="extension-detail-peek" style={{width:peekWidth}}>
         <ResizeHandle label="the resource details" width={peekWidth} minWidth={listRow.bounds.minWidth} maxWidth={listRow.bounds.maxWidth} edge="left" onResize={setPeekWidth} onCommit={savePeekWidth}/>
-        <ExtensionResourceDetails key={`${scope}/${selected.namespace}/${selected.name}`} selection={{id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:selected.namespace,name:selected.name}} onClose={()=>{setSelected(null);rowButtons.current.get(`${selected.namespace}/${selected.name}`)?.focus();}} onChanged={data.reload} />
+        <ExtensionResourceDetails key={`${scope}/${selected.namespace}/${selected.name}`} selection={{id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:selected.namespace,name:selected.name}} onClose={()=>{setSelected(null);rowButtons.current.get(`${selected.namespace}/${selected.name}`)?.focus();}} />
       </div>}
     </section>
   );

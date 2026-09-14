@@ -110,6 +110,29 @@ it("shows dashboard counts and navigates to grouped resource pages on the pinned
   fireEvent.click(screen.getByRole("button", { name: "Sources" }));
   expect(onPage).toHaveBeenCalledWith("repos", "");
 });
+it("refreshes dashboard counts when an action on one of their resources is accepted", async () => {
+  const { EXTENSION_RESOURCE_CHANGED } = await import("@srelens/core");
+  render(
+    <ExtensionWorkspace
+      plugin={plugin}
+      page={plugin.manifest.contributions.pages[0]}
+      context="staging"
+    />,
+  );
+  expect(await screen.findByText("Ready: 1")).toBeTruthy();
+  const before = vi.mocked(readExtension).mock.calls.length;
+  const changed = (detail: object) =>
+    window.dispatchEvent(new CustomEvent(EXTENSION_RESOURCE_CHANGED, { detail }));
+  const resource = { id: "org.test.flux", revision: 3, capability: "apps", context: "staging", namespace: "flux-system", name: "apps" };
+  changed({ ...resource, context: "prod" });
+  changed({ ...resource, id: "org.other.app" });
+  changed({ ...resource, capability: "other" });
+  expect(readExtension).toHaveBeenCalledTimes(before);
+  changed(resource);
+  await waitFor(() =>
+    expect(vi.mocked(readExtension).mock.calls.length).toBeGreaterThan(before),
+  );
+});
 it("reports failed summaries instead of displaying zero healthy resources", async () => {
   vi.mocked(readExtension).mockRejectedValue(new Error("Forbidden"));
   render(
