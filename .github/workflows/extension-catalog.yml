@@ -14,14 +14,17 @@ on:
   schedule:
     # Daily, off the hour.
     - cron: "41 5 * * *"
-  # Also on the code that decides what to trust, against the live assets that
-  # code will meet once it ships.
+  # Also on the code that decides what to trust and what to accept, against the
+  # live assets that code will meet once it ships. That is the whole extension
+  # module, not just catalog and signing: the check passes every downloaded
+  # manifest through `validate_app` in extensions.rs, so a change to the host's
+  # rules can reject the published apps. plugin-host parses and validates the
+  # manifest itself.
   pull_request:
     branches: [dev, main]
     paths:
-      - crates/registry/src/extensions/catalog.rs
-      - crates/registry/src/extensions/signing.rs
-      - crates/registry/src/extensions/srelens-apps.pub
+      - crates/registry/src/extensions.rs
+      - crates/registry/src/extensions/**
       - crates/plugin-host/**
       - .github/workflows/extension-catalog.yml
   workflow_dispatch:
