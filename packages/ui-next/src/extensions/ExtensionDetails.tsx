@@ -26,9 +26,22 @@ function describeGrant(id: string): string {
     .join(" · ");
 }
 
-function origin(version: { signatureProof?: unknown; source: ExtensionSource }) {
-  const signer = version.signatureProof ? "Signed by srelens" : "Unsigned";
-  return `${signer} · ${version.source === "catalog" ? "from the Catalog" : "local manifest"}`;
+const from: Record<ExtensionSource, string> = { catalog: "from the Catalog", local: "local manifest" };
+
+/**
+ * Says only what the host verified. The installed version's proof is rechecked on every
+ * load, and a failure quarantines the app; a kept version's is checked when it is restored.
+ */
+function origin(version: InstalledExtension | ExtensionPreviousVersion) {
+  const installed = "history" in version;
+  const signer = !version.signatureProof
+    ? "Unsigned"
+    : !installed
+      ? "Signed; verified when restored"
+      : version.quarantined
+        ? "Signature not verified"
+        : "Signed by srelens";
+  return `${signer} · ${from[version.source]}`;
 }
 
 const installedOn = (seconds: number) => new Date(seconds * 1000).toLocaleString();

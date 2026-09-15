@@ -280,6 +280,13 @@ it("reviews the permissions of a rollback whose grants differ", async () => {
     }),
   );
 });
+it("does not call a quarantined app's signature verified", async () => {
+  const app = { ...updated(), enabled: false, quarantined: "App publisher signature is invalid" };
+  const details = await openDetails(app);
+  const source = within(details).getByText(/revision 4/);
+  expect(source.textContent).toContain("Signature not verified");
+  expect(source.textContent).not.toContain("Signed by srelens");
+});
 it("only confirms a rollback whose grants are unchanged", async () => {
   const app = updated();
   app.history[0].manifest = { ...app.history[0].manifest, permissions: app.grants };
