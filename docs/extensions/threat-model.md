@@ -138,7 +138,7 @@ An author who wants an app to do more than show custom resources.
 | APP-9 | Pose as an official app | S | IDs under `org.srelens.` install only with the srelens signature (`check_install` in `crates/registry/src/extensions.rs`, `reserved` in `crates/registry/src/extensions/signing.rs`), so an unsigned install cannot take an official ID or replace a signed app. Bundled logos are chosen by ID (`packages/ui-next/src/extensions/ExtensionLogo.tsx`). Settings → Apps labels each app **Unsigned local**, **Signed by srelens** or **Signature not verified** (`packages/ui-next/src/extensions/Extensions.tsx`). | Shipped. See residual risk |
 | APP-10 | Spoof host UI or dialogs | S | Apps contribute data, never markup: pages, detail tabs and row actions render with host components, and the frontend renders no text as raw HTML. Names, titles and groups are 1–120 characters with no control characters (`label` in `crates/plugin-host/src/manifest.rs`). Install and action reviews are host-owned (`packages/ui-next/src/extensions/Extensions.tsx`, `packages/ui-next/src/extensions/ExtensionResourceDetails.tsx`). | Shipped. See residual risk |
 | APP-11 | Read clusters the user did not intend the app for | I | Every read names an explicit context and runs under that context's RBAC. Installation is app-wide, so an enabled app can read any cluster the user opens it on. An optional per-app cluster allow-list, enforced in `extensions.read`, `extensions.resource` and `extensions.action`, is in review. | Pending in [#597] ([#535]) |
-| APP-12 | Exhaust the host | D | A manifest is at most 256 KiB (`MAX_MANIFEST_BYTES` in `crates/plugin-host/src/manifest.rs`), with 1–32 capabilities, at most 64 contributions, 1–32 kinds per detail tab or row action, and 1–12 pages per dashboard. The inventory is at most 1 MiB and keeps at most three replaced versions per app. Resource inspection reads at most 10 pages of 500 events (`list_events` in `crates/kube/src/gitops.rs`). | Shipped. Performance budgets planned in [#581] |
+| APP-12 | Exhaust the host | D | What an app declares is bounded. A manifest is at most 256 KiB (`MAX_MANIFEST_BYTES` in `crates/plugin-host/src/manifest.rs`), with 1–32 capabilities, at most 64 contributions, 1–32 kinds per detail tab or row action, and 1–12 pages per dashboard. The inventory is at most 1 MiB and keeps at most three replaced versions per app. Single-resource inspection reads at most 10 pages of 500 events (`list_events` in `crates/kube/src/gitops.rs`). What an app's pages and dashboards read is not bounded; see residual risk. | Manifest and inventory limits shipped. Bounded app reads: **Gap**. Performance budgets planned in [#581] |
 
 Residual risk:
 
@@ -167,6 +167,24 @@ Residual risk:
 
   [#554] adds a diff for updates, not a summary for first installs. Showing the bindings in the install review is planned
   in [#608].
+- **App reads are unbounded.** An app page lists with `k8s.listCustomResource`
+  (`list_custom_resource_capability` in `crates/kube/src/crds.rs`), and a dashboard reads
+  events with `k8s.listEvents` (`list_events_capability` in `crates/kube/src/events.rs`).
+  - **Backend:** each sends one unpaginated list request (`ListParams::default()`). With no
+    namespace in the view it lists every namespace (`scoped_api` in
+    `crates/kube/src/lib.rs`). The whole response is held in memory, and `extensions.read`
+    returns it uncapped.
+  - **Rendering:** the page renders every row
+    (`packages/ui-next/src/extensions/ExtensionResults.tsx`). The dashboard filters events
+    by API group in the browser and renders every match
+    (`packages/ui-next/src/extensions/ExtensionWorkspace.tsx`).
+  - **Columns:** every row evaluates every declared printer column against the whole
+    object, and the number of `printerColumns` is limited only by the manifest's size.
+  - **Timeout:** `request_timeout` bounds how long a read waits, not the memory or
+    rendering cost of a large response that arrives in time.
+
+  A large cluster, a noisy namespace or a manifest with many columns can stall or exhaust
+  the desktop app. RBAC still limits what is listed. **Gap.**
 - **Unsigned apps choose their own names.** A local app outside the reserved namespace can
   call itself "Argo CD". It gets an initials mark and the **Unsigned local** label, not the
   bundled logo.
@@ -209,7 +227,7 @@ An honest app with a flaw, or a host bug that an app's input can reach.
 | VULN-1 | A flawed app is hijacked to run code, open sockets or read files | E | Not possible in API 0.1: there is no app code to hijack, and the manifest type admits no executable kind. Executable apps are to ship only with an OS sandbox, and unsigned ones only behind an explicit setting. | Sandbox spike planned in [#571] (epic [#521]); untrusted-source policy in [#558] |
 | VULN-2 | A malformed manifest, catalog, signature or inventory crashes or confuses the host | T, D | Parsers are Rust and `serde`, and sizes are checked before parsing: manifests 256 KiB (`Manifest::decode` in `crates/plugin-host/src/manifest.rs`), catalogs 1 MiB (`parse_catalog` and `download` in `crates/registry/src/extensions/catalog.rs`), the inventory 1 MiB (`read` in `crates/registry/src/extensions.rs`), signatures 64 bytes. Every problem found in a manifest is reported with a stable code and path (`crates/plugin-host/src/validation.rs`). | Shipped. Fuzzing planned in [#580] |
 | VULN-3 | An app's settings leak a credential | I | Settings are free-form JSON, and nothing marks a value as secret. The declarative host never interpolates them into capability arguments, but it keeps them in plain text in two places. The inventory stores them, and `extensions.list` returns them. An `extensions.configure` call made over MCP is also copied into the MCP audit log (`audit.jsonl`, created with mode 0600 on Unix). The capability is not sensitive-annotated, so `redact` (`crates/mcp/src/audit.rs`) removes only values whose key contains `token`, `secret`, `password` or `key`, or is exactly `data`, `stringData`, `yaml` or `values`. A setting named `credential` or `certificate` is written verbatim, even when consent is denied, and stays in `audit.jsonl.1` after the log rotates. Settings saved from Settings → Apps are not audited and reach only the inventory. | Keychain-backed secret settings planned in [#543], which keeps secret values out of `settings`. Redacting `settings` in the audit log planned in [#605] |
-| VULN-4 | An app is slow on a large cluster | D | Cluster requests are bounded by `request_timeout` (`crates/kube/src/connect.rs`) and by the limits in APP-12. | Performance budgets planned in [#581] |
+| VULN-4 | An app is slow on a large cluster | D | Each cluster request is bounded in time by `request_timeout` (`crates/kube/src/connect.rs`), 8 seconds by default and configurable from 1 to 120. That limits how long a read can wait, not how large a response that arrives in time can be. | Performance budgets planned in [#581]. Bounded app reads: **Gap** (see APP-12) |
 
 ### Malicious catalog or network position
 
