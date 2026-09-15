@@ -393,12 +393,24 @@ fn validate_app(
             );
         }
     }
-    // The broker's own registration checks the bindings against each target's schema.
-    if problems.0.is_empty() {
-        let mut temp = Registry::new();
-        if let Err(reason) = PluginHost::new(core).register(&mut temp, manifest.clone(), grants) {
-            problems.push(Code::InvalidBinding, "capabilities", reason);
+    // The broker checks each binding against its target's input schema whatever else is
+    // wrong, except where the target itself is refused or the path is already reported.
+    let host = PluginHost::new(core);
+    for (index, binding) in manifest.capabilities.iter().enumerate() {
+        let target = format!("capabilities[{index}].target");
+        if problems
+            .0
+            .iter()
+            .any(|p| p.code == Code::UnsupportedTarget && p.path == target)
+        {
+            continue;
         }
+        let found: Vec<_> = host
+            .binding_problems(index, binding)
+            .into_iter()
+            .filter(|found| !problems.0.iter().any(|p| p.path == found.path))
+            .collect();
+        problems.0.extend(found);
     }
     problems.into_result()
 }
@@ -424,13 +436,14 @@ fn check_install(
                 manifest.id
             ),
         ),
-        // Verification parses the manifest again, so it is meaningful only once that passes.
-        Some(signature) if problems.0.is_empty() => {
-            if let Err(reason) = signing::verify(source.as_bytes(), signature) {
+        None => {}
+        // The signature covers the exact bytes, so it is checked whatever else is wrong.
+        Some(signature) => {
+            if let Err(reason) = signing::verify_for(&manifest.id, source.as_bytes(), signature)
+            {
                 problems.push(Code::InvalidSignature, "", reason);
             }
         }
-        _ => {}
     }
     problems.into_result()?;
     Ok(manifest)
@@ -761,6 +774,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tampered["errors"][0]["code"], "EXTENSION_INVALID_SIGNATURE");
+
+        // Broker and signature checks do not wait for the other problems to be fixed.
+        let codes_and_paths = |report: &Value| {
+            let mut found: Vec<(String, String)> = report["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|error| {
+                    (
+                        error["code"].as_str().unwrap().to_owned(),
+                        error["path"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect();
+            found.sort();
+            found
+        };
+        let mut value: Value = serde_json::from_str(&manifest()).unwrap();
+        value["id"] = json!("Not a domain");
+        value["capabilities"][0]["arguments"]["bogus"] = json!("x");
+        assert_eq!(
+            codes_and_paths(&validate(value.to_string()).await.unwrap()),
+            [
+                (
+                    "EXTENSION_INVALID_BINDING".to_owned(),
+                    "capabilities[0].arguments.bogus".to_owned()
+                ),
+                ("EXTENSION_INVALID_ID".to_owned(), "id".to_owned()),
+            ]
+        );
+        let renamed = official.replace("\"name\": \"Argo CD\"", "\"name\": \"\"");
+        assert_ne!(renamed, official);
+        let report = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": renamed, "grants": grants, "signature": signature}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            codes_and_paths(&report),
+            [
+                ("EXTENSION_INVALID_SIGNATURE".to_owned(), String::new()),
+                ("EXTENSION_INVALID_VALUE".to_owned(), "name".to_owned()),
+            ]
+        );
     }
 
     fn setup(path: &std::path::Path) -> Registry {

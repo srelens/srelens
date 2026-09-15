@@ -411,24 +411,30 @@ impl Manifest {
                 format!("Manifest is not valid JSON: {e}"),
             )
         })?;
-        // Check the API range before the strict schema, so a manifest written for a newer API
-        // is told which version it needs rather than which field this host does not know.
-        if let Some(range) = raw.get("srelensApiVersion").and_then(Value::as_str) {
-            if semver::VersionReq::parse(range)
-                .is_ok_and(|req| matching_api_versions_in(&req, SUPPORTED_API_VERSIONS).is_empty())
-            {
-                return Err(ValidationError::new(
+        let unsupported = raw
+            .get("srelensApiVersion")
+            .and_then(Value::as_str)
+            .filter(|range| {
+                semver::VersionReq::parse(range).is_ok_and(|req| {
+                    matching_api_versions_in(&req, SUPPORTED_API_VERSIONS).is_empty()
+                })
+            });
+        // Decode the source, not `raw`: a repeated key is an error rather than last-wins.
+        let mut deserializer = serde_json::Deserializer::from_str(source);
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+            // A manifest written for an API this host lacks is told the version it needs,
+            // not the field this host does not know. One that still decodes goes on to
+            // `validate`, which reports the version together with every other problem.
+            let problem = match unsupported {
+                Some(range) => ValidationError::new(
                     Code::ApiIncompatible,
                     "srelensApiVersion",
                     unsupported_api(range),
-                )
-                .into());
-            }
-        }
-        // Decode the source, not `raw`: a repeated key is an error rather than last-wins.
-        let mut deserializer = serde_json::Deserializer::from_str(source);
-        serde_path_to_error::deserialize(&mut deserializer)
-            .map_err(|error| ValidationErrors::from(schema_error(&error)))
+                ),
+                None => schema_error(&error),
+            };
+            ValidationErrors::from(problem)
+        })
     }
 
     /// The published JSON Schema. schemars annotates Rust integers with formats such as

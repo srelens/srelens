@@ -218,6 +218,26 @@ fn errors_use_the_camel_case_wire_shape_and_read_as_one_line_each() {
 }
 
 #[test]
+fn an_unsupported_api_range_is_reported_with_the_other_problems() {
+    let mut value = manifest();
+    value["srelensApiVersion"] = json!("^99");
+    value["id"] = json!("Not a domain");
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[
+            ("EXTENSION_API_INCOMPATIBLE", "srelensApiVersion"),
+            ("EXTENSION_INVALID_ID", "id"),
+        ])
+    );
+    // One this host cannot decode is told the version it needs, not the field it lacks.
+    value["contributions"]["dashboardCards"] = json!([]);
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[("EXTENSION_API_INCOMPATIBLE", "srelensApiVersion")])
+    );
+}
+
+#[test]
 fn every_code_is_documented_in_the_specification() {
     let specification = include_str!("../../../docs/extensions/specification.md");
     for &each in ValidationCode::ALL {
