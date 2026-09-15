@@ -130,7 +130,10 @@ export interface ExtensionCatalogSnapshot {
   fetchedAt: number;
   stale: boolean;
   error: string | null;
+  /** The newest supported extension API version. Deprecated: read `hostApiVersions`. */
   hostApiVersion: string;
+  /** Every extension API version this host supports, oldest first. */
+  hostApiVersions: string[];
   incompatible: string[];
 }
 export const listExtensionCatalog = (refresh = false) =>

@@ -3,7 +3,137 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
-pub const API_VERSION: &str = "0.1.0";
+/// Extension API versions this host implements, oldest first. A manifest is accepted when
+/// its `srelensApiVersion` range matches any of them. How versions are added and retired
+/// is specified in docs/extensions/specification.md.
+pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.1.0"];
+
+/// The highest version in `supported` that `range` matches.
+pub fn negotiate_api_version_in(
+    range: &semver::VersionReq,
+    supported: &[&str],
+) -> Option<semver::Version> {
+    supported
+        .iter()
+        .filter_map(|version| semver::Version::parse(version).ok())
+        .filter(|version| range.matches(version))
+        .max()
+}
+
+/// The API version this host serves a manifest under, if it supports the manifest's range.
+pub fn negotiate_api_version(range: &semver::VersionReq) -> Option<semver::Version> {
+    negotiate_api_version_in(range, SUPPORTED_API_VERSIONS)
+}
+
+/// Every version in `supported` that `range` matches, oldest first.
+pub fn matching_api_versions_in(
+    range: &semver::VersionReq,
+    supported: &[&str],
+) -> Vec<semver::Version> {
+    let mut versions: Vec<semver::Version> = supported
+        .iter()
+        .filter_map(|version| semver::Version::parse(version).ok())
+        .filter(|version| range.matches(version))
+        .collect();
+    versions.sort();
+    versions
+}
+
+fn unsupported_api(range: &str) -> String {
+    format!(
+        "extension requires API {range}; host supports {}",
+        SUPPORTED_API_VERSIONS.join(", ")
+    )
+}
+/// A manifest field that is not part of every supported API version.
+#[derive(Debug, Clone, Copy)]
+pub struct ApiField {
+    /// Dot-separated from the manifest root; `[]` steps into every element of an array,
+    /// and the last segment always names a field.
+    pub path: &'static str,
+    /// The first API version with the field.
+    pub introduced: &'static str,
+    /// The first API version without it, when a later line removed or renamed it.
+    pub removed: Option<&'static str>,
+}
+
+/// Manifest fields added or removed after API 0.1. A manifest may use a field only when
+/// its range negotiates to a version inside the field's availability. A rename is a
+/// removal plus an addition. Empty while 0.1 is the only version.
+pub const API_FIELDS: &[ApiField] = &[];
+
+/// Rejects a field in `raw` that is missing from any of `versions`: every supported API
+/// version the manifest's range admits. A range that also admits an older line claims
+/// hosts on that line, so it may use only fields every admitted line has.
+pub fn check_api_fields_in(
+    raw: &Value,
+    versions: &[semver::Version],
+    fields: &[ApiField],
+) -> Result<(), String> {
+    let parse = |field: &ApiField, version: &str| {
+        semver::Version::parse(version)
+            .map_err(|e| format!("invalid API version for {}: {e}", field.path))
+    };
+    for field in fields {
+        if !field_present(raw, field.path) {
+            continue;
+        }
+        let introduced = parse(field, field.introduced)?;
+        let removed = field
+            .removed
+            .map(|removed| parse(field, removed))
+            .transpose()?;
+        for version in versions {
+            if *version < introduced {
+                return Err(format!(
+                    "`{}` requires API {introduced}, but this manifest's srelensApiVersion admits API {version}",
+                    field.path
+                ));
+            }
+            if let Some(removed) = &removed {
+                if version >= removed {
+                    return Err(format!(
+                        "`{}` was removed in API {removed}, but this manifest's srelensApiVersion admits API {version}",
+                        field.path
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `path` holds a value in `value`. Null, an empty array and an empty object count
+/// as absent: they contribute nothing, and a manifest loaded from storage serializes its
+/// unused collection fields as empty.
+fn field_present(value: &Value, path: &str) -> bool {
+    let mut nodes = vec![value];
+    for segment in path.split('.') {
+        let (key, each) = match segment.strip_suffix("[]") {
+            Some(key) => (key, true),
+            None => (segment, false),
+        };
+        let mut next = Vec::new();
+        for node in nodes {
+            match node.get(key) {
+                Some(Value::Array(items)) if each => next.extend(items.iter()),
+                Some(child) if !each => next.push(child),
+                _ => {}
+            }
+        }
+        if next.is_empty() {
+            return false;
+        }
+        nodes = next;
+    }
+    nodes.iter().any(|node| match node {
+        Value::Null => false,
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+        _ => true,
+    })
+}
+
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -153,6 +283,20 @@ impl Manifest {
         if source.len() > MAX_MANIFEST_BYTES {
             return Err("extension manifest exceeds 256 KiB".into());
         }
+        // Check the API range before the strict schema, so a manifest written for a newer API
+        // is told which version it needs rather than which field this host does not know.
+        let raw = serde_json::from_str::<Value>(source).ok();
+        if let Some(range) = raw
+            .as_ref()
+            .and_then(|raw| raw.get("srelensApiVersion"))
+            .and_then(Value::as_str)
+        {
+            if semver::VersionReq::parse(range)
+                .is_ok_and(|req| matching_api_versions_in(&req, SUPPORTED_API_VERSIONS).is_empty())
+            {
+                return Err(unsupported_api(range));
+            }
+        }
         let manifest: Self =
             serde_json::from_str(source).map_err(|e| format!("invalid extension manifest: {e}"))?;
         manifest.validate()?;
@@ -161,6 +305,17 @@ impl Manifest {
 
     pub fn schema() -> Value {
         serde_json::to_value(schemars::schema_for!(Self)).expect("manifest schema serializes")
+    }
+
+    /// Rejects a field the manifest uses that is missing from any version in `supported`
+    /// its range admits. It works on a manifest loaded from storage as well as a parsed one,
+    /// so inventory reverification applies the same rules as installation.
+    pub fn check_api_fields(&self, supported: &[&str], fields: &[ApiField]) -> Result<(), String> {
+        let range = semver::VersionReq::parse(&self.api_version)
+            .map_err(|e| format!("invalid srelensApiVersion: {e}"))?;
+        let admitted = matching_api_versions_in(&range, supported);
+        let value = serde_json::to_value(self).map_err(|e| e.to_string())?;
+        check_api_fields_in(&value, &admitted, fields)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -174,12 +329,12 @@ impl Manifest {
             .map_err(|e| format!("invalid extension version: {e}"))?;
         let range = semver::VersionReq::parse(&self.api_version)
             .map_err(|e| format!("invalid srelensApiVersion: {e}"))?;
-        if !range.matches(&semver::Version::parse(API_VERSION).unwrap()) {
-            return Err(format!(
-                "extension requires API {}; host supports {API_VERSION}",
-                self.api_version
-            ));
+        if negotiate_api_version(&range).is_none() {
+            return Err(unsupported_api(&self.api_version));
         }
+        // Stored manifests are rechecked here as well, so an app using a field a newer
+        // host no longer admits is quarantined rather than left enabled.
+        self.check_api_fields(SUPPORTED_API_VERSIONS, API_FIELDS)?;
         if self.capabilities.is_empty() || self.capabilities.len() > 32 {
             return Err("declare 1–32 capabilities".into());
         }

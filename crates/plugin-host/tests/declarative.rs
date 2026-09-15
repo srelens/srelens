@@ -293,6 +293,169 @@ fn manifest_wire_contract_and_contribution_identity_are_strict() {
 }
 
 #[test]
+fn api_ranges_negotiate_against_every_supported_version() {
+    use srelens_plugin_host::{negotiate_api_version_in, SUPPORTED_API_VERSIONS};
+    let req = |range: &str| semver::VersionReq::parse(range).unwrap();
+    let both = ["0.1.0", "0.2.0"];
+    let negotiated = |range: &str, supported: &[&str]| {
+        negotiate_api_version_in(&req(range), supported).map(|v| v.to_string())
+    };
+    // A ^0.1 manifest keeps installing on a host that also supports 0.2.
+    assert_eq!(negotiated("^0.1", &both).as_deref(), Some("0.1.0"));
+    assert_eq!(negotiated("^0.2", &both).as_deref(), Some("0.2.0"));
+    // A range spanning several supported versions is served under the highest.
+    assert_eq!(negotiated(">=0.1, <1", &both).as_deref(), Some("0.2.0"));
+    assert_eq!(negotiated("^0.3", &both), None);
+    assert_eq!(negotiated("^0.1", &["0.2.0"]), None);
+    // The host's own set parses and is ordered oldest to newest.
+    let parsed: Vec<semver::Version> = SUPPORTED_API_VERSIONS
+        .iter()
+        .map(|v| semver::Version::parse(v).unwrap())
+        .collect();
+    assert!(!parsed.is_empty() && parsed.windows(2).all(|w| w[0] < w[1]));
+    assert!(Manifest::parse(&manifest().to_string()).is_ok());
+}
+
+#[test]
+fn a_manifest_for_a_newer_api_is_told_the_version_it_needs_not_an_unknown_field() {
+    let mut newer = manifest();
+    newer["srelensApiVersion"] = json!("^0.9");
+    newer["contributions"]["dashboardCards"] = json!([]);
+    let error = Manifest::parse(&newer.to_string()).unwrap_err();
+    assert!(error.contains("requires API ^0.9"), "{error}");
+    assert!(
+        error.contains(&srelens_plugin_host::SUPPORTED_API_VERSIONS.join(", ")),
+        "{error}"
+    );
+    // A supported range still gets the strict schema.
+    newer["srelensApiVersion"] = json!("^0.1");
+    assert!(Manifest::parse(&newer.to_string())
+        .unwrap_err()
+        .contains("unknown field"));
+}
+
+#[test]
+fn fields_must_exist_in_every_api_version_the_range_admits() {
+    use srelens_plugin_host::{
+        check_api_fields_in, matching_api_versions_in, ApiField, API_FIELDS, SUPPORTED_API_VERSIONS,
+    };
+    let version = |v: &str| semver::Version::parse(v).unwrap();
+    let range = |r: &str| semver::VersionReq::parse(r).unwrap();
+    let both = ["0.1.0", "0.2.0"];
+    let fields = [
+        ApiField {
+            path: "contributions.dashboardCards",
+            introduced: "0.2.0",
+            removed: None,
+        },
+        ApiField {
+            path: "contributions.pages[].badges",
+            introduced: "0.2.0",
+            removed: None,
+        },
+        // A 0.1 field a later line removed; a rename is this plus an addition.
+        ApiField {
+            path: "contributions.rowActions",
+            introduced: "0.1.0",
+            removed: Some("0.2.0"),
+        },
+    ];
+    let with_row_action = || {
+        let mut value = manifest();
+        value["contributions"]["rowActions"] = json!([{"id":"inspect","title":"Inspect","capability":"applications","forKinds":["argoproj.io/Application"]}]);
+        value
+    };
+    let admits = |r: &str| matching_api_versions_in(&range(r), &both);
+    assert_eq!(admits("^0.1"), [version("0.1.0")]);
+    assert_eq!(admits("^0.2"), [version("0.2.0")]);
+    assert_eq!(admits(">=0.1, <0.3"), [version("0.1.0"), version("0.2.0")]);
+    assert!(admits("^0.3").is_empty());
+
+    assert!(check_api_fields_in(&manifest(), &admits("^0.1"), &fields).is_ok());
+    // An empty value contributes nothing, so it does not count as using the field.
+    assert!(check_api_fields_in(&manifest(), &admits("^0.2"), &fields).is_ok());
+    let mut empty_cards = manifest();
+    empty_cards["contributions"]["dashboardCards"] = json!([]);
+    assert!(check_api_fields_in(&empty_cards, &admits("^0.1"), &fields).is_ok());
+
+    // A 0.2 field under ^0.1 fails even on a host that knows the field.
+    let mut top_level = manifest();
+    top_level["contributions"]["dashboardCards"] = json!([{"id": "card"}]);
+    let error = check_api_fields_in(&top_level, &admits("^0.1"), &fields).unwrap_err();
+    assert!(
+        error.contains("`contributions.dashboardCards` requires API 0.2.0"),
+        "{error}"
+    );
+    assert!(error.contains("admits API 0.1.0"), "{error}");
+    assert!(check_api_fields_in(&top_level, &admits("^0.2"), &fields).is_ok());
+    // A range spanning 0.1 and 0.2 still claims 0.1 hosts, so the 0.2 field is rejected.
+    let spanning = check_api_fields_in(&top_level, &admits(">=0.1, <0.3"), &fields).unwrap_err();
+    assert!(spanning.contains("admits API 0.1.0"), "{spanning}");
+
+    let mut per_page = manifest();
+    per_page["contributions"]["pages"][0]["badges"] = json!([{"id": "badge"}]);
+    assert!(check_api_fields_in(&per_page, &admits("^0.1"), &fields).is_err());
+    assert!(check_api_fields_in(&per_page, &admits("^0.2"), &fields).is_ok());
+
+    // A field removed in 0.2 is accepted under ^0.1 and rejected by any range admitting 0.2.
+    let removed = check_api_fields_in(&with_row_action(), &admits("^0.2"), &fields).unwrap_err();
+    assert!(
+        removed.contains("`contributions.rowActions` was removed in API 0.2.0"),
+        "{removed}"
+    );
+    assert!(check_api_fields_in(&with_row_action(), &admits(">=0.1, <0.3"), &fields).is_err());
+    assert!(check_api_fields_in(&with_row_action(), &admits("^0.1"), &fields).is_ok());
+
+    // Every gated field names a supported version and is removed only after it arrived.
+    for field in API_FIELDS {
+        assert!(
+            SUPPORTED_API_VERSIONS.contains(&field.introduced),
+            "{}",
+            field.path
+        );
+        if let Some(removed) = field.removed {
+            assert!(
+                version(removed) > version(field.introduced),
+                "{}",
+                field.path
+            );
+        }
+    }
+}
+
+#[test]
+fn stored_manifests_are_rechecked_against_the_hosts_api_fields() {
+    use srelens_plugin_host::ApiField;
+    // An app installed while 0.2 was newest, with a range that also admits 0.3, which
+    // later removes a field the app uses.
+    let mut value = manifest();
+    value["srelensApiVersion"] = json!(">=0.2, <0.4");
+    value["contributions"]["rowActions"] = json!([{"id":"inspect","title":"Inspect","capability":"applications","forKinds":["argoproj.io/Application"]}]);
+    // The inventory deserializes stored manifests directly rather than through parse.
+    let stored: Manifest = serde_json::from_value(value).unwrap();
+    let fields = [ApiField {
+        path: "contributions.rowActions",
+        introduced: "0.1.0",
+        removed: Some("0.3.0"),
+    }];
+    assert!(stored
+        .check_api_fields(&["0.1.0", "0.2.0"], &fields)
+        .is_ok());
+    let error = stored
+        .check_api_fields(&["0.1.0", "0.2.0", "0.3.0"], &fields)
+        .unwrap_err();
+    assert!(error.contains("was removed in API 0.3.0"), "{error}");
+    assert!(error.contains("admits API 0.3.0"), "{error}");
+    // Unused collection fields serialize as empty and do not count as using a field.
+    let mut unused = manifest();
+    unused["srelensApiVersion"] = json!(">=0.2, <0.4");
+    let unused: Manifest = serde_json::from_value(unused).unwrap();
+    assert!(unused
+        .check_api_fields(&["0.1.0", "0.2.0", "0.3.0"], &fields)
+        .is_ok());
+}
+
+#[test]
 fn core_kinds_use_an_explicit_empty_api_group() {
     let mut value = manifest();
     value["contributions"]["detailTabs"] =

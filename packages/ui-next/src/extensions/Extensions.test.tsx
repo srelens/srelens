@@ -478,7 +478,7 @@ it.each([undefined, [1,2,3]])("installs catalog bytes and signature %j only afte
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] });
   const source = JSON.stringify(plugin.manifest);
   vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source, signature });
-  vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [{ id: plugin.manifest.id, name: "Catalog GitOps", description: "GitOps resources", repository: "https://github.com/example/gitops", license: "MIT", release: { version: "0.1.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: true } }] }, fetchedAt: 1, stale: false, error: null, hostApiVersion: "0.1.0", incompatible: [] } as any);
+  vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [{ id: plugin.manifest.id, name: "Catalog GitOps", description: "GitOps resources", repository: "https://github.com/example/gitops", license: "MIT", release: { version: "0.1.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: true } }] }, fetchedAt: 1, stale: false, error: null, hostApiVersions: ["0.1.0"], incompatible: [] } as any);
   render(<ExtensionManager />);
   fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
   fireEvent.click(await screen.findByText("Review installation"));
@@ -490,7 +490,7 @@ it.each([undefined, [1,2,3]])("installs catalog bytes and signature %j only afte
 });
 
 it("separates installed apps from the catalog and collapses local installation by default", async () => {
-  vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [] }, fetchedAt: 1, stale: false, error: null, hostApiVersion: "0.1.0", incompatible: [] } as any);
+  vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [] }, fetchedAt: 1, stale: false, error: null, hostApiVersions: ["0.1.0"], incompatible: [] } as any);
   render(<ExtensionManager />);
   expect((await screen.findByRole("tab", { name: "Apps" })).getAttribute("aria-selected")).toBe("true");
   expect(screen.getByLabelText("Local app manifest (JSON)").closest("details")?.open).toBe(false);

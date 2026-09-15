@@ -1,7 +1,7 @@
 //! A fixed public catalog; official manifests require a pinned publisher signature.
 use super::*;
 use sha2::{Digest, Sha256};
-use srelens_plugin_host::{API_VERSION, MAX_MANIFEST_BYTES};
+use srelens_plugin_host::{negotiate_api_version, MAX_MANIFEST_BYTES, SUPPORTED_API_VERSIONS};
 use std::{
     collections::BTreeSet,
     io::Read as _,
@@ -45,16 +45,22 @@ struct Release {
     srelens_api_version: String,
     prerelease: bool,
 }
+// Also the on-disk cache. Its host fields are recomputed on every load, so a cache written
+// by an older host (without `hostApiVersions`) is still read rather than refetched.
 #[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct Snapshot {
     catalog: Catalog,
     #[serde(rename = "fetchedAt")]
     fetched_at: u64,
     stale: bool,
     error: Option<String>,
-    #[serde(rename = "hostApiVersion")]
+    /// Every extension API version this host supports, oldest first.
+    /// The newest supported extension API version. Deprecated in favour of
+    /// `host_api_versions`, and kept for API 0.1 clients until a new API line removes it.
+    #[serde(rename = "hostApiVersion", default)]
     host_api_version: String,
+    #[serde(rename = "hostApiVersions", default)]
+    host_api_versions: Vec<String>,
     incompatible: Vec<String>,
 }
 #[derive(Deserialize, JsonSchema)]
@@ -106,8 +112,20 @@ fn allowed_download(url: &reqwest::Url) -> bool {
         }
 }
 fn compatible(range: &str) -> bool {
-    semver::VersionReq::parse(range)
-        .is_ok_and(|range| range.matches(&semver::Version::parse(API_VERSION).unwrap()))
+    semver::VersionReq::parse(range).is_ok_and(|range| negotiate_api_version(&range).is_some())
+}
+fn newest_api_version() -> String {
+    SUPPORTED_API_VERSIONS
+        .last()
+        .copied()
+        .unwrap_or_default()
+        .to_owned()
+}
+fn host_api_versions() -> Vec<String> {
+    SUPPORTED_API_VERSIONS
+        .iter()
+        .map(|version| (*version).to_owned())
+        .collect()
 }
 fn hex(value: &str, len: usize) -> bool {
     value.len() == len
@@ -216,7 +234,8 @@ fn load_with(
             .filter(|e| !compatible(&e.release.srelens_api_version))
             .map(|e| e.id.clone())
             .collect();
-        state.host_api_version = API_VERSION.into();
+        state.host_api_version = newest_api_version();
+        state.host_api_versions = host_api_versions();
         Some(state)
     });
     if !refresh
@@ -251,7 +270,8 @@ fn load_with(
         fetched_at: now(),
         stale: false,
         error: None,
-        host_api_version: API_VERSION.into(),
+        host_api_version: newest_api_version(),
+        host_api_versions: host_api_versions(),
     };
     let mut file =
         tempfile::NamedTempFile::new_in(path.parent().ok_or("Catalog cache has no parent")?)
@@ -511,6 +531,35 @@ mod tests {
             serde_json::from_value::<ListIn>(json!({"refresh":true}))
                 .unwrap()
                 .refresh
+        );
+    }
+    #[test]
+    fn snapshot_lists_every_supported_api_version_and_reuses_legacy_caches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let state = load_with(&path, false, || Ok(fixture())).unwrap();
+        let value = serde_json::to_value(&state).unwrap();
+        let supported = json!(srelens_plugin_host::SUPPORTED_API_VERSIONS);
+        assert_eq!(value["hostApiVersions"], supported);
+        // The singular field stays for API 0.1 clients, as the newest supported version.
+        let newest = json!(srelens_plugin_host::SUPPORTED_API_VERSIONS.last().unwrap());
+        assert_eq!(value["hostApiVersion"], newest);
+        // A cache written before the list existed is still used rather than refetched.
+        let mut legacy = value;
+        legacy.as_object_mut().unwrap().remove("hostApiVersions");
+        legacy["hostApiVersion"] = json!("0.1.0");
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let cached = load_with(&path, false, || {
+            panic!("a legacy cache must not force a refetch")
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&cached).unwrap()["hostApiVersions"],
+            supported
+        );
+        assert_eq!(
+            serde_json::to_value(&cached).unwrap()["hostApiVersion"],
+            newest
         );
     }
     #[test]
