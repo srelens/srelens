@@ -90,7 +90,7 @@ exactly that.
   | Flag | Authorizes |
   | --- | --- |
   | `--mcp-allow-destructive` | anything that changes state — delete, drain, scale, apply, helm install, installing local tooling |
-  | `--mcp-allow-sensitive-reads` | reads that return secret material, i.e. `k8s.getSecret` |
+  | `--mcp-allow-sensitive-reads` | reads that return secret material — `k8s.getSecret`, or the SSH node diagnostics, whose host logs and process arguments can carry credentials (the full set is under "sensitive read" in [mcp-catalog.md](mcp-catalog.md)) |
 
   So an agent allowed to read a Secret still cannot drain a node, and an
   agent allowed to drain nodes cannot read your Secrets. Both flags apply to

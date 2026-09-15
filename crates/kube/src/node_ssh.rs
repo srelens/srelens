@@ -335,7 +335,7 @@ pub fn node_service_status_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<NodeServiceStatusIn, NodeServiceStatusOut, _, _>(
         "k8s.nodeServiceStatus",
         "check the status of a systemd service (e.g. rke2-server, kubelet) on a node via SSH",
-        Annotations::READ_ONLY,
+        Annotations::SENSITIVE_READ,
         move |input: NodeServiceStatusIn| {
             let cache = cache.clone();
             async move {
@@ -437,7 +437,7 @@ pub fn node_journal_logs_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<NodeJournalLogsIn, NodeJournalLogsOut, _, _>(
         "k8s.nodeJournalLogs",
         "retrieve journalctl logs for a service on a node via SSH",
-        Annotations::READ_ONLY,
+        Annotations::SENSITIVE_READ,
         move |input: NodeJournalLogsIn| {
             let cache = cache.clone();
             async move {
@@ -468,22 +468,47 @@ pub fn node_journal_logs_capability(cache: Arc<ClientCache>) -> Capability {
 
                 let (stdout, stderr, exit_code) =
                     run_ssh_command(&args, DEFAULT_SSH_TIMEOUT_SECS).await?;
-
-                if exit_code == 255 && !stderr.is_empty() && stdout.is_empty() {
-                    return Err(CapabilityError::Handler(format!(
-                        "SSH connection to '{target_host}' failed: {}",
-                        stderr.trim()
-                    )));
-                }
-
-                let line_count = stdout.lines().count();
-                Ok(NodeJournalLogsOut {
-                    logs: stdout,
-                    lines_returned: line_count,
-                })
+                journal_logs_result(&target_host, stdout, &stderr, exit_code)
             }
         },
     )
+}
+
+/// Turn a remote `journalctl` run into logs or an error. A failed call and an
+/// empty journal must not read as the same answer: `--since nonsense` exits 1
+/// with "Failed to parse timestamp" on stderr, and returning that as zero lines
+/// claims the node has no logs (#615). A `--grep` that matches nothing also
+/// exits 1, but with nothing on stderr, so it stays an honest empty result.
+pub fn journal_logs_result(
+    target_host: &str,
+    stdout: String,
+    stderr: &str,
+    exit_code: i32,
+) -> Result<NodeJournalLogsOut, CapabilityError> {
+    if exit_code == 255 && !stderr.is_empty() && stdout.is_empty() {
+        return Err(CapabilityError::Handler(format!(
+            "SSH connection to '{target_host}' failed: {}",
+            stderr.trim()
+        )));
+    }
+    // `StrictHostKeyChecking=accept-new` announces a first connection on
+    // stderr; that notice is ssh talking, not journalctl failing.
+    let journal_stderr = stderr
+        .lines()
+        .filter(|line| !line.starts_with("Warning: Permanently added"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if exit_code != 0 && !journal_stderr.trim().is_empty() {
+        return Err(CapabilityError::Handler(format!(
+            "journalctl on '{target_host}' failed (exit {exit_code}): {}",
+            journal_stderr.trim()
+        )));
+    }
+    let line_count = stdout.lines().count();
+    Ok(NodeJournalLogsOut {
+        logs: stdout,
+        lines_returned: line_count,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -533,7 +558,7 @@ pub fn node_runtime_diagnostics_capability(cache: Arc<ClientCache>) -> Capabilit
     Capability::typed::<NodeRuntimeDiagnosticsIn, NodeRuntimeDiagnosticsOut, _, _>(
         "k8s.nodeRuntimeDiagnostics",
         "run non-invasive host diagnostics (containers, dmesg, disk, memory, process) on a node via SSH",
-        Annotations::READ_ONLY,
+        Annotations::SENSITIVE_READ,
         move |input: NodeRuntimeDiagnosticsIn| {
             let cache = cache.clone();
             async move {
@@ -868,25 +893,69 @@ mod tests {
     #[test]
     fn capability_annotations_match_safety_rules() {
         let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
-        let status = node_service_status_capability(cache.clone());
-        assert!(status.annotations.read_only);
-        assert!(!status.annotations.destructive);
-        assert!(!status.annotations.requires_confirm);
-
-        let logs = node_journal_logs_capability(cache.clone());
-        assert!(logs.annotations.read_only);
-        assert!(!logs.annotations.destructive);
-        assert!(!logs.annotations.requires_confirm);
-
-        let diag = node_runtime_diagnostics_capability(cache.clone());
-        assert!(diag.annotations.read_only);
-        assert!(!diag.annotations.destructive);
-        assert!(!diag.annotations.requires_confirm);
+        // The reads change nothing, but service status, the journal and `ps`
+        // output carry process arguments and log lines that can hold
+        // credentials, so an MCP client must not get them unprompted (#615).
+        for read in [
+            node_service_status_capability(cache.clone()),
+            node_journal_logs_capability(cache.clone()),
+            node_runtime_diagnostics_capability(cache.clone()),
+        ] {
+            assert!(read.annotations.read_only, "{}", read.id);
+            assert!(!read.annotations.destructive, "{}", read.id);
+            assert!(read.annotations.requires_confirm, "{}", read.id);
+            assert!(read.annotations.sensitive, "{}", read.id);
+        }
 
         let restart = node_service_restart_capability(cache);
         assert!(!restart.annotations.read_only);
         assert!(restart.annotations.destructive);
         assert!(restart.annotations.requires_confirm);
+    }
+
+    /// Outputs captured from journalctl 259, the exit codes included.
+    #[test]
+    fn a_failed_journalctl_is_an_error_but_a_grep_with_no_match_is_not() {
+        // An unparseable --since exits 1 and says why on stderr. Returning
+        // that as zero lines would claim the node has no logs.
+        let err =
+            journal_logs_result("worker-1", String::new(), "Failed to parse timestamp: nonsense\n", 1)
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("Failed to parse timestamp"), "{err}");
+        assert!(err.contains("worker-1"), "{err}");
+
+        // A --grep that matches nothing ALSO exits 1, with nothing on stderr.
+        let no_match = journal_logs_result(
+            "worker-1",
+            "-- Boot 327c08b63df648a7a51850bde913f768 --\n".into(),
+            "",
+            1,
+        );
+        assert!(no_match.is_ok(), "{no_match:?}");
+
+        // ssh's accept-new notice on a first connection is not journalctl failing.
+        let first_contact = journal_logs_result(
+            "worker-1",
+            String::new(),
+            "Warning: Permanently added 'worker-1' (ED25519) to the list of known hosts.\r\n",
+            1,
+        );
+        assert!(first_contact.is_ok(), "{first_contact:?}");
+
+        // A connection failure keeps its own message.
+        let unreachable = journal_logs_result(
+            "worker-1",
+            String::new(),
+            "ssh: connect to host worker-1 port 22: Connection refused\n",
+            255,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unreachable.contains("SSH connection to 'worker-1' failed"), "{unreachable}");
+
+        let logs = journal_logs_result("worker-1", "one\ntwo\n".into(), "", 0).unwrap();
+        assert_eq!(logs.lines_returned, 2);
     }
 
     #[test]
