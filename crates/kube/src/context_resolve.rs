@@ -272,16 +272,16 @@ pub fn resolve_contexts(paths: &[PathBuf]) -> Vec<ResolvedContext> {
     resolve_contexts_with(paths, |path| Kubeconfig::read_from(path).ok())
 }
 
-/// Each kubeconfig in `paths` that cannot be read, with the reason, as `path: reason`.
-/// [`resolve_contexts`] skips these, so a context declared only in one of them looks absent.
-pub fn unreadable_kubeconfigs(paths: &[PathBuf]) -> Vec<String> {
+/// Each kubeconfig in `paths` that cannot be read or parsed. [`resolve_contexts`] skips
+/// these, so a context declared only in one of them looks absent.
+///
+/// Only the paths: a parse error can quote the file's contents, credentials included, so
+/// the reason is not passed on (as `contexts.rs` also does).
+pub fn unreadable_kubeconfigs(paths: &[PathBuf]) -> Vec<PathBuf> {
     paths
         .iter()
-        .filter_map(|path| {
-            Kubeconfig::read_from(path)
-                .err()
-                .map(|error| format!("{}: {error}", path.display()))
-        })
+        .filter(|path| Kubeconfig::read_from(path).is_err())
+        .cloned()
         .collect()
 }
 

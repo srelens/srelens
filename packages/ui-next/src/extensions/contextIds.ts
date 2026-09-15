@@ -22,18 +22,21 @@ type ContextIds = {
 let state: ContextIds = {};
 const listeners = new Set<() => void>();
 let stop: (() => void) | undefined;
+/** The latest listing started. Refreshes can overlap (a focus during a Retry), and an older one answering last must not replace a newer answer. */
+let generation = 0;
 
 const key = ({ ids, error }: ContextIds) => JSON.stringify([ids ? [...ids] : null, error ?? null]);
 
 /** List the contexts again. */
 export async function refreshContextIds() {
+  const started = ++generation;
   let outcome: Awaited<ReturnType<typeof listContexts>> | undefined;
   try {
     outcome = await listContexts(loadKubeconfigFiles());
   } catch (e) {
     outcome = { error: String(e) };
   }
-  if (!listeners.size) return;
+  if (!listeners.size || started !== generation) return;
   const listed = outcome?.contexts ?? (outcome?.error ? undefined : []);
   const next: ContextIds = {
     ids: listed ? new Map(listed.map((context) => [context.name, context.stableId])) : state.ids,

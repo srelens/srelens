@@ -558,6 +558,27 @@ it("says a limited app's resource views could not be checked when the clusters f
   expect(await screen.findByRole("tab", { name: "GitOps apps" })).toBeTruthy();
   expect(screen.queryByRole("alert")).toBeNull();
 });
+it("ignores a slower, older cluster listing that finishes after a newer one", async () => {
+  const { ExtensionResourceSlot } = await import("./Extensions");
+  const installed = structuredClone(plugin);
+  installed.manifest.contributions.detailTabs = [
+    { id: "detail", title: "GitOps apps", capability: "list", forKinds: ["/Namespace"] },
+  ];
+  installed.contexts = ["/kube/s.yaml#staging"];
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [installed] });
+  vi.mocked(readExtension).mockResolvedValue({ items: [] });
+  let finishOlder: (outcome: unknown) => void = () => {};
+  vi.mocked(listContexts)
+    .mockReturnValueOnce(new Promise((resolve) => (finishOlder = resolve)) as any)
+    .mockResolvedValueOnce({ contexts: [{ name: "staging", stableId: "/kube/s.yaml#staging" }] } as any);
+  render(<ExtensionResourceSlot context="staging" kind="Namespace" namespace={null} name="argo" />);
+  await waitFor(() => expect(listContexts).toHaveBeenCalledTimes(1));
+  fireEvent.focus(window);
+  expect(await screen.findByRole("tab", { name: "GitOps apps" })).toBeTruthy();
+  // The first listing answers last, with a list that no longer has the cluster.
+  await act(async () => finishOlder({ contexts: [] }));
+  expect(screen.getByRole("tab", { name: "GitOps apps" })).toBeTruthy();
+});
 it("does not attach a custom kind contribution to a built-in with the same name", async () => {
   const { ExtensionResourceSlot } = await import("./Extensions");
   const installed = structuredClone(plugin);

@@ -26,15 +26,19 @@ export function ExtensionResourceSlot(
   );
 }
 
-import { ErrorNotice, ExtensionWorkspace, ExtensionLogo, useExtensions, useContextId, useContextLookup, refreshContextIds, ExtensionResourceNavigation, ExtensionResourceDetails } from "@srelens/ui-next/extensions";
+import { ErrorNotice, ExtensionWorkspace, ExtensionLogo, useExtensions, useContextLookup, refreshContextIds, ExtensionResourceNavigation, ExtensionResourceDetails } from "@srelens/ui-next/extensions";
 import { extensionEnabledFor } from "@srelens/core";
 export function ClassicAppsNav({context,onOpen}:{context:string;onOpen(context:string,id:string,page:string):void}) {
   const inventory=useExtensions();
   // App scope keys on the context's stable ID, not its name (#265).
-  const contextId=useContextId(context);
-  const apps=inventory.data?.plugins.filter(p=>p.enabled && extensionEnabledFor(p,contextId) && p.manifest.contributions.pages.length)??[];
-  if(!apps.length)return null;
-  return <details className="pl-3 py-1 text-sm"><summary className="cursor-pointer text-muted-foreground"><LayoutGrid size={16} className="inline-block align-middle mr-1" aria-hidden="true"/>Apps</summary>{apps.map(app=><details key={app.manifest.id} className="pl-2 py-1"><summary className="cursor-pointer"><ExtensionLogo id={app.manifest.id} name={app.manifest.name} size={16}/> {app.manifest.name}</summary>{app.manifest.contributions.pages.map(page=><button type="button" key={page.id} aria-label={`Open ${page.title}`} className="block w-full truncate px-3 py-1 text-left hover:bg-muted" onClick={()=>onOpen(context,app.manifest.id,page.id)}>{page.group?`${page.group} · ${page.title}`:page.title}</button>)}</details>)}</details>;
+  const lookup=useContextLookup(context);
+  const contextId=lookup.status==="found"?lookup.id:undefined;
+  const withPages=inventory.data?.plugins.filter(p=>p.enabled && p.manifest.contributions.pages.length)??[];
+  const apps=withPages.filter(p=>extensionEnabledFor(p,contextId));
+  // A failed lookup hides limited apps; say why instead of dropping them silently.
+  const failure=lookup.status==="failed"&&withPages.some(p=>p.contexts)?lookup.error:undefined;
+  if(!apps.length&&failure===undefined)return null;
+  return <ExtensionControlsProvider value={controls}>{failure!==undefined&&<div className="pl-3 py-1 text-sm"><ErrorNotice title="Could not list clusters" message={failure} retry={()=>void refreshContextIds()}/></div>}{apps.length>0&&<details className="pl-3 py-1 text-sm"><summary className="cursor-pointer text-muted-foreground"><LayoutGrid size={16} className="inline-block align-middle mr-1" aria-hidden="true"/>Apps</summary>{apps.map(app=><details key={app.manifest.id} className="pl-2 py-1"><summary className="cursor-pointer"><ExtensionLogo id={app.manifest.id} name={app.manifest.name} size={16}/> {app.manifest.name}</summary>{app.manifest.contributions.pages.map(page=><button type="button" key={page.id} aria-label={`Open ${page.title}`} className="block w-full truncate px-3 py-1 text-left hover:bg-muted" onClick={()=>onOpen(context,app.manifest.id,page.id)}>{page.group?`${page.group} · ${page.title}`:page.title}</button>)}</details>)}</details>}</ExtensionControlsProvider>;
 }
 export function ClassicAppPage({context,id,page,namespace="",resourceName,onOpenResource,onPage,onNamespace}:{context:string;id:string;page:string;namespace?:string;resourceName?:string;onOpenResource?(name:string,namespace:string):void;onPage(page:string,namespace?:string):void;onNamespace?(namespace:string):void}) {
   const inventory=useExtensions();

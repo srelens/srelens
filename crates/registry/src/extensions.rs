@@ -83,7 +83,11 @@ async fn context_id(
     } else {
         format!(
             "the context \"{context}\" was not found, and these kubeconfig files could not be read: {}",
-            unreadable.join("; ")
+            unreadable
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
         )
     })
 }
@@ -1503,6 +1507,16 @@ mod tests {
             unreadable.contains("could not be read") && unreadable.contains("first.yaml"),
             "{unreadable}"
         );
+
+        // Only the path: a parse error can quote the file's contents, credentials included.
+        fs::write(
+            &first,
+            "apiVersion: v1\nkind: Config\nusers: \"hunter2-token\"\n",
+        )
+        .unwrap();
+        let quoted = refusal("default").await;
+        assert!(quoted.contains("first.yaml"), "{quoted}");
+        assert!(!quoted.contains("hunter2-token"), "{quoted}");
     }
     #[test]
     fn history_keeps_the_three_versions_before_the_installed_one() {

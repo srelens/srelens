@@ -171,3 +171,20 @@ it("keeps an app's pages when a later cluster listing fails", async () => {
   // A refresh that could not be made takes nothing away: cluster/a is still the allowed cluster.
   expect(screen.getByText("Apps")).toBeTruthy();
 });
+
+it("says why the classic Apps navigation cannot show a limited app, and retries", async () => {
+  listTwoClusters();
+  vi.mocked(listContexts).mockResolvedValueOnce({ error: "kubeconfig unreadable" });
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [{ ...plugin, contexts: ["/kube/a.yaml#cluster/a"] }],
+  });
+  const { ClassicAppsNav } = await import("./Extensions");
+  render(<ClassicAppsNav context="cluster/a" onOpen={vi.fn()} />);
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("Could not list clusters");
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByText("Apps")).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
