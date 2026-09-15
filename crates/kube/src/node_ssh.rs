@@ -791,4 +791,50 @@ mod tests {
         let restart_in: NodeServiceRestartIn = serde_json::from_value(json_payload).unwrap();
         assert_eq!(restart_in.identity_file.as_deref(), Some("/path/to/key.pem"));
     }
+
+    #[test]
+    fn validates_since_window() {
+        assert!(validate_since(None).is_ok());
+        assert!(validate_since(Some("")).is_ok());
+        assert!(validate_since(Some("  ")).is_ok());
+        assert!(validate_since(Some("10m ago")).is_ok());
+        assert!(validate_since(Some("2026-09-14 18:00:00")).is_ok());
+        assert!(validate_since(Some("-1 hour")).is_err());
+        assert!(validate_since(Some("10m; rm -rf /")).is_err());
+    }
+
+    #[test]
+    fn validates_grep_pattern() {
+        assert!(validate_grep(None).is_ok());
+        assert!(validate_grep(Some("error")).is_ok());
+        assert!(validate_grep(Some("connection refused")).is_ok());
+        assert!(validate_grep(Some("error\nrm -rf /")).is_err());
+        assert!(validate_grep(Some("error\r\n")).is_err());
+        assert!(validate_grep(Some("error; reboot")).is_err());
+        assert!(validate_grep(Some("error && reboot")).is_err());
+        assert!(validate_grep(Some("error | cat")).is_err());
+        assert!(validate_grep(Some("`whoami`")).is_err());
+        assert!(validate_grep(Some("$HOME")).is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_node_target_short_circuits_on_ip_without_kube_lookup() {
+        let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
+
+        // An IP address is used as-is, with no context/K8s lookup attempted.
+        assert_eq!(
+            resolve_node_target(&cache, None, "10.0.0.5").await,
+            "10.0.0.5"
+        );
+        assert_eq!(
+            resolve_node_target(&cache, Some("some-ctx"), "192.168.1.20").await,
+            "192.168.1.20"
+        );
+
+        // A non-IP node name with no context falls back to the name unchanged.
+        assert_eq!(
+            resolve_node_target(&cache, None, "worker-01").await,
+            "worker-01"
+        );
+    }
 }

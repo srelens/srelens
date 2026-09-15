@@ -7472,6 +7472,131 @@ mod tests {
         assert!(content.contains("Auto-Sync"));
         assert!(content.contains("[Enter/y]"));
     }
+
+    #[tokio::test]
+    async fn test_argo_list_and_detail_key_handlers_exercise_side_panels_safely() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::views::argo_detail_view::ArgoDetailTab;
+        use srelens_tui::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // No repoURL, so the 'g' handler below hits the safe "no repo
+        // configured" branch instead of actually spawning a browser process.
+        let argo_app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "payments-api", "namespace": "prod"},
+            "spec": {"project": "core", "destination": {"name": "in-cluster"}},
+            "status": {
+                "sync": {"status": "OutOfSync"},
+                "health": {"status": "Degraded"},
+                "resources": [
+                    {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "prod", "name": "payments-api",
+                     "status": "OutOfSync", "health": {"status": "Degraded", "message": "1/2 ready"}}
+                ]
+            }
+        }));
+
+        let mut state = ArgoViewState::new();
+        state.set_applications(
+            vec![argo_app.clone()],
+            vec![argo_app],
+            true,
+            Some("hub-ctx".to_string()),
+        );
+        app.active_view = ActiveView::Argo(state);
+
+        // List view: hard refresh, reload, config hub, toggle-show-all,
+        // deep-link copy, and git-open with an empty repoURL.
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Triggering hard refresh"));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Refreshing ArgoCD applications"));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("no repoURL configured"));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).await;
+        if let ActiveView::Argo(ref s) = app.active_view {
+            assert!(s.show_all_hub_apps);
+        } else {
+            panic!("expected ActiveView::Argo");
+        }
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Copied deep link"));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::TuiConfig(_)));
+
+        // Back to the Argo list (config hub pushed it onto nav_stack), then
+        // open the detail view.
+        if let Some(prev) = app.nav_stack.pop() {
+            app.active_view = prev;
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::ArgoDetail(_)));
+
+        // Detail view: tab navigation (number keys, arrows, BackTab),
+        // resource selection, hard refresh, reload, and deep-link copy.
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref d) = app.active_view {
+            assert_eq!(d.active_tab, ArgoDetailTab::ManagedResources);
+        }
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref d) = app.active_view {
+            assert_eq!(d.active_tab, ArgoDetailTab::Drift);
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref d) = app.active_view {
+            assert_eq!(d.active_tab, ArgoDetailTab::ManagedResources);
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref d) = app.active_view {
+            assert_eq!(d.active_tab, ArgoDetailTab::Overview);
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)).await;
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)).await;
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Triggering hard refresh"));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Refreshing application details"));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Copied deep link"));
+
+        // Describe (Enter/d) and YAML (y/v) on the selected Managed Resource,
+        // then the action palette (x).
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Describe(_)));
+
+        if let Some(prev) = app.nav_stack.pop() {
+            app.active_view = prev;
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Yaml(_)));
+
+        if let Some(prev) = app.nav_stack.pop() {
+            app.active_view = prev;
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).await;
+        assert!(app.modal.is_some());
+    }
 }
 
 
