@@ -212,7 +212,10 @@ fn verify_proof(proof: &SignatureProof, manifest: &Manifest) -> Result<(), Strin
     }
     Ok(())
 }
-fn write(path: &Path, state: &Inventory) -> Result<(), String> {
+/// The largest inventory `write` saves, measured in its saved form.
+const MAX_INVENTORY_BYTES: usize = 1024 * 1024;
+/// The inventory exactly as `write` saves it.
+fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
     // Quarantine is recomputed on every load. Persisting it would also make the file
     // unreadable to hosts that predate the field.
     let mut stored = serde_json::to_value(state).map_err(|e| e.to_string())?;
@@ -221,8 +224,11 @@ fn write(path: &Path, state: &Inventory) -> Result<(), String> {
             plugin.remove("quarantined");
         }
     }
-    let raw = serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())?;
-    if raw.len() > 1024 * 1024 {
+    serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())
+}
+fn write(path: &Path, state: &Inventory) -> Result<(), String> {
+    let raw = saved_form(state)?;
+    if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
     }
     let parent = path
@@ -584,6 +590,18 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             state
                 .plugins
                 .sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
+            // Kept versions give way, oldest first, before the saved inventory outgrows its
+            // limit; the update itself is not refused. Other apps' versions are left alone.
+            while saved_form(&state)?.len() > MAX_INVENTORY_BYTES {
+                let updated = state
+                    .plugins
+                    .iter_mut()
+                    .find(|p| p.revision == revision)
+                    .ok_or("the updated app is missing from the inventory")?;
+                if updated.history.pop().is_none() {
+                    break;
+                }
+            }
         }
         Configure::Rollback {
             id,
@@ -1105,6 +1123,40 @@ mod tests {
             "local",
             "other bytes are not the release"
         );
+    }
+    #[test]
+    fn kept_versions_give_way_before_the_inventory_outgrows_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        // A valid manifest with thousands of small entries. The inventory is saved
+        // pretty-printed, so each copy takes about 400 KiB there: the installed version
+        // and three kept ones cannot all fit in 1 MiB.
+        let large = |version: &str| {
+            let mut value: Value = serde_json::from_str(&manifest_at(version)).unwrap();
+            value["capabilities"][0]["arguments"]["printerColumns"] =
+                json!(vec![json!({"name": "c", "jsonPath": ".a"}); 4300]);
+            value.to_string()
+        };
+        for minor in 1..=4 {
+            let version = format!("0.{minor}.0");
+            configure(
+                &path,
+                json!({"action":"install","manifest":large(&version),"grants":["k8s.listCustomResource"]}),
+            )
+            .unwrap_or_else(|error| panic!("install {version}: {error}"));
+        }
+        let app = &read(&path).unwrap().plugins[0];
+        assert_eq!(app.manifest.version, "0.4.0");
+        assert!(
+            !app.history.is_empty() && app.history.len() < KEPT_VERSIONS,
+            "kept {} versions",
+            app.history.len()
+        );
+        assert_eq!(
+            app.history[0].manifest.version, "0.3.0",
+            "the newest are kept"
+        );
+        assert!(fs::metadata(&path).unwrap().len() <= 1024 * 1024);
     }
     #[test]
     fn history_keeps_the_three_versions_before_the_installed_one() {

@@ -27,7 +27,9 @@ dashboard, which the review shows.
 ## Rolling back
 
 Each update keeps the version it replaced, up to the last three per app, with the
-grants, source and install time it had. **Settings → Apps → Details → Previous
+grants, source and install time it had. The oldest are dropped sooner when keeping them
+would take the inventory past its 1 MiB limit, so an app with very large manifests keeps
+fewer. **Settings → Apps → Details → Previous
 versions** restores one:
 
 - A version whose permissions differ from what is granted now goes through permission

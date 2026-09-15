@@ -280,6 +280,14 @@ it("reviews the permissions of a rollback whose grants differ", async () => {
     }),
   );
 });
+it("closes the reset confirmation with Escape without resetting", async () => {
+  const details = await openDetails(updated());
+  fireEvent.click(within(details).getByRole("button", { name: "Reset settings" }));
+  const dialog = within(details).getByRole("alertdialog", { name: "Reset settings" });
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  expect(within(details).queryByRole("alertdialog", { name: "Reset settings" })).toBeNull();
+  expect(configureExtensions).not.toHaveBeenCalled();
+});
 it("does not call a quarantined app's signature verified", async () => {
   const app = { ...updated(), enabled: false, quarantined: "App publisher signature is invalid" };
   const details = await openDetails(app);

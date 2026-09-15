@@ -117,7 +117,14 @@ export function ExtensionDetails({
         </Button>
       </div>
       {resetting && (
-        <div className="extension-install" role="alertdialog" aria-label="Reset settings">
+        <div
+          className="extension-install"
+          role="alertdialog"
+          aria-label="Reset settings"
+          onKeyDown={(e) => {
+            if (e.key === "Escape" && !busy) setResetting(false);
+          }}
+        >
           <p>Reset {manifest.name} to its default settings? Its saved settings are removed.</p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={() => setResetting(false)}>
             Cancel
@@ -138,7 +145,7 @@ export function ExtensionDetails({
 
       <h3>Previous versions</h3>
       {plugin.history.length === 0 ? (
-        <p className="extension-message">No earlier version is kept. Each update keeps the last three.</p>
+        <p className="extension-message">No earlier version is kept. Each update keeps up to three.</p>
       ) : (
         <ul className="extension-versions" aria-label="Previous versions">
           {plugin.history.map((version) => (
