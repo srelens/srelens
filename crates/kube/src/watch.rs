@@ -154,7 +154,7 @@ where
     while let Some(item) = stream.next().await {
         match item {
             Ok(event) => {
-                if reconnecting && !matches!(event, Event::Init) {
+                if reconnecting && !matches!(event, Event::Init | Event::InitApply(_)) {
                     reconnecting = false;
                     on_status(WatchStatus::Live);
                 }
@@ -178,7 +178,7 @@ where
                 }
                 // The raw watcher retries immediately; default_backoff above
                 // delays retries so a dead cluster cannot flood the UI queue.
-                // Init only starts a list attempt, so it must not mark us live.
+                // Init/InitApply only build a partial list; recovery waits for InitDone.
                 if !reconnecting {
                     reconnecting = true;
                     on_status(WatchStatus::Reconnecting);
@@ -925,7 +925,7 @@ where
     while let Some(item) = stream.next().await {
         match item {
             Ok(event) => {
-                if reconnecting && !matches!(event, Event::Init) {
+                if reconnecting && !matches!(event, Event::Init | Event::InitApply(_)) {
                     reconnecting = false;
                     on_status(WatchStatus::Live);
                 }
@@ -1043,7 +1043,7 @@ where
     while let Some(item) = stream.next().await {
         match item {
             Ok(event) => {
-                if reconnecting && !matches!(event, Event::Init) {
+                if reconnecting && !matches!(event, Event::Init | Event::InitApply(_)) {
                     reconnecting = false;
                     on_status(WatchStatus::Live);
                 }
@@ -1190,6 +1190,69 @@ mod tests {
             *events.lock().unwrap(),
             vec!["reconnecting", "live", "snapshot"]
         );
+    }
+
+    #[tokio::test]
+    async fn partial_relist_does_not_report_recovery_before_the_last_page() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "offline",
+                    ));
+                }
+                let (status, body) = if attempt == 1 {
+                    (
+                        200,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "NamespaceList",
+                            "metadata": {"resourceVersion": "1", "continue": "next-page"},
+                            "items": [{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "first-page"}}]
+                        }),
+                    )
+                } else {
+                    assert!(request
+                        .uri()
+                        .query()
+                        .unwrap()
+                        .contains("continue=next-page"));
+                    (
+                        403,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                            "reason": "Forbidden", "message": "forbidden", "code": 403
+                        }),
+                    )
+                };
+                Ok(http::Response::builder()
+                    .status(status)
+                    .body(kube::client::Body::from(body.to_string().into_bytes()))
+                    .unwrap())
+            }
+        });
+        let api: Api<Namespace> = Api::all(kube::Client::new(service, "default"));
+        let statuses = Mutex::new(Vec::new());
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            watch_typed(
+                api,
+                |ns: Namespace| ns.metadata.name.unwrap(),
+                |name: &String| name.clone(),
+                |_| panic!("an incomplete relist must not emit a snapshot"),
+                |status| statuses.lock().unwrap().push(status),
+            ),
+        )
+        .await
+        .expect("the failed second page should stop the watch");
+        assert!(result.unwrap_err().contains("forbidden"));
+        assert_eq!(*statuses.lock().unwrap(), vec![WatchStatus::Reconnecting]);
     }
 
     #[test]
