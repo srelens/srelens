@@ -26,7 +26,9 @@ on:
   #   with schemas derived by crates/capability. gitops.rs, the inspection and
   #   actions behind the apps' resource views, sits beside them.
   pull_request:
-    branches: [dev, main]
+    # The same target branches as ci.yml, `feat/ui-next` included: a shared
+    # branch missing from this list runs no check at all (see ci.yml).
+    branches: [dev, main, feat/ui-next]
     paths:
       - crates/registry/src/extensions.rs
       - crates/registry/src/extensions/**
