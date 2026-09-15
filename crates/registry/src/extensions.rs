@@ -134,8 +134,18 @@ enum Configure {
     #[serde(rename = "clusters")]
     Clusters {
         id: String,
+        /// Required: leaving it out is refused rather than read as `null`, which would
+        /// quietly allow the app on every cluster.
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "context_names_or_null")]
         contexts: Option<Vec<String>>,
     },
+}
+/// The schema of the clusters action's `contexts`: a list of names or `null`, never absent.
+fn context_names_or_null(
+    generator: &mut schemars::gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    <Option<Vec<String>>>::json_schema(generator)
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1269,6 +1279,40 @@ mod tests {
         .unwrap();
         assert_eq!(updated.plugins[0].contexts, only_a);
         assert_eq!(limit(Value::Null).unwrap().plugins[0].contexts, None);
+    }
+    #[test]
+    fn the_clusters_action_needs_an_explicit_list_or_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        install(&path, fake_core());
+        let only_a = Some(vec!["cluster/a".to_owned()]);
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd","contexts":["cluster/a"]}),
+        )
+        .unwrap();
+        // Leaving the list out must not quietly allow the app on every cluster.
+        assert!(configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd"})
+        )
+        .is_err());
+        assert_eq!(read(&path).unwrap().plugins[0].contexts, only_a);
+        // The input schema callers such as MCP clients see says the same.
+        let reg = setup(&path);
+        let input = &reg.get("extensions.configure").unwrap().input_schema;
+        let clusters = input["oneOf"]
+            .as_array()
+            .expect("a tagged union of actions")
+            .iter()
+            .find(|variant| variant["properties"]["action"]["enum"] == json!(["clusters"]))
+            .expect("a clusters action");
+        assert!(
+            clusters["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&json!("contexts"))),
+            "{clusters}"
+        );
     }
     #[test]
     fn history_keeps_the_three_versions_before_the_installed_one() {

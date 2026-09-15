@@ -24,6 +24,22 @@ import {
   listContexts,
 } from "@srelens/core";
 import { ExtensionManager, ExtensionResults } from "./Extensions";
+
+// jsdom has no ResizeObserver, and the cluster picker's popover watches its trigger with
+// one while cmdk scrolls the highlighted row into view. The same stubs the kit's
+// Radix-backed suites carry, kept here so the requirement stays visible.
+if (!("ResizeObserver" in globalThis)) {
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+const elementProto = window.HTMLElement.prototype as unknown as Record<string, unknown>;
+elementProto.scrollIntoView ??= () => {};
+elementProto.hasPointerCapture ??= () => false;
+elementProto.setPointerCapture ??= () => {};
+elementProto.releasePointerCapture ??= () => {};
 const plugin = {
   manifest: {
     id: "org.test.gitops",
@@ -295,15 +311,32 @@ it("limits an app to chosen clusters from its details", async () => {
   vi.mocked(listContexts).mockResolvedValue({
     contexts: [{ name: "cluster/a", stableId: "a" }, { name: "cluster/b", stableId: "b" }],
   } as any);
-  const details = await openDetails(updated());
-  const clusters = within(details).getByRole("group", { name: "Clusters" });
-  expect((within(clusters).getByLabelText("All clusters") as HTMLInputElement).checked).toBe(true);
-  fireEvent.click(within(clusters).getByLabelText("Only these clusters"));
-  fireEvent.click(await within(clusters).findByLabelText("cluster/b"));
-  fireEvent.click(within(clusters).getByRole("button", { name: "Save clusters" }));
-  await waitFor(() =>
-    expect(configureExtensions).toHaveBeenCalledWith({ action: "clusters", id: "org.test.gitops", contexts: ["cluster/b"] }),
-  );
+  // Opening the picker makes the manifest editor measure text ranges, and jsdom has no
+  // layout to measure. Stub them for this test only.
+  const measuring = {
+    getClientRects: Range.prototype.getClientRects,
+    getBoundingClientRect: Range.prototype.getBoundingClientRect,
+  };
+  Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+  Range.prototype.getBoundingClientRect = () =>
+    ({ x: 0, y: 0, width: 0, height: 0, top: 0, right: 0, bottom: 0, left: 0, toJSON: () => ({}) }) as DOMRect;
+  try {
+    const details = await openDetails(updated());
+    const clusters = within(details).getByRole("group", { name: "Clusters" });
+    expect((within(clusters).getByLabelText("All clusters") as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(within(clusters).getByLabelText("Only these clusters"));
+    await waitFor(() => expect(listContexts).toHaveBeenCalled());
+    // Contexts come from the kubeconfig and can number in the hundreds, so they are searched.
+    fireEvent.click(within(clusters).getByRole("combobox", { name: "Add a cluster" }));
+    fireEvent.click(await screen.findByRole("option", { name: "cluster/b" }));
+    expect(within(clusters).getByRole("button", { name: "Remove cluster/b" })).toBeTruthy();
+    fireEvent.click(within(clusters).getByRole("button", { name: "Save clusters" }));
+    await waitFor(() =>
+      expect(configureExtensions).toHaveBeenCalledWith({ action: "clusters", id: "org.test.gitops", contexts: ["cluster/b"] }),
+    );
+  } finally {
+    Object.assign(Range.prototype, measuring);
+  }
 });
 it("allows every cluster again, and keeps listing a chosen cluster the kubeconfig no longer has", async () => {
   vi.mocked(listContexts).mockResolvedValue({ contexts: [{ name: "cluster/a", stableId: "a" }] } as any);
@@ -311,13 +344,27 @@ it("allows every cluster again, and keeps listing a chosen cluster the kubeconfi
   const details = await openDetails(app);
   const clusters = within(details).getByRole("group", { name: "Clusters" });
   expect((within(clusters).getByLabelText("Only these clusters") as HTMLInputElement).checked).toBe(true);
-  expect((await within(clusters).findByLabelText("cluster/a") as HTMLInputElement).checked).toBe(true);
-  expect((within(clusters).getByLabelText("retired") as HTMLInputElement).checked).toBe(true);
+  expect(within(clusters).getByRole("button", { name: "Remove cluster/a" })).toBeTruthy();
+  fireEvent.click(within(clusters).getByRole("button", { name: "Remove retired" }));
+  expect(within(clusters).queryByRole("button", { name: "Remove retired" })).toBeNull();
   fireEvent.click(within(clusters).getByLabelText("All clusters"));
   fireEvent.click(within(clusters).getByRole("button", { name: "Save clusters" }));
   await waitFor(() =>
     expect(configureExtensions).toHaveBeenCalledWith({ action: "clusters", id: "org.test.gitops", contexts: null }),
   );
+});
+it("says why the cluster list could not be loaded, and retries it", async () => {
+  vi.mocked(listContexts)
+    .mockResolvedValueOnce({ error: "kubeconfig unreadable" })
+    .mockResolvedValue({ contexts: [{ name: "cluster/a", stableId: "a" }] } as any);
+  const app = { ...updated(), contexts: ["cluster/b"] };
+  const details = await openDetails(app);
+  const clusters = within(details).getByRole("group", { name: "Clusters" });
+  const alert = await within(clusters).findByRole("alert");
+  expect(alert.textContent).toContain("kubeconfig unreadable");
+  fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(within(clusters).queryByRole("alert")).toBeNull());
+  expect(listContexts).toHaveBeenCalledTimes(2);
 });
 it("does not call a quarantined app's signature verified", async () => {
   const app = { ...updated(), enabled: false, quarantined: "App publisher signature is invalid" };

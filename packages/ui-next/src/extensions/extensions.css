@@ -343,7 +343,8 @@
   padding-left: 20px;
   list-style: none;
 }
-.extension-cluster-list label { font-family: var(--font-mono); white-space: nowrap; }
+.extension-cluster-list li { display: flex; align-items: center; gap: 8px; }
+.extension-cluster-list code { font-family: var(--font-mono); white-space: nowrap; overflow-x: auto; }
 .extension-grants span { color: var(--ink-muted, var(--fl-color-text-muted)); }
 .extension-problem-code {
   color: var(--ink-muted, var(--fl-color-text-muted));

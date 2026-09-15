@@ -6,6 +6,7 @@ import {
   type InstalledExtension,
 } from "@srelens/core";
 import { ExtensionControls } from "./ExtensionControls";
+import { ErrorNotice } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 
 /**
@@ -22,19 +23,18 @@ export function ExtensionClusters({
   busy: boolean;
   change(action: ExtensionChange): Promise<boolean>;
 }) {
-  const { Button } = useContext(ExtensionControls);
+  const { Button, Combobox } = useContext(ExtensionControls);
   const saved = plugin.contexts;
   const [limited, setLimited] = useState(Boolean(saved));
   const [chosen, setChosen] = useState<string[]>(saved ?? []);
   const listing = useResource(() => listContexts(loadKubeconfigFiles()), [], () => false);
-  // A saved name the kubeconfig no longer lists stays visible, so it can be removed.
-  const names = [
-    ...new Set([...(listing.data?.contexts ?? []).map((context) => context.name), ...(saved ?? [])]),
-  ];
-  const toggle = (name: string) =>
-    setChosen((current) =>
-      current.includes(name) ? current.filter((each) => each !== name) : [...current, name],
-    );
+  // `listContexts` reports a failed listing in its result as well as by rejecting.
+  const failure = listing.status === "error" ? listing.error : listing.data?.error;
+  // A kubeconfig can hold hundreds of contexts, so they are searched rather than listed;
+  // only the chosen ones are shown, including any the kubeconfig no longer has.
+  const available = (listing.data?.contexts ?? [])
+    .map((context) => context.name)
+    .filter((name) => !chosen.includes(name));
   const unchanged = limited
     ? Boolean(saved) && chosen.length === saved!.length && chosen.every((name) => saved!.includes(name))
     : !saved;
@@ -52,24 +52,45 @@ export function ExtensionClusters({
       </label>
       {limited && (
         <>
-          {listing.status === "loading" && (
-            <p role="status" className="extension-message">
-              Loading clusters…
-            </p>
+          {failure ? (
+            <ErrorNotice title="Could not list clusters" message={failure} retry={listing.reload} />
+          ) : (
+            listing.status === "loading" && (
+              <p role="status" className="extension-message">
+                Loading clusters…
+              </p>
+            )
           )}
-          {listing.data?.error && (
-            <p className="extension-warning">Could not list every kubeconfig context: {listing.data.error}</p>
+          <Combobox
+            value=""
+            onValueChange={(name) =>
+              name && setChosen((current) => (current.includes(name) ? current : [...current, name]))
+            }
+            options={available.map((name) => ({ value: name, label: name }))}
+            placeholder="Add a cluster…"
+            searchPlaceholder="Search clusters…"
+            ariaLabel="Add a cluster"
+          />
+          {chosen.length === 0 ? (
+            <p className="extension-message">No cluster chosen yet.</p>
+          ) : (
+            <ul className="extension-cluster-list" aria-label="Chosen clusters">
+              {chosen.map((name) => (
+                <li key={name}>
+                  <code>{name}</code>
+                  <Button
+                    variant="secondary"
+                    size="xs"
+                    aria-label={`Remove ${name}`}
+                    disabled={busy}
+                    onClick={() => setChosen((current) => current.filter((each) => each !== name))}
+                  >
+                    Remove
+                  </Button>
+                </li>
+              ))}
+            </ul>
           )}
-          <ul className="extension-cluster-list">
-            {names.map((name) => (
-              <li key={name}>
-                <label>
-                  <input type="checkbox" checked={chosen.includes(name)} disabled={busy} onChange={() => toggle(name)} />{" "}
-                  {name}
-                </label>
-              </li>
-            ))}
-          </ul>
         </>
       )}
       <p className="extension-message">
