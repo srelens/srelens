@@ -324,7 +324,7 @@ export function ExtensionManager() {
     </div>
   );
 }
-/** The detail tabs and row actions apps offer for a kind, on a cluster they are enabled for. */
+/** The detail tabs and detail links apps offer for a kind, on a cluster they are enabled for. */
 export function useExtensionContributions(context: string, kind: string, group?: string) {
   const inventory = useExtensions();
   // App scope keys on the context's stable ID, not its name (#265).
