@@ -1,12 +1,12 @@
 #![allow(dead_code, unused_imports)]
 
-use std::io::{self, stdout};
+use std::io::{self, stdout, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
-    cursor::MoveTo,
+    cursor::{MoveTo, Show},
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     },
@@ -469,18 +469,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(Duration::from_millis(20)).await;
             while events.try_recv().is_ok() {}
 
-            // Temporarily restore terminal for external interactive session in alternate screen
+            // Temporarily restore terminal for external interactive session on primary screen
             disable_raw_mode()?;
             execute!(
                 terminal.backend_mut(),
-                Clear(ClearType::All),
-                MoveTo(0, 0),
-                ResetColor,
+                LeaveAlternateScreen,
                 DisableMouseCapture,
                 DisableBracketedPaste
             )?;
-            terminal.show_cursor()?;
+            execute!(std::io::stdout(), Show)?;
             let _ = terminal.flush();
+            let _ = std::io::stdout().flush();
 
             // 2. Run external action
             match action {

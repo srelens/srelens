@@ -253,8 +253,34 @@ impl ExecRunner {
 
     /// Launches an interactive SSH session to a node
     pub fn run_node_ssh(destination: &str) -> Result<(), String> {
-        let cmd = Self::build_node_ssh_command(destination);
-        Self::run_interactive_command(cmd)
+        let mut cmd = Self::build_node_ssh_command(destination);
+        cmd.stdin(Stdio::inherit());
+        cmd.stdout(Stdio::inherit());
+        cmd.stderr(Stdio::inherit());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn ssh: {}", e))?;
+
+        let status = child
+            .wait()
+            .map_err(|e| format!("SSH execution error: {}", e))?;
+
+        if !status.success() {
+            if status.code() == Some(130) {
+                return Ok(());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if status.signal() == Some(2) {
+                    return Ok(());
+                }
+            }
+            return Err(format!("SSH exited with status: {}", status));
+        }
+
+        Ok(())
     }
 }
 

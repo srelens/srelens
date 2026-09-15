@@ -4019,9 +4019,10 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
     assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
     assert!(app.toast.as_ref().unwrap().0.contains("Already viewing feature banner"));
 
-    // Dismiss with Esc
-    press(&mut app, key(KeyCode::Esc)).await;
+    // Press '0' switches to Nodes view and closes banner
+    press(&mut app, ch('0')).await;
     assert!(app.modal.is_none());
+    assert!(matches!(&app.active_view, ActiveView::Table(t) if t.kind == ResourceKind::Nodes));
 
     std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
 }

@@ -2402,6 +2402,8 @@ fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
     assert!(text_enabled.contains(":ai-settings"), "shows ai-settings command");
     assert!(text_enabled.contains(":config"), "shows config command");
     assert!(text_enabled.contains(":banner"), "shows banner command");
+    assert!(text_enabled.contains(":nodes"), "shows nodes command");
+    assert!(text_enabled.contains("[0]"), "shows jump key 0");
     assert!(text_enabled.contains("[9]"), "shows jump key 9");
     assert!(text_enabled.contains("[●]"), "shows enabled checkbox dot");
     assert!(text_enabled.contains("Show this feature banner on startup"), "shows checkbox label");

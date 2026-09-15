@@ -1690,6 +1690,10 @@ impl App {
                         KeyCode::Char('9') => {
                             self.set_toast("Already viewing feature banner (:banner)".to_string(), Theme::status_ok());
                         }
+                        KeyCode::Char('0') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Nodes).await;
+                        }
                         _ => {}
                     }
                 }
@@ -1770,20 +1774,183 @@ impl App {
                         _ => {}
                     }
                 }
-                Modal::NodeSsh { node_name, mut destination_input } => {
+                Modal::NodeSsh {
+                    node_name,
+                    mut destination_input,
+                    mut cursor_pos,
+                } => {
+                    let char_count = destination_input.chars().count();
+                    cursor_pos = cursor_pos.min(char_count);
+
                     match key.code {
-                        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            delete_prev_word(&mut destination_input);
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input });
+                        // 1. Skip word left: Option+Left, Ctrl+Left, or Alt+b / Alt+B
+                        KeyCode::Left
+                            if key.modifiers.contains(KeyModifiers::ALT)
+                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            let chars: Vec<char> = destination_input.chars().collect();
+                            let mut pos = cursor_pos.min(chars.len());
+                            while pos > 0 && chars[pos - 1].is_whitespace() {
+                                pos -= 1;
+                            }
+                            while pos > 0 && !chars[pos - 1].is_whitespace() {
+                                pos -= 1;
+                            }
+                            cursor_pos = pos;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
                         }
-                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
-                            destination_input.push(c);
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input });
+                        KeyCode::Char('b') | KeyCode::Char('B')
+                            if key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            let chars: Vec<char> = destination_input.chars().collect();
+                            let mut pos = cursor_pos.min(chars.len());
+                            while pos > 0 && chars[pos - 1].is_whitespace() {
+                                pos -= 1;
+                            }
+                            while pos > 0 && !chars[pos - 1].is_whitespace() {
+                                pos -= 1;
+                            }
+                            cursor_pos = pos;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
                         }
+
+                        // 2. Skip word right: Option+Right, Ctrl+Right, or Alt+f / Alt+F
+                        KeyCode::Right
+                            if key.modifiers.contains(KeyModifiers::ALT)
+                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            let chars: Vec<char> = destination_input.chars().collect();
+                            let len = chars.len();
+                            let mut pos = cursor_pos.min(len);
+                            while pos < len && !chars[pos].is_whitespace() {
+                                pos += 1;
+                            }
+                            while pos < len && chars[pos].is_whitespace() {
+                                pos += 1;
+                            }
+                            cursor_pos = pos;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::Char('f') | KeyCode::Char('F')
+                            if key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            let chars: Vec<char> = destination_input.chars().collect();
+                            let len = chars.len();
+                            let mut pos = cursor_pos.min(len);
+                            while pos < len && !chars[pos].is_whitespace() {
+                                pos += 1;
+                            }
+                            while pos < len && chars[pos].is_whitespace() {
+                                pos += 1;
+                            }
+                            cursor_pos = pos;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 3. Start of Text: Ctrl+A, Cmd+A, Cmd+Left, Home
+                        KeyCode::Char('a') | KeyCode::Char('A')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                || key.modifiers.contains(KeyModifiers::SUPER) =>
+                        {
+                            cursor_pos = 0;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::Left if key.modifiers.contains(KeyModifiers::SUPER) => {
+                            cursor_pos = 0;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::Home => {
+                            cursor_pos = 0;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 4. End of Text: Ctrl+E, Cmd+E, Cmd+Right, End
+                        KeyCode::Char('e') | KeyCode::Char('E')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                || key.modifiers.contains(KeyModifiers::SUPER) =>
+                        {
+                            cursor_pos = destination_input.chars().count();
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::Right if key.modifiers.contains(KeyModifiers::SUPER) => {
+                            cursor_pos = destination_input.chars().count();
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::End => {
+                            cursor_pos = destination_input.chars().count();
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 5. Single character Left / Right
+                        KeyCode::Left => {
+                            cursor_pos = cursor_pos.saturating_sub(1);
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::Right => {
+                            let len = destination_input.chars().count();
+                            if cursor_pos < len {
+                                cursor_pos += 1;
+                            }
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 6. Delete word backwards (Ctrl+W, Option+Backspace, etc.)
+                        _ if is_word_delete_key(&key) => {
+                            let chars: Vec<char> = destination_input.chars().collect();
+                            let pos = cursor_pos.min(chars.len());
+                            if pos > 0 {
+                                let mut i = pos;
+                                while i > 0 && chars[i - 1].is_whitespace() {
+                                    i -= 1;
+                                }
+                                while i > 0 && !chars[i - 1].is_whitespace() {
+                                    i -= 1;
+                                }
+                                let mut new_chars = chars[..i].to_vec();
+                                new_chars.extend_from_slice(&chars[pos..]);
+                                destination_input = new_chars.into_iter().collect();
+                                cursor_pos = i;
+                            }
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 7. Backspace
                         KeyCode::Backspace => {
-                            destination_input.pop();
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input });
+                            let mut chars: Vec<char> = destination_input.chars().collect();
+                            let pos = cursor_pos.min(chars.len());
+                            if pos > 0 {
+                                chars.remove(pos - 1);
+                                destination_input = chars.into_iter().collect();
+                                cursor_pos = pos - 1;
+                            }
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
                         }
+
+                        // 8. Delete
+                        KeyCode::Delete => {
+                            let mut chars: Vec<char> = destination_input.chars().collect();
+                            let pos = cursor_pos.min(chars.len());
+                            if pos < chars.len() {
+                                chars.remove(pos);
+                                destination_input = chars.into_iter().collect();
+                            }
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 9. Typed characters
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            let mut chars: Vec<char> = destination_input.chars().collect();
+                            let pos = cursor_pos.min(chars.len());
+                            chars.insert(pos, c);
+                            destination_input = chars.into_iter().collect();
+                            cursor_pos = pos + 1;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 10. Submit
                         KeyCode::Enter => {
                             self.modal = None;
                             let trimmed = destination_input.trim();
@@ -1793,6 +1960,8 @@ impl App {
                                 });
                             }
                         }
+
+                        // 11. Dismiss
                         KeyCode::Esc => {
                             self.modal = None;
                         }
@@ -3194,9 +3363,11 @@ impl App {
                                     })
                                     .unwrap_or(&node_name)
                                     .to_string();
+                                let cursor_pos = destination.chars().count();
                                 self.modal = Some(Modal::NodeSsh {
                                     node_name,
                                     destination_input: destination,
+                                    cursor_pos,
                                 });
                             }
                         }
@@ -4573,9 +4744,11 @@ impl App {
                         let destination = inspector.details.as_ref()
                             .and_then(|d| d.internal_ip.clone().or_else(|| d.external_ip.clone()))
                             .unwrap_or_else(|| node_name.clone());
+                        let cursor_pos = destination.chars().count();
                         self.modal = Some(Modal::NodeSsh {
                             node_name: node_name.clone(),
                             destination_input: destination,
+                            cursor_pos,
                         });
                     }
                     KeyCode::Char('c') => {
@@ -5712,9 +5885,16 @@ impl App {
                     let cleaned = text.replace("\r\n", "").replace('\n', "");
                     input.push_str(&cleaned);
                 }
-                Modal::NodeSsh { ref mut destination_input, .. } => {
+                Modal::NodeSsh { ref mut destination_input, ref mut cursor_pos, .. } => {
                     let cleaned = text.replace("\r\n", "").replace('\n', "");
-                    destination_input.push_str(&cleaned);
+                    let pos = (*cursor_pos).min(destination_input.chars().count());
+                    let mut chars: Vec<char> = destination_input.chars().collect();
+                    let added_len = cleaned.chars().count();
+                    for (i, c) in cleaned.chars().enumerate() {
+                        chars.insert(pos + i, c);
+                    }
+                    *destination_input = chars.into_iter().collect();
+                    *cursor_pos = pos + added_len;
                 }
                 Modal::PortForward { ref mut local_port_input, .. } => {
                     let cleaned = text.replace("\r\n", "").replace('\n', "");
@@ -8143,9 +8323,11 @@ impl App {
                             }
                             _ => resource_name.clone(),
                         };
+                        let cursor_pos = destination.chars().count();
                         self.modal = Some(Modal::NodeSsh {
                             node_name: resource_name,
                             destination_input: destination,
+                            cursor_pos,
                         });
                     }
                     QuickActionId::PortForward => {
