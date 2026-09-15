@@ -165,7 +165,8 @@ Residual risk:
   - **After install:** the full manifest can be read under Details
     (`packages/ui-next/src/extensions/ExtensionDetails.tsx`).
 
-  [#554] adds a diff for updates, not a summary for first installs. **Gap.**
+  [#554] adds a diff for updates, not a summary for first installs. Showing the bindings in the install review is planned
+  in [#608].
 - **Unsigned apps choose their own names.** A local app outside the reserved namespace can
   call itself "Argo CD". It gets an initials mark and the **Unsigned local** label, not the
   bundled logo.
@@ -239,7 +240,7 @@ An agent that is connected and authenticated, but acting on bad instructions.
 
 | ID | Threat | STRIDE | Mitigation | Status |
 |---|---|---|---|---|
-| MCP-1 | Connect without authorization | S | `/mcp` always requires a bearer token, compared in constant time, and no production constructor serves without one (`router_with_auth` and `token_guard` in `crates/mcp/src/http.rs`, `crates/mcp/src/auth.rs`). The desktop's in-app server binds `127.0.0.1` only (`start_server` in `apps/desktop/src-tauri/src/mcp.rs`). Headless `--mcp-http` defaults to `127.0.0.1:8765` but binds whatever address it is given, unchanged (`run_mcp_http` in `apps/desktop/src-tauri/src/main.rs`, `serve_http`). Every route rejects a `Host` header other than `127.0.0.1`, `::1` or `localhost` (`host_guard`). That stops DNS rebinding from a browser, but it does not restrict where a request comes from, because any client can send `Host: localhost`. See [MCP.md](../MCP.md#security-model). | Token and in-app loopback bind shipped. Loopback for headless `--mcp-http` is not enforced: **Gap** |
+| MCP-1 | Connect without authorization | S | `/mcp` always requires a bearer token, compared in constant time, and no production constructor serves without one (`router_with_auth` and `token_guard` in `crates/mcp/src/http.rs`, `crates/mcp/src/auth.rs`). The desktop's in-app server binds `127.0.0.1` only (`start_server` in `apps/desktop/src-tauri/src/mcp.rs`). Headless `--mcp-http` defaults to `127.0.0.1:8765` but binds whatever address it is given, unchanged (`run_mcp_http` in `apps/desktop/src-tauri/src/main.rs`, `serve_http`). Every route rejects a `Host` header other than `127.0.0.1`, `::1` or `localhost` (`host_guard`). That stops DNS rebinding from a browser, but it does not restrict where a request comes from, because any client can send `Host: localhost`. See [MCP.md](../MCP.md#security-model). | Token and in-app loopback bind shipped. Refusing non-loopback addresses for headless `--mcp-http` planned in [#607] |
 | MCP-2 | Install or enable an app, change its grants or settings, or roll it back | E | `extensions.configure` is mutating, so `handle_request` (`crates/mcp/src/stdio.rs`) asks the consent policy first (`consent_kind` in `crates/mcp/src/lib.rs`). In the desktop app that is a dialog (`PromptUser` in `apps/desktop/src-tauri/src/mcp_confirm.rs`). Headless, it needs both `--mcp-allow-destructive` and `"_confirm": true` (`FlagGated` in `crates/mcp/src/policy.rs`). With no policy, it is denied (`AlwaysDeny`). | Shipped |
 | MCP-3 | Start a GitOps write | E | `extensions.action` and `k8s.gitOpsAction` are mutating and gated the same way (`action_dispatch_uses_bound_api_and_mcp_cannot_bypass_confirmation` in `crates/registry/src/extensions/resource.rs`). The write fetches the resource again and refuses a changed UID or resourceVersion, a sync while an Argo CD operation is present, a Suspend of a suspended resource or a Resume of one that is not, reconciliation while suspended, and a resource being deleted. It then sends the UID and resourceVersion as PATCH preconditions (`guard_action`, `execute` in `crates/kube/src/gitops.rs`). A sync never enables pruning. | Shipped |
 | MCP-4 | Call a removed app through a stale tool list | E | Broker handlers check the flag `Registration::unregister` clears, and `extensions.*` read the inventory on every call. | Shipped |
@@ -253,7 +254,7 @@ Residual risk:
   client that sends a loopback `Host` header, and the transport is plain HTTP, so anyone
   who can observe the traffic can read the token and every tool result, including cluster
   data, and replay the token. Gated tools still need the process flags and `_confirm`.
-  **Gap.**
+  Planned in [#607].
 - With `--mcp-allow-destructive`, a headless agent that sends `_confirm` can install any
   unsigned read-only app with the grants it asks for. [#558] covers apps that write or run
   code, not read-only ones.
@@ -312,6 +313,8 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 | [#603] | APP-10: reject bidirectional and invisible characters in labels |
 | [#604] | NET-3: match trusted repositories case-insensitively |
 | [#605] | VULN-3: redact extension settings in the MCP audit log |
+| [#607] | MCP-1: refuse non-loopback addresses for headless HTTP unless explicitly exposed |
+| [#608] | APP-3: show what an app binds in the install review |
 | [#515] ([#522]) | WEB-1: per-user apps on the web host |
 | [#39] | Scope: CSP, update chain and the rest of the host |
 [#39]: https://github.com/srelens/srelens/issues/39
@@ -338,4 +341,6 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 [#603]: https://github.com/srelens/srelens/issues/603
 [#604]: https://github.com/srelens/srelens/issues/604
 [#605]: https://github.com/srelens/srelens/issues/605
+[#607]: https://github.com/srelens/srelens/issues/607
+[#608]: https://github.com/srelens/srelens/issues/608
 [#597]: https://github.com/srelens/srelens/pull/597
