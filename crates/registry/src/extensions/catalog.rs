@@ -1,7 +1,9 @@
 //! A fixed public catalog; official manifests require a pinned publisher signature.
 use super::*;
 use sha2::{Digest, Sha256};
-use srelens_plugin_host::{negotiate_api_version, MAX_MANIFEST_BYTES, SUPPORTED_API_VERSIONS};
+use srelens_plugin_host::{
+    is_format_character, negotiate_api_version, MAX_MANIFEST_BYTES, SUPPORTED_API_VERSIONS,
+};
 use std::{
     collections::BTreeSet,
     io::Read as _,
@@ -161,6 +163,17 @@ pub(super) fn parse_catalog(raw: &[u8]) -> Result<Catalog, String> {
             .any(|s| s.trim().is_empty())
         {
             return Err("Missing catalog metadata".into());
+        }
+        // A format character, such as a right-to-left override, can make one app's name
+        // display as another's.
+        if [&entry.name, &entry.description]
+            .iter()
+            .any(|s| s.chars().any(is_format_character))
+        {
+            return Err(format!(
+                "Catalog app {} has a bidirectional or invisible format character in its name or description",
+                entry.id
+            ));
         }
         https_url(&entry.repository)?;
         https_url(&entry.tested_host.repository)?;
@@ -611,6 +624,36 @@ mod tests {
                 .unwrap()
                 .refresh
         );
+    }
+    #[test]
+    fn refuses_bidirectional_and_invisible_characters_in_names_and_descriptions() {
+        let base: Value = serde_json::from_slice(&fixture()).unwrap();
+        for (pointer, text) in [
+            // A right-to-left override displays this name as "Argo CD".
+            ("/extensions/0/name", "\u{202E}DC ogrA"),
+            ("/extensions/0/name", "Argo CD\u{200B}"),
+            ("/extensions/0/description", "Soft\u{00AD}hyphen"),
+            (
+                "/extensions/1/description",
+                "GitOps \u{2066}dashboards\u{2069}",
+            ),
+            ("/extensions/1/description", "\u{FEFF}Flux"),
+        ] {
+            let mut value = base.clone();
+            *value.pointer_mut(pointer).unwrap() = json!(text);
+            let parsed = parse_catalog(&serde_json::to_vec(&value).unwrap()).map(|_| ());
+            assert!(
+                parsed
+                    .as_ref()
+                    .is_err_and(|reason| reason.contains("invisible")),
+                "{pointer} {text:?}: {parsed:?}"
+            );
+        }
+        let mut value = base;
+        value["extensions"][0]["name"] = json!("Argo CD — Übersicht");
+        value["extensions"][0]["description"] =
+            json!("GitOps アプリケーション, приложения и عمليات");
+        parse_catalog(&serde_json::to_vec(&value).unwrap()).unwrap();
     }
     #[test]
     fn snapshot_lists_every_supported_api_version_and_reuses_legacy_caches() {

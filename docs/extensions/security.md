@@ -20,6 +20,9 @@ mitigation and the risk that remains.
 - **Official identities are reserved.** IDs under `org.srelens.` install only with the
   srelens publisher signature, so a pasted manifest cannot take an official app's ID
   or logo ([distribution.md](distribution.md#signed-official-releases)).
+- **Names display as written.** App names, titles and groups, and catalog names and
+  descriptions, refuse bidirectional overrides, zero-width characters and other Unicode
+  format characters ([specification.md](specification.md#identifiers)).
 - **One bad app is contained.** An app that fails re-verification is quarantined on
   its own ([architecture.md](architecture.md#quarantine)).
 - **Downloads are constrained.** Only the fixed catalog URL, GitHub release assets and
