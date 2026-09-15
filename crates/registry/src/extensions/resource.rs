@@ -23,8 +23,10 @@ struct Action {
 async fn resolve(
     path: PathBuf,
     core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
     selection: Selection,
 ) -> Result<ResourceIn, CapabilityError> {
+    let context_id = context_id(&cache, &selection.context).await;
     let state = tokio::task::spawn_blocking(move || read(&path))
         .await
         .map_err(|e| CapabilityError::Handler(e.to_string()))?
@@ -38,7 +40,7 @@ async fn resolve(
                 "App was disabled, removed or updated; refresh the view".into(),
             )
         })?;
-    if !plugin.allows(&selection.context) {
+    if !plugin.allows(context_id.as_deref()) {
         return Err(CapabilityError::Handler(NOT_ENABLED_FOR_CLUSTER.into()));
     }
     validate_app(&plugin.manifest, &plugin.grants, core)
@@ -70,9 +72,15 @@ async fn resolve(
     resource.validate().map_err(CapabilityError::InvalidInput)?;
     Ok(resource)
 }
-pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
+pub(super) fn register(
+    reg: &mut Registry,
+    path: PathBuf,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+) {
     let p = path.clone();
     let c = core.clone();
+    let k = cache.clone();
     reg.register(Capability::typed::<Selection, Value, _, _>(
         "extensions.resource",
         "Inspect the selected resource of an enabled app",
@@ -80,8 +88,9 @@ pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
         move |selection| {
             let p = p.clone();
             let c = c.clone();
+            let k = k.clone();
             async move {
-                let resource = resolve(p, c.clone(), selection).await?;
+                let resource = resolve(p, c.clone(), k, selection).await?;
                 c.invoke(
                     "k8s.getCustomResource",
                     serde_json::to_value(resource).unwrap(),
@@ -91,8 +100,8 @@ pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
         },
     ));
     reg.register(Capability::typed::<Action, Value, _, _>("extensions.action", "Request a host-owned GitOps action on an app resource; requires explicit confirmation", Annotations::MUTATING, move |input| {
-        let p = path.clone(); let c = core.clone(); async move {
-            let resource = resolve(p,c.clone(),input.resource).await?;
+        let p = path.clone(); let c = core.clone(); let k = cache.clone(); async move {
+            let resource = resolve(p,c.clone(),k,input.resource).await?;
             c.invoke("k8s.gitOpsAction", json!({"resource":resource,"action":input.action,"uid":input.uid,"resourceVersion":input.resource_version})).await
         }
     }));
@@ -114,6 +123,7 @@ mod tests {
         let resolved = resolve(
             path.clone(),
             core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
             serde_json::from_value(payload.clone()).unwrap(),
         )
         .await
@@ -133,11 +143,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            resolve(path, core, serde_json::from_value(payload).unwrap())
-                .await
-                .is_err()
-        );
+        assert!(resolve(
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            serde_json::from_value(payload).unwrap()
+        )
+        .await
+        .is_err());
     }
     #[tokio::test]
     async fn action_dispatch_uses_bound_api_and_mcp_cannot_bypass_confirmation() {
@@ -158,7 +171,12 @@ mod tests {
             .name
             .clone();
         let mut reg = Registry::new();
-        register(&mut reg, path.clone(), core.clone());
+        register(
+            &mut reg,
+            path.clone(),
+            core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
         let selected = json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"cluster/a","namespace":"team","name":"app"});
         let payload = json!({"resource":selected,"action":"sync","uid":"u","resourceVersion":"2"});
         let result = reg
@@ -183,10 +201,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            resolve(path, core, serde_json::from_value(selected).unwrap())
-                .await
-                .is_err()
-        );
+        assert!(resolve(
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            serde_json::from_value(selected).unwrap()
+        )
+        .await
+        .is_err());
     }
 }

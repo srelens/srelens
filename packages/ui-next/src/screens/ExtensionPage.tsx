@@ -40,7 +40,7 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             {inventory.error}
             <Button onClick={inventory.reload}>Retry</Button>
           </div>
-        ) : plugin && page && !extensionEnabledFor(plugin, target.context) ? (
+        ) : plugin && page && !extensionEnabledFor(plugin, cluster?.stableId) ? (
           <p className="extension-message">
             This app is not enabled for this cluster. Manage it in Settings → Apps.
           </p>

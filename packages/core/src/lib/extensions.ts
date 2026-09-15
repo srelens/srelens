@@ -71,7 +71,10 @@ export interface InstalledExtension {
   installedAt: number;
   /** The versions this one replaced, newest first; at most three. */
   history: ExtensionPreviousVersion[];
-  /** The kubeconfig context names the app is enabled for; absent means every cluster. */
+  /**
+   * The stable IDs (`ClusterContext.stableId`) of the kubeconfig contexts the app is enabled
+   * for; absent means every cluster. A context's name is presentation only (#265).
+   */
   contexts?: string[];
 }
 export interface ExtensionInventory {
@@ -85,12 +88,18 @@ export type ExtensionChange =
   | { action: "remove"; id: string }
   /** Restores a kept version; `grants` are what the user reviewed and grants again. */
   | { action: "rollback"; id: string; revision: number; grants: string[] }
-  /** Limits the app to these context names, or with `null` allows every cluster. */
+  /** Limits the app to these stable context IDs, or with `null` allows every cluster. */
   | { action: "clusters"; id: string; contexts: string[] | null }
   | { action: "settings"; id: string; settings: Record<string, unknown> };
-/** Whether an installed app may be used on `context`, a kubeconfig context name. */
-export const extensionEnabledFor = (plugin: Pick<InstalledExtension, "contexts">, context: string) =>
-  !plugin.contexts || plugin.contexts.includes(context);
+/**
+ * Whether an installed app may be used on a context, given that context's stable ID
+ * (`ClusterContext.stableId`). A limited app is not enabled on a context whose ID is not
+ * known yet; the host enforces the same scope on every read and action.
+ */
+export const extensionEnabledFor = (
+  plugin: Pick<InstalledExtension, "contexts">,
+  contextId: string | undefined,
+) => !plugin.contexts || (contextId !== undefined && plugin.contexts.includes(contextId));
 export const EXTENSIONS_CHANGED = "srelens:extensions-changed";
 export const listExtensions = () =>
   invokeCapability<ExtensionInventory>("extensions.list", {});

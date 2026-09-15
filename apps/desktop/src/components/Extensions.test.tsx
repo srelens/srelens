@@ -6,11 +6,13 @@ vi.mock("@srelens/core", async (original) => ({
   listExtensions: vi.fn(),
   configureExtensions: vi.fn(),
   readExtension: vi.fn(),
+  listContexts: vi.fn(),
 }));
 import {
   listExtensions,
   configureExtensions,
   readExtension,
+  listContexts,
   type InstalledExtension,
 } from "@srelens/core";
 import { ExtensionManager, ExtensionResourceSlot } from "./Extensions";
@@ -85,11 +87,21 @@ it("opens native app pages from classic's connected-cluster navigation without a
   expect(screen.queryByText("Choose a cluster")).toBeNull();
 });
 
+/** The contexts both clusters tests list: names are presentation, stable IDs are identity. */
+const listTwoClusters = () =>
+  vi.mocked(listContexts).mockResolvedValue({
+    contexts: [
+      { name: "cluster/a", stableId: "/kube/a.yaml#cluster/a" },
+      { name: "cluster/b", stableId: "/kube/b.yaml#cluster/b" },
+    ],
+  } as any);
+
 it("offers an app's pages only on the clusters it is enabled for", async () => {
+  listTwoClusters();
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
     nextRevision: 2,
-    plugins: [{ ...plugin, contexts: ["cluster/b"] }],
+    plugins: [{ ...plugin, contexts: ["/kube/b.yaml#cluster/b"] }],
   });
   const { ClassicAppsNav } = await import("./Extensions");
   render(
@@ -104,10 +116,11 @@ it("offers an app's pages only on the clusters it is enabled for", async () => {
 });
 
 it("offers an app's resource tabs only on the clusters it is enabled for", async () => {
+  listTwoClusters();
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
     nextRevision: 2,
-    plugins: [{ ...plugin, contexts: ["cluster/b"] }],
+    plugins: [{ ...plugin, contexts: ["/kube/b.yaml#cluster/b"] }],
   });
   render(
     <>

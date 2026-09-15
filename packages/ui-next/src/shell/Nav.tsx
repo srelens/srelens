@@ -112,10 +112,10 @@ export function Nav({ contexts }: NavProps) {
   const nodes = useMemo<ResourceNode[]>(
     () => [
       ...kindNodes().slice(0, 1),
-      ...(ctx && extensions.data && extensions.data.plugins.some(p => p.enabled && extensionEnabledFor(p, ctx.name) && p.manifest.contributions.pages.length)
+      ...(ctx && extensions.data && extensions.data.plugins.some(p => p.enabled && extensionEnabledFor(p, ctx.stableId) && p.manifest.contributions.pages.length)
         ? [{
             id: "extensions", label: "Apps", icon: Icons.apps,
-            children: extensions.data.plugins.filter(p => p.enabled && extensionEnabledFor(p, ctx.name) && p.manifest.contributions.pages.length).map(p => ({
+            children: extensions.data.plugins.filter(p => p.enabled && extensionEnabledFor(p, ctx.stableId) && p.manifest.contributions.pages.length).map(p => ({
               id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: extensionLogoIcon(p.manifest.id, p.manifest.name),
               children: p.manifest.contributions.pages.flatMap((page, index, pages) => {
                 const leaf = (item: typeof page) => ({

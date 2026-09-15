@@ -1,5 +1,6 @@
 import { ExtensionDetails } from "./ExtensionDetails";
 import { ExtensionRequirements } from "./ExtensionRequirements";
+import { useContextId } from "./contextIds";
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useState } from "react";
 import {
@@ -22,6 +23,7 @@ export { ExtensionResults } from "./ExtensionResults";
 
 import { useExtensions } from "./inventoryStore";
 export { useExtensions } from "./inventoryStore";
+export { useContextId } from "./contextIds";
 
 export function ExtensionManager() {
   const { Button, Tabs } = useContext(ExtensionControls);
@@ -325,7 +327,9 @@ export function ExtensionManager() {
 /** The detail tabs and row actions apps offer for a kind, on a cluster they are enabled for. */
 export function useExtensionContributions(context: string, kind: string, group?: string) {
   const inventory = useExtensions();
-  const plugins = inventory.data?.plugins.filter((p) => p.enabled && extensionEnabledFor(p, context)) ?? [];
+  // App scope keys on the context's stable ID, not its name (#265).
+  const contextId = useContextId(context);
+  const plugins = inventory.data?.plugins.filter((p) => p.enabled && extensionEnabledFor(p, contextId)) ?? [];
   const qualified = contributionKind(kind, group);
   return {
     inventory,

@@ -66,6 +66,8 @@ it("limits an app to chosen clusters, and allows every cluster when none are cho
   expect(extensionEnabledFor(limited, "cluster/a")).toBe(true);
   expect(extensionEnabledFor(limited, "cluster/b")).toBe(false);
   expect(extensionEnabledFor({} as App, "cluster/b")).toBe(true);
+  // A limited app stays hidden until the context's stable ID is known.
+  expect(extensionEnabledFor(limited, undefined)).toBe(false);
   await configureExtensions({ action: "clusters", id: "org.test.app", contexts: ["cluster/a"] });
   expect(invokeCapability).toHaveBeenLastCalledWith("extensions.configure", {
     action: "clusters",

@@ -255,7 +255,7 @@ that existing `^0.1` manifests receive without an update.
   - Settings → Apps shows an app's manifest, grants with their annotations, source and install time; it exports settings as JSON, resets them to defaults, and rolls back.
   - The capability catalog carries a `sensitive` flag.
 - **#535:**
-  - An installed app may be limited to chosen kubeconfig context names in `contexts`. Without the list it is offered on every cluster, as before.
+  - An installed app may be limited to chosen kubeconfig contexts in `contexts`. Each is kept by stable ID (`{file}#{name}`: the declaring kubeconfig and the context's name in it), because a display name changes when another kubeconfig declares the same name (#265). Without the list the app is offered on every cluster, as before.
   - `extensions.configure` gains `clusters`. On a cluster the app is not enabled for, `extensions.read`, `extensions.resource` and `extensions.action` refuse with "App is not enabled for this cluster", and both desktop designs hide its pages, detail tabs and row actions.
   - The terminal UI is recorded as out of scope for extension API 1.0 (see [Scope](#scope)).
 - **#537:** pre-release rename.

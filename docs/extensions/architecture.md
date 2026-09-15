@@ -52,7 +52,9 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
   (see [migration.md](migration.md#rolling-back)).
 - Each installed version records its source: `catalog` when its exact bytes are a
   release in the cached catalog, otherwise `local`. The host decides this, not the caller.
-- An app may be limited to chosen kubeconfig context names. Navigation and resource slots
+- An app may be limited to chosen kubeconfig contexts, kept by stable ID because a context's
+  display name changes when another kubeconfig declares the same name (#265). The broker
+  resolves each request's context name to that ID the same way a connection does. Navigation and resource slots
   hide it on the other clusters, and the broker refuses its reads and actions there with
   "App is not enabled for this cluster", distinct from a missing-CRD requirement.
 - Every read checks the durable inventory and revision, so a disabled, removed or

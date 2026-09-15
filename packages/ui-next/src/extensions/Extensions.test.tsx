@@ -307,9 +307,13 @@ it("closes the reset confirmation with Escape without resetting", async () => {
   expect(within(details).queryByRole("alertdialog", { name: "Reset settings" })).toBeNull();
   expect(configureExtensions).not.toHaveBeenCalled();
 });
-it("limits an app to chosen clusters from its details", async () => {
+it("limits an app to chosen clusters from its details, by stable context ID", async () => {
+  // The name is presentation only; the saved list keys on each context's stable ID (#265).
   vi.mocked(listContexts).mockResolvedValue({
-    contexts: [{ name: "cluster/a", stableId: "a" }, { name: "cluster/b", stableId: "b" }],
+    contexts: [
+      { name: "cluster/a", stableId: "/kube/a.yaml#cluster/a" },
+      { name: "cluster/b", stableId: "/kube/b.yaml#cluster/b" },
+    ],
   } as any);
   // Opening the picker makes the manifest editor measure text ranges, and jsdom has no
   // layout to measure. Stub them for this test only.
@@ -332,21 +336,28 @@ it("limits an app to chosen clusters from its details", async () => {
     expect(within(clusters).getByRole("button", { name: "Remove cluster/b" })).toBeTruthy();
     fireEvent.click(within(clusters).getByRole("button", { name: "Save clusters" }));
     await waitFor(() =>
-      expect(configureExtensions).toHaveBeenCalledWith({ action: "clusters", id: "org.test.gitops", contexts: ["cluster/b"] }),
+      expect(configureExtensions).toHaveBeenCalledWith({
+        action: "clusters",
+        id: "org.test.gitops",
+        contexts: ["/kube/b.yaml#cluster/b"],
+      }),
     );
   } finally {
     Object.assign(Range.prototype, measuring);
   }
 });
 it("allows every cluster again, and keeps listing a chosen cluster the kubeconfig no longer has", async () => {
-  vi.mocked(listContexts).mockResolvedValue({ contexts: [{ name: "cluster/a", stableId: "a" }] } as any);
-  const app = { ...updated(), contexts: ["cluster/a", "retired"] };
+  vi.mocked(listContexts).mockResolvedValue({
+    contexts: [{ name: "cluster/a", stableId: "/kube/a.yaml#cluster/a" }],
+  } as any);
+  const app = { ...updated(), contexts: ["/kube/a.yaml#cluster/a", "/kube/gone.yaml#retired"] };
   const details = await openDetails(app);
   const clusters = within(details).getByRole("group", { name: "Clusters" });
   expect((within(clusters).getByLabelText("Only these clusters") as HTMLInputElement).checked).toBe(true);
-  expect(within(clusters).getByRole("button", { name: "Remove cluster/a" })).toBeTruthy();
-  fireEvent.click(within(clusters).getByRole("button", { name: "Remove retired" }));
-  expect(within(clusters).queryByRole("button", { name: "Remove retired" })).toBeNull();
+  // A listed context shows its name; one the kubeconfig no longer has shows its ID, so it can be removed.
+  expect(await within(clusters).findByRole("button", { name: "Remove cluster/a" })).toBeTruthy();
+  fireEvent.click(within(clusters).getByRole("button", { name: "Remove /kube/gone.yaml#retired" }));
+  expect(within(clusters).queryByRole("button", { name: "Remove /kube/gone.yaml#retired" })).toBeNull();
   fireEvent.click(within(clusters).getByLabelText("All clusters"));
   fireEvent.click(within(clusters).getByRole("button", { name: "Save clusters" }));
   await waitFor(() =>
