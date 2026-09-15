@@ -50,3 +50,10 @@ it("says the clusters could not be listed rather than that a limited app is not 
  fireEvent.click(within(alert).getByRole("button",{name:"Retry"}));
  await waitFor(()=>expect(setContexts).toHaveBeenCalledWith(listed,""));
 });
+it("says the cluster is gone rather than that a limited app is not enabled",async()=>{
+ Object.assign(clusters,{contexts:[{name:"cluster/b",stableId:"/kube/b.yaml#cluster/b"}],status:"loaded"});
+ limitedTo("/kube/a.yaml#cluster/a");
+ openKustomizations();
+ expect(await screen.findByText(/no longer in your kubeconfig files/)).toBeTruthy();
+ expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
+});

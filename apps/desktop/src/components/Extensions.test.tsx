@@ -188,3 +188,18 @@ it("says why the classic Apps navigation cannot show a limited app, and retries"
   expect(await screen.findByText("Apps")).toBeTruthy();
   expect(screen.queryByRole("alert")).toBeNull();
 });
+
+it("says the cluster is gone rather than that a limited app is not enabled", async () => {
+  vi.mocked(listContexts).mockResolvedValue({
+    contexts: [{ name: "cluster/b", stableId: "/kube/b.yaml#cluster/b" }],
+  } as any);
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [{ ...plugin, contexts: ["/kube/a.yaml#cluster/a"] }],
+  });
+  const { ClassicAppPage } = await import("./Extensions");
+  render(<ClassicAppPage context="cluster/a" id={manifest.id} page={manifest.contributions.pages[0].id} onPage={vi.fn()} />);
+  expect(await screen.findByText(/no longer in your kubeconfig files/)).toBeTruthy();
+  expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
+});

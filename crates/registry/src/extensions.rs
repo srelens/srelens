@@ -1463,6 +1463,28 @@ mod tests {
         assert_eq!(reached(&[impostor.clone(), first.clone()]), Some(first));
         assert_eq!(reached(&[impostor]), None);
     }
+    /// A kubeconfig can be given by a relative path. Its contexts still get an absolute stable
+    /// ID, so a context named after that ID is recognised as an impostor like any other.
+    #[test]
+    fn a_kubeconfig_given_by_a_relative_path_still_pins_by_an_absolute_id() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let relative = PathBuf::from(dir.path().file_name().unwrap()).join("first.yaml");
+        let given = [relative.clone()];
+        let listed = srelens_kube::context_resolve::resolve_contexts(&given);
+        let id = listed[0].stable_id();
+        assert!(Path::new(&id).is_absolute(), "{id}");
+        let impostor = kubeconfig(dir.path(), "impostor.yaml", &[&id]);
+        let reached = |paths: &[PathBuf]| {
+            srelens_kube::context_resolve::resolve_context(paths, &id)
+                .map(|context| context.original_name)
+        };
+        assert_eq!(
+            reached(&[impostor.clone(), relative]),
+            Some("default".to_owned())
+        );
+        assert_eq!(reached(&[impostor]), None);
+    }
     /// A limited app is refused on a context the host cannot resolve, but with why: whether
     /// the app is enabled there is unknown, which is not the same as not enabled.
     #[tokio::test]

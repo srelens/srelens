@@ -58,6 +58,11 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             message={contextsError}
             retry={() => void relistContexts()}
           />
+        ) : unchecked ? (
+          <p className="extension-message">
+            This cluster is no longer in your kubeconfig files, so its apps cannot be opened here.
+            Manage your kubeconfig files in Settings → Contexts.
+          </p>
         ) : plugin && page && !extensionEnabledFor(plugin, cluster?.stableId) ? (
           <p className="extension-message">
             This app is not enabled for this cluster. Manage it in Settings → Apps.

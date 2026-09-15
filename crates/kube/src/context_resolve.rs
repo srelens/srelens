@@ -52,8 +52,13 @@ impl ResolvedContext {
     /// user never touched can be renamed by adding an unrelated file — taking
     /// every per-context setting keyed by that name with it (#265). The
     /// declaring file plus the name inside that file does not move.
+    ///
+    /// The file is always given as an absolute path, even when the kubeconfig was
+    /// added by a relative one, so an ID is always recognisable as one (see
+    /// `find_context`) and does not depend on the working directory.
     pub fn stable_id(&self) -> String {
-        format!("{}#{}", self.source.display(), self.original_name)
+        let source = std::path::absolute(&self.source).unwrap_or_else(|_| self.source.clone());
+        format!("{}#{}", source.display(), self.original_name)
     }
 }
 
