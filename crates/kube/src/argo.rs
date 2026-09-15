@@ -92,7 +92,7 @@ impl ArgoApplication {
         let dest = spec.and_then(|s| s.get("destination"));
         let destination_server = dest.and_then(|d| d.get("server")).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let destination_name = dest.and_then(|d| d.get("name")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let destination_namespace = dest.and_then(|d| d.get("namespace")).and_then(|v| v.as_str()).unwrap_or("default").to_string();
+        let destination_namespace = dest.and_then(|d| d.get("namespace")).and_then(|v| v.as_str()).unwrap_or("").to_string();
 
         let sync_policy = spec.and_then(|s| s.get("syncPolicy"));
         let automated = sync_policy.and_then(|p| p.get("automated"));
@@ -102,7 +102,7 @@ impl ArgoApplication {
 
         let status = val.get("status");
         let sync = status.and_then(|s| s.get("sync"));
-        let sync_status = sync.and_then(|s| s.get("status")).and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
+        let sync_status = sync.and_then(|s| s.get("status")).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let sync_revision = sync.and_then(|s| s.get("revision")).and_then(|v| v.as_str()).unwrap_or("").to_string();
 
         let health = status.and_then(|s| s.get("health"));
@@ -886,6 +886,27 @@ mod tests {
         assert_eq!(app.resources[0].health, "Degraded");
         assert_eq!(app.sync_history.len(), 1);
         assert_eq!(app.sync_history[0].id, 12);
+    }
+
+    #[test]
+    fn test_parse_argo_application_cluster_scoped_and_missing_sync_status() {
+        let raw = serde_json::json!({
+            "metadata": {
+                "name": "cluster-roles-app",
+                "namespace": "argocd"
+            },
+            "spec": {
+                "destination": {
+                    "server": "https://kubernetes.default.svc"
+                }
+            },
+            "status": {}
+        });
+
+        let app = ArgoApplication::from_json(&raw);
+        assert_eq!(app.name, "cluster-roles-app");
+        assert_eq!(app.destination_namespace, "");
+        assert_eq!(app.sync_status, "");
     }
 
     #[test]

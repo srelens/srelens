@@ -184,7 +184,9 @@ fn sync_status_badge(status: &str) -> (&'static str, Style) {
     match status {
         "Synced" => ("● Synced", Theme::status_ok()),
         "OutOfSync" => ("▲ OutOfSync", Theme::status_warn()),
-        _ if status.is_empty() => ("- Unknown", Style::default().fg(Theme::dim())),
+        _ if status.is_empty() || status.eq_ignore_ascii_case("unknown") => {
+            ("- Unknown", Style::default().fg(Theme::dim()))
+        }
         _ => ("✖ Error", Theme::status_error()),
     }
 }
@@ -429,7 +431,14 @@ fn render_overview_tab(
             Span::styled(dest_server, Style::default().fg(Theme::label())),
             Span::styled(")    ", Theme::header_label()),
             Span::styled("Target Namespace: ", Theme::header_label()),
-            Span::styled(&app.destination_namespace, Style::default().fg(Theme::cyan())),
+            Span::styled(
+                if app.destination_namespace.is_empty() {
+                    "(cluster-scoped / none)"
+                } else {
+                    app.destination_namespace.as_str()
+                },
+                Style::default().fg(Theme::cyan()),
+            ),
         ]),
     ];
 
@@ -793,4 +802,25 @@ fn render_history_tab(
 
     let table = Table::new(rows, widths).header(headers);
     f.render_widget(table, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sync_status_badge() {
+        let (label, _) = sync_status_badge("Synced");
+        assert_eq!(label, "● Synced");
+        let (label, _) = sync_status_badge("OutOfSync");
+        assert_eq!(label, "▲ OutOfSync");
+        let (label, _) = sync_status_badge("");
+        assert_eq!(label, "- Unknown");
+        let (label, _) = sync_status_badge("Unknown");
+        assert_eq!(label, "- Unknown");
+        let (label, _) = sync_status_badge("unknown");
+        assert_eq!(label, "- Unknown");
+        let (label, _) = sync_status_badge("Failed");
+        assert_eq!(label, "✖ Error");
+    }
 }

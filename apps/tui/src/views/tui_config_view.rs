@@ -766,15 +766,17 @@ pub fn render_tui_config_view(
         let preview_inner = preview_block.inner(preview_area);
         f.render_widget(preview_block, preview_area);
 
-        let is_remote = config.argo_hub_context.is_some() || config.argo_hub_kubeconfig.is_some();
+        let resolved_hub_ctx = config.resolved_argo_hub_context();
+        let resolved_hub_kc = config.resolved_argo_hub_kubeconfig();
+        let is_remote = resolved_hub_ctx.is_some() || resolved_hub_kc.is_some();
         let topology_mode_span = if is_remote {
             Span::styled("Hub-and-Spoke (Central Management Cluster)", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD))
         } else {
             Span::styled("Local / In-Cluster (Single Cluster)", Theme::status_ok().add_modifier(Modifier::BOLD))
         };
 
-        let hub_context_str = config.argo_hub_context.as_deref().unwrap_or("(active cluster)");
-        let hub_kubeconfig_str = config.argo_hub_kubeconfig.as_ref()
+        let hub_context_str = resolved_hub_ctx.as_deref().unwrap_or("(active cluster)");
+        let hub_kubeconfig_str = resolved_hub_kc.as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(default $KUBECONFIG)".to_string());
 

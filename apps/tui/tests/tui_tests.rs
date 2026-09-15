@@ -7112,7 +7112,12 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
         assert!(app.modal.is_some());
         if let Some(Modal::Confirm { ref action_name, .. }) = app.modal {
-            assert!(action_name.starts_with("argo_sync:mgmt-hub:argocd:auth-api:false:false"));
+            assert!(action_name.starts_with("argo_sync:"));
+            let val: serde_json::Value = serde_json::from_str(action_name.strip_prefix("argo_sync:").unwrap()).unwrap();
+            assert_eq!(val["ctx"], "mgmt-hub");
+            assert_eq!(val["ns"], "argocd");
+            assert_eq!(val["name"], "auth-api");
+            assert_eq!(val["prune"], false);
         } else {
             panic!("Expected Modal::Confirm for argo_sync");
         }
@@ -7122,7 +7127,12 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT)).await;
         assert!(app.modal.is_some());
         if let Some(Modal::Confirm { ref action_name, .. }) = app.modal {
-            assert!(action_name.starts_with("argo_sync:mgmt-hub:argocd:auth-api:true:false"));
+            assert!(action_name.starts_with("argo_sync:"));
+            let val: serde_json::Value = serde_json::from_str(action_name.strip_prefix("argo_sync:").unwrap()).unwrap();
+            assert_eq!(val["ctx"], "mgmt-hub");
+            assert_eq!(val["ns"], "argocd");
+            assert_eq!(val["name"], "auth-api");
+            assert_eq!(val["prune"], true);
         } else {
             panic!("Expected Modal::Confirm for argo_sync with prune");
         }
@@ -7132,7 +7142,12 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)).await;
         assert!(app.modal.is_some());
         if let Some(Modal::Confirm { ref action_name, .. }) = app.modal {
-            assert!(action_name.starts_with("argo_toggle_auto:mgmt-hub:argocd:auth-api:true"));
+            assert!(action_name.starts_with("argo_toggle_auto:"));
+            let val: serde_json::Value = serde_json::from_str(action_name.strip_prefix("argo_toggle_auto:").unwrap()).unwrap();
+            assert_eq!(val["ctx"], "mgmt-hub");
+            assert_eq!(val["ns"], "argocd");
+            assert_eq!(val["name"], "auth-api");
+            assert_eq!(val["enable"], true);
         } else {
             panic!("Expected Modal::Confirm for argo_toggle_auto");
         }
@@ -7174,6 +7189,73 @@ mod tests {
         std::env::remove_var("SRELENS_ARGO_HUB_CONTEXT");
         std::env::remove_var("SRELENS_ARGO_HUB_KUBECONFIG");
         assert_eq!(cfg.resolved_argo_hub_context(), Some("platform-mgmt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_colon_command_with_namespace_argument() {
+        use srelens_tui::app::{ActiveView, App};
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+        app.active_namespace = "default".to_string();
+
+        // :argo argocd should switch to Argo and set filter_query to argocd
+        app.execute_colon_command("argo argocd").await;
+        assert_eq!(app.active_namespace, "argocd");
+        match &app.active_view {
+            ActiveView::Argo(state) => {
+                assert_eq!(state.filter_query, "argocd");
+            }
+            _ => panic!("Expected ActiveView::Argo"),
+        }
+
+        // :helm dev should switch to Helm and set active_namespace to dev
+        app.execute_colon_command("helm dev").await;
+        assert_eq!(app.active_namespace, "dev");
+        assert!(matches!(app.active_view, ActiveView::Helm(_)));
+    }
+
+    #[tokio::test]
+    async fn test_argo_confirm_modal_with_eks_arn_context() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::App;
+        use srelens_tui::ui::dialogs::Modal;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+        let eks_arn_ctx = "arn:aws:eks:us-east-1:123456789012:cluster/prod";
+        let payload = serde_json::json!({
+            "ctx": eks_arn_ctx,
+            "ns": "argocd",
+            "name": "payment-service",
+            "prune": false,
+            "dry_run": false,
+        });
+        app.modal = Some(Modal::Confirm {
+            title: "Sync".into(),
+            message: "Sync?".into(),
+            action_name: format!("argo_sync:{}", payload),
+            is_destructive: false,
+        });
+
+        // Confirming should safely parse the ARN without splitting on ARN colons
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(app.modal.is_none());
+        assert!(app.toast.as_ref().unwrap().0.contains("Triggering sync for 'payment-service'..."));
     }
 }
 

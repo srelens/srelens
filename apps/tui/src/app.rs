@@ -3902,20 +3902,34 @@ impl App {
                     }
                     KeyCode::Char('s') => {
                         if let Some(app) = sel_app {
+                            let payload = serde_json::json!({
+                                "ctx": query_ctx,
+                                "ns": app.namespace,
+                                "name": app.name,
+                                "prune": false,
+                                "dry_run": false,
+                            });
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Sync ArgoCD Application [{}]", app.name),
                                 message: format!("Trigger sync for '{}/{}'? (Prune: false)", app.namespace, app.name),
-                                action_name: format!("argo_sync:{}:{}:{}:false:false", query_ctx, app.namespace, app.name),
+                                action_name: format!("argo_sync:{}", payload),
                                 is_destructive: false,
                             });
                         }
                     }
                     KeyCode::Char('S') => {
                         if let Some(app) = sel_app {
+                            let payload = serde_json::json!({
+                                "ctx": query_ctx,
+                                "ns": app.namespace,
+                                "name": app.name,
+                                "prune": true,
+                                "dry_run": false,
+                            });
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Sync ArgoCD Application with Prune [{}]", app.name),
                                 message: format!("Trigger sync with PRUNE for '{}/{}'?", app.namespace, app.name),
-                                action_name: format!("argo_sync:{}:{}:{}:true:false", query_ctx, app.namespace, app.name),
+                                action_name: format!("argo_sync:{}", payload),
                                 is_destructive: true,
                             });
                         }
@@ -3924,10 +3938,16 @@ impl App {
                         if let Some(app) = sel_app {
                             let enable = !app.auto_sync_enabled;
                             let label = if enable { "Enable Auto-Sync" } else { "Pause Auto-Sync (Incident Lever)" };
+                            let payload = serde_json::json!({
+                                "ctx": query_ctx,
+                                "ns": app.namespace,
+                                "name": app.name,
+                                "enable": enable,
+                            });
                             self.modal = Some(Modal::Confirm {
                                 title: format!("{} [{}]", label, app.name),
                                 message: format!("{} for '{}/{}'?", label, app.namespace, app.name),
-                                action_name: format!("argo_toggle_auto:{}:{}:{}:{}", query_ctx, app.namespace, app.name, enable),
+                                action_name: format!("argo_toggle_auto:{}", payload),
                                 is_destructive: !enable,
                             });
                         }
@@ -3975,7 +3995,7 @@ impl App {
                     KeyCode::Char('y') => {
                         if let Some(app) = sel_app {
                             let link = crate::deep_link::DeepLink::Resource {
-                                context: self.active_context.clone(),
+                                context: query_ctx.clone(),
                                 namespace: Some(app.namespace.clone()),
                                 kind: "Application".to_string(),
                                 name: app.name.clone(),
@@ -5230,20 +5250,34 @@ impl App {
                     KeyCode::Down | KeyCode::Char('j') => detail.select_next(),
                     KeyCode::Char('s') => {
                         if let Some(ref app) = app_opt {
+                            let payload = serde_json::json!({
+                                "ctx": query_ctx,
+                                "ns": app.namespace,
+                                "name": app.name,
+                                "prune": false,
+                                "dry_run": false,
+                            });
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Sync ArgoCD Application [{}]", app.name),
                                 message: format!("Trigger sync for '{}/{}'? (Prune: false)", app.namespace, app.name),
-                                action_name: format!("argo_sync:{}:{}:{}:false:false", query_ctx, app.namespace, app.name),
+                                action_name: format!("argo_sync:{}", payload),
                                 is_destructive: false,
                             });
                         }
                     }
                     KeyCode::Char('S') => {
                         if let Some(ref app) = app_opt {
+                            let payload = serde_json::json!({
+                                "ctx": query_ctx,
+                                "ns": app.namespace,
+                                "name": app.name,
+                                "prune": true,
+                                "dry_run": false,
+                            });
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Sync ArgoCD Application with Prune [{}]", app.name),
                                 message: format!("Trigger sync with PRUNE for '{}/{}'?", app.namespace, app.name),
-                                action_name: format!("argo_sync:{}:{}:{}:true:false", query_ctx, app.namespace, app.name),
+                                action_name: format!("argo_sync:{}", payload),
                                 is_destructive: true,
                             });
                         }
@@ -5252,10 +5286,16 @@ impl App {
                         if let Some(ref app) = app_opt {
                             let enable = !app.auto_sync_enabled;
                             let label = if enable { "Enable Auto-Sync" } else { "Pause Auto-Sync (Incident Lever)" };
+                            let payload = serde_json::json!({
+                                "ctx": query_ctx,
+                                "ns": app.namespace,
+                                "name": app.name,
+                                "enable": enable,
+                            });
                             self.modal = Some(Modal::Confirm {
                                 title: format!("{} [{}]", label, app.name),
                                 message: format!("{} for '{}/{}'?", label, app.namespace, app.name),
-                                action_name: format!("argo_toggle_auto:{}:{}:{}:{}", query_ctx, app.namespace, app.name, enable),
+                                action_name: format!("argo_toggle_auto:{}", payload),
                                 is_destructive: !enable,
                             });
                         }
@@ -5286,7 +5326,7 @@ impl App {
                     }
                     KeyCode::Char('c') => {
                         let link = crate::deep_link::DeepLink::Resource {
-                            context: self.active_context.clone(),
+                            context: query_ctx.clone(),
                             namespace: Some(detail.app_namespace.clone()),
                             kind: "Application".to_string(),
                             name: detail.app_name.clone(),
@@ -5991,18 +6031,38 @@ impl App {
             return;
         }
 
-        if let Some(target) = resolve_command_with_crds(cmd, &self.crds) {
-            self.execute_command_target(target).await;
+        let (cmd_base, arg_opt) = if let Some(pos) = trimmed.find(char::is_whitespace) {
+            (&trimmed[..pos], Some(trimmed[pos..].trim()))
         } else {
-            // Check if there is an unambiguous top suggestion
-            let suggestions = command_suggestions_with_crds(cmd, &self.crds);
+            (trimmed, None)
+        };
+
+        let resolved = resolve_command_with_crds(cmd_base, &self.crds).or_else(|| {
+            let suggestions = command_suggestions_with_crds(cmd_base, &self.crds);
             if let Some((top, score)) = suggestions.first() {
                 if *score >= 80 {
-                    self.execute_command_target(top.target.clone()).await;
-                    return;
+                    return Some(top.target.clone());
                 }
             }
-            self.set_toast(format!("Unknown command: '{}' (type :help or ?)", cmd), Theme::status_warn());
+            None
+        });
+
+        if let Some(target) = resolved {
+            if let Some(arg) = arg_opt {
+                if !arg.is_empty() {
+                    self.active_namespace = arg.to_string();
+                }
+            }
+            self.execute_command_target(target).await;
+            if let Some(arg) = arg_opt {
+                if !arg.is_empty() {
+                    if let ActiveView::Argo(ref mut argo) = self.active_view {
+                        argo.filter_query = arg.to_string();
+                    }
+                }
+            }
+        } else {
+            self.set_toast(format!("Unknown command: '{}' (type :help or ?)", trimmed), Theme::status_warn());
         }
     }
 
@@ -8100,8 +8160,13 @@ impl App {
                                 } else {
                                     "-"
                                 };
+                                let dest_ns = if app.destination_namespace.is_empty() {
+                                    "(cluster-scoped)"
+                                } else {
+                                    &app.destination_namespace
+                                };
                                 let mut details = vec![
-                                    format!("Destination: {} / {}", dest, app.destination_namespace),
+                                    format!("Destination: {} / {}", dest, dest_ns),
                                     format!("Sync: {}", if app.sync_status.is_empty() { "Unknown" } else { &app.sync_status }),
                                     format!("Health: {}", if app.health_status.is_empty() { "Unknown" } else { &app.health_status }),
                                 ];
@@ -8165,8 +8230,13 @@ impl App {
                             } else {
                                 "-"
                             };
+                            let dest_ns = if app.destination_namespace.is_empty() {
+                                "(cluster-scoped)"
+                            } else {
+                                &app.destination_namespace
+                            };
                             let mut details = vec![
-                                format!("Destination: {} / {}", dest, app.destination_namespace),
+                                format!("Destination: {} / {}", dest, dest_ns),
                                 format!("Sync: {}", if app.sync_status.is_empty() { "Unknown" } else { &app.sync_status }),
                                 format!("Health: {}", if app.health_status.is_empty() { "Unknown" } else { &app.health_status }),
                             ];
@@ -8224,10 +8294,17 @@ impl App {
                         };
                         let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
                         let ns = namespace.unwrap_or_else(|| "argocd".to_string());
+                        let payload = serde_json::json!({
+                            "ctx": query_ctx,
+                            "ns": ns,
+                            "name": resource_name,
+                            "prune": false,
+                            "dry_run": false,
+                        });
                         self.modal = Some(Modal::Confirm {
                             title: format!("Sync ArgoCD Application [{}]", resource_name),
                             message: format!("Trigger sync for '{}/{}'? (Prune: false)", ns, resource_name),
-                            action_name: format!("argo_sync:{}:{}:{}:false:false", query_ctx, ns, resource_name),
+                            action_name: format!("argo_sync:{}", payload),
                             is_destructive: false,
                         });
                     }
@@ -8711,14 +8788,35 @@ impl App {
                 });
                 self.set_toast(format!("Uninstalling release '{}'...", name), Theme::status_warn());
             }
-        } else if action_name.starts_with("argo_sync:") {
-            let parts: Vec<&str> = action_name.splitn(6, ':').collect();
-            if parts.len() >= 6 {
-                let ctx = parts[1].to_string();
-                let ns = parts[2].to_string();
-                let name = parts[3].to_string();
-                let prune = parts[4] == "true";
-                let dry_run = parts[5] == "true";
+        } else if let Some(payload) = action_name.strip_prefix("argo_sync:") {
+            let parsed: Option<(String, String, String, bool, bool)> =
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
+                    let ctx = v.get("ctx").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let ns = v.get("ns").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let name = v.get("name").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let prune = v.get("prune").and_then(|b| b.as_bool()).unwrap_or(false);
+                    let dry_run = v.get("dry_run").and_then(|b| b.as_bool()).unwrap_or(false);
+                    if !name.is_empty() {
+                        Some((ctx, ns, name, prune, dry_run))
+                    } else {
+                        None
+                    }
+                } else {
+                    let parts: Vec<&str> = action_name.splitn(6, ':').collect();
+                    if parts.len() >= 6 {
+                        Some((
+                            parts[1].to_string(),
+                            parts[2].to_string(),
+                            parts[3].to_string(),
+                            parts[4] == "true",
+                            parts[5] == "true",
+                        ))
+                    } else {
+                        None
+                    }
+                };
+
+            if let Some((ctx, ns, name, prune, dry_run)) = parsed {
                 let cache = self.client_cache.clone();
                 let event_tx = self.event_tx.clone();
                 let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
@@ -8744,13 +8842,33 @@ impl App {
                 });
                 self.set_toast(format!("Triggering sync for '{}'...", name), Theme::status_warn());
             }
-        } else if action_name.starts_with("argo_toggle_auto:") {
-            let parts: Vec<&str> = action_name.splitn(5, ':').collect();
-            if parts.len() >= 5 {
-                let ctx = parts[1].to_string();
-                let ns = parts[2].to_string();
-                let name = parts[3].to_string();
-                let enable = parts[4] == "true";
+        } else if let Some(payload) = action_name.strip_prefix("argo_toggle_auto:") {
+            let parsed: Option<(String, String, String, bool)> =
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
+                    let ctx = v.get("ctx").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let ns = v.get("ns").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let name = v.get("name").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let enable = v.get("enable").and_then(|b| b.as_bool()).unwrap_or(false);
+                    if !name.is_empty() {
+                        Some((ctx, ns, name, enable))
+                    } else {
+                        None
+                    }
+                } else {
+                    let parts: Vec<&str> = action_name.splitn(5, ':').collect();
+                    if parts.len() >= 5 {
+                        Some((
+                            parts[1].to_string(),
+                            parts[2].to_string(),
+                            parts[3].to_string(),
+                            parts[4] == "true",
+                        ))
+                    } else {
+                        None
+                    }
+                };
+
+            if let Some((ctx, ns, name, enable)) = parsed {
                 let cache = self.client_cache.clone();
                 let event_tx = self.event_tx.clone();
                 let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();

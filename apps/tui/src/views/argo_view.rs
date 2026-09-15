@@ -156,8 +156,20 @@ fn sync_status_badge(status: &str) -> (&'static str, Style) {
     match status {
         "Synced" => ("● Synced", Theme::status_ok()),
         "OutOfSync" => ("▲ OutOfSync", Theme::status_warn()),
-        _ if status.is_empty() => ("- Unknown", Style::default().fg(Theme::dim())),
+        _ if status.is_empty() || status.eq_ignore_ascii_case("unknown") => {
+            ("- Unknown", Style::default().fg(Theme::dim()))
+        }
         _ => ("✖ Error", Theme::status_error()),
+    }
+}
+
+pub(crate) fn repo_basename(repo_url: &str) -> &str {
+    let s = repo_url.trim_end_matches('/');
+    let s = s.strip_suffix(".git").unwrap_or(s);
+    if let Some(pos) = s.rfind(|c| c == '/' || c == ':') {
+        &s[pos + 1..]
+    } else {
+        s
     }
 }
 
@@ -306,7 +318,12 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
         };
 
         max_dest = max_dest.max(dest_str.len());
-        max_dest_ns = max_dest_ns.max(app.destination_namespace.len());
+        let dest_ns_str = if app.destination_namespace.is_empty() {
+            "-"
+        } else {
+            app.destination_namespace.as_str()
+        };
+        max_dest_ns = max_dest_ns.max(dest_ns_str.len());
         max_ns = max_ns.max(app.namespace.len());
         max_name = max_name.max(app.name.len());
         max_project = max_project.max(app.project.len());
@@ -386,10 +403,15 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
                 } else {
                     "-"
                 };
+                let dest_ns = if app.destination_namespace.is_empty() {
+                    "-"
+                } else {
+                    app.destination_namespace.as_str()
+                };
 
                 vec![
                     Cell::from(dest),
-                    Cell::from(app.destination_namespace.as_str()),
+                    Cell::from(dest_ns),
                     Cell::from(app.name.as_str()),
                     Cell::from(sync_text).style(sync_style),
                     Cell::from(health_text).style(health_style),
@@ -405,7 +427,14 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
             };
 
             if show_source {
-                let source_display = if app.path.is_empty() {
+                let repo = repo_basename(&app.repo_url);
+                let source_display = if !repo.is_empty() {
+                    if app.path.is_empty() {
+                        format!("{}@{}", repo, app.target_revision)
+                    } else {
+                        format!("{}@{}:{}", repo, app.target_revision, app.path)
+                    }
+                } else if app.path.is_empty() {
                     app.target_revision.clone()
                 } else {
                     format!("{}:{}", app.target_revision, app.path)
@@ -460,4 +489,34 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
 
     let table = Table::new(rows, widths).header(headers);
     f.render_widget(table, inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_repo_basename() {
+        assert_eq!(repo_basename("https://github.com/argoproj/argocd-example-apps.git"), "argocd-example-apps");
+        assert_eq!(repo_basename("git@github.com:argoproj/argocd-example-apps.git"), "argocd-example-apps");
+        assert_eq!(repo_basename("https://gitlab.com/org/repo/"), "repo");
+        assert_eq!(repo_basename("custom-repo"), "custom-repo");
+        assert_eq!(repo_basename(""), "");
+    }
+
+    #[test]
+    fn test_sync_status_badge() {
+        let (label, _) = sync_status_badge("Synced");
+        assert_eq!(label, "● Synced");
+        let (label, _) = sync_status_badge("OutOfSync");
+        assert_eq!(label, "▲ OutOfSync");
+        let (label, _) = sync_status_badge("");
+        assert_eq!(label, "- Unknown");
+        let (label, _) = sync_status_badge("Unknown");
+        assert_eq!(label, "- Unknown");
+        let (label, _) = sync_status_badge("unknown");
+        assert_eq!(label, "- Unknown");
+        let (label, _) = sync_status_badge("Failed");
+        assert_eq!(label, "✖ Error");
+    }
 }
