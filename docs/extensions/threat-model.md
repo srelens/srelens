@@ -148,7 +148,7 @@ Residual risk:
   `apps` or `batch`, and its `printerColumns` JSON paths can surface any scalar field of
   those objects, such as a literal environment variable in a Deployment. RBAC still
   applies and the manifest is shown at review, but the permission list only says
-  `k8s.listCustomResource`. **Gap.**
+  `k8s.listCustomResource`. Planned in [#601].
 - **Grants are per host capability, not per resource.** Granting `k8s.listCustomResource`
   grants whatever the manifest binds. The review lists capability IDs and shows the
   manifest; it does not summarize the bound groups and kinds.
@@ -159,13 +159,13 @@ Residual risk:
   (`char::is_control`, category Cc) but not format characters (category Cf) such as
   right-to-left overrides and zero-width spaces, which can make a title display
   differently from its text. Catalog `name` and `description` are only checked to be
-  non-empty (`parse_catalog`). **Gap.**
+  non-empty (`parse_catalog`). Planned in [#603].
 - **An unsigned entry already under a reserved ID is not quarantined.** `check_install`
   refuses one, but `reverify` and the `enable` action do not check the reserved
   namespace. An inventory entry with an `org.srelens.` ID and no signature proof, such as
   one installed before [#528] reserved the namespace, keeps loading enabled with the
   bundled logo. It is still labelled **Unsigned local** and confined to declarative
-  readers. **Gap.**
+  readers. Planned in [#602].
 
 ### Compromised publisher or key
 
@@ -193,7 +193,7 @@ An honest app with a flaw, or a host bug that an app's input can reach.
 |---|---|---|---|---|
 | VULN-1 | A flawed app is hijacked to run code, open sockets or read files | E | Not possible in API 0.1: there is no app code to hijack, and the manifest type admits no executable kind. Executable apps are to ship only with an OS sandbox, and unsigned ones only behind an explicit setting. | Sandbox spike planned in [#571] (epic [#521]); untrusted-source policy in [#558] |
 | VULN-2 | A malformed manifest, catalog, signature or inventory crashes or confuses the host | T, D | Parsers are Rust and `serde`, and sizes are checked before parsing: manifests 256 KiB (`Manifest::decode` in `crates/plugin-host/src/manifest.rs`), catalogs 1 MiB (`parse_catalog` and `download` in `crates/registry/src/extensions/catalog.rs`), the inventory 1 MiB (`read` in `crates/registry/src/extensions.rs`), signatures 64 bytes. Every problem found in a manifest is reported with a stable code and path (`crates/plugin-host/src/validation.rs`). | Shipped. Fuzzing planned in [#580] |
-| VULN-3 | An app's settings leak a credential | I | Settings are free-form JSON, stored in plain text in the inventory and returned by `extensions.list`. The declarative host never interpolates them into capability arguments, but nothing marks a setting as secret. | Keychain-backed secret settings planned in [#543] |
+| VULN-3 | An app's settings leak a credential | I | Settings are free-form JSON, and nothing marks a value as secret. The declarative host never interpolates them into capability arguments, but it keeps them in plain text in two places. The inventory stores them, and `extensions.list` returns them. An `extensions.configure` call made over MCP is also copied into the MCP audit log (`audit.jsonl`, created with mode 0600 on Unix). The capability is not sensitive-annotated, so `redact` (`crates/mcp/src/audit.rs`) removes only values whose key contains `token`, `secret`, `password` or `key`, or is exactly `data`, `stringData`, `yaml` or `values`. A setting named `credential` or `certificate` is written verbatim, even when consent is denied, and stays in `audit.jsonl.1` after the log rotates. Settings saved from Settings → Apps are not audited and reach only the inventory. | Keychain-backed secret settings planned in [#543], which keeps secret values out of `settings`. Redacting `settings` in the audit log: **Gap** |
 | VULN-4 | An app is slow on a large cluster | D | Cluster requests are bounded by `request_timeout` (`crates/kube/src/connect.rs`) and by the limits in APP-12. | Performance budgets planned in [#581] |
 
 ### Malicious catalog or network position
@@ -217,7 +217,7 @@ Residual risk:
   whose repository is `https://github.com/SRELENS/extension-argocd`, which GitHub resolves
   to the srelens repository, is not required to be signed. Its ID cannot be reserved, so it
   still installs as unsigned without a bundled logo; only its repository link misleads.
-  **Gap.**
+  Planned in [#604].
 
 ### MCP client abuse
 
@@ -229,7 +229,7 @@ An agent that is connected and authenticated, but acting on bad instructions.
 | MCP-2 | Install or enable an app, change its grants or settings, or roll it back | E | `extensions.configure` is mutating, so `handle_request` (`crates/mcp/src/stdio.rs`) asks the consent policy first (`consent_kind` in `crates/mcp/src/lib.rs`). In the desktop app that is a dialog (`PromptUser` in `apps/desktop/src-tauri/src/mcp_confirm.rs`). Headless, it needs both `--mcp-allow-destructive` and `"_confirm": true` (`FlagGated` in `crates/mcp/src/policy.rs`). With no policy, it is denied (`AlwaysDeny`). | Shipped |
 | MCP-3 | Start a GitOps write | E | `extensions.action` and `k8s.gitOpsAction` are mutating and gated the same way (`action_dispatch_uses_bound_api_and_mcp_cannot_bypass_confirmation` in `crates/registry/src/extensions/resource.rs`). The write fetches the resource again and refuses a changed UID or resourceVersion, a sync while an Argo CD operation is present, a Suspend of a suspended resource or a Resume of one that is not, reconciliation while suspended, and a resource being deleted. It then sends the UID and resourceVersion as PATCH preconditions (`guard_action`, `execute` in `crates/kube/src/gitops.rs`). A sync never enables pruning. | Shipped |
 | MCP-4 | Call a removed app through a stale tool list | E | Broker handlers check the flag `Registration::unregister` clears, and `extensions.*` read the inventory on every call. | Shipped |
-| MCP-5 | Deny having made a call | R | Every MCP tool call is written to the JSONL audit log with its consent decision and redacted arguments (`crates/mcp/src/audit.rs`). Calls from the desktop UI go straight to the registry (`invoke_capability` in `apps/desktop/src-tauri/src/bridge.rs`) and are not audited. | MCP shipped. UI-path audit planned in [#555] |
+| MCP-5 | Deny having made a call | R | MCP tool calls are recorded, best-effort, in a local JSONL audit log with the consent decision, the outcome and redacted arguments (`JsonlAuditLog` and `redact` in `crates/mcp/src/audit.rs`, called from `handle_request` in `crates/mcp/src/stdio.rs`). Recording fails open by design, so that a lost log line never breaks a cluster operation. A failed rotation, write or permission change is swallowed, a failed open is only reported on stderr, and the call goes ahead either way. An executed call is recorded after it returns. Calls from the desktop UI go straight to the registry (`invoke_capability` in `apps/desktop/src-tauri/src/bridge.rs`) and are not audited. | Best-effort MCP audit shipped. UI-path audit planned in [#555] |
 
 Residual risk:
 
@@ -243,6 +243,12 @@ Residual risk:
   the RBAC of the host's own readers.
 - `k8s.gitOpsAction` called directly is not scoped by any app. It still needs consent and
   still names an allowlisted kind.
+- **The audit log is a record, not evidence.** If the log path is unwritable or the disk
+  is full, a call succeeds and leaves no record, so its caller can deny making it. A call
+  that brings the process down before it returns is never recorded. The log is an
+  ordinary file the user's account can edit or delete, and each rotation replaces the
+  previous `audit.jsonl.1`. [#555] extends auditing to UI calls; it does not make
+  recording fail closed or tamper-evident.
 
 ### Web multi-user host
 
@@ -259,7 +265,7 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 
 | ID | Threat | STRIDE | Mitigation | Status |
 |---|---|---|---|---|
-| LOCAL-1 | Edit the inventory to add, enable or widen an app | T, E | The inventory is parsed strictly: unknown fields, a `schemaVersion` other than 1, a file over 1 MiB and duplicate IDs are all fatal. Each app's manifest and signature proof are checked again, and a failing app is quarantined; the reason is recomputed on every load and never saved (`read`, `reverify`, `saved_form` in `crates/registry/src/extensions.rs`). A hand-added unsigned entry is still confined to declarative readers, because every call runs `validate_app`. | Shipped. See the reserved-ID gap under [Malicious app](#malicious-app) |
+| LOCAL-1 | Edit the inventory to add, enable or widen an app | T, E | The inventory is parsed strictly: unknown fields, a `schemaVersion` other than 1, a file over 1 MiB and duplicate IDs are all fatal. Each app's manifest and signature proof are checked again, and a failing app is quarantined; the reason is recomputed on every load and never saved (`read`, `reverify`, `saved_form` in `crates/registry/src/extensions.rs`). A hand-added unsigned entry is still confined to declarative readers, because every call runs `validate_app`. | Shipped. The reserved-ID check for stored entries is planned in [#602] (see [Malicious app](#malicious-app)) |
 | LOCAL-2 | Corrupt the inventory through concurrent writes or a crash | T | Saves write a private temporary file, sync it and replace the inventory atomically, under a cross-process lock (`write`, `mutate`). | Shipped |
 
 ## Open work
@@ -280,15 +286,16 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 | [#571] ([#521]) | VULN-1: sandboxed executable apps |
 | [#580] | VULN-2: parser fuzzing |
 | [#581] | APP-12, VULN-4: performance budgets |
+| [#601] | APP-3: refuse built-in API groups in reader bindings |
+| [#602] | APP-9, LOCAL-1: quarantine stored unsigned apps under reserved IDs |
+| [#603] | APP-10: reject bidirectional and invisible characters in labels |
+| [#604] | NET-3: match trusted repositories case-insensitively |
 | [#515] ([#522]) | WEB-1: per-user apps on the web host |
 | [#39] | Scope: CSP, update chain and the rest of the host |
 
 Gaps with no issue yet:
 
-- the reader accepts built-in API groups (APP-3)
-- labels allow Unicode format characters (APP-10)
-- unsigned entries already under a reserved ID stay enabled (APP-9, LOCAL-1)
-- the official-repository check is case-sensitive (NET-3)
+- app settings sent over MCP are written unredacted to the audit log (VULN-3)
 
 [#39]: https://github.com/srelens/srelens/issues/39
 [#515]: https://github.com/srelens/srelens/issues/515
@@ -309,4 +316,8 @@ Gaps with no issue yet:
 [#571]: https://github.com/srelens/srelens/issues/571
 [#580]: https://github.com/srelens/srelens/issues/580
 [#581]: https://github.com/srelens/srelens/issues/581
+[#601]: https://github.com/srelens/srelens/issues/601
+[#602]: https://github.com/srelens/srelens/issues/602
+[#603]: https://github.com/srelens/srelens/issues/603
+[#604]: https://github.com/srelens/srelens/issues/604
 [#597]: https://github.com/srelens/srelens/pull/597
