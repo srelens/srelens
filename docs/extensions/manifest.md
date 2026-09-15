@@ -107,6 +107,10 @@ The desktop app accepts a narrower surface than the developer broker:
 - Every page, detail tab and row action references a `k8s.listCustomResource` binding.
 - `statusColumns` indices point at declared `printerColumns`.
 
+Settings → Apps checks these rules together with the manifest's own before it offers
+to install, and lists every problem with its path. See
+[Validation errors](specification.md#validation-errors).
+
 The examples bind `argoproj.io/v1alpha1` Applications and Flux's
 `kustomize.toolkit.fluxcd.io/v1` Kustomizations and `helm.toolkit.fluxcd.io/v2`
 HelmReleases. The cluster must serve those versions; see

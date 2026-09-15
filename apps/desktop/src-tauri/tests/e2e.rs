@@ -181,6 +181,7 @@ const EXCLUDED: &[(&str, &str)] = &[
     ("extensions.action", "requires installed app; isolated registry and MCP tests verify scope and consent"),
     ("extensions.catalog", "desktop public catalog; offline cache and validation use isolated registry tests"),
     ("extensions.catalogManifest", "release download needs the public catalog; checksum/identity and permission validation use registry tests"),
+    ("extensions.validate", "checks a manifest without a cluster or installing it; registry tests cover manifest, host and signature rules"),
     ("extensions.list", "desktop-local inventory; registry lifecycle tests use an isolated temporary store"),
     ("extensions.configure", "explicit grants and atomic persistence are exercised with an isolated temporary store"),
     ("extensions.read", "requires an installed extension and GitOps CRDs; registry tests exercise the real binding against an injected core handler"),

@@ -283,6 +283,14 @@
 .extension-catalog-entry > .extension-toolbar { border-bottom: 0; }
 .extension-catalog-entry .extension-catalog-meta { margin-top: 3px; }
 .extension-permission-review { background: var(--surface, var(--fl-color-surface)); }
+.extension-problems { color: var(--sev, var(--fl-color-danger)); }
+.extension-problems p { margin: 0; }
+.extension-problems ul { display: grid; gap: 4px; margin: 6px 0 0; padding-left: 18px; }
+.extension-problems code { color: inherit; font-family: var(--font-mono); overflow-wrap: anywhere; }
+.extension-problem-code {
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  font-size: var(--text-caption, 0.75rem);
+}
 
 .extension-requirements {
   border-bottom: 1px solid var(--rule, var(--fl-color-border));

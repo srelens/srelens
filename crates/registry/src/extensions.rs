@@ -6,7 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use srelens_capability::{Annotations, Capability, CapabilityError, Registry};
-use srelens_plugin_host::{Manifest, PluginHost};
+use srelens_plugin_host::{
+    Manifest, PluginHost, ValidationCode as Code, ValidationError, ValidationErrors,
+};
 use std::{
     fs,
     io::Write,
@@ -189,37 +191,70 @@ fn write(path: &Path, state: &Inventory) -> Result<(), String> {
     })();
     result.map_err(|e| format!("save extension inventory: {e}"))
 }
-fn validate_app(manifest: &Manifest, grants: &[String], core: Arc<Registry>) -> Result<(), String> {
-    for binding in &manifest.capabilities {
+/// The manifest's own rules and this app's narrower ones, reporting every violation.
+fn validate_app(
+    manifest: &Manifest,
+    grants: &[String],
+    core: Arc<Registry>,
+) -> Result<(), ValidationErrors> {
+    let mut problems = manifest.validate().err().unwrap_or_default();
+    for (index, binding) in manifest.capabilities.iter().enumerate() {
+        let at = format!("capabilities[{index}]");
         if !matches!(
             binding.target.as_str(),
             "k8s.listCustomResource" | "k8s.listEvents"
-        ) || binding
-            .inputs
-            .iter()
-            .any(|key| key != "context" && key != "namespace")
-        {
-            return Err("This app version supports only read-only custom-resource and event extensions with context/namespace inputs".into());
+        ) {
+            problems.push(
+                Code::UnsupportedTarget,
+                format!("{at}.target"),
+                "This app version supports only k8s.listCustomResource and k8s.listEvents readers",
+            );
+            continue;
         }
-        let target = core
-            .get(&binding.target)
-            .ok_or("extension reader is unavailable")?;
+        let Some(target) = core.get(&binding.target) else {
+            problems.push(
+                Code::UnsupportedTarget,
+                format!("{at}.target"),
+                "This host does not provide the reader",
+            );
+            continue;
+        };
         if !target.annotations.read_only
             || target.annotations.requires_confirm
             || target.annotations.sensitive
             || target.annotations.destructive
         {
-            return Err(
-                "This app extension reader cannot dispatch a gated or mutating host operation"
-                    .into(),
+            problems.push(
+                Code::UnsupportedTarget,
+                format!("{at}.target"),
+                "An app reader cannot dispatch a gated or mutating host operation",
             );
+            continue;
         }
+        for (position, key) in binding.inputs.iter().enumerate() {
+            if key != "context" && key != "namespace" {
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.inputs[{position}]"),
+                    format!("\"{key}\" is not an input; readers accept only context and namespace"),
+                );
+            }
+        }
+        let accepts = |key: &str| binding.inputs.iter().any(|input| input == key);
         if binding.target == "k8s.listEvents" {
-            if !binding.arguments.is_empty()
-                || !binding.inputs.iter().any(|k| k == "context")
-                || !binding.inputs.iter().any(|k| k == "namespace")
-            {
-                return Err("Event extensions must accept the host context and namespace without bound arguments".into());
+            if !binding.arguments.is_empty() {
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.arguments"),
+                    "Event readers take no bound arguments",
+                );
+            }
+            if !accepts("context") || !accepts("namespace") {
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.inputs"),
+                    "Event readers must accept the host context and namespace",
+                );
             }
             continue;
         }
@@ -237,99 +272,183 @@ fn validate_app(manifest: &Manifest, grants: &[String], core: Arc<Registry>) -> 
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || b".-".contains(&c))
             {
-                return Err(format!("Extension must bind a valid custom-resource {key}"));
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.arguments.{key}"),
+                    format!("Bind a custom-resource {key} of letters, digits, . and -"),
+                );
             }
         }
-        if !binding.inputs.iter().any(|key| key == "context")
-            || binding.arguments.contains_key("context")
-            || binding.arguments.contains_key("namespace")
-        {
-            return Err("Cluster and namespace must come from the host view".into());
+        if !accepts("context") {
+            problems.push(
+                Code::InvalidBinding,
+                format!("{at}.inputs"),
+                "Accept the cluster context from the host view",
+            );
         }
-        if !binding
-            .arguments
-            .get("namespaced")
-            .is_some_and(Value::is_boolean)
-        {
-            return Err("Extension must bind resource scope".into());
+        for key in ["context", "namespace"] {
+            if binding.arguments.contains_key(key) {
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.arguments.{key}"),
+                    format!("{key} comes from the host view and cannot be bound"),
+                );
+            }
         }
-        if binding.arguments.get("namespaced") == Some(&json!(true))
-            && !binding.inputs.iter().any(|key| key == "namespace")
-        {
-            return Err("Namespaced extensions must accept the host namespace".into());
+        match binding.arguments.get("namespaced") {
+            Some(Value::Bool(true)) if !accepts("namespace") => problems.push(
+                Code::InvalidBinding,
+                format!("{at}.inputs"),
+                "A namespaced reader must accept the host namespace",
+            ),
+            Some(Value::Bool(_)) => {}
+            _ => problems.push(
+                Code::InvalidBinding,
+                format!("{at}.arguments.namespaced"),
+                "Bind the resource scope as a boolean",
+            ),
         }
     }
     // Table surfaces have a resource-row contract; event readers are only valid
     // in the explicitly typed dashboard event slot.
-    for name in manifest
-        .contributions
-        .pages
-        .iter()
-        .map(|p| &p.capability)
-        .chain(
+    let contributions: [(&str, Vec<&String>); 3] = [
+        (
+            "pages",
+            manifest
+                .contributions
+                .pages
+                .iter()
+                .map(|p| &p.capability)
+                .collect(),
+        ),
+        (
+            "detailTabs",
             manifest
                 .contributions
                 .detail_tabs
                 .iter()
-                .map(|p| &p.capability),
-        )
-        .chain(
+                .map(|p| &p.capability)
+                .collect(),
+        ),
+        (
+            "rowActions",
             manifest
                 .contributions
                 .row_actions
                 .iter()
-                .map(|p| &p.capability),
-        )
-    {
-        if !manifest
-            .capabilities
-            .iter()
-            .any(|b| &b.name == name && b.target == "k8s.listCustomResource")
-        {
-            return Err("Resource contributions must reference a custom-resource reader".into());
-        }
-    }
-    for page in &manifest.contributions.pages {
-        if let Some(status) = &page.status_columns {
-            let count = manifest
-                .capabilities
-                .iter()
-                .find(|b| b.name == page.capability)
-                .and_then(|b| b.arguments.get("printerColumns"))
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len);
-            if [Some(status.ready), status.suspended, status.progressing]
-                .into_iter()
-                .flatten()
-                .any(|i| i >= count)
-            {
-                return Err("Status columns must reference declared printer columns".into());
+                .map(|p| &p.capability)
+                .collect(),
+        ),
+    ];
+    for (list, capabilities) in contributions {
+        for (index, name) in capabilities.into_iter().enumerate() {
+            // An undeclared capability is already reported by the manifest's own rules.
+            let binding = manifest.capabilities.iter().find(|b| &b.name == name);
+            if binding.is_some_and(|b| b.target != "k8s.listCustomResource") {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("contributions.{list}[{index}].capability"),
+                    format!("\"{name}\" must be a k8s.listCustomResource reader to back a table"),
+                );
             }
         }
     }
-    let mut temp = Registry::new();
-    PluginHost::new(core).register(&mut temp, manifest.clone(), grants)?;
-    Ok(())
+    for (index, page) in manifest.contributions.pages.iter().enumerate() {
+        let Some(status) = &page.status_columns else {
+            continue;
+        };
+        let Some(binding) = manifest
+            .capabilities
+            .iter()
+            .find(|b| b.name == page.capability)
+        else {
+            continue;
+        };
+        let count = binding
+            .arguments
+            .get("printerColumns")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        for (field, column) in [
+            ("ready", Some(status.ready)),
+            ("suspended", status.suspended),
+            ("progressing", status.progressing),
+        ] {
+            // Indices of 64 and above are already reported by the manifest's own rules.
+            if let Some(column) = column.filter(|&column| column >= count && column < 64) {
+                problems.push(
+                    Code::InvalidValue,
+                    format!("contributions.pages[{index}].statusColumns.{field}"),
+                    format!("Column {column} is not one of the {count} declared printerColumns"),
+                );
+            }
+        }
+    }
+    for permission in &manifest.permissions {
+        if !grants.contains(permission) {
+            problems.push(
+                Code::PermissionMismatch,
+                "permissions",
+                format!("{permission} was not granted"),
+            );
+        }
+    }
+    // The broker's own registration checks the bindings against each target's schema.
+    if problems.0.is_empty() {
+        let mut temp = Registry::new();
+        if let Err(reason) = PluginHost::new(core).register(&mut temp, manifest.clone(), grants) {
+            problems.push(Code::InvalidBinding, "capabilities", reason);
+        }
+    }
+    problems.into_result()
+}
+/// Every reason installing `source` with these grants and signature would be refused.
+fn check_install(
+    source: &str,
+    grants: &[String],
+    signature: Option<&[u8]>,
+    core: Arc<Registry>,
+) -> Result<Manifest, ValidationErrors> {
+    let manifest = Manifest::decode(source)?;
+    let mut problems = validate_app(&manifest, grants, core)
+        .err()
+        .unwrap_or_default();
+    match signature {
+        // Without this, a pasted manifest could replace a signed app, or take an
+        // official ID and its logo, differing from the real one only by a label.
+        None if signing::reserved(&manifest.id) => problems.push(
+            Code::ReservedId,
+            "id",
+            format!(
+                "App ID {} is reserved for signed srelens releases. Install it from the Catalog, or give your local manifest its own ID.",
+                manifest.id
+            ),
+        ),
+        // Verification parses the manifest again, so it is meaningful only once that passes.
+        Some(signature) if problems.0.is_empty() => {
+            if let Err(reason) = signing::verify(source.as_bytes(), signature) {
+                problems.push(Code::InvalidSignature, "", reason);
+            }
+        }
+        _ => {}
+    }
+    problems.into_result()?;
+    Ok(manifest)
 }
 fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventory, String> {
     let _lock = super::settings::write_lock(path)?;
     let mut state = read(path)?;
     match input {
-        Configure::Install { manifest, grants, signature } => {
-            let signature_proof = if let Some(signature) = signature {
-                signing::verify(manifest.as_bytes(), &signature)?;
-                Some(SignatureProof { manifest: manifest.clone(), signature })
-            } else { None };
-            let manifest = Manifest::parse(&manifest)?;
-            // Without this, a pasted manifest could replace a signed app, or take an
-            // official ID and its logo, differing from the real one only by a label.
-            if signature_proof.is_none() && signing::reserved(&manifest.id) {
-                return Err(format!(
-                    "App ID {} is reserved for signed srelens releases. Install it from the Catalog, or give your local manifest its own ID.",
-                    manifest.id
-                ));
-            }
-            validate_app(&manifest, &grants, core)?;
+        Configure::Install {
+            manifest: source,
+            grants,
+            signature,
+        } => {
+            let manifest = check_install(&source, &grants, signature.as_deref(), core)?;
+            let signature_proof = signature.map(|signature| SignatureProof {
+                manifest: source,
+                signature,
+            });
             let revision = state.next_revision;
             state.next_revision = revision
                 .checked_add(1)
@@ -388,6 +507,20 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
     write(path, &state)?;
     Ok(state)
 }
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ValidateIn {
+    manifest: String,
+    #[serde(default)]
+    grants: Vec<String>,
+    #[serde(default)]
+    signature: Option<Vec<u8>>,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct ValidationReport {
+    /// Empty when the manifest could be installed with these grants.
+    errors: Vec<ValidationError>,
+}
 pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
     catalog::register(reg, path.with_extension("catalog.json"), core.clone());
     resource::register(reg, path.clone(), core.clone());
@@ -420,6 +553,23 @@ pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
                     .await
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)
+            }
+        },
+    ));
+    let c = core.clone();
+    reg.register(Capability::typed::<ValidateIn, ValidationReport, _, _>(
+        "extensions.validate",
+        "Check a declarative extension manifest exactly as installing it would and return every problem; does not install it",
+        Annotations::READ_ONLY,
+        move |input: ValidateIn| {
+            let c = c.clone();
+            async move {
+                let errors =
+                    check_install(&input.manifest, &input.grants, input.signature.as_deref(), c)
+                        .err()
+                        .unwrap_or_default()
+                        .0;
+                Ok::<_, CapabilityError>(ValidationReport { errors })
             }
         },
     ));
@@ -465,7 +615,7 @@ pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
                         )
                     })?;
                 validate_app(&plugin.manifest, &plugin.grants, c.clone())
-                    .map_err(CapabilityError::Handler)?;
+                    .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
                 let mut manifest = plugin.manifest.clone();
                 if input.use_crd_columns {
                     if let Some(binding) = manifest.capabilities.iter_mut().find(|b| b.name == input.capability && b.target == "k8s.listCustomResource") {
@@ -524,6 +674,93 @@ mod tests {
             got == want,
             "extension-inventory.schema.json is stale — run UPDATE_CATALOG=1 cargo test -p srelens-registry"
         );
+    }
+
+    #[tokio::test]
+    async fn validation_reports_manifest_and_host_problems_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = setup(&dir.path().join("extensions.json"));
+        let grants = json!(["k8s.listCustomResource"]);
+        let validate = |manifest: String| {
+            reg.invoke(
+                "extensions.validate",
+                json!({"manifest": manifest, "grants": grants}),
+            )
+        };
+        assert_eq!(validate(manifest()).await.unwrap(), json!({"errors": []}));
+
+        let mut value: Value = serde_json::from_str(&manifest()).unwrap();
+        // One manifest rule and two host rules, each independent of the others.
+        value["id"] = json!("Not a domain");
+        value["capabilities"][0]["arguments"]["plural"] = json!("");
+        value["contributions"]["pages"][0]["statusColumns"] = json!({"ready": 5});
+        let report = validate(value.to_string()).await.unwrap();
+        let mut problems: Vec<(String, String)> = report["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|error| {
+                (
+                    error["code"].as_str().unwrap().to_owned(),
+                    error["path"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        problems.sort();
+        assert_eq!(
+            problems,
+            [
+                (
+                    "EXTENSION_INVALID_BINDING".to_owned(),
+                    "capabilities[0].arguments.plural".to_owned()
+                ),
+                ("EXTENSION_INVALID_ID".to_owned(), "id".to_owned()),
+                (
+                    "EXTENSION_INVALID_VALUE".to_owned(),
+                    "contributions.pages[0].statusColumns.ready".to_owned()
+                ),
+            ]
+        );
+
+        // Installing it is refused with every problem, and nothing is saved.
+        let refused = reg
+            .invoke(
+                "extensions.configure",
+                json!({"action":"install","manifest": value.to_string(),"grants": grants}),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        for (_, path) in &problems {
+            assert!(refused.contains(path.as_str()), "{refused}");
+        }
+        assert_eq!(
+            reg.invoke("extensions.list", json!({})).await.unwrap()["plugins"],
+            json!([])
+        );
+
+        // A reserved ID needs the publisher signature, which validation also checks.
+        let official = include_str!("../tests/fixtures/argocd-manifest.json");
+        let unsigned = validate(official.into()).await.unwrap();
+        assert_eq!(unsigned["errors"][0]["code"], "EXTENSION_RESERVED_ID");
+        assert_eq!(unsigned["errors"][0]["path"], "id");
+        let signature = include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec();
+        let signed = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": official, "grants": grants, "signature": signature}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(signed, json!({"errors": []}));
+        let tampered = reg
+            .invoke(
+                "extensions.validate",
+                json!({"manifest": official.replace("Argo CD", "Argo CE"), "grants": grants, "signature": signature}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tampered["errors"][0]["code"], "EXTENSION_INVALID_SIGNATURE");
     }
 
     fn setup(path: &std::path::Path) -> Registry {
@@ -912,11 +1149,12 @@ mod tests {
             "extensions.read",
             "extensions.catalog",
             "extensions.catalogManifest",
+            "extensions.validate",
         ] {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 7);
+        assert_eq!(mcp.list_tools().len(), 8);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

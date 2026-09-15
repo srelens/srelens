@@ -3,7 +3,9 @@
 //! No package code is loaded here. A trusted installer supplies explicit
 //! grants for native srelens manifests.
 mod manifest;
+mod validation;
 pub use manifest::*;
+pub use validation::*;
 
 use serde_json::{Map, Value};
 use srelens_capability::{Capability, CapabilityError, Registry};

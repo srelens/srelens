@@ -12,7 +12,8 @@ Consent rules are in [permissions.md](permissions.md).
 | `extensions.resource` | Read-only | Inspect one resource of an enabled app, with its events and supported actions. |
 | `extensions.catalog` | Read-only | Browse the catalog, from a 24-hour cache. Reports the host's supported API versions as `hostApiVersions`; the deprecated `hostApiVersion` still gives the newest. |
 | `extensions.catalogManifest` | Read-only | Download and verify one catalog release for review. Does not install it. |
-| `extensions.configure` | Mutating | Install, enable, remove or configure an app. |
+| `extensions.validate` | Read-only | Check a manifest, with its grants and optional signature, exactly as installing it would, and return every problem as `{code, path, message}` (see [Validation errors](specification.md#validation-errors)). Does not install it. |
+| `extensions.configure` | Mutating | Install, enable, remove or configure an app. An install that fails validation is refused with the same problems. |
 | `extensions.action` | Mutating | Request a host GitOps action on an app resource. |
 
 The app facade refuses a host reader with stronger consent annotations than the

@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
@@ -7,6 +7,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   reviewCatalogExtension: vi.fn(),
   listExtensions: vi.fn(),
   configureExtensions: vi.fn(),
+  validateExtension: vi.fn(),
   readExtension: vi.fn(),
   inspectExtensionResource: vi.fn(),
 }));
@@ -15,6 +16,7 @@ import {
   reviewCatalogExtension,
   listExtensions,
   configureExtensions,
+  validateExtension,
   readExtension,
 } from "@srelens/core";
 import { ExtensionManager, ExtensionResults } from "./Extensions";
@@ -45,6 +47,7 @@ beforeEach(() => {
     plugins: [],
   } as any);
   vi.mocked(configureExtensions).mockResolvedValue({} as any);
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
 });
 it("shows backend errors and retries instead of claiming no apps", async () => {
   vi.mocked(listExtensions).mockRejectedValueOnce(new Error("disk unreadable"));
@@ -124,6 +127,7 @@ it("reviews the exact manifest and reports rejected installs without claiming su
     nextRevision: 1,
     plugins: [],
   });
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
   vi.mocked(configureExtensions).mockRejectedValueOnce(
     new Error("Unsupported API version"),
   );
@@ -135,7 +139,7 @@ it("reviews the exact manifest and reports rejected installs without claiming su
   );
   fireEvent.click(screen.getByText("Review manifest"));
   expect(configureExtensions).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByText("Install and grant permissions"));
+  fireEvent.click(await screen.findByText("Install and grant permissions"));
   expect((await screen.findByRole("alert")).textContent).toContain(
     "Unsupported API version",
   );
@@ -144,6 +148,32 @@ it("reviews the exact manifest and reports rejected installs without claiming su
     manifest: source,
     grants: plugin.manifest.permissions,
   });
+});
+it("lists every manifest problem with its path and does not offer to install", async () => {
+  const errors = [
+    { code: "EXTENSION_INVALID_ID", path: "id", message: "App ID must be a reverse-domain identifier" },
+    { code: "EXTENSION_UNRESOLVED_CAPABILITY", path: "contributions.pages[0].capability", message: 'Capability "applications.delete" is not declared' },
+    { code: "EXTENSION_INVALID_KIND", path: "contributions.detailTabs[0].forKinds[0]", message: "Qualify the kind with its API group" },
+  ];
+  vi.mocked(validateExtension).mockResolvedValue({ errors });
+  render(<ExtensionManager />);
+  const source = JSON.stringify(plugin.manifest);
+  fireEvent.change(
+    await screen.findByLabelText("Local app manifest (JSON)"),
+    { target: { value: source } },
+  );
+  fireEvent.click(screen.getByText("Review manifest"));
+  const list = await screen.findByRole("list", { name: "Manifest problems" });
+  const items = within(list).getAllByRole("listitem");
+  expect(items).toHaveLength(3);
+  errors.forEach((error, index) => {
+    expect(items[index].textContent).toContain(error.path);
+    expect(items[index].textContent).toContain(error.message);
+    expect(items[index].textContent).toContain(error.code);
+  });
+  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, undefined);
+  expect(screen.queryByText("Install and grant permissions")).toBeNull();
+  expect(configureExtensions).not.toHaveBeenCalled();
 });
 it("persists settings, disable and remove through the backend", async () => {
   vi.mocked(listExtensions).mockResolvedValue({
@@ -483,6 +513,7 @@ it.each([undefined, [1,2,3]])("installs catalog bytes and signature %j only afte
   fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
   fireEvent.click(await screen.findByText("Review installation"));
   const install = await screen.findByText("Install and grant permissions");
+  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, signature);
   expect(configureExtensions).not.toHaveBeenCalled();
   expect(readExtension).not.toHaveBeenCalled();
   fireEvent.click(install);

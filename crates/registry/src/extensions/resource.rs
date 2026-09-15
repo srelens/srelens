@@ -38,7 +38,8 @@ async fn resolve(
                 "App was disabled, removed or updated; refresh the view".into(),
             )
         })?;
-    validate_app(&plugin.manifest, &plugin.grants, core).map_err(CapabilityError::Handler)?;
+    validate_app(&plugin.manifest, &plugin.grants, core)
+        .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
     let binding = plugin
         .manifest
         .capabilities
