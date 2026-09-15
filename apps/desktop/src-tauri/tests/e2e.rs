@@ -177,6 +177,10 @@ impl Harness {
 const EXCLUDED: &[(&str, &str)] = &[
     ("k8s.getCustomResource", "needs custom APIs; GitOps mock HTTP tests exercise resource GET and event RBAC failure"),
     ("k8s.gitOpsAction", "needs running Flux/Argo controllers; mock HTTP tests verify conditional PATCH and rejected writes"),
+    ("k8s.nodeJournalLogs", "requires SSH access to the node host; exercised via unit tests with mocked sessions"),
+    ("k8s.nodeRuntimeDiagnostics", "requires host-level runtime CLI (crictl/containerd) via SSH; exercised via unit tests"),
+    ("k8s.nodeServiceRestart", "requires node host systemd access via SSH; exercised via unit tests"),
+    ("k8s.nodeServiceStatus", "requires node host systemctl access via SSH; exercised via unit tests"),
     ("extensions.resource", "requires installed app; isolated registry tests verify pinned identity and revocation"),
     ("extensions.action", "requires installed app; isolated registry and MCP tests verify scope and consent"),
     ("extensions.catalog", "desktop public catalog; offline cache and validation use isolated registry tests"),
