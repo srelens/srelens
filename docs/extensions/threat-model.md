@@ -147,11 +147,25 @@ Residual risk:
   belongs to a CustomResourceDefinition. A manifest may bind a built-in group such as
   `apps` or `batch`, and its `printerColumns` JSON paths can surface any scalar field of
   those objects, such as a literal environment variable in a Deployment. RBAC still
-  applies and the manifest is shown at review, but the permission list only says
-  `k8s.listCustomResource`. Planned in [#601].
-- **Grants are per host capability, not per resource.** Granting `k8s.listCustomResource`
-  grants whatever the manifest binds. The review lists capability IDs and shows the
-  manifest; it does not summarize the bound groups and kinds.
+  applies, but the install review shows only `k8s.listCustomResource`, not the binding
+  (see the next point). Planned in [#601].
+- **Grants are per host capability, and the install review does not show what they
+  cover.** Granting `k8s.listCustomResource` grants whatever the manifest binds. The
+  review (`ExtensionManager` in `packages/ui-next/src/extensions/Extensions.tsx`, which
+  the classic design reuses through `apps/desktop/src/components/Extensions.tsx`) shows
+  the app's name, a signature label, the requested capability IDs and any validation
+  problems. It never shows the manifest, or the groups, kinds and printer columns it
+  binds.
+  - **Pasted manifest:** the text stays visible in **Install a local manifest**, and
+    editing it cancels the review.
+  - **Catalog install:** the manifest is downloaded and installed without being shown
+    (`packages/ui-next/src/extensions/ExtensionCatalog.tsx`). The catalog lists only the
+    app's name, description, ID, versions and license. An unsigned catalog app is
+    labelled **Unsigned local manifest** in the review.
+  - **After install:** the full manifest can be read under Details
+    (`packages/ui-next/src/extensions/ExtensionDetails.tsx`).
+
+  [#554] adds a diff for updates, not a summary for first installs. **Gap.**
 - **Unsigned apps choose their own names.** A local app outside the reserved namespace can
   call itself "Argo CD". It gets an initials mark and the **Unsigned local** label, not the
   bundled logo.
@@ -225,7 +239,7 @@ An agent that is connected and authenticated, but acting on bad instructions.
 
 | ID | Threat | STRIDE | Mitigation | Status |
 |---|---|---|---|---|
-| MCP-1 | Connect without authorization | S | The HTTP transport binds loopback, rejects a non-loopback `Host` header to stop DNS rebinding, and requires a bearer token compared in constant time (`crates/mcp/src/http.rs`, `crates/mcp/src/auth.rs`). See [MCP.md](../MCP.md#security-model). | Shipped |
+| MCP-1 | Connect without authorization | S | `/mcp` always requires a bearer token, compared in constant time, and no production constructor serves without one (`router_with_auth` and `token_guard` in `crates/mcp/src/http.rs`, `crates/mcp/src/auth.rs`). The desktop's in-app server binds `127.0.0.1` only (`start_server` in `apps/desktop/src-tauri/src/mcp.rs`). Headless `--mcp-http` defaults to `127.0.0.1:8765` but binds whatever address it is given, unchanged (`run_mcp_http` in `apps/desktop/src-tauri/src/main.rs`, `serve_http`). Every route rejects a `Host` header other than `127.0.0.1`, `::1` or `localhost` (`host_guard`). That stops DNS rebinding from a browser, but it does not restrict where a request comes from, because any client can send `Host: localhost`. See [MCP.md](../MCP.md#security-model). | Token and in-app loopback bind shipped. Loopback for headless `--mcp-http` is not enforced: **Gap** |
 | MCP-2 | Install or enable an app, change its grants or settings, or roll it back | E | `extensions.configure` is mutating, so `handle_request` (`crates/mcp/src/stdio.rs`) asks the consent policy first (`consent_kind` in `crates/mcp/src/lib.rs`). In the desktop app that is a dialog (`PromptUser` in `apps/desktop/src-tauri/src/mcp_confirm.rs`). Headless, it needs both `--mcp-allow-destructive` and `"_confirm": true` (`FlagGated` in `crates/mcp/src/policy.rs`). With no policy, it is denied (`AlwaysDeny`). | Shipped |
 | MCP-3 | Start a GitOps write | E | `extensions.action` and `k8s.gitOpsAction` are mutating and gated the same way (`action_dispatch_uses_bound_api_and_mcp_cannot_bypass_confirmation` in `crates/registry/src/extensions/resource.rs`). The write fetches the resource again and refuses a changed UID or resourceVersion, a sync while an Argo CD operation is present, a Suspend of a suspended resource or a Resume of one that is not, reconciliation while suspended, and a resource being deleted. It then sends the UID and resourceVersion as PATCH preconditions (`guard_action`, `execute` in `crates/kube/src/gitops.rs`). A sync never enables pruning. | Shipped |
 | MCP-4 | Call a removed app through a stale tool list | E | Broker handlers check the flag `Registration::unregister` clears, and `extensions.*` read the inventory on every call. | Shipped |
@@ -233,6 +247,13 @@ An agent that is connected and authenticated, but acting on bad instructions.
 
 Residual risk:
 
+- **Headless `--mcp-http` on a non-loopback address is reachable from the network.**
+  Nothing refuses `--mcp-http 0.0.0.0:8765`, and the startup message still calls the
+  listener loopback. The bearer token is then the only barrier. `/healthz` answers any
+  client that sends a loopback `Host` header, and the transport is plain HTTP, so anyone
+  who can observe the traffic can read the token and every tool result, including cluster
+  data, and replay the token. Gated tools still need the process flags and `_confirm`.
+  **Gap.**
 - With `--mcp-allow-destructive`, a headless agent that sends `_confirm` can install any
   unsigned read-only app with the grants it asks for. [#558] covers apps that write or run
   code, not read-only ones.
