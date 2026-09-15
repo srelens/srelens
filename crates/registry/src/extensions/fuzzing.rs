@@ -283,6 +283,20 @@ mod tests {
     }
 
     #[test]
+    fn a_setting_survives_a_save_exactly() {
+        // serde_json reads this double back one step off unless it parses floats exactly, so
+        // a setting holding it changed on every save.
+        let fixture = std::str::from_utf8(INVENTORY).unwrap();
+        let data = fixture.replacen(
+            "\"namespace\": \"argocd\"",
+            "\"namespace\": \"argocd\", \"ratio\": 1.0715660391465826e-75",
+            1,
+        );
+        assert_ne!(data, fixture);
+        inventory(data.as_bytes());
+    }
+
+    #[test]
     fn readers_hold_their_size_limits_to_the_byte() {
         assert!(parse_catalog(&padded(CATALOG, MAX_CATALOG)).is_ok());
         assert!(parse_catalog(&padded(CATALOG, MAX_CATALOG + 1)).is_err());

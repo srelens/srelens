@@ -393,6 +393,19 @@ mod tests {
     }
 
     #[test]
+    fn a_number_survives_a_round_trip_exactly() {
+        // serde_json reads this double back one step off unless it parses floats exactly, so
+        // an argument holding it changed every time a manifest was stored and read again.
+        let source = EXAMPLES[0].replacen(
+            "\"arguments\": {",
+            "\"arguments\": {\"ratio\": 1.0715660391465826e-75,",
+            1,
+        );
+        assert_ne!(source, EXAMPLES[0]);
+        manifest(source.as_bytes());
+    }
+
+    #[test]
     fn edits_are_repeatable_and_none_leave_the_seed() {
         let seed: Value = serde_json::from_str(EXAMPLES[1]).unwrap();
         assert_eq!(mutate(&seed, &[]), seed);
