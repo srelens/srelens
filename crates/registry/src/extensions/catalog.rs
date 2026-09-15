@@ -492,15 +492,22 @@ mod tests {
     async fn catalog_capabilities_registered_and_invoked() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog.json");
-        fs::write(&path, fixture()).unwrap();
+        // Seed the cache in the shape `load` writes — a `Snapshot`, not a bare
+        // catalog. A bare catalog fails the cache parse, so the capability
+        // fetched the live catalog: red offline, and online it tested mutable
+        // live data instead of this fixture (#615).
+        let seeded = load_with(&path, false, || Ok(fixture())).unwrap();
 
         let mut reg = Registry::new();
         let core = Arc::new(Registry::new());
         register(&mut reg, path, core);
 
         let cap_list = reg.get("extensions.catalog").unwrap();
-        let list_res = (cap_list.handler)(serde_json::json!({"refresh": false})).await;
-        assert!(list_res.is_ok());
+        let list_res = (cap_list.handler)(serde_json::json!({"refresh": false}))
+            .await
+            .unwrap();
+        // Served from the seeded cache, not a fresh download.
+        assert_eq!(list_res["fetchedAt"], json!(seeded.fetched_at));
 
         let cap_manifest = reg.get("extensions.catalogManifest").unwrap();
         let err_res =
