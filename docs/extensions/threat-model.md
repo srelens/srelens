@@ -143,12 +143,24 @@ An author who wants an app to do more than show custom resources.
 Residual risk:
 
 - **The custom-resource reader is not limited to custom resources.** `validate_app`
-  refuses the core group, but `k8s.listCustomResource` does not check that the bound group
-  belongs to a CustomResourceDefinition. A manifest may bind a built-in group such as
-  `apps` or `batch`, and its `printerColumns` JSON paths can surface any scalar field of
-  those objects, such as a literal environment variable in a Deployment. RBAC still
-  applies, but the install review shows only `k8s.listCustomResource`, not the binding
-  (see the next point). Planned in [#601].
+  refuses the core group, but nothing checks that the bound group belongs to a
+  CustomResourceDefinition. A manifest may bind a built-in group such as `apps` or
+  `batch`, and that binding exposes those objects in two ways:
+  - **Lists:** `k8s.listCustomResource` (`list_custom_resource_capability` in
+    `crates/kube/src/crds.rs`) renders the binding's `printerColumns` JSON paths. These
+    can surface any scalar field, such as a literal environment variable in a Deployment.
+  - **Whole objects:** `extensions.resource` resolves the same binding (`resolve` in
+    `crates/registry/src/extensions/resource.rs`) and calls `k8s.getCustomResource`. That
+    returns the complete object, with only `managedFields` removed (`inspect` in
+    `crates/kube/src/gitops.rs`), including every container's environment. The Manifest
+    tab shows all of it (`packages/ui-next/src/extensions/ExtensionResourceDetails.tsx`),
+    and an MCP client can request it without consent. No GitOps action is offered,
+    because `supported_actions` lists only Flux and Argo CD kinds.
+
+  RBAC still applies, but the install review shows only `k8s.listCustomResource`, not the
+  binding (see the next point). Planned in [#601], which refuses non-CRD groups at install
+  and load, and checks for a matching CRD in `extensions.read`, `extensions.resource` and
+  `extensions.action`.
 - **Grants are per host capability, and the install review does not show what they
   cover.** Granting `k8s.listCustomResource` grants whatever the manifest binds. The
   review (`ExtensionManager` in `packages/ui-next/src/extensions/Extensions.tsx`, which
@@ -225,7 +237,7 @@ An honest app with a flaw, or a host bug that an app's input can reach.
 | ID | Threat | STRIDE | Mitigation | Status |
 |---|---|---|---|---|
 | VULN-1 | A flawed app is hijacked to run code, open sockets or read files | E | Not possible in API 0.1: there is no app code to hijack, and the manifest type admits no executable kind. Executable apps are to ship only with an OS sandbox, and unsigned ones only behind an explicit setting. | Sandbox spike planned in [#571] (epic [#521]); untrusted-source policy in [#558] |
-| VULN-2 | A malformed manifest, catalog, signature or inventory crashes or confuses the host | T, D | Parsers are Rust and `serde`, and sizes are checked before parsing: manifests 256 KiB (`Manifest::decode` in `crates/plugin-host/src/manifest.rs`), catalogs 1 MiB (`parse_catalog` and `download` in `crates/registry/src/extensions/catalog.rs`), the inventory 1 MiB (`read` in `crates/registry/src/extensions.rs`), signatures 64 bytes. Every problem found in a manifest is reported with a stable code and path (`crates/plugin-host/src/validation.rs`). | Shipped. Fuzzing planned in [#580] |
+| VULN-2 | A malformed or oversized manifest, catalog, signature or inventory crashes or exhausts the host | T, D | Parsers are Rust and `serde`. Data srelens fetches or loads is size-checked before it is parsed: catalogs 1 MiB (`parse_catalog` and `download` in `crates/registry/src/extensions/catalog.rs`), downloaded signatures 64 bytes, and the inventory 1 MiB (`read` in `crates/registry/src/extensions.rs`). A manifest string is checked against 256 KiB before it is decoded (`Manifest::decode` in `crates/plugin-host/src/manifest.rs`). Caller-supplied capability inputs are not bounded before they are deserialized. The `signature` accepted by `extensions.validate` and `extensions.configure` is a byte array of any length (`ValidateIn` and `Configure` in `crates/registry/src/extensions.rs`), and the manifest string and `settings` object also arrive whole. Ed25519 refuses a signature that is not 64 bytes, but only after the array is allocated. What limits an input is the transport. The MCP HTTP handler takes a `Json` body, which axum caps at 2 MiB by default, and srelens does not change that (`rpc` in `crates/mcp/src/http.rs`). stdio reads each request as one line with no length limit (`serve` in `crates/mcp/src/stdio.rs`, fed from stdin by `run_mcp_stdio` in `apps/desktop/src-tauri/src/main.rs`), though a stdio client already started the process with the user's privileges. The desktop bridge sets no limit of its own (`invoke_capability` in `apps/desktop/src-tauri/src/bridge.rs`). Every problem found in a manifest is reported with a stable code and path (`crates/plugin-host/src/validation.rs`). | Limits on fetched and stored data shipped. Limits on caller-supplied inputs: **Gap**. Fuzzing planned in [#580] |
 | VULN-3 | An app's settings leak a credential | I | Settings are free-form JSON, and nothing marks a value as secret. The declarative host never interpolates them into capability arguments, but it keeps them in plain text in two places. The inventory stores them, and `extensions.list` returns them. An `extensions.configure` call made over MCP is also copied into the MCP audit log (`audit.jsonl`, created with mode 0600 on Unix). The capability is not sensitive-annotated, so `redact` (`crates/mcp/src/audit.rs`) removes only values whose key contains `token`, `secret`, `password` or `key`, or is exactly `data`, `stringData`, `yaml` or `values`. A setting named `credential` or `certificate` is written verbatim, even when consent is denied, and stays in `audit.jsonl.1` after the log rotates. Settings saved from Settings → Apps are not audited and reach only the inventory. | Keychain-backed secret settings planned in [#543], which keeps secret values out of `settings`. Redacting `settings` in the audit log planned in [#605] |
 | VULN-4 | An app is slow on a large cluster | D | Each cluster request is bounded in time by `request_timeout` (`crates/kube/src/connect.rs`), 8 seconds by default and configurable from 1 to 120. That limits how long a read can wait, not how large a response that arrives in time can be. | Performance budgets planned in [#581]; bounded app reads in [#609] |
 
@@ -306,7 +318,7 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 | ID | Threat | STRIDE | Mitigation | Status |
 |---|---|---|---|---|
 | LOCAL-1 | Edit the inventory to add, enable or widen an app | T, E | The inventory is parsed strictly: unknown fields, a `schemaVersion` other than 1, a file over 1 MiB and duplicate IDs are all fatal. Each app's manifest and signature proof are checked again, and a failing app is quarantined; the reason is recomputed on every load and never saved (`read`, `reverify`, `saved_form` in `crates/registry/src/extensions.rs`). A hand-added unsigned entry is still confined to declarative readers, because every call runs `validate_app`. | Shipped. The reserved-ID check for stored entries is planned in [#602] (see [Malicious app](#malicious-app)) |
-| LOCAL-2 | Corrupt the inventory through concurrent writes or a crash | T | Saves write a private temporary file, sync it and replace the inventory atomically, under a cross-process lock (`write`, `mutate`). | Shipped |
+| LOCAL-2 | Corrupt or lose the inventory through concurrent writes or a crash | T | Saves are serialized by a cross-process lock (`write_lock` in `crates/registry/src/settings.rs`). Each writes a private temporary file beside the inventory, syncs it, and renames it over the inventory (`write`, `mutate` in `crates/registry/src/extensions.rs`), so a concurrent writer or a crashed process leaves the old file or the new one, never a torn one. The parent directory is never synced after the rename, and tempfile's `persist` does not sync it either: it is a plain rename on Unix, and a move without the write-through flag on Windows. After a power loss or kernel crash, the rename can be lost. The inventory then comes back as its previous version, or is missing after a first save, so an app that was just disabled or removed can reappear enabled. The catalog cache is saved the same way (`load_with` in `crates/registry/src/extensions/catalog.rs`). | Lock and atomic replace shipped. Durability across power loss is partial: **Gap** |
 
 ## Open work
 
