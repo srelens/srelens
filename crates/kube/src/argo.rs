@@ -377,21 +377,28 @@ pub fn matches_destination(
         if let Some(curr_server) = current_server_url {
             let norm_curr = normalize_server_url(curr_server);
             if !app_dest_name.is_empty() {
+                // If app targets cluster by name, check if that name maps to current_server_url
                 if let Some(mapped_server) = mapping.server_for_name(app_dest_name) {
                     if normalize_server_url(mapped_server) == norm_curr {
                         return true;
                     }
                 }
             }
+            // If current_server_url is registered under a cluster name in ArgoCD, check if app targets that name
             if let Some(mapped_name) = mapping.name_for_server(curr_server) {
                 if !app_dest_name.is_empty() && name_matches(mapped_name, app_dest_name) {
                     return true;
                 }
-                if name_matches(mapped_name, current_context) {
+            }
+        }
+        // If app targets cluster by destination_server, check if that server maps to active context/cluster
+        if !app.destination_server.is_empty() {
+            if let Some(mapped_cluster_name) = mapping.name_for_server(&app.destination_server) {
+                if name_matches(mapped_cluster_name, current_context) {
                     return true;
                 }
                 if let Some(c_cluster) = current_cluster_name {
-                    if name_matches(mapped_name, c_cluster) {
+                    if name_matches(mapped_cluster_name, c_cluster) {
                         return true;
                     }
                 }
@@ -996,6 +1003,84 @@ mod tests {
             Some(&mapping),
             false,
         ));
+    }
+
+    #[test]
+    fn spoke_filter_excludes_apps_targeting_other_spokes_even_with_cluster_mapping() {
+        let mut mapping = ArgoClusterMapping::new();
+        mapping.insert("data-processing-stage-eu-dus1", "https://10.200.1.1:6443");
+        mapping.insert("advertiser-service-prod0-as-se1", "https://10.200.2.1:6443");
+
+        // App targeting another spoke cluster (advertiser-service-prod0-as-se1)
+        let other_app = ArgoApplication {
+            name: "abreuv2-prod-as-se1".into(),
+            namespace: "argocd".into(),
+            project: "default".into(),
+            destination_server: "".into(),
+            destination_name: "advertiser-service-prod0-as-se1".into(),
+            destination_namespace: "connector".into(),
+            repo_url: "".into(),
+            target_revision: "".into(),
+            path: "".into(),
+            sync_status: "Synced".into(),
+            health_status: "Healthy".into(),
+            health_message: "".into(),
+            sync_revision: "".into(),
+            operation_phase: "".into(),
+            operation_message: "".into(),
+            auto_sync_enabled: true,
+            self_heal_enabled: false,
+            prune_enabled: false,
+            last_sync_time: "".into(),
+            created_at: "".into(),
+            resources: vec![],
+            sync_history: vec![],
+        };
+
+        // Current active context is data-processing-stage-eu-dus1
+        assert!(!matches_destination(
+            &other_app,
+            "data-processing-stage-eu-dus1",
+            Some("data-processing-stage-eu-dus1"),
+            Some("https://10.200.1.1:6443"),
+            Some(&mapping),
+            false,
+        ), "App targeting advertiser-service-prod0-as-se1 must NOT match active cluster data-processing-stage-eu-dus1");
+
+        // App targeting active cluster by destination_server URL registered in mapping
+        let spoke_server_app = ArgoApplication {
+            name: "stage-data-pipeline".into(),
+            namespace: "argocd".into(),
+            project: "default".into(),
+            destination_server: "https://10.200.1.1:6443".into(),
+            destination_name: "".into(),
+            destination_namespace: "pipeline".into(),
+            repo_url: "".into(),
+            target_revision: "".into(),
+            path: "".into(),
+            sync_status: "Synced".into(),
+            health_status: "Healthy".into(),
+            health_message: "".into(),
+            sync_revision: "".into(),
+            operation_phase: "".into(),
+            operation_message: "".into(),
+            auto_sync_enabled: true,
+            self_heal_enabled: false,
+            prune_enabled: false,
+            last_sync_time: "".into(),
+            created_at: "".into(),
+            resources: vec![],
+            sync_history: vec![],
+        };
+
+        assert!(matches_destination(
+            &spoke_server_app,
+            "data-processing-stage-eu-dus1",
+            Some("data-processing-stage-eu-dus1"),
+            Some("https://10.200.1.1:6443"),
+            Some(&mapping),
+            false,
+        ), "App targeting active cluster via registered destination_server must match");
     }
 
     #[test]
