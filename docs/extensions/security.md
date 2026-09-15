@@ -1,7 +1,8 @@
 # Security
 
-The trust boundary for apps today, and what it does not yet cover. A formal threat
-model is tracked in [#579](https://github.com/srelens/srelens/issues/579).
+The trust boundary for apps today, and what it does not yet cover. The
+[threat model](threat-model.md) takes it threat by threat, with the code behind each
+mitigation and the risk that remains.
 
 ## What holds today
 

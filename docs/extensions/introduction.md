@@ -37,6 +37,7 @@ Freelens and OpenLens packages are not supported.
 | [ui-contributions.md](ui-contributions.md) | Pages, dashboards, detail tabs, requirement checks, resource inspection |
 | [capabilities.md](capabilities.md) | The `extensions.*` capabilities, MCP, host GitOps actions |
 | [security.md](security.md) | Trust boundary and what is not yet protected |
+| [threat-model.md](threat-model.md) | Assets, adversaries, mitigations with their code, residual risk and open work |
 | [distribution.md](distribution.md) | Catalog, signed releases, local installation |
 | [testing.md](testing.md) | Developer harness and the test suites |
 | [migration.md](migration.md) | Upgrading, downgrading and moving between API versions |
