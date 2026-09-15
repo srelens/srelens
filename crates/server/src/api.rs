@@ -24,7 +24,11 @@ use crate::AppState;
 /// that a victim's next helmInstall would pull from. The other helm ops
 /// (install/upgrade/rollback/uninstall/template/searchRepo/list/get) use
 /// per-context temp kubeconfigs and stay allowed. Read-only toolbox
-/// capabilities (status/diagnoseContext/searchPlugins) stay allowed.
+/// capabilities (status/diagnoseContext/searchPlugins) stay allowed. The
+/// `k8s.node*` SSH capabilities run the server's own `ssh` against a
+/// caller-named host, user, port and server-side `identityFile`: on the web that
+/// hands every user the container's SSH identity against any reachable machine,
+/// and `nodeServiceRestart` has no consent prompt there, so all four are denied.
 pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     "extensions.configure",
     "extensions.catalog",
@@ -42,6 +46,10 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     "k8s.deleteContext",
     "k8s.helmRepoAdd",
     "k8s.helmRepoUpdate",
+    "k8s.nodeServiceStatus",
+    "k8s.nodeJournalLogs",
+    "k8s.nodeRuntimeDiagnostics",
+    "k8s.nodeServiceRestart",
     "toolbox.installKubectl",
     "toolbox.installHelm",
     "toolbox.installKrew",
@@ -496,6 +504,22 @@ mod tests {
     #[tokio::test]
     async fn helm_repo_mutators_are_denied_on_web() {
         for id in ["k8s.helmRepoAdd", "k8s.helmRepoUpdate"] {
+            let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
+            assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn node_ssh_capabilities_are_denied_on_web() {
+        // Read-only or not, each one runs the server's `ssh` against a host the
+        // caller names, so none may reach dispatch on the shared web server.
+        for id in [
+            "k8s.nodeServiceStatus",
+            "k8s.nodeJournalLogs",
+            "k8s.nodeRuntimeDiagnostics",
+            "k8s.nodeServiceRestart",
+        ] {
             let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id} must be denied");
             assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");
