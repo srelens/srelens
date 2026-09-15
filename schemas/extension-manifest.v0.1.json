@@ -37,6 +37,12 @@
     "Contributions": {
       "additionalProperties": false,
       "properties": {
+        "detailLinks": {
+          "items": {
+            "$ref": "#/definitions/DetailLink"
+          },
+          "type": "array"
+        },
         "detailTabs": {
           "items": {
             "$ref": "#/definitions/DetailTab"
@@ -48,18 +54,12 @@
             "$ref": "#/definitions/Page"
           },
           "type": "array"
-        },
-        "rowActions": {
-          "items": {
-            "$ref": "#/definitions/RowAction"
-          },
-          "type": "array"
         }
       },
       "required": [
+        "detailLinks",
         "detailTabs",
-        "pages",
-        "rowActions"
+        "pages"
       ],
       "type": "object"
     },
@@ -104,6 +104,34 @@
       "required": [
         "apiGroups",
         "capability"
+      ],
+      "type": "object"
+    },
+    "DetailLink": {
+      "additionalProperties": false,
+      "description": "An entry in a resource detail view's app links menu that opens a read-only results panel. It never writes to the cluster; the name `rowActions` is reserved for declared mutations.",
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "forKinds",
+        "id",
+        "title"
       ],
       "type": "object"
     },
@@ -183,33 +211,6 @@
       },
       "required": [
         "capability",
-        "id",
-        "title"
-      ],
-      "type": "object"
-    },
-    "RowAction": {
-      "additionalProperties": false,
-      "properties": {
-        "capability": {
-          "type": "string"
-        },
-        "forKinds": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "id": {
-          "type": "string"
-        },
-        "title": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "capability",
-        "forKinds",
         "id",
         "title"
       ],

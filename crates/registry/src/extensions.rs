@@ -383,10 +383,10 @@ fn validate_app(
                 .collect(),
         ),
         (
-            "rowActions",
+            "detailLinks",
             manifest
                 .contributions
-                .row_actions
+                .detail_links
                 .iter()
                 .map(|p| &p.capability)
                 .collect(),

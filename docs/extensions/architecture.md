@@ -9,7 +9,7 @@ ahead, are in the [plugin ADR](../design/plugin-architecture.md) and
 `crates/plugin-host` implements the extension API (see
 [specification.md](specification.md)) and a declarative broker. A manifest binds
 existing host capabilities to app-specific operations and declares pages, detail tabs
-and row actions.
+and detail links.
 
 The broker:
 

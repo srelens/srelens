@@ -42,7 +42,7 @@ before publishing.
 | `kind` | Yes | `declarative`. No other kind is accepted. |
 | `permissions` | Yes | The exact host capability IDs the bindings use. |
 | `capabilities` | Yes | 1–32 bindings, below. |
-| `contributions` | Yes | `pages`, `detailTabs` and `rowActions`, below. |
+| `contributions` | Yes | `pages`, `detailTabs` and `detailLinks`, below. |
 
 Unknown fields are errors at every level. A manifest is at most 256 KiB.
 
@@ -81,15 +81,21 @@ contribution names a declared capability.
 | `statusColumns` | Optional `{ ready, suspended?, progressing? }`: zero-based indices into the binding's `printerColumns`, each below 64. |
 | `dashboard` | Optional `{ pages, events? }`. `pages` references 1–12 resource pages that have `statusColumns` and are not dashboards. `events` is `{ capability, apiGroups }`, where `capability` binds `k8s.listEvents` and `apiGroups` lists 1–32 dotted groups. |
 
-### `detailTabs` and `rowActions`
+### `detailTabs` and `detailLinks`
 
 | Field | Meaning |
 |---|---|
 | `id`, `title`, `capability` | Identity, label and binding. |
 | `forKinds` | 1–32 group-qualified kinds: `argoproj.io/Application`, or `/Pod` for the core group. |
 
-`rowActions` open read panels; they are not cluster writes. The name is planned to
-change to `detailLinks` ([#537](https://github.com/srelens/srelens/issues/537)).
+A detail tab adds a tab to a matching resource's detail view. A detail link adds an
+entry to that view's **App links** menu, which opens a read-only results panel. Neither
+writes to the cluster.
+
+`rowActions` was this contribution's name before release
+([#537](https://github.com/srelens/srelens/issues/537)). It is reserved for declared
+mutations ([#549](https://github.com/srelens/srelens/issues/549)), and a manifest that
+uses it now is rejected as an unknown field.
 
 ## Rules the desktop app adds
 
@@ -104,7 +110,7 @@ The desktop app accepts a narrower surface than the developer broker:
   `namespace`.
 - A `k8s.listEvents` binding has no fixed arguments and accepts both `context` and
   `namespace`.
-- Every page, detail tab and row action references a `k8s.listCustomResource` binding.
+- Every page, detail tab and detail link references a `k8s.listCustomResource` binding.
 - `statusColumns` indices point at declared `printerColumns`.
 
 Settings → Apps checks these rules together with the manifest's own before it offers

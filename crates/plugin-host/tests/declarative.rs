@@ -10,7 +10,7 @@ fn manifest() -> Value {
         "capabilities":[{"name":"applications","title":"List applications", "target":"k8s.listCustomResource",
             "arguments":{"group":"argoproj.io"},"inputs":["context","namespace"]}],
         "contributions":{"pages":[{"id":"applications","title":"Applications","capability":"applications"}],
-            "detailTabs":[],"rowActions":[]}
+            "detailTabs":[],"detailLinks":[]}
     })
 }
 fn core() -> Registry {
@@ -271,11 +271,11 @@ fn manifest_wire_contract_and_contribution_identity_are_strict() {
     }
     let mut value = manifest();
     value["contributions"]["detailTabs"] = json!([{"id":"detail","title":"Details","capability":"applications","forKinds":["argoproj.io/Application"]}]);
-    value["contributions"]["rowActions"] = json!([{"id":"inspect","title":"Inspect","capability":"applications","forKinds":["argoproj.io/Application"]}]);
+    value["contributions"]["detailLinks"] = json!([{"id":"inspect","title":"Inspect","capability":"applications","forKinds":["argoproj.io/Application"]}]);
     assert!(Manifest::parse(&value.to_string()).is_ok());
-    value["contributions"]["rowActions"][0]["forKinds"] = json!(["Application"]);
+    value["contributions"]["detailLinks"][0]["forKinds"] = json!(["Application"]);
     assert!(Manifest::parse(&value.to_string()).is_err());
-    value["contributions"]["rowActions"] = json!([]);
+    value["contributions"]["detailLinks"] = json!([]);
     value["contributions"]["detailTabs"][0]["id"] = json!("applications");
     assert!(Manifest::parse(&value.to_string()).is_err());
     let mut value = manifest();
@@ -356,14 +356,14 @@ fn fields_must_exist_in_every_api_version_the_range_admits() {
         },
         // A 0.1 field a later line removed; a rename is this plus an addition.
         ApiField {
-            path: "contributions.rowActions",
+            path: "contributions.detailLinks",
             introduced: "0.1.0",
             removed: Some("0.2.0"),
         },
     ];
-    let with_row_action = || {
+    let with_detail_link = || {
         let mut value = manifest();
-        value["contributions"]["rowActions"] = json!([{"id":"inspect","title":"Inspect","capability":"applications","forKinds":["argoproj.io/Application"]}]);
+        value["contributions"]["detailLinks"] = json!([{"id":"inspect","title":"Inspect","capability":"applications","forKinds":["argoproj.io/Application"]}]);
         value
     };
     let admits = |r: &str| matching_api_versions_in(&range(r), &both);
@@ -399,13 +399,13 @@ fn fields_must_exist_in_every_api_version_the_range_admits() {
     assert!(check_api_fields_in(&per_page, &admits("^0.2"), &fields).is_ok());
 
     // A field removed in 0.2 is accepted under ^0.1 and rejected by any range admitting 0.2.
-    let removed = check_api_fields_in(&with_row_action(), &admits("^0.2"), &fields).unwrap_err();
+    let removed = check_api_fields_in(&with_detail_link(), &admits("^0.2"), &fields).unwrap_err();
     assert!(
-        removed.contains("`contributions.rowActions` was removed in API 0.2.0"),
+        removed.contains("`contributions.detailLinks` was removed in API 0.2.0"),
         "{removed}"
     );
-    assert!(check_api_fields_in(&with_row_action(), &admits(">=0.1, <0.3"), &fields).is_err());
-    assert!(check_api_fields_in(&with_row_action(), &admits("^0.1"), &fields).is_ok());
+    assert!(check_api_fields_in(&with_detail_link(), &admits(">=0.1, <0.3"), &fields).is_err());
+    assert!(check_api_fields_in(&with_detail_link(), &admits("^0.1"), &fields).is_ok());
 
     // Every gated field names a supported version and is removed only after it arrived.
     for field in API_FIELDS {
@@ -431,11 +431,11 @@ fn stored_manifests_are_rechecked_against_the_hosts_api_fields() {
     // later removes a field the app uses.
     let mut value = manifest();
     value["srelensApiVersion"] = json!(">=0.2, <0.4");
-    value["contributions"]["rowActions"] = json!([{"id":"inspect","title":"Inspect","capability":"applications","forKinds":["argoproj.io/Application"]}]);
+    value["contributions"]["detailLinks"] = json!([{"id":"inspect","title":"Inspect","capability":"applications","forKinds":["argoproj.io/Application"]}]);
     // The inventory deserializes stored manifests directly rather than through parse.
     let stored: Manifest = serde_json::from_value(value).unwrap();
     let fields = [ApiField {
-        path: "contributions.rowActions",
+        path: "contributions.detailLinks",
         introduced: "0.1.0",
         removed: Some("0.3.0"),
     }];

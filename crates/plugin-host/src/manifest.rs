@@ -218,8 +218,8 @@ pub struct Contributions {
     pub pages: Vec<Page>,
     #[serde(rename = "detailTabs")]
     pub detail_tabs: Vec<DetailTab>,
-    #[serde(rename = "rowActions")]
-    pub row_actions: Vec<RowAction>,
+    #[serde(rename = "detailLinks")]
+    pub detail_links: Vec<DetailLink>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -277,9 +277,12 @@ pub struct DetailTab {
     pub for_kinds: Vec<String>,
 }
 
+/// An entry in a resource detail view's app links menu that opens a read-only results
+/// panel. It never writes to the cluster; the name `rowActions` is reserved for declared
+/// mutations.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct RowAction {
+pub struct DetailLink {
     pub id: String,
     pub title: String,
     pub capability: String,
@@ -584,9 +587,9 @@ impl Manifest {
                     .collect(),
             ),
             (
-                "rowActions",
+                "detailLinks",
                 self.contributions
-                    .row_actions
+                    .detail_links
                     .iter()
                     .map(|p| (&p.id, &p.title, &p.capability))
                     .collect(),
@@ -601,7 +604,7 @@ impl Manifest {
             problems.push(
                 Code::InvalidValue,
                 "contributions",
-                "Declare at most 64 pages, detail tabs and row actions in total",
+                "Declare at most 64 pages, detail tabs and detail links in total",
             );
         }
         let mut ids = BTreeSet::new();
@@ -615,7 +618,7 @@ impl Manifest {
                         Code::DuplicateIdentifier,
                         format!("{at}.id"),
                         format!(
-                            "\"{id}\" is already used by another page, detail tab or row action"
+                            "\"{id}\" is already used by another page, detail tab or detail link"
                         ),
                     );
                 }
@@ -741,11 +744,11 @@ impl Manifest {
                 &tab.for_kinds,
             );
         }
-        for (index, action) in self.contributions.row_actions.iter().enumerate() {
+        for (index, link) in self.contributions.detail_links.iter().enumerate() {
             kinds(
                 &mut problems,
-                &format!("contributions.rowActions[{index}].forKinds"),
-                &action.for_kinds,
+                &format!("contributions.detailLinks[{index}].forKinds"),
+                &link.for_kinds,
             );
         }
         problems.into_result()

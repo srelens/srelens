@@ -56,7 +56,7 @@
         ]
       }
     ],
-    "rowActions": [
+    "detailLinks": [
       {
         "id": "inspect-namespace",
         "title": "Inspect Argo CD resources",

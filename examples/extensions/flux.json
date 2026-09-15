@@ -694,7 +694,7 @@
         ]
       }
     ],
-    "rowActions": [
+    "detailLinks": [
       {
         "id": "inspect-namespace",
         "title": "Inspect Flux resources",

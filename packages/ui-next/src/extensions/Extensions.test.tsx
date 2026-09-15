@@ -34,7 +34,7 @@ const plugin = {
     contributions: {
       pages: [{ id: "apps", title: "Applications", capability: "list" }],
       detailTabs: [],
-      rowActions: [],
+      detailLinks: [],
     },
   },
   enabled: true,
@@ -393,7 +393,7 @@ it("renders printer-column values as text", async () => {
   expect(screen.getByRole("columnheader", { name: "Ready" })).toBeTruthy();
 });
 
-it("adds namespace detail views and actions, and removes them when disabled", async () => {
+it("adds namespace detail views and links, and removes them when disabled", async () => {
   const { ExtensionResourceSlot } = await import("./Extensions");
   const installed = structuredClone(plugin);
   installed.manifest.contributions.detailTabs = [
@@ -404,7 +404,7 @@ it("adds namespace detail views and actions, and removes them when disabled", as
       forKinds: ["/Namespace"],
     },
   ];
-  installed.manifest.contributions.rowActions = [
+  installed.manifest.contributions.detailLinks = [
     {
       id: "inspect",
       title: "Inspect apps",
@@ -437,7 +437,7 @@ it("adds namespace detail views and actions, and removes them when disabled", as
       true,
     ),
   );
-  fireEvent.click(screen.getByText("App actions"));
+  fireEvent.click(screen.getByText("App links"));
   fireEvent.click(screen.getByText("Inspect apps"));
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,

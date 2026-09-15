@@ -336,8 +336,8 @@ export function useExtensionContributions(kind: string, group?: string) {
           id: `extension:${plugin.manifest.id}/${contribution.id}`,
         })),
     ),
-    actions: plugins.flatMap((plugin) =>
-      plugin.manifest.contributions.rowActions
+    links: plugins.flatMap((plugin) =>
+      plugin.manifest.contributions.detailLinks
         .filter((c) => c.forKinds?.includes(qualified))
         .map((contribution) => ({
           plugin,
@@ -362,28 +362,28 @@ export function ExtensionResourceSlot({
   name: string;
 }) {
   const { Button, Tabs } = useContext(ExtensionControls);
-  const { inventory, tabs, actions } = useExtensionContributions(kind, group);
+  const { inventory, tabs, links } = useExtensionContributions(kind, group);
   const [selected, setSelected] = useState("");
-  const active = [...tabs, ...actions].some((c) => c.id === selected)
+  const active = [...tabs, ...links].some((c) => c.id === selected)
     ? selected
     : tabs[0]?.id || "";
-  const current = [...tabs, ...actions].find((c) => c.id === active);
+  const current = [...tabs, ...links].find((c) => c.id === active);
   const panelTabs =
     current && !tabs.some((c) => c.id === current.id)
       ? [...tabs, current]
       : tabs;
   if (inventory.status === "error")
     return <ErrorNotice message={inventory.error} retry={inventory.reload} />;
-  if (!tabs.length && !actions.length) return null;
+  if (!tabs.length && !links.length) return null;
   const ns = contributionKind(kind, group) === "/Namespace" ? name : (namespace ?? "");
   return (
     <section className="extension-installed extension-resource-slot">
       <div className="extension-toolbar">
         <strong>Apps</strong>
-        {actions.length > 0 && (
+        {links.length > 0 && (
           <details>
-            <summary>App actions</summary>
-            {actions.map((c) => (
+            <summary>App links</summary>
+            {links.map((c) => (
               <Button
                 variant="secondary"
                 key={c.id}
