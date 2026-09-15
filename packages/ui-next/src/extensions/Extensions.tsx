@@ -6,7 +6,6 @@ import {
   contributionKind,
   isTauri,
   type ExtensionChange,
-  type ExtensionContribution,
   type InstalledExtension,
 } from "@srelens/core";
 

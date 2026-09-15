@@ -1,15 +1,26 @@
 import { invokeCapability } from "../transport/transport";
-export interface ExtensionContribution {
+// These mirror crates/plugin-host/src/manifest.rs and crates/registry/src/extensions.rs;
+// extensionTypes.test.ts fails when a field name or its optionality differs.
+interface ExtensionContributionBase {
   id: string;
   title: string;
   capability: string;
-  forKinds?: string[];
+}
+export interface ExtensionPage extends ExtensionContributionBase {
   group?: string;
   statusColumns?: { ready: number; suspended?: number; progressing?: number };
   dashboard?: {
     pages: string[];
     events?: { capability: string; apiGroups: string[] };
   };
+}
+export interface ExtensionDetailTab extends ExtensionContributionBase {
+  /** Qualified Kubernetes kinds, e.g. `argoproj.io/Application`. */
+  forKinds: string[];
+}
+export interface ExtensionRowAction extends ExtensionContributionBase {
+  /** Qualified Kubernetes kinds, e.g. `argoproj.io/Application`. */
+  forKinds: string[];
 }
 export interface ExtensionManifest {
   /** Editor metadata naming the manifest's JSON Schema; the host ignores it. */
@@ -28,9 +39,9 @@ export interface ExtensionManifest {
     inputs: string[];
   }>;
   contributions: {
-    pages: ExtensionContribution[];
-    detailTabs: ExtensionContribution[];
-    rowActions: ExtensionContribution[];
+    pages: ExtensionPage[];
+    detailTabs: ExtensionDetailTab[];
+    rowActions: ExtensionRowAction[];
   };
 }
 export interface InstalledExtension {
