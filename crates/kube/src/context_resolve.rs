@@ -334,27 +334,35 @@ pub fn resolve_context(paths: &[PathBuf], name: &str) -> Option<ResolvedContext>
 
 /// [`resolve_context`] over an already resolved listing.
 ///
-/// A stable ID that more than one listed context carries (see
-/// [`ResolvedContext::pinned_id`]) names no single context, so it resolves to nothing rather
-/// than to whichever comes first.
+/// One string can mean two different contexts to two kinds of caller: an ID to extension
+/// dispatch, and a display name to delete, connect or the toolbox, when a context is
+/// literally named after another's ID. Such a string resolves to nothing, so neither caller
+/// is redirected. Likewise a stable ID that more than one listed context carries (see
+/// [`ResolvedContext::pinned_id`]) names no single context and resolves to nothing.
 pub fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedContext> {
-    if let Some(pinned) = all.iter().find(|context| context.pinned_id() == name) {
-        return Some(pinned.clone());
+    let by_id: Vec<&ResolvedContext> = all
+        .iter()
+        .filter(|context| context.pinned_id() == name || context.stable_id() == name)
+        .collect();
+    let by_name = all
+        .iter()
+        .find(|context| context.display_name == name)
+        .or_else(|| all.iter().find(|context| context.original_name == name));
+    match (by_id.as_slice(), by_name) {
+        ([found], None) => return Some((*found).clone()),
+        ([found], Some(named)) if found.pinned_id() == named.pinned_id() => {
+            return Some((*found).clone())
+        }
+        ([], _) => {}
+        _ => return None,
     }
-    let mut by_stable_id = all.iter().filter(|context| context.stable_id() == name);
-    if let Some(found) = by_stable_id.next() {
-        return by_stable_id.next().is_none().then(|| found.clone());
-    }
-    // A context can be named anything, including another context's ID. A name shaped like a
-    // pinned ID (an absolute kubeconfig path, `#`, a context name) is taken as one, so once
-    // its context is gone it reaches nothing rather than whichever context carries that name.
+    // No context carries this ID. A name shaped like a pinned ID (an absolute kubeconfig
+    // path, `#`, a context name) is still taken as one, so a request pinned to a context
+    // that has since gone reaches nothing, never a context that took that string as its name.
     if name.contains('#') && Path::new(name).is_absolute() {
         return None;
     }
-    all.iter()
-        .find(|context| context.display_name == name)
-        .or_else(|| all.iter().find(|context| context.original_name == name))
-        .cloned()
+    by_name.cloned()
 }
 
 #[cfg(test)]
@@ -719,12 +727,39 @@ mod tests {
             "/kube/impostor.yaml",
             "clusters:\n  - name: c\n    cluster: { server: https://impostor }\ncontexts:\n  - name: \"/kube/kube_prod.yaml#default\"\n    context: { cluster: c, user: u }\n",
         );
+        // Listed together, the string names two different contexts for two kinds of caller
+        // (an ID for extension dispatch, a display name for delete or connect), so it
+        // resolves to neither rather than redirecting either.
         let listed = resolve_from(&[impostor, cfg("/kube/kube_prod.yaml", PROD)]);
+        assert!(find_context(&listed, &id).is_none());
+        assert!(find_context(&listed[..1], &id).is_none());
         assert_eq!(
-            find_context(&listed, &id).unwrap().server,
+            find_context(&listed[1..], &id).unwrap().server,
             "https://prod:6443"
         );
-        assert!(find_context(&listed[..1], &id).is_none());
+    }
+
+    /// An ordinary caller looking a context up by its display name is never sent to a
+    /// different context because that name happens to be another context's ID.
+    #[test]
+    fn a_name_that_is_also_another_contexts_id_is_refused_rather_than_redirected() {
+        let prod = resolve_from(&[cfg("/kube/kube_prod.yaml", PROD)]).remove(0);
+        let named_like_prod = cfg(
+            "/kube/other.yaml",
+            &format!(
+                "clusters:\n  - name: c\n    cluster: {{ server: https://other }}\ncontexts:\n  - name: '{}'\n    context: {{ cluster: c, user: u }}\n",
+                prod.pinned_id()
+            ),
+        );
+        let both = resolve_from(&[cfg("/kube/kube_prod.yaml", PROD), named_like_prod]);
+        assert_eq!(both[1].display_name, prod.pinned_id());
+        // By that display name: not prod.
+        assert!(find_context(&both, &both[1].display_name).is_none());
+        // Prod itself stays reachable by its own name.
+        assert_eq!(
+            find_context(&both, "default").unwrap().server,
+            "https://prod:6443"
+        );
     }
 
     #[test]
@@ -747,10 +782,7 @@ mod tests {
             ),
         );
         let with_impostor = resolve_from(&[impostor, cfg("kube/prod.yaml", PROD)]);
-        assert_eq!(
-            find_context(&with_impostor, &pinned).unwrap().server,
-            "https://prod:6443"
-        );
+        assert!(find_context(&with_impostor, &pinned).is_none());
         assert!(find_context(&with_impostor[..1], &pinned).is_none());
     }
 

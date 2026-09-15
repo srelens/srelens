@@ -1480,7 +1480,10 @@ mod tests {
             srelens_kube::context_resolve::resolve_context(paths, &first_default)
                 .map(|context| context.source)
         };
-        assert_eq!(reached(&[impostor.clone(), first.clone()]), Some(first));
+        // Alone, the ID reaches its context; with the impostor listed, the string means two
+        // things, so it reaches nothing rather than either.
+        assert_eq!(reached(&[first.clone()]), Some(first.clone()));
+        assert_eq!(reached(&[impostor.clone(), first]), None);
         assert_eq!(reached(&[impostor]), None);
     }
     /// A kubeconfig can be given by a relative path, and its contexts' stable IDs keep that
@@ -1527,10 +1530,8 @@ mod tests {
             srelens_kube::context_resolve::resolve_context(paths, &pinned)
                 .map(|context| context.original_name)
         };
-        assert_eq!(
-            reached(&[impostor.clone(), relative]),
-            Some("default".to_owned())
-        );
+        assert_eq!(reached(&[relative.clone()]), Some("default".to_owned()));
+        assert_eq!(reached(&[impostor.clone(), relative]), None);
         assert_eq!(reached(&[impostor]), None);
     }
     /// A file path and a context name can both contain `#`, so two contexts can share one
