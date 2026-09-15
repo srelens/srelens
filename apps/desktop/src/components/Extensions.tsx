@@ -26,7 +26,7 @@ export function ExtensionResourceSlot(
   );
 }
 
-import { ExtensionWorkspace, ExtensionLogo, useExtensions, useContextId, ExtensionResourceNavigation, ExtensionResourceDetails } from "@srelens/ui-next/extensions";
+import { ErrorNotice, ExtensionWorkspace, ExtensionLogo, useExtensions, useContextId, useContextLookup, refreshContextIds, ExtensionResourceNavigation, ExtensionResourceDetails } from "@srelens/ui-next/extensions";
 import { extensionEnabledFor } from "@srelens/core";
 export function ClassicAppsNav({context,onOpen}:{context:string;onOpen(context:string,id:string,page:string):void}) {
   const inventory=useExtensions();
@@ -38,10 +38,13 @@ export function ClassicAppsNav({context,onOpen}:{context:string;onOpen(context:s
 }
 export function ClassicAppPage({context,id,page,namespace="",resourceName,onOpenResource,onPage,onNamespace}:{context:string;id:string;page:string;namespace?:string;resourceName?:string;onOpenResource?(name:string,namespace:string):void;onPage(page:string,namespace?:string):void;onNamespace?(namespace:string):void}) {
   const inventory=useExtensions();
-  const contextId=useContextId(context);
+  const lookup=useContextLookup(context);
+  const contextId=lookup.status==="found"?lookup.id:undefined;
   const plugin=inventory.data?.plugins.find(p=>p.enabled && p.manifest.id===id);
   const contribution=plugin?.manifest.contributions.pages.find(p=>p.id===page);
+  // Only an app limited to some clusters waits on the lookup, and a failed lookup is not a denial.
+  const limited=Boolean(plugin?.contexts);
   return <ExtensionControlsProvider value={controls}><div className="flex min-h-0 flex-1 flex-col overflow-auto">
-    {inventory.status==="loading"?<p className="p-3">Loading app…</p>:inventory.status==="error"?<div role="alert" className="p-3">{inventory.error}<Button onClick={inventory.reload}>Retry</Button></div>:plugin&&contribution&&!extensionEnabledFor(plugin,contextId)?<p className="p-3">This app is not enabled for this cluster. Manage it in Settings → Apps.</p>:plugin&&contribution?<ExtensionResourceNavigation.Provider value={onOpenResource ? resource=>onOpenResource(resource.name,resource.namespace):undefined}>{resourceName ? <ExtensionResourceDetails fullPage selection={{id,revision:plugin.revision,capability:contribution.capability,context,namespace,name:resourceName}}/> : <ExtensionWorkspace key={`${context}/${id}/${plugin.revision}`} context={context} plugin={plugin} page={contribution} namespace={namespace} onPage={onPage} onNamespace={onNamespace}/>}</ExtensionResourceNavigation.Provider>:<p className="p-3">This app page is unavailable. Manage it in Settings → Apps.</p>}
+    {inventory.status==="loading"||(limited&&lookup.status==="loading")?<p className="p-3">Loading app…</p>:inventory.status==="error"?<div role="alert" className="p-3">{inventory.error}<Button onClick={inventory.reload}>Retry</Button></div>:limited&&lookup.status==="failed"?<div className="p-3"><ErrorNotice title="Could not list clusters" message={lookup.error} retry={()=>void refreshContextIds()}/></div>:plugin&&contribution&&!extensionEnabledFor(plugin,contextId)?<p className="p-3">This app is not enabled for this cluster. Manage it in Settings → Apps.</p>:plugin&&contribution?<ExtensionResourceNavigation.Provider value={onOpenResource ? resource=>onOpenResource(resource.name,resource.namespace):undefined}>{resourceName ? <ExtensionResourceDetails fullPage selection={{id,revision:plugin.revision,capability:contribution.capability,context,namespace,name:resourceName}}/> : <ExtensionWorkspace key={`${context}/${id}/${plugin.revision}`} context={context} plugin={plugin} page={contribution} namespace={namespace} onPage={onPage} onNamespace={onNamespace}/>}</ExtensionResourceNavigation.Provider>:<p className="p-3">This app page is unavailable. Manage it in Settings → Apps.</p>}
   </div></ExtensionControlsProvider>;
 }

@@ -54,9 +54,13 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
   release in the cached catalog, otherwise `local`. The host decides this, not the caller.
 - An app may be limited to chosen kubeconfig contexts, kept by stable ID because a context's
   display name changes when another kubeconfig declares the same name (#265). The broker
-  resolves each request's context name to that ID the same way a connection does. Navigation and resource slots
+  resolves each request's context name to that ID the same way a connection does, and sends
+  the request on under that ID, so a kubeconfig change mid-request cannot reach a cluster that
+  took the name since. Navigation and resource slots
   hide it on the other clusters, and the broker refuses its reads and actions there with
-  "App is not enabled for this cluster", distinct from a missing-CRD requirement.
+  "App is not enabled for this cluster", distinct from a missing-CRD requirement. When the
+  contexts cannot be listed, an app page says so and offers a retry rather than calling the
+  app not enabled.
 - Every read checks the durable inventory and revision, so a disabled, removed or
   replaced installation cannot be invoked through an old registry instance. Calls
   already admitted may finish.

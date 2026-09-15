@@ -287,12 +287,21 @@ fn resolve_contexts_with(
     resolve_from(&configs)
 }
 
-/// Find a resolved context by display name, falling back to a raw original name
-/// (for MCP/tests that pass the kubeconfig's own context name directly).
+/// Find a resolved context by display name or [stable ID](ResolvedContext::stable_id),
+/// falling back to a raw original name (for MCP/tests that pass the kubeconfig's own
+/// context name directly).
+///
+/// A caller that has checked a context passes its stable ID on, so the lookup reaches the
+/// context that was checked: a display name can pass to another cluster when kubeconfig
+/// files change in between (#265).
 pub fn resolve_context(paths: &[PathBuf], name: &str) -> Option<ResolvedContext> {
-    let all = resolve_contexts(paths);
+    find_context(&resolve_contexts(paths), name)
+}
+
+fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedContext> {
     all.iter()
         .find(|context| context.display_name == name)
+        .or_else(|| all.iter().find(|context| context.stable_id() == name))
         .or_else(|| all.iter().find(|context| context.original_name == name))
         .cloned()
 }
@@ -635,6 +644,24 @@ mod tests {
         let by_display = resolved.iter().find(|c| c.display_name == "kube_stage/default").unwrap();
         assert_eq!(by_display.source, PathBuf::from("/kube/kube_stage.yaml"));
         assert_eq!(by_display.original_name, "default");
+    }
+
+    #[test]
+    fn a_stable_id_finds_its_own_context_whatever_it_is_displayed_as() {
+        let id = resolve_from(&[cfg("/kube/kube_prod.yaml", PROD)])[0].stable_id();
+
+        // A second file renames prod's `default`; its ID still finds it, not stage's.
+        let clashing = resolve_from(&[
+            cfg("/kube/kube_stage.yaml", STAGE),
+            cfg("/kube/kube_prod.yaml", PROD),
+        ]);
+        let found = find_context(&clashing, &id).expect("the stable ID still resolves");
+        assert_eq!(found.display_name, "kube_prod/default");
+        assert_eq!(found.server, "https://prod:6443");
+
+        // With prod's file gone, the ID finds nothing rather than the other `default`.
+        let stage_only = resolve_from(&[cfg("/kube/kube_stage.yaml", STAGE)]);
+        assert!(find_context(&stage_only, &id).is_none());
     }
 
     #[test]

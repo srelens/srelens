@@ -58,6 +58,10 @@ impl Installed {
 /// The stable ID of the context a request names, resolved against the kubeconfig files the
 /// host connects with, the same way a connection resolves it. `None` when there is no such
 /// context.
+///
+/// Scope is checked against this ID, and the request goes out under it too: capabilities
+/// resolve their context again, and by name a kubeconfig change in between could reach a
+/// cluster that took the name since.
 async fn context_id(
     cache: &srelens_kube::client_cache::ClientCache,
     context: &str,
@@ -872,7 +876,7 @@ pub fn register(
                 let _registration = PluginHost::new(c)
                     .register(&mut registry, manifest, &plugin.grants)
                     .map_err(CapabilityError::Handler)?;
-                let mut args = json!({"context":input.context});
+                let mut args = json!({"context": context_id.unwrap_or(input.context)});
                 if plugin
                     .manifest
                     .capabilities
@@ -1348,7 +1352,7 @@ mod tests {
     }
     /// A kubeconfig declaring each of `contexts` against an unreachable server, for tests
     /// that resolve context names without a cluster.
-    fn kubeconfig(dir: &Path, file: &str, contexts: &[&str]) -> PathBuf {
+    pub(super) fn kubeconfig(dir: &Path, file: &str, contexts: &[&str]) -> PathBuf {
         let path = dir.join(file);
         let mut yaml = String::from(
             "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1\nusers:\n- name: u\n  user: {}\ncontexts:\n",
@@ -1397,6 +1401,33 @@ mod tests {
         // With the first kubeconfig gone, the remaining `default` is another cluster.
         cache.set_paths(vec![second]).await;
         assert!(refused("default").await);
+    }
+    /// Scope is checked against one resolution of the context name. The read goes out under
+    /// the stable ID that was checked, so a kubeconfig change in between cannot hand the name
+    /// to another cluster when the capability resolves it again.
+    #[tokio::test]
+    async fn a_read_goes_to_the_cluster_its_scope_was_checked_against() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let core = fake_core();
+        let revision = install(&path, core.clone());
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![first.clone()]),
+        );
+        let output = reg
+            .invoke(
+                "extensions.read",
+                json!({"id":"org.example.argocd","revision":revision,
+                    "capability":"applications","context":"default","namespace":""}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output["context"], format!("{}#default", first.display()));
     }
     #[test]
     fn history_keeps_the_three_versions_before_the_installed_one() {

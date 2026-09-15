@@ -1,19 +1,28 @@
 import { ExtensionResourceDetails } from "../extensions/ExtensionResourceDetails";
+import { ErrorNotice } from "../extensions/ExtensionResults";
 import { ExtensionResourceNavigation } from "../extensions/resourceNavigation";
-import { extensionEnabledFor, extensionRoute, extensionResourceRoute, parseExtensionRoute } from "@srelens/core";
+import { extensionEnabledFor, extensionRoute, extensionResourceRoute, listContexts, parseExtensionRoute } from "@srelens/core";
 import { Button, Screen } from "@srelens/ui-kit";
 import { useExtensions } from "../extensions/Extensions";
 import { ExtensionWorkspace } from "../extensions/ExtensionWorkspace";
 import { openTab } from "../lib/tabsStore";
-import { useContexts } from "../lib/clusters";
+import { getContexts, getKubeconfigFiles, setContexts, useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
 import { getContextLabel } from "../lib/marks";
 import type { RoutedScreenProps } from "../lib/routes";
+
+/** Lists the contexts again and writes the answer back through the store, as Connections does. */
+async function relistContexts() {
+  const outcome = await listContexts(getKubeconfigFiles());
+  setContexts([...(outcome.contexts ?? getContexts())], outcome.error ?? "");
+}
 
 /** Extension destinations carry their cluster in the route, independent of the rail. */
 export function ExtensionPage({ route }: RoutedScreenProps) {
   const target = parseExtensionRoute(route);
   const inventory = useExtensions();
   const contexts = useContexts();
+  const contextsStatus = useContextsStatus();
+  const contextsError = useContextsError();
   if (!target) return null;
   const plugin = inventory.data
     ? inventory.data.plugins.find(
@@ -24,6 +33,9 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
     (p) => p.id === target.page,
   );
   const cluster = contexts.find((c) => c.name === target.context);
+  // An app limited to some clusters can only be checked once its cluster is listed, and a
+  // listing that failed says nothing about whether the app is enabled there.
+  const unchecked = Boolean(plugin?.contexts) && !cluster;
   return (
     <Screen
       title={target.resourceName ?? page?.title ?? "App"}
@@ -31,7 +43,7 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
       fill
     >
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        {inventory.status === "loading" ? (
+        {inventory.status === "loading" || (unchecked && contextsStatus === "loading") ? (
           <p className="extension-message" role="status">
             Loading app…
           </p>
@@ -40,6 +52,12 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             {inventory.error}
             <Button onClick={inventory.reload}>Retry</Button>
           </div>
+        ) : unchecked && contextsStatus === "failed" ? (
+          <ErrorNotice
+            title="Could not list clusters"
+            message={contextsError}
+            retry={() => void relistContexts()}
+          />
         ) : plugin && page && !extensionEnabledFor(plugin, cluster?.stableId) ? (
           <p className="extension-message">
             This app is not enabled for this cluster. Manage it in Settings → Apps.

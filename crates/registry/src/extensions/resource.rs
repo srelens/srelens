@@ -60,7 +60,8 @@ async fn resolve(
             .to_owned()
     };
     let resource = ResourceIn {
-        context: selection.context,
+        // The context scope was checked as (see `context_id`).
+        context: context_id.unwrap_or(selection.context),
         namespace: selection.namespace,
         name: selection.name,
         group: field("group"),
@@ -151,6 +152,29 @@ mod tests {
         )
         .await
         .is_err());
+    }
+    #[tokio::test]
+    async fn a_selection_goes_to_the_cluster_its_scope_was_checked_against() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let core = super::super::tests::fake_core();
+        let revision = super::super::tests::install(&path, core.clone());
+        let config = super::super::tests::kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let binding = read(&path).unwrap().plugins[0].manifest.capabilities[0]
+            .name
+            .clone();
+        let selection = json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"default","namespace":"team","name":"app"});
+        let resolved = resolve(
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![config.clone()]),
+            serde_json::from_value(selection).unwrap(),
+        )
+        .await
+        .unwrap();
+        // Inspection and actions go out under the ID scope was checked as, so the capability
+        // cannot resolve the name again to a cluster that took it since.
+        assert_eq!(resolved.context, format!("{}#default", config.display()));
     }
     #[tokio::test]
     async fn action_dispatch_uses_bound_api_and_mcp_cannot_bypass_confirmation() {

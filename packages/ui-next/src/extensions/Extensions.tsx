@@ -18,12 +18,12 @@ import { ExtensionCatalog } from "./ExtensionCatalog";
 import { ExtensionControls } from "./ExtensionControls";
 export { ExtensionControlsProvider } from "./ExtensionControls";
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
-export { ExtensionResults } from "./ExtensionResults";
+export { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 
 
 import { useExtensions } from "./inventoryStore";
 export { useExtensions } from "./inventoryStore";
-export { useContextId } from "./contextIds";
+export { refreshContextIds, useContextId, useContextLookup } from "./contextIds";
 
 export function ExtensionManager() {
   const { Button, Tabs } = useContext(ExtensionControls);

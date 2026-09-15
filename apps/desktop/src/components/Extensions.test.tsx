@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
@@ -131,4 +131,43 @@ it("offers an app's resource tabs only on the clusters it is enabled for", async
   const tabs = await screen.findAllByRole("tab", { name: "Argo CD" });
   expect(tabs.map((tab) => tab.closest("[data-testid]")?.getAttribute("data-testid"))).toEqual(["cluster/b"]);
   expect(readExtension).not.toHaveBeenCalledWith(manifest.id, 1, "applications", "cluster/a", "argo", true);
+});
+
+it("says the clusters could not be listed, rather than that a limited app is not enabled, and retries", async () => {
+  listTwoClusters();
+  vi.mocked(listContexts).mockResolvedValueOnce({ error: "kubeconfig unreadable" });
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [{ ...plugin, contexts: ["/kube/a.yaml#cluster/a"] }],
+  });
+  const { ClassicAppPage } = await import("./Extensions");
+  render(<ClassicAppPage context="cluster/a" id={manifest.id} page={manifest.contributions.pages[0].id} onPage={vi.fn()} />);
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("Could not list clusters");
+  expect(alert.textContent).toContain("kubeconfig unreadable");
+  expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  expect(listContexts).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
+});
+
+it("keeps an app's pages when a later cluster listing fails", async () => {
+  listTwoClusters();
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [{ ...plugin, contexts: ["/kube/a.yaml#cluster/a"] }],
+  });
+  const { ClassicAppsNav } = await import("./Extensions");
+  render(<ClassicAppsNav context="cluster/a" onOpen={vi.fn()} />);
+  expect(await screen.findByText("Apps")).toBeTruthy();
+  vi.mocked(listContexts).mockResolvedValue({ error: "kubeconfig unreadable" });
+  await act(async () => {
+    fireEvent.focus(window);
+  });
+  expect(listContexts).toHaveBeenCalledTimes(2);
+  // A refresh that could not be made takes nothing away: cluster/a is still the allowed cluster.
+  expect(screen.getByText("Apps")).toBeTruthy();
 });

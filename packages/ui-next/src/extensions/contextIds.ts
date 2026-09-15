@@ -9,30 +9,48 @@ import { listContexts, loadKubeconfigFiles } from "@srelens/core";
  * (#265). Both desktop designs render app surfaces with only a context name, so they look
  * the ID up here rather than each threading it through. One listing per window, refreshed
  * on focus. The host enforces scope on every read and action; this only decides what to show.
+ *
+ * A listing that fails keeps the IDs already known and records why, so a caller can tell
+ * "not enabled for this cluster" from "the clusters could not be listed".
  */
-let ids: ReadonlyMap<string, string> | undefined;
+type ContextIds = {
+  /** Undefined until a listing has answered. */
+  ids?: ReadonlyMap<string, string>;
+  /** Why the latest listing failed, when it did. */
+  error?: string;
+};
+let state: ContextIds = {};
 const listeners = new Set<() => void>();
 let stop: (() => void) | undefined;
 
-async function refresh() {
+const key = ({ ids, error }: ContextIds) => JSON.stringify([ids ? [...ids] : null, error ?? null]);
+
+/** List the contexts again. */
+export async function refreshContextIds() {
+  let outcome: Awaited<ReturnType<typeof listContexts>> | undefined;
   try {
-    const outcome = await listContexts(loadKubeconfigFiles());
-    const next = new Map((outcome?.contexts ?? []).map((context) => [context.name, context.stableId]));
-    if (!ids || JSON.stringify([...ids]) !== JSON.stringify([...next])) {
-      ids = next;
-      for (const listener of listeners) listener();
-    }
-  } catch {
-    // An unlisted context has no ID, so an app limited to chosen clusters stays hidden.
+    outcome = await listContexts(loadKubeconfigFiles());
+  } catch (e) {
+    outcome = { error: String(e) };
+  }
+  if (!listeners.size) return;
+  const listed = outcome?.contexts ?? (outcome?.error ? undefined : []);
+  const next: ContextIds = {
+    ids: listed ? new Map(listed.map((context) => [context.name, context.stableId])) : state.ids,
+    error: outcome?.error || undefined,
+  };
+  if (key(next) !== key(state)) {
+    state = next;
+    for (const listener of listeners) listener();
   }
 }
 
 function subscribe(listener: () => void) {
   listeners.add(listener);
   if (listeners.size === 1) {
-    const onFocus = () => void refresh();
+    const onFocus = () => void refreshContextIds();
     window.addEventListener("focus", onFocus);
-    void refresh();
+    void refreshContextIds();
     stop = () => window.removeEventListener("focus", onFocus);
   }
   return () => {
@@ -40,14 +58,29 @@ function subscribe(listener: () => void) {
     if (!listeners.size) {
       stop?.();
       stop = undefined;
-      ids = undefined;
+      state = {};
     }
   };
 }
 
-const getIds = () => ids;
+const getState = () => state;
 
 /** The stable ID of the context named `name`, or undefined until the contexts are listed. */
 export function useContextId(name: string): string | undefined {
-  return useSyncExternalStore(subscribe, getIds, getIds)?.get(name);
+  return useSyncExternalStore(subscribe, getState, getState).ids?.get(name);
+}
+
+/** The context named `name`: found, still being listed, or not found because the listing failed or lacks it. */
+export type ContextLookup =
+  | { status: "found"; id: string }
+  | { status: "loading" }
+  | { status: "failed"; error: string }
+  | { status: "missing" };
+
+export function useContextLookup(name: string): ContextLookup {
+  const { ids, error } = useSyncExternalStore(subscribe, getState, getState);
+  const id = ids?.get(name);
+  if (id !== undefined) return { status: "found", id };
+  if (error) return { status: "failed", error };
+  return ids ? { status: "missing" } : { status: "loading" };
 }
