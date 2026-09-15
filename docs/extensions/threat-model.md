@@ -193,7 +193,7 @@ An honest app with a flaw, or a host bug that an app's input can reach.
 |---|---|---|---|---|
 | VULN-1 | A flawed app is hijacked to run code, open sockets or read files | E | Not possible in API 0.1: there is no app code to hijack, and the manifest type admits no executable kind. Executable apps are to ship only with an OS sandbox, and unsigned ones only behind an explicit setting. | Sandbox spike planned in [#571] (epic [#521]); untrusted-source policy in [#558] |
 | VULN-2 | A malformed manifest, catalog, signature or inventory crashes or confuses the host | T, D | Parsers are Rust and `serde`, and sizes are checked before parsing: manifests 256 KiB (`Manifest::decode` in `crates/plugin-host/src/manifest.rs`), catalogs 1 MiB (`parse_catalog` and `download` in `crates/registry/src/extensions/catalog.rs`), the inventory 1 MiB (`read` in `crates/registry/src/extensions.rs`), signatures 64 bytes. Every problem found in a manifest is reported with a stable code and path (`crates/plugin-host/src/validation.rs`). | Shipped. Fuzzing planned in [#580] |
-| VULN-3 | An app's settings leak a credential | I | Settings are free-form JSON, and nothing marks a value as secret. The declarative host never interpolates them into capability arguments, but it keeps them in plain text in two places. The inventory stores them, and `extensions.list` returns them. An `extensions.configure` call made over MCP is also copied into the MCP audit log (`audit.jsonl`, created with mode 0600 on Unix). The capability is not sensitive-annotated, so `redact` (`crates/mcp/src/audit.rs`) removes only values whose key contains `token`, `secret`, `password` or `key`, or is exactly `data`, `stringData`, `yaml` or `values`. A setting named `credential` or `certificate` is written verbatim, even when consent is denied, and stays in `audit.jsonl.1` after the log rotates. Settings saved from Settings → Apps are not audited and reach only the inventory. | Keychain-backed secret settings planned in [#543], which keeps secret values out of `settings`. Redacting `settings` in the audit log: **Gap** |
+| VULN-3 | An app's settings leak a credential | I | Settings are free-form JSON, and nothing marks a value as secret. The declarative host never interpolates them into capability arguments, but it keeps them in plain text in two places. The inventory stores them, and `extensions.list` returns them. An `extensions.configure` call made over MCP is also copied into the MCP audit log (`audit.jsonl`, created with mode 0600 on Unix). The capability is not sensitive-annotated, so `redact` (`crates/mcp/src/audit.rs`) removes only values whose key contains `token`, `secret`, `password` or `key`, or is exactly `data`, `stringData`, `yaml` or `values`. A setting named `credential` or `certificate` is written verbatim, even when consent is denied, and stays in `audit.jsonl.1` after the log rotates. Settings saved from Settings → Apps are not audited and reach only the inventory. | Keychain-backed secret settings planned in [#543], which keeps secret values out of `settings`. Redacting `settings` in the audit log planned in [#605] |
 | VULN-4 | An app is slow on a large cluster | D | Cluster requests are bounded by `request_timeout` (`crates/kube/src/connect.rs`) and by the limits in APP-12. | Performance budgets planned in [#581] |
 
 ### Malicious catalog or network position
@@ -290,13 +290,9 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 | [#602] | APP-9, LOCAL-1: quarantine stored unsigned apps under reserved IDs |
 | [#603] | APP-10: reject bidirectional and invisible characters in labels |
 | [#604] | NET-3: match trusted repositories case-insensitively |
+| [#605] | VULN-3: redact extension settings in the MCP audit log |
 | [#515] ([#522]) | WEB-1: per-user apps on the web host |
 | [#39] | Scope: CSP, update chain and the rest of the host |
-
-Gaps with no issue yet:
-
-- app settings sent over MCP are written unredacted to the audit log (VULN-3)
-
 [#39]: https://github.com/srelens/srelens/issues/39
 [#515]: https://github.com/srelens/srelens/issues/515
 [#521]: https://github.com/srelens/srelens/issues/521
@@ -320,4 +316,5 @@ Gaps with no issue yet:
 [#602]: https://github.com/srelens/srelens/issues/602
 [#603]: https://github.com/srelens/srelens/issues/603
 [#604]: https://github.com/srelens/srelens/issues/604
+[#605]: https://github.com/srelens/srelens/issues/605
 [#597]: https://github.com/srelens/srelens/pull/597
