@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
@@ -193,6 +193,30 @@ it("says the manifest check failed, offers a retry and does not offer to install
   expect(validateExtension).toHaveBeenCalledTimes(2);
   expect(validateExtension).toHaveBeenLastCalledWith(source, plugin.manifest.permissions, undefined);
   expect(configureExtensions).not.toHaveBeenCalled();
+});
+it("applies a manifest check only to the review that asked for it", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] });
+  const source = JSON.stringify(plugin.manifest);
+  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source, signature: [1, 2, 3] });
+  vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [{ id: plugin.manifest.id, name: "Catalog GitOps", description: "GitOps resources", repository: "https://github.com/example/gitops", license: "MIT", release: { version: "0.1.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: true } }] }, fetchedAt: 1, stale: false, error: null, hostApiVersions: ["0.1.0"], incompatible: [] } as any);
+  let finishSigned!: (report: { errors: [] }) => void;
+  vi.mocked(validateExtension)
+    .mockImplementationOnce(() => new Promise((resolve) => { finishSigned = resolve; }))
+    .mockResolvedValueOnce({ errors: [{ code: "EXTENSION_RESERVED_ID", path: "id", message: "Reserved for signed releases" }] });
+  render(<ExtensionManager />);
+  // A signed catalog review is still being checked...
+  fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
+  fireEvent.click(await screen.findByText("Review installation"));
+  await waitFor(() => expect(validateExtension).toHaveBeenCalledTimes(1));
+  // ...when the same bytes are reviewed unsigned, and that check finds a problem.
+  fireEvent.click(screen.getByRole("tab", { name: "Apps" }));
+  fireEvent.change(screen.getByLabelText("Local app manifest (JSON)"), { target: { value: source } });
+  fireEvent.click(screen.getByText("Review manifest"));
+  await screen.findByRole("list", { name: "Manifest problems" });
+  // The signed check answering late must not clear the unsigned review's problem.
+  await act(async () => { finishSigned({ errors: [] }); });
+  expect(screen.getByRole("list", { name: "Manifest problems" })).toBeTruthy();
+  expect(screen.queryByText("Install and grant permissions")).toBeNull();
 });
 it("persists settings, disable and remove through the backend", async () => {
   vi.mocked(listExtensions).mockResolvedValue({

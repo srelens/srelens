@@ -39,6 +39,11 @@ export function ExtensionManager() {
     errors?: ExtensionValidationError[];
     /** Why the check itself failed, as opposed to the problems it found. */
     checkError?: string;
+    /**
+     * This review's identity. The same bytes can be reviewed signed and unsigned, so a
+     * check that answers late is applied only to the review that asked for it.
+     */
+    request: object;
   } | null>(null);
   const [settings, setSettings] = useState<{ id: string; text: string } | null>(
     null,
@@ -73,16 +78,17 @@ export function ExtensionManager() {
         ? (parsed.permissions as string[])
         : [];
     const name = typeof parsed.name === "string" ? parsed.name : "This manifest";
+    const request = {};
     setError("");
-    setReview({ source: manifest, signature, name, permissions });
+    setReview({ request, source: manifest, signature, name, permissions });
     try {
       const { errors } = await validateExtension(manifest, permissions, signature);
-      setReview((current) => (current?.source === manifest ? { ...current, errors } : current));
+      setReview((current) => (current?.request === request ? { ...current, errors } : current));
     } catch (e) {
       // The check did not run, which says nothing about the manifest: keep the review
       // open with the reason and a retry, and do not offer to install.
       const checkError = e instanceof Error ? e.message : String(e);
-      setReview((current) => (current?.source === manifest ? { ...current, checkError } : current));
+      setReview((current) => (current?.request === request ? { ...current, checkError } : current));
     }
   }
   if (!isTauri())
