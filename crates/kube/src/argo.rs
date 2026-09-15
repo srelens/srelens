@@ -1218,4 +1218,65 @@ mod tests {
         };
         assert_eq!(extract_secret_str(&secret, "server"), None);
     }
+
+    #[tokio::test]
+    async fn fetch_argo_applications_cached_returns_cache_hit_without_contacting_cluster() {
+        invalidate_argo_applications_cache();
+        let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
+
+        let key = ArgoAppsCacheKey {
+            current_context: "cache-hit-ctx".to_string(),
+            hub_context: None,
+            current_cluster_name: None,
+            current_server_url: None,
+            target_namespace: None,
+        };
+        let cached_result = ArgoApplicationsFetchResult {
+            all_apps: vec![],
+            filtered_apps: vec![],
+            is_remote_hub: false,
+        };
+        if let Ok(mut guard) = ARGO_APPS_CACHE.write() {
+            let map = guard.get_or_insert_with(HashMap::new);
+            map.insert(key, (Instant::now(), cached_result.clone()));
+        }
+
+        // No client is configured on this cache, so a non-error result here
+        // proves the cache-hit fast path returned before any cluster contact.
+        let result = fetch_argo_applications_cached(
+            &cache,
+            "cache-hit-ctx",
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, cached_result);
+
+        invalidate_argo_applications_cache();
+    }
+
+    #[tokio::test]
+    async fn fetch_argo_applications_cached_reports_connect_failure_on_cache_miss() {
+        invalidate_argo_applications_cache();
+        let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
+
+        let err = fetch_argo_applications_cached(
+            &cache,
+            "nonexistent-ctx-for-test",
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+    }
 }

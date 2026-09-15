@@ -7410,6 +7410,27 @@ mod tests {
                 ArgoDetailTab::RevisionHistory => assert!(content.contains("abc123")),
             }
         }
+
+        // A healthy, fully-synced app with no resources/history reported
+        // exercises the "nothing to show" branch of each tab instead.
+        let clean_app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "clean-app", "namespace": "prod"},
+            "spec": {"project": "core", "destination": {"name": "in-cluster"}},
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}}
+        }));
+        for (tab, expected) in [
+            (ArgoDetailTab::ManagedResources, "No managed Kubernetes resources reported by ArgoCD."),
+            (ArgoDetailTab::Drift, "No Drift Detected"),
+            (ArgoDetailTab::RevisionHistory, "No synchronization history available."),
+        ] {
+            let mut detail = ArgoDetailViewState::new("clean-app".to_string(), "prod".to_string(), None);
+            detail.set_application(clean_app.clone());
+            detail.set_tab(tab);
+            app.active_view = ActiveView::ArgoDetail(detail);
+
+            let content = render_to_string(&mut app, 160, 40);
+            assert!(content.contains(expected));
+        }
     }
 
     #[tokio::test]
