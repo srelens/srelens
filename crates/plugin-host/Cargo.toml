@@ -12,7 +12,13 @@ serde_path_to_error = "0.1"
 schemars = "0.8"
 semver = "1"
 
+[features]
+# Exposes `srelens_plugin_host::fuzzing` to the fuzz targets in `fuzz/` and to
+# srelens-registry's property tests. Test support, not an API.
+fuzzing = []
+
 [dev-dependencies]
 srelens-registry = { path = "../registry" }
 srelens-mcp = { path = "../mcp" }
 tokio = { version = "1", features = ["macros", "rt", "io-std"] }
+proptest = { version = "1", default-features = false, features = ["std"] }

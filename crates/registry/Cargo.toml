@@ -32,5 +32,14 @@ sha2 = "0.10"
 ring = "0.17"
 semver = "1"
 
+[features]
+# Exposes `srelens_registry::fuzzing`, the extension readers' fuzz entry points,
+# to the targets in `fuzz/`. Test support, not an API.
+fuzzing = []
+
 [dev-dependencies]
+# The property tests start from valid documents and edit them with plugin-host's
+# test support.
+srelens-plugin-host = { path = "../plugin-host", features = ["fuzzing"] }
+proptest = { version = "1", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
