@@ -959,7 +959,7 @@ pub fn render_assistant_view(
         None => String::new(),
     };
     let title = format!(
-        " SRElens AI Assistant{}{}[{} - {}] [{}{}, {}, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
+        " SRElens AI Assistant{}{}[{} - {}] [{}{}, {}, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ",
         cluster_tag, caveman_tag, prov_name, model, token_hint, copy_hint, tools_hint
     );
 

@@ -806,4 +806,152 @@ mod tests {
         assert!(result.events_error.unwrap().contains("rejected by cluster"));
         assert!(requests.lock().unwrap()[1].0.contains("involvedObject.uid"));
     }
+    #[test]
+    fn supported_actions_and_patch_generation_all_kinds() {
+        // Non-namespaced resource gets no actions
+        let mut non_ns = resource("argoproj.io", "Application", "applications");
+        non_ns.namespaced = false;
+        assert!(supported_actions(&non_ns).is_empty());
+
+        // Unrecognized group gets no actions
+        let unrec = resource("unknown.io", "App", "apps");
+        assert!(supported_actions(&unrec).is_empty());
+
+        // Unsupported version gets no actions
+        let mut bad_ver = resource("argoproj.io", "Application", "applications");
+        bad_ver.version = "v99".into();
+        assert!(supported_actions(&bad_ver).is_empty());
+
+        // ArgoCD Application actions and patches
+        let argo = resource("argoproj.io", "Application", "applications");
+        let actions = supported_actions(&argo);
+        assert_eq!(actions, vec!["refresh", "hard-refresh", "sync"]);
+        assert_eq!(
+            action_patch(&argo, "hard-refresh", "tok").unwrap(),
+            json!({"metadata":{"annotations":{"argocd.argoproj.io/refresh":"hard"}}})
+        );
+        assert!(action_patch(&argo, "unsupported-action", "tok").is_err());
+
+        // Flux HelmRelease actions and patches
+        let helm = resource("helm.toolkit.fluxcd.io", "HelmRelease", "helmreleases");
+        let helm_actions = supported_actions(&helm);
+        assert_eq!(
+            helm_actions,
+            vec!["suspend", "resume", "reconcile", "force", "reset"]
+        );
+        assert_eq!(
+            action_patch(&helm, "suspend", "tok").unwrap(),
+            json!({"spec":{"suspend":true}})
+        );
+        assert_eq!(
+            action_patch(&helm, "resume", "tok").unwrap(),
+            json!({"spec":{"suspend":false}})
+        );
+        let force_patch = action_patch(&helm, "force", "2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(
+            force_patch["metadata"]["annotations"]["reconcile.fluxcd.io/forceAt"],
+            "2026-01-01T00:00:00Z"
+        );
+    }
+
+    #[tokio::test]
+    async fn gitops_capabilities_validation_and_resolution() {
+        let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
+
+        // 1. Resource capability validation
+        let res_cap = resource_capability(cache.clone());
+        assert_eq!(res_cap.id, "k8s.getCustomResource");
+
+        // Invalid JSON input (missing required fields)
+        let err = (res_cap.handler)(json!({})).await.unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::InvalidInput(_)
+        ));
+
+        // Invalid resource input (empty context)
+        let err = (res_cap.handler)(json!({
+            "context": "",
+            "group": "argoproj.io",
+            "version": "v1alpha1",
+            "kind": "Application",
+            "resource": "applications",
+            "name": "billing",
+            "namespaced": true
+        }))
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::InvalidInput(_)
+        ));
+
+        // Missing context in cache -> Handler error
+        let err = (res_cap.handler)(json!({
+            "context": "non-existent-cluster",
+            "group": "argoproj.io",
+            "version": "v1alpha1",
+            "plural": "applications",
+            "kind": "Application",
+            "namespaced": true,
+            "namespace": "argocd",
+            "name": "billing"
+        }))
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::Handler(_)
+        ));
+
+        // 2. Action capability validation
+        let act_cap = action_capability(cache.clone());
+        assert_eq!(act_cap.id, "k8s.gitOpsAction");
+
+        // Invalid action (unsupported action for Application)
+        let err = (act_cap.handler)(json!({
+            "resource": {
+                "context": "cluster-1",
+                "group": "argoproj.io",
+                "version": "v1alpha1",
+                "plural": "applications",
+                "kind": "Application",
+                "namespaced": true,
+                "namespace": "argocd",
+                "name": "billing"
+            },
+            "action": "non-existent-action",
+            "uid": "12345",
+            "resourceVersion": "1"
+        }))
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::InvalidInput(_)
+        ));
+
+        // Valid action but non-existent context -> Handler error
+        let err = (act_cap.handler)(json!({
+            "resource": {
+                "context": "non-existent-cluster",
+                "group": "argoproj.io",
+                "version": "v1alpha1",
+                "plural": "applications",
+                "kind": "Application",
+                "namespaced": true,
+                "namespace": "argocd",
+                "name": "billing"
+            },
+            "action": "refresh",
+            "uid": "12345",
+            "resourceVersion": "1"
+        }))
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::Handler(_)
+        ));
+    }
 }

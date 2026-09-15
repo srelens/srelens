@@ -236,6 +236,52 @@ impl ExecRunner {
         let cmd = Self::build_node_shell_command(context, node_name);
         Self::run_interactive_command(cmd)
     }
+
+    /// Builds the Command for an interactive SSH session to a node (or host address)
+    pub fn build_node_ssh_command(destination: &str) -> Command {
+        let parts: Vec<String> = shlex::split(destination).unwrap_or_else(|| {
+            destination.split_whitespace().map(String::from).collect()
+        });
+        let mut cmd = Command::new("ssh");
+        if parts.is_empty() {
+            cmd.arg(destination);
+        } else {
+            cmd.args(parts);
+        }
+        cmd
+    }
+
+    /// Launches an interactive SSH session to a node
+    pub fn run_node_ssh(destination: &str) -> Result<(), String> {
+        let mut cmd = Self::build_node_ssh_command(destination);
+        cmd.stdin(Stdio::inherit());
+        cmd.stdout(Stdio::inherit());
+        cmd.stderr(Stdio::inherit());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn ssh: {}", e))?;
+
+        let status = child
+            .wait()
+            .map_err(|e| format!("SSH execution error: {}", e))?;
+
+        if !status.success() {
+            if status.code() == Some(130) {
+                return Ok(());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if status.signal() == Some(2) {
+                    return Ok(());
+                }
+            }
+            return Err(format!("SSH exited with status: {}", status));
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +328,17 @@ mod tests {
         let cmd = ExecRunner::build_node_shell_command("prod-ctx", "node-gpu");
         let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
         assert_eq!(args, vec!["--context", "prod-ctx", "debug", "node/node-gpu", "-i", "-t", "--image=busybox"]);
+    }
+
+    #[test]
+    fn test_build_node_ssh_command() {
+        let cmd = ExecRunner::build_node_ssh_command("10.0.1.20");
+        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        assert_eq!(args, vec!["10.0.1.20"]);
+
+        let cmd_flags = ExecRunner::build_node_ssh_command("-p 2222 ubuntu@worker-1");
+        let args_flags: Vec<String> = cmd_flags.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        assert_eq!(args_flags, vec!["-p", "2222", "ubuntu@worker-1"]);
     }
 
     #[test]
