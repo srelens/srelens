@@ -1,5 +1,5 @@
 import { useContext, type ReactNode } from "react";
-import { listCrds, type ExtensionContribution, type InstalledExtension } from "@srelens/core";
+import { listCrds, type ExtensionPage, type InstalledExtension } from "@srelens/core";
 import { useResource } from "../lib/useResource";
 import { ExtensionControls } from "./ExtensionControls";
 import { ErrorNotice } from "./ExtensionResults";
@@ -7,7 +7,7 @@ import { ErrorNotice } from "./ExtensionResults";
 /** Installation is global; only the APIs needed by this view are cluster-specific. */
 export function ExtensionRequirements({ plugin, page, context, refresh, children }: {
   plugin: InstalledExtension;
-  page: ExtensionContribution;
+  page: ExtensionPage;
   context: string;
   refresh: number;
   children: ReactNode;

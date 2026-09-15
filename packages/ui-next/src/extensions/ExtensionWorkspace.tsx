@@ -7,7 +7,7 @@ import {
   loadKubeconfigFiles,
   onExtensionResourceChanged,
   readExtension,
-  type ExtensionContribution,
+  type ExtensionPage,
   type InstalledExtension,
   type EventSummary,
 } from "@srelens/core";
@@ -25,7 +25,7 @@ const statuses = [
 type Status = (typeof statuses)[number];
 export function resourceStatus(
   values: string[],
-  columns: NonNullable<ExtensionContribution["statusColumns"]>,
+  columns: NonNullable<ExtensionPage["statusColumns"]>,
 ): Status {
   const truth = (index?: number) =>
     index !== undefined && values[index]?.toLowerCase() === "true";
@@ -54,7 +54,7 @@ function Summary({
   onPage,
 }: {
   plugin: InstalledExtension;
-  page: ExtensionContribution;
+  page: ExtensionPage;
   context: string;
   namespace: string;
   refresh: number;
@@ -154,7 +154,7 @@ function Events({
 }: {
   plugin: InstalledExtension;
   config: NonNullable<
-    NonNullable<ExtensionContribution["dashboard"]>["events"]
+    NonNullable<ExtensionPage["dashboard"]>["events"]
   >;
   context: string;
   namespace: string;
@@ -252,7 +252,7 @@ export function ExtensionWorkspace({
   onNamespace,
 }: {
   plugin: InstalledExtension;
-  page: ExtensionContribution;
+  page: ExtensionPage;
   context: string;
   namespace?: string;
   onPage?(id: string, namespace: string): void;

@@ -499,6 +499,33 @@ mod tests {
     use super::*;
     use serde_json::json;
     use srelens_capability::Registry;
+
+    /// The inventory's JSON Schema, which includes the manifest's, is what @srelens/core
+    /// holds its extension types to (packages/core/src/lib/extensionTypes.test.ts). It
+    /// MUST equal these types; regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`.
+    #[test]
+    fn extension_inventory_schema_json_is_in_sync() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/core/src/lib/extension-inventory.schema.json"
+        );
+        let want = serde_json::to_value(schemars::schema_for!(Inventory)).unwrap();
+        if std::env::var("UPDATE_CATALOG").is_ok() {
+            std::fs::write(path, serde_json::to_string_pretty(&want).unwrap() + "\n").unwrap();
+            return;
+        }
+        let got: Value = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or(Value::Null);
+        // Compare parsed values, never text: map key order depends on which serde_json
+        // features the rest of the workspace enables (see AGENTS.md).
+        assert!(
+            got == want,
+            "extension-inventory.schema.json is stale — run UPDATE_CATALOG=1 cargo test -p srelens-registry"
+        );
+    }
+
     fn setup(path: &std::path::Path) -> Registry {
         let core = crate::build_registry_with_paths(
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
