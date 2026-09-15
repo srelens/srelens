@@ -71,6 +71,8 @@ export interface InstalledExtension {
   installedAt: number;
   /** The versions this one replaced, newest first; at most three. */
   history: ExtensionPreviousVersion[];
+  /** The kubeconfig context names the app is enabled for; absent means every cluster. */
+  contexts?: string[];
 }
 export interface ExtensionInventory {
   schemaVersion: number;
@@ -83,7 +85,12 @@ export type ExtensionChange =
   | { action: "remove"; id: string }
   /** Restores a kept version; `grants` are what the user reviewed and grants again. */
   | { action: "rollback"; id: string; revision: number; grants: string[] }
+  /** Limits the app to these context names, or with `null` allows every cluster. */
+  | { action: "clusters"; id: string; contexts: string[] | null }
   | { action: "settings"; id: string; settings: Record<string, unknown> };
+/** Whether an installed app may be used on `context`, a kubeconfig context name. */
+export const extensionEnabledFor = (plugin: Pick<InstalledExtension, "contexts">, context: string) =>
+  !plugin.contexts || plugin.contexts.includes(context);
 export const EXTENSIONS_CHANGED = "srelens:extensions-changed";
 export const listExtensions = () =>
   invokeCapability<ExtensionInventory>("extensions.list", {});

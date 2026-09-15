@@ -59,6 +59,27 @@ it("matches explicit API identity, including custom and unmapped built-in kinds"
   expect(contributionKind("Deployment", "example.io")).toBe("example.io/Deployment");
 });
 
+it("limits an app to chosen clusters, and allows every cluster when none are chosen", async () => {
+  const { extensionEnabledFor } = await import("./extensions");
+  type App = Parameters<typeof extensionEnabledFor>[0];
+  const limited = { contexts: ["cluster/a"] } as App;
+  expect(extensionEnabledFor(limited, "cluster/a")).toBe(true);
+  expect(extensionEnabledFor(limited, "cluster/b")).toBe(false);
+  expect(extensionEnabledFor({} as App, "cluster/b")).toBe(true);
+  await configureExtensions({ action: "clusters", id: "org.test.app", contexts: ["cluster/a"] });
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.configure", {
+    action: "clusters",
+    id: "org.test.app",
+    contexts: ["cluster/a"],
+  });
+  await configureExtensions({ action: "clusters", id: "org.test.app", contexts: null });
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.configure", {
+    action: "clusters",
+    id: "org.test.app",
+    contexts: null,
+  });
+});
+
 it("rolls back to a kept revision with the grants reviewed for it", async () => {
   await configureExtensions({ action: "rollback", id: "org.test.app", revision: 3, grants: ["k8s.listCustomResource"] });
   expect(invokeCapability).toHaveBeenLastCalledWith("extensions.configure", {

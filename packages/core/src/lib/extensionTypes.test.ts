@@ -30,6 +30,7 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     source: "required",
     installedAt: "required",
     history: "required",
+    contexts: "optional",
   } satisfies Presence<InstalledExtension>,
   PreviousVersion: {
     signatureProof: "optional",

@@ -84,3 +84,38 @@ it("opens native app pages from classic's connected-cluster navigation without a
   expect(open).toHaveBeenCalledWith("cluster/a",manifest.id,manifest.contributions.pages[0].id);
   expect(screen.queryByText("Choose a cluster")).toBeNull();
 });
+
+it("offers an app's pages only on the clusters it is enabled for", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [{ ...plugin, contexts: ["cluster/b"] }],
+  });
+  const { ClassicAppsNav } = await import("./Extensions");
+  render(
+    <>
+      <div data-testid="cluster/a"><ClassicAppsNav context="cluster/a" onOpen={vi.fn()} /></div>
+      <div data-testid="cluster/b"><ClassicAppsNav context="cluster/b" onOpen={vi.fn()} /></div>
+    </>,
+  );
+  // Both navigations read the same inventory, so once cluster/b lists the app, cluster/a has loaded too.
+  const apps = await screen.findAllByText("Apps");
+  expect(apps.map((node) => node.closest("[data-testid]")?.getAttribute("data-testid"))).toEqual(["cluster/b"]);
+});
+
+it("offers an app's resource tabs only on the clusters it is enabled for", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [{ ...plugin, contexts: ["cluster/b"] }],
+  });
+  render(
+    <>
+      <div data-testid="cluster/a"><ExtensionResourceSlot context="cluster/a" kind="Namespace" namespace={null} name="argo" /></div>
+      <div data-testid="cluster/b"><ExtensionResourceSlot context="cluster/b" kind="Namespace" namespace={null} name="argo" /></div>
+    </>,
+  );
+  const tabs = await screen.findAllByRole("tab", { name: "Argo CD" });
+  expect(tabs.map((tab) => tab.closest("[data-testid]")?.getAttribute("data-testid"))).toEqual(["cluster/b"]);
+  expect(readExtension).not.toHaveBeenCalledWith(manifest.id, 1, "applications", "cluster/a", "argo", true);
+});

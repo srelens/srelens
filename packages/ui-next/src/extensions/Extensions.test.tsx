@@ -11,6 +11,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   readExtension: vi.fn(),
   inspectExtensionResource: vi.fn(),
   saveTextFile: vi.fn(),
+  listContexts: vi.fn(),
 }));
 import {
   listExtensionCatalog,
@@ -20,6 +21,7 @@ import {
   validateExtension,
   readExtension,
   saveTextFile,
+  listContexts,
 } from "@srelens/core";
 import { ExtensionManager, ExtensionResults } from "./Extensions";
 const plugin = {
@@ -50,6 +52,7 @@ beforeEach(() => {
   } as any);
   vi.mocked(configureExtensions).mockResolvedValue({} as any);
   vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  vi.mocked(listContexts).mockResolvedValue({ contexts: [] });
 });
 it("shows backend errors and retries instead of claiming no apps", async () => {
   vi.mocked(listExtensions).mockRejectedValueOnce(new Error("disk unreadable"));
@@ -287,6 +290,34 @@ it("closes the reset confirmation with Escape without resetting", async () => {
   fireEvent.keyDown(dialog, { key: "Escape" });
   expect(within(details).queryByRole("alertdialog", { name: "Reset settings" })).toBeNull();
   expect(configureExtensions).not.toHaveBeenCalled();
+});
+it("limits an app to chosen clusters from its details", async () => {
+  vi.mocked(listContexts).mockResolvedValue({
+    contexts: [{ name: "cluster/a", stableId: "a" }, { name: "cluster/b", stableId: "b" }],
+  } as any);
+  const details = await openDetails(updated());
+  const clusters = within(details).getByRole("group", { name: "Clusters" });
+  expect((within(clusters).getByLabelText("All clusters") as HTMLInputElement).checked).toBe(true);
+  fireEvent.click(within(clusters).getByLabelText("Only these clusters"));
+  fireEvent.click(await within(clusters).findByLabelText("cluster/b"));
+  fireEvent.click(within(clusters).getByRole("button", { name: "Save clusters" }));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "clusters", id: "org.test.gitops", contexts: ["cluster/b"] }),
+  );
+});
+it("allows every cluster again, and keeps listing a chosen cluster the kubeconfig no longer has", async () => {
+  vi.mocked(listContexts).mockResolvedValue({ contexts: [{ name: "cluster/a", stableId: "a" }] } as any);
+  const app = { ...updated(), contexts: ["cluster/a", "retired"] };
+  const details = await openDetails(app);
+  const clusters = within(details).getByRole("group", { name: "Clusters" });
+  expect((within(clusters).getByLabelText("Only these clusters") as HTMLInputElement).checked).toBe(true);
+  expect((await within(clusters).findByLabelText("cluster/a") as HTMLInputElement).checked).toBe(true);
+  expect((within(clusters).getByLabelText("retired") as HTMLInputElement).checked).toBe(true);
+  fireEvent.click(within(clusters).getByLabelText("All clusters"));
+  fireEvent.click(within(clusters).getByRole("button", { name: "Save clusters" }));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "clusters", id: "org.test.gitops", contexts: null }),
+  );
 });
 it("does not call a quarantined app's signature verified", async () => {
   const app = { ...updated(), enabled: false, quarantined: "App publisher signature is invalid" };

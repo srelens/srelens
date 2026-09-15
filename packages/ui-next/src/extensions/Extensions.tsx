@@ -5,6 +5,7 @@ import { useContext, useState } from "react";
 import {
   configureExtensions,
   contributionKind,
+  extensionEnabledFor,
   isTauri,
   validateExtension,
   type ExtensionChange,
@@ -321,9 +322,10 @@ export function ExtensionManager() {
     </div>
   );
 }
-export function useExtensionContributions(kind: string, group?: string) {
+/** The detail tabs and row actions apps offer for a kind, on a cluster they are enabled for. */
+export function useExtensionContributions(context: string, kind: string, group?: string) {
   const inventory = useExtensions();
-  const plugins = inventory.data?.plugins.filter((p) => p.enabled) ?? [];
+  const plugins = inventory.data?.plugins.filter((p) => p.enabled && extensionEnabledFor(p, context)) ?? [];
   const qualified = contributionKind(kind, group);
   return {
     inventory,
@@ -362,7 +364,7 @@ export function ExtensionResourceSlot({
   name: string;
 }) {
   const { Button, Tabs } = useContext(ExtensionControls);
-  const { inventory, tabs, links } = useExtensionContributions(kind, group);
+  const { inventory, tabs, links } = useExtensionContributions(context, kind, group);
   const [selected, setSelected] = useState("");
   const active = [...tabs, ...links].some((c) => c.id === selected)
     ? selected

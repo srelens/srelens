@@ -38,6 +38,19 @@ pub struct Installed {
     installed_at: u64,
     /// The versions this one replaced, newest first, at most [`KEPT_VERSIONS`].
     history: Vec<PreviousVersion>,
+    /// The kubeconfig context names the app is enabled for; `None` is every cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    contexts: Option<Vec<String>>,
+}
+/// What the broker answers when an app is used on a cluster it is not enabled for.
+const NOT_ENABLED_FOR_CLUSTER: &str = "App is not enabled for this cluster";
+impl Installed {
+    /// Whether the app may be used on `context`, a kubeconfig context name.
+    fn allows(&self, context: &str) -> bool {
+        self.contexts
+            .as_ref()
+            .is_none_or(|contexts| contexts.iter().any(|allowed| allowed == context))
+    }
 }
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -116,6 +129,12 @@ enum Configure {
         id: String,
         revision: u64,
         grants: Vec<String>,
+    },
+    /// Limits the app to these kubeconfig context names, or with `null` allows every cluster.
+    #[serde(rename = "clusters")]
+    Clusters {
+        id: String,
+        contexts: Option<Vec<String>>,
     },
 }
 #[derive(Deserialize, JsonSchema)]
@@ -548,8 +567,9 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 .iter()
                 .position(|p| p.manifest.id == manifest.id)
                 .map(|i| state.plugins.remove(i));
-            // An update keeps the app's settings, and the version it replaces for rollback.
-            let (settings, history) = match previous {
+            // An update keeps the app's settings and clusters, and the version it replaces
+            // for rollback.
+            let (settings, history, contexts) = match previous {
                 Some(Installed {
                     signature_proof: replaced_proof,
                     manifest: replaced,
@@ -559,6 +579,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                     installed_at: replaced_at,
                     settings,
                     mut history,
+                    contexts,
                     ..
                 }) => {
                     history.insert(
@@ -573,9 +594,9 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                         },
                     );
                     history.truncate(KEPT_VERSIONS);
-                    (settings, history)
+                    (settings, history, contexts)
                 }
-                None => (Default::default(), Vec::new()),
+                None => (Default::default(), Vec::new(), None),
             };
             state.plugins.push(Installed {
                 signature_proof,
@@ -588,6 +609,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 source: origin,
                 installed_at: now(),
                 history,
+                contexts,
             });
             state
                 .plugins
@@ -638,6 +660,28 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             app.quarantined = None;
             // A new revision, so views pinned to the rolled-away version refresh.
             app.revision = next;
+        }
+        Configure::Clusters { id, contexts } => {
+            if let Some(contexts) = &contexts {
+                // An empty list would be a second way to disable the app.
+                if contexts.is_empty() || contexts.len() > 256 {
+                    return Err("Choose 1–256 clusters, or allow the app on every cluster".into());
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for context in contexts {
+                    if context.trim().is_empty() || !seen.insert(context.as_str()) {
+                        return Err(format!(
+                            "Cluster names must be non-empty and listed once: {context:?}"
+                        ));
+                    }
+                }
+            }
+            state
+                .plugins
+                .iter_mut()
+                .find(|p| p.manifest.id == id)
+                .ok_or("Extension is not installed")?
+                .contexts = contexts;
         }
         Configure::Enable { id, enabled } => {
             let p = state
@@ -782,6 +826,9 @@ pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
                             "Extension was disabled, removed or updated; refresh the view".into(),
                         )
                     })?;
+                if !plugin.allows(&input.context) {
+                    return Err(CapabilityError::Handler(NOT_ENABLED_FOR_CLUSTER.into()));
+                }
                 validate_app(&plugin.manifest, &plugin.grants, c.clone())
                     .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
                 let mut manifest = plugin.manifest.clone();
@@ -1159,6 +1206,69 @@ mod tests {
             "the newest are kept"
         );
         assert!(fs::metadata(&path).unwrap().len() <= 1024 * 1024);
+    }
+    #[tokio::test]
+    async fn an_app_limited_to_some_clusters_is_refused_on_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let reg = setup(&path);
+        let revision = install(&path, fake_core());
+        let limit = |contexts: Value| {
+            configure(
+                &path,
+                json!({"action":"clusters","id":"org.example.argocd","contexts":contexts}),
+            )
+        };
+        // An empty list would be a second way to disable the app; a blank or repeated name
+        // is a mistake.
+        assert!(limit(json!([])).is_err());
+        assert!(limit(json!([" "])).is_err());
+        assert!(limit(json!(["cluster/a", "cluster/a"])).is_err());
+        let only_a = Some(vec!["cluster/a".to_owned()]);
+        assert_eq!(
+            limit(json!(["cluster/a"])).unwrap().plugins[0].contexts,
+            only_a
+        );
+
+        let selected =
+            json!({"id":"org.example.argocd","revision":revision,"capability":"applications"});
+        let on = |context: &str, extra: Value| {
+            let mut payload = selected.clone();
+            payload["context"] = json!(context);
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            payload
+        };
+        let resource = on("cluster/b", json!({"namespace":"team","name":"app"}));
+        for (capability, payload) in [
+            ("extensions.read", on("cluster/b", json!({"namespace":""}))),
+            ("extensions.resource", resource.clone()),
+            (
+                "extensions.action",
+                json!({"resource":resource,"action":"suspend","uid":"u","resourceVersion":"1"}),
+            ),
+        ] {
+            let error = reg
+                .invoke(capability, payload)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("App is not enabled for this cluster"),
+                "{capability}: {error}"
+            );
+        }
+
+        // An update keeps the list, like settings; clearing it allows every cluster again.
+        let updated = configure(
+            &path,
+            json!({"action":"install","manifest":manifest_at("0.2.0"),"grants":["k8s.listCustomResource"]}),
+        )
+        .unwrap();
+        assert_eq!(updated.plugins[0].contexts, only_a);
+        assert_eq!(limit(Value::Null).unwrap().plugins[0].contexts, None);
     }
     #[test]
     fn history_keeps_the_three_versions_before_the_installed_one() {

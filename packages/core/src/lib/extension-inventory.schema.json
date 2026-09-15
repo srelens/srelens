@@ -166,6 +166,16 @@
     "Installed": {
       "additionalProperties": false,
       "properties": {
+        "contexts": {
+          "description": "The kubeconfig context names the app is enabled for; `None` is every cluster.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "enabled": {
           "type": "boolean"
         },
