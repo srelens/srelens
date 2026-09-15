@@ -40,9 +40,7 @@ async fn resolve(
                 "App was disabled, removed or updated; refresh the view".into(),
             )
         })?;
-    if !plugin.allows(context_id.as_deref()) {
-        return Err(CapabilityError::Handler(NOT_ENABLED_FOR_CLUSTER.into()));
-    }
+    plugin.check_scope(&context_id)?;
     validate_app(&plugin.manifest, &plugin.grants, core)
         .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
     let binding = plugin

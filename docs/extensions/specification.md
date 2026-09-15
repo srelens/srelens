@@ -258,7 +258,8 @@ that existing `^0.1` manifests receive without an update.
   - An installed app may be limited to chosen kubeconfig contexts in `contexts`. Each is kept by stable ID (`{file}#{name}`: the declaring kubeconfig and the context's name in it), because a display name changes when another kubeconfig declares the same name (#265). Without the list the app is offered on every cluster, as before.
   - `extensions.configure` gains `clusters`. On a cluster the app is not enabled for, `extensions.read`, `extensions.resource` and `extensions.action` refuse with "App is not enabled for this cluster", and both desktop designs hide its pages, detail tabs and row actions.
   - Those three send the request on under the stable ID they checked, and a context lookup accepts a stable ID as well as a name, so a kubeconfig change mid-request cannot move it to another cluster.
-  - A limited app's page waits while the contexts are listed, and shows the failure with a retry if the listing fails. A failed refresh keeps the contexts already known.
+  - A limited app's page waits while the contexts are listed, and shows the failure with a retry if the listing fails. Resource views do the same for a limited app's tabs and actions. A failed refresh keeps the contexts already known.
+  - On a context the host cannot resolve, a limited app is refused with the reason (no kubeconfig declares it, or which kubeconfig could not be read), not with "App is not enabled for this cluster".
   - The terminal UI is recorded as out of scope for extension API 1.0 (see [Scope](#scope)).
 - **#537:** pre-release rename.
   - The `rowActions` contribution is now `detailLinks`, with the same shape. Each entry opens a read-only results panel from the resource detail view's **App links** menu; it was never a row menu or a cluster write.

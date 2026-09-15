@@ -1,6 +1,6 @@
 import { ExtensionDetails } from "./ExtensionDetails";
 import { ExtensionRequirements } from "./ExtensionRequirements";
-import { useContextId } from "./contextIds";
+import { refreshContextIds, useContextLookup } from "./contextIds";
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useState } from "react";
 import {
@@ -328,11 +328,20 @@ export function ExtensionManager() {
 export function useExtensionContributions(context: string, kind: string, group?: string) {
   const inventory = useExtensions();
   // App scope keys on the context's stable ID, not its name (#265).
-  const contextId = useContextId(context);
-  const plugins = inventory.data?.plugins.filter((p) => p.enabled && extensionEnabledFor(p, contextId)) ?? [];
+  const lookup = useContextLookup(context);
+  const contextId = lookup.status === "found" ? lookup.id : undefined;
   const qualified = contributionKind(kind, group);
+  const enabled = inventory.data?.plugins.filter((p) => p.enabled) ?? [];
+  const offersHere = (plugin: InstalledExtension) =>
+    [...plugin.manifest.contributions.detailTabs, ...plugin.manifest.contributions.detailLinks].some((c) =>
+      c.forKinds?.includes(qualified),
+    );
+  const plugins = enabled.filter((p) => extensionEnabledFor(p, contextId));
   return {
     inventory,
+    /** Why the clusters could not be listed, when an app limited to some of them offers something here. */
+    lookupError:
+      lookup.status === "failed" && enabled.some((p) => p.contexts && offersHere(p)) ? lookup.error : undefined,
     tabs: plugins.flatMap((plugin) =>
       plugin.manifest.contributions.detailTabs
         .filter((c) => c.forKinds?.includes(qualified))
@@ -368,7 +377,7 @@ export function ExtensionResourceSlot({
   name: string;
 }) {
   const { Button, Tabs } = useContext(ExtensionControls);
-  const { inventory, tabs, links } = useExtensionContributions(context, kind, group);
+  const { inventory, tabs, links, lookupError } = useExtensionContributions(context, kind, group);
   const [selected, setSelected] = useState("");
   const active = [...tabs, ...links].some((c) => c.id === selected)
     ? selected
@@ -380,10 +389,15 @@ export function ExtensionResourceSlot({
       : tabs;
   if (inventory.status === "error")
     return <ErrorNotice message={inventory.error} retry={inventory.reload} />;
-  if (!tabs.length && !links.length) return null;
+  // A failed cluster lookup hides limited apps' views; say why instead of dropping them silently.
+  const lookupNotice = lookupError !== undefined && (
+    <ErrorNotice title="Could not list clusters" message={lookupError} retry={() => void refreshContextIds()} />
+  );
+  if (!tabs.length && !links.length) return lookupNotice || null;
   const ns = contributionKind(kind, group) === "/Namespace" ? name : (namespace ?? "");
   return (
     <section className="extension-installed extension-resource-slot">
+      {lookupNotice}
       <div className="extension-toolbar">
         <strong>Apps</strong>
         {links.length > 0 && (

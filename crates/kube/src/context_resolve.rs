@@ -272,6 +272,19 @@ pub fn resolve_contexts(paths: &[PathBuf]) -> Vec<ResolvedContext> {
     resolve_contexts_with(paths, |path| Kubeconfig::read_from(path).ok())
 }
 
+/// Each kubeconfig in `paths` that cannot be read, with the reason, as `path: reason`.
+/// [`resolve_contexts`] skips these, so a context declared only in one of them looks absent.
+pub fn unreadable_kubeconfigs(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .filter_map(|path| {
+            Kubeconfig::read_from(path)
+                .err()
+                .map(|error| format!("{}: {error}", path.display()))
+        })
+        .collect()
+}
+
 /// Same as [`resolve_contexts`], but takes the file reader as a parameter so
 /// a test can count how many times each path is actually read. Kept private:
 /// this seam exists for that one pinning test, not as a public extension

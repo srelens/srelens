@@ -539,6 +539,25 @@ it("adds namespace detail views and links, and removes them when disabled", asyn
     expect(screen.queryByRole("tab", { name: "GitOps apps" })).toBeNull(),
   );
 });
+it("says a limited app's resource views could not be checked when the clusters fail to list, and retries", async () => {
+  const { ExtensionResourceSlot } = await import("./Extensions");
+  const installed = structuredClone(plugin);
+  installed.manifest.contributions.detailTabs = [
+    { id: "detail", title: "GitOps apps", capability: "list", forKinds: ["/Namespace"] },
+  ];
+  installed.contexts = ["/kube/s.yaml#staging"];
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [installed] });
+  vi.mocked(readExtension).mockResolvedValue({ items: [] });
+  vi.mocked(listContexts).mockResolvedValueOnce({ error: "kubeconfig unreadable" });
+  render(<ExtensionResourceSlot context="staging" kind="Namespace" namespace={null} name="argo" />);
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("Could not list clusters");
+  expect(alert.textContent).toContain("kubeconfig unreadable");
+  vi.mocked(listContexts).mockResolvedValue({ contexts: [{ name: "staging", stableId: "/kube/s.yaml#staging" }] } as any);
+  fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+  expect(await screen.findByRole("tab", { name: "GitOps apps" })).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
 it("does not attach a custom kind contribution to a built-in with the same name", async () => {
   const { ExtensionResourceSlot } = await import("./Extensions");
   const installed = structuredClone(plugin);

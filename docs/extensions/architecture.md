@@ -60,7 +60,9 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
   hide it on the other clusters, and the broker refuses its reads and actions there with
   "App is not enabled for this cluster", distinct from a missing-CRD requirement. When the
   contexts cannot be listed, an app page says so and offers a retry rather than calling the
-  app not enabled.
+  app not enabled, and so does a resource view where a limited app offers tabs or actions.
+  The broker refuses a limited app on a context it cannot resolve with the reason (no
+  kubeconfig declares it, or which kubeconfig could not be read), not as not enabled.
 - Every read checks the durable inventory and revision, so a disabled, removed or
   replaced installation cannot be invoked through an old registry instance. Calls
   already admitted may finish.

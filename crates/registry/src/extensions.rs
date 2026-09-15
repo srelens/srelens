@@ -47,17 +47,24 @@ pub struct Installed {
 /// What the broker answers when an app is used on a cluster it is not enabled for.
 const NOT_ENABLED_FOR_CLUSTER: &str = "App is not enabled for this cluster";
 impl Installed {
-    /// Whether the app may be used on the context with this stable ID. A limited app is
-    /// refused on a context the host cannot resolve.
-    fn allows(&self, context_id: Option<&str>) -> bool {
-        self.contexts.as_ref().is_none_or(|contexts| {
-            context_id.is_some_and(|id| contexts.iter().any(|allowed| allowed == id))
-        })
+    /// Refuses a limited app on a context outside its list. A context the host could not
+    /// resolve is refused too, but with why: whether the app is enabled there is unknown.
+    fn check_scope(&self, context_id: &Result<String, String>) -> Result<(), CapabilityError> {
+        let Some(contexts) = &self.contexts else {
+            return Ok(());
+        };
+        match context_id {
+            Ok(id) if contexts.contains(id) => Ok(()),
+            Ok(_) => Err(CapabilityError::Handler(NOT_ENABLED_FOR_CLUSTER.into())),
+            Err(reason) => Err(CapabilityError::Handler(format!(
+                "Could not check whether this app is enabled for this cluster: {reason}"
+            ))),
+        }
     }
 }
 /// The stable ID of the context a request names, resolved against the kubeconfig files the
-/// host connects with, the same way a connection resolves it. `None` when there is no such
-/// context.
+/// host connects with, the same way a connection resolves it. When there is no such context,
+/// why: no kubeconfig declares it, or the files that could not be read.
 ///
 /// Scope is checked against this ID, and the request goes out under it too: capabilities
 /// resolve their context again, and by name a kubeconfig change in between could reach a
@@ -65,10 +72,20 @@ impl Installed {
 async fn context_id(
     cache: &srelens_kube::client_cache::ClientCache,
     context: &str,
-) -> Option<String> {
+) -> Result<String, String> {
     let paths = cache.paths().await;
-    srelens_kube::context_resolve::resolve_context(&paths, context)
-        .map(|resolved| resolved.stable_id())
+    if let Some(resolved) = srelens_kube::context_resolve::resolve_context(&paths, context) {
+        return Ok(resolved.stable_id());
+    }
+    let unreadable = srelens_kube::context_resolve::unreadable_kubeconfigs(&paths);
+    Err(if unreadable.is_empty() {
+        format!("no kubeconfig declares the context \"{context}\"")
+    } else {
+        format!(
+            "the context \"{context}\" was not found, and these kubeconfig files could not be read: {}",
+            unreadable.join("; ")
+        )
+    })
 }
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -861,9 +878,7 @@ pub fn register(
                             "Extension was disabled, removed or updated; refresh the view".into(),
                         )
                     })?;
-                if !plugin.allows(context_id.as_deref()) {
-                    return Err(CapabilityError::Handler(NOT_ENABLED_FOR_CLUSTER.into()));
-                }
+                plugin.check_scope(&context_id)?;
                 validate_app(&plugin.manifest, &plugin.grants, c.clone())
                     .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
                 let mut manifest = plugin.manifest.clone();
@@ -1257,7 +1272,9 @@ mod tests {
     async fn an_app_limited_to_some_clusters_is_refused_on_the_others() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("extensions.json");
-        let reg = setup(&path);
+        let config = kubeconfig(dir.path(), "clusters.yaml", &["cluster/a", "cluster/b"]);
+        let (reg, _cache) = setup_with(&path, vec![config.clone()]);
+        let a = format!("{}#cluster/a", config.display());
         let revision = install(&path, fake_core());
         let limit = |contexts: Value| {
             configure(
@@ -1269,12 +1286,9 @@ mod tests {
         // is a mistake.
         assert!(limit(json!([])).is_err());
         assert!(limit(json!([" "])).is_err());
-        assert!(limit(json!(["cluster/a", "cluster/a"])).is_err());
-        let only_a = Some(vec!["cluster/a".to_owned()]);
-        assert_eq!(
-            limit(json!(["cluster/a"])).unwrap().plugins[0].contexts,
-            only_a
-        );
+        assert!(limit(json!([&a, &a])).is_err());
+        let only_a = Some(vec![a.clone()]);
+        assert_eq!(limit(json!([&a])).unwrap().plugins[0].contexts, only_a);
 
         let selected =
             json!({"id":"org.example.argocd","revision":revision,"capability":"applications"});
@@ -1444,6 +1458,51 @@ mod tests {
         };
         assert_eq!(reached(&[impostor.clone(), first.clone()]), Some(first));
         assert_eq!(reached(&[impostor]), None);
+    }
+    /// A limited app is refused on a context the host cannot resolve, but with why: whether
+    /// the app is enabled there is unknown, which is not the same as not enabled.
+    #[tokio::test]
+    async fn an_unresolvable_context_is_refused_with_the_reason_not_as_a_denial() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let (reg, _cache) = setup_with(&path, vec![first.clone()]);
+        let revision = install(&path, fake_core());
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd",
+                "contexts":[format!("{}#default", first.display())]}),
+        )
+        .unwrap();
+        let refusal = |context: &str| {
+            let reg = reg.clone();
+            let payload = json!({"id":"org.example.argocd","revision":revision,
+                "capability":"applications","context":context,"namespace":""});
+            async move {
+                reg.invoke("extensions.read", payload)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+            }
+        };
+        let missing = refusal("elsewhere").await;
+        assert!(!missing.contains(NOT_ENABLED_FOR_CLUSTER), "{missing}");
+        assert!(
+            missing.contains("no kubeconfig declares the context \"elsewhere\""),
+            "{missing}"
+        );
+
+        // The allowed context's kubeconfig can no longer be read: still refused, and says so.
+        fs::write(&first, "contexts: [").unwrap();
+        let unreadable = refusal("default").await;
+        assert!(
+            !unreadable.contains(NOT_ENABLED_FOR_CLUSTER),
+            "{unreadable}"
+        );
+        assert!(
+            unreadable.contains("could not be read") && unreadable.contains("first.yaml"),
+            "{unreadable}"
+        );
     }
     #[test]
     fn history_keeps_the_three_versions_before_the_installed_one() {
