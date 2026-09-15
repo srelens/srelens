@@ -131,7 +131,7 @@ Four invariants are enforced by tests rather than by review, so "everything is e
 | `capability_catalog_json_is_in_sync` (`crates/registry`) | The committed `packages/core/src/lib/capability-catalog.json` equals the live registry, so the frontend palette audit can cross-check without linking Rust. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`. |
 | `committed_manifest_schema_matches_the_contract` (`crates/plugin-host/tests/schema.rs`) | The committed `schemas/extension-manifest.v0.1.json` equals `Manifest::schema()`, and Vitest validates every example manifest against it. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema`. |
 | `extension_inventory_schema_json_is_in_sync` (`crates/registry`) | The committed `packages/core/src/lib/extension-inventory.schema.json` equals the Rust inventory and manifest types, and `extensionTypes.test.ts` holds the `@srelens/core` extension types to its field names and optionality. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`. |
-| `full_capability_suite` (`apps/desktop/src-tauri/tests/e2e.rs`) | Every registered capability is actually exercised against a live kind cluster, or explicitly excluded with a reason. Runs in the `integration` CI job. |
+| `full_capability_suite` (`apps/desktop/src-tauri/tests/e2e.rs`) | Every registered capability is actually exercised against a live kind cluster, or explicitly excluded with a reason. Runs in the `backend` CI job. |
 
 ### Long-lived streams
 
@@ -259,6 +259,8 @@ cargo test -p srelens-kube --test helm_lifecycle -- --ignored --nocapture --test
 
 The e2e suite prints `covered N/M capabilities` and fails if any registered capability is neither exercised nor explicitly excluded with a reason — so a new capability cannot land with no end-to-end case.
 
+For the extension and GitOps capabilities it applies minimal Flux and Argo CD CRDs from `apps/desktop/src-tauri/tests/fixtures/gitops-crds.yaml` and deletes them in teardown. Use a throwaway cluster: the suite refuses one that already has real Flux or Argo CD CRDs, rather than replace them.
+
 ### Accessibility check
 
 Automated tests catch labels and roles; they cannot tell you whether the app is
@@ -309,13 +311,17 @@ technology, and its version.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs three jobs on every push and PR to `dev` or `main`:
+`.github/workflows/ci.yml` runs these jobs on every push and PR to `dev`, `main` or `feat/ui-next`:
 
-- **frontend** — `pnpm build` + Vitest with the coverage threshold.
-- **backend** — `cargo llvm-cov` with the ratcheting coverage floor (see above).
-- **integration (kind)** — spins up a kind cluster and helm, then runs the `#[ignore]`d live-cluster suites: the full capability e2e suite (which enforces capability coverage) and the helm lifecycle suite. Without this job a new capability could land with no end-to-end case.
+- **frontend** (and **frontend (Node 24)**) — typecheck, `pnpm build`, Vitest with the coverage threshold, and the release and performance-baseline script tests.
+- **backend** — one `cargo llvm-cov` run over the workspace unit suites and, on a kind cluster with helm, the `#[ignore]`d live-cluster suites: the full capability e2e suite (which enforces capability coverage) and the helm lifecycle suite. It then enforces the ratcheting coverage floor. Without the live-cluster half a new capability could land with no end-to-end case.
+- **smoke (webdriver)** — pull requests only: the built app, driven through tauri-driver against a kind cluster.
+- **install script** — shellcheck and the install script's tests, again as root in a container.
+- **docker image** — builds the whole container image.
 
-All three must be green.
+All must be green.
+
+`.github/workflows/extension-catalog.yml` runs the `#[ignore]`d live extension catalog check daily, and on pull requests that change anything its verdict depends on: the extension module (`crates/registry/src/extensions.rs` and `extensions/`), `crates/plugin-host`, the reader capabilities app bindings are checked against (`crates/kube/src/crds.rs` and `events.rs`, with `gitops.rs` beside them), their registration in `crates/registry/src/lib.rs`, and `crates/capability`, which derives their schemas: every release in the public catalog must download, match its checksum and publisher signature, and validate on this host. A re-uploaded release asset or a bad signature breaks installs without any commit here, so a schedule is what catches it.
 
 A separate Fuzz workflow (`.github/workflows/fuzz.yml`) runs the extension parsers' cargo-fuzz targets on nightly: for a minute each on a pull request that touches those parsers, their fixtures or `Cargo.lock`, and for fifteen minutes each night. It is not a required check. See [docs/extensions/testing.md](extensions/testing.md#fuzzing).
 

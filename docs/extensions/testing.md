@@ -54,10 +54,32 @@ handler's consent gate.
 | `packages/core/src/lib/extensionManifestSchema.test.ts` | Every example manifest validates against the committed schema and names it in `$schema` |
 | `packages/core/src/lib/extensionTypes.test.ts` | The TypeScript manifest and inventory types have the Rust field names and optionality, from `extension-inventory.schema.json` |
 | `packages/ui-next/src/extensions/*.test.tsx` | Settings → Apps, catalog, workspace, resource details |
+| `cargo test -p srelens-desktop --test e2e -- --ignored` (kind) | Every `extensions.*` capability, `k8s.getCustomResource` and `k8s.gitOpsAction` against a live cluster: the example Flux and Argo CD apps and the signed Argo CD release are validated, installed, listed, read and inspected; suspend, resume and refresh land on the object; a stale `resourceVersion` is refused; a disabled app stops reading |
+| `.github/workflows/extension-catalog.yml` (daily) | The ignored `public_catalog_release_smoke`: every release in the live public catalog downloads, matches its checksum and publisher signature, and validates on this host |
 
-The extension capabilities are not yet covered by the live-cluster e2e suite
-([#536](https://github.com/srelens/srelens/issues/536)). An authoring CLI with a test
-command is planned ([#577](https://github.com/srelens/srelens/issues/577)).
+### Live cluster
+
+The e2e suite applies `apps/desktop/src-tauri/tests/fixtures/gitops-crds.yaml` itself:
+minimal Flux `Kustomization` and Argo CD `Application` CRDs with the upstream groups,
+versions and plurals, and no controllers. Reads and conditional patches need nothing
+more. Run it against a throwaway kind cluster (see
+[DEVELOPMENT.md](../DEVELOPMENT.md#live-cluster-tests)). It refuses a cluster that
+already has real Flux or Argo CD CRDs, because teardown deletes the CRDs it applied,
+and deleting a CRD deletes every object of that kind.
+
+The examples use reserved `org.srelens.` IDs, which install only with the publisher's
+signature, so the suite installs them as `org.example.flux` and `org.example.argocd`. The
+signed Argo CD release is installed with its signature under its own ID.
+
+The catalog check needs the network and no cluster:
+
+```sh
+cargo test -p srelens-registry --lib -- --ignored --exact \
+  extensions::catalog::tests::public_catalog_release_smoke
+```
+
+An authoring CLI with a test command is planned
+([#577](https://github.com/srelens/srelens/issues/577)).
 
 ## Fuzzing
 
