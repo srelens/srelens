@@ -1,6 +1,6 @@
 import { ExtensionDetails } from "./ExtensionDetails";
 import { ExtensionRequirements } from "./ExtensionRequirements";
-import { refreshContextIds, useContextLookup } from "./contextIds";
+import { SHARED_CONTEXT_ID_MESSAGE, refreshContextIds, useContextLookup } from "./contextIds";
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useState } from "react";
 import {
@@ -23,7 +23,7 @@ export { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 
 import { useExtensions } from "./inventoryStore";
 export { useExtensions } from "./inventoryStore";
-export { refreshContextIds, useContextId, useContextLookup } from "./contextIds";
+export { SHARED_CONTEXT_ID_MESSAGE, refreshContextIds, useContextId, useContextLookup } from "./contextIds";
 
 export function ExtensionManager() {
   const { Button, Tabs } = useContext(ExtensionControls);
@@ -339,9 +339,16 @@ export function useExtensionContributions(context: string, kind: string, group?:
   const plugins = enabled.filter((p) => extensionEnabledFor(p, contextId));
   return {
     inventory,
-    /** Why the clusters could not be listed, when an app limited to some of them offers something here. */
-    lookupError:
-      lookup.status === "failed" && enabled.some((p) => p.contexts && offersHere(p)) ? lookup.error : undefined,
+    /**
+     * Why a limited app that offers something here cannot be checked: the clusters could
+     * not be listed (with a retry), or this cluster shares its ID with another.
+     */
+    lookupProblem:
+      lookup.status === "failed" && enabled.some((p) => p.contexts && offersHere(p))
+        ? { title: "Could not list clusters", message: lookup.error, retry: () => void refreshContextIds() }
+        : lookup.status === "shared" && enabled.some((p) => p.contexts && offersHere(p))
+          ? { title: "Cluster ID is shared", message: SHARED_CONTEXT_ID_MESSAGE }
+          : undefined,
     tabs: plugins.flatMap((plugin) =>
       plugin.manifest.contributions.detailTabs
         .filter((c) => c.forKinds?.includes(qualified))
@@ -377,7 +384,7 @@ export function ExtensionResourceSlot({
   name: string;
 }) {
   const { Button, Tabs } = useContext(ExtensionControls);
-  const { inventory, tabs, links, lookupError } = useExtensionContributions(context, kind, group);
+  const { inventory, tabs, links, lookupProblem } = useExtensionContributions(context, kind, group);
   const [selected, setSelected] = useState("");
   const active = [...tabs, ...links].some((c) => c.id === selected)
     ? selected
@@ -389,9 +396,18 @@ export function ExtensionResourceSlot({
       : tabs;
   if (inventory.status === "error")
     return <ErrorNotice message={inventory.error} retry={inventory.reload} />;
-  // A failed cluster lookup hides limited apps' views; say why instead of dropping them silently.
-  const lookupNotice = lookupError !== undefined && (
-    <ErrorNotice title="Could not list clusters" message={lookupError} retry={() => void refreshContextIds()} />
+  // An uncheckable cluster hides limited apps' views; say why instead of dropping them silently.
+  const lookupNotice = lookupProblem !== undefined && (
+    lookupProblem.retry ? (
+      <ErrorNotice title={lookupProblem.title} message={lookupProblem.message} retry={lookupProblem.retry} />
+    ) : (
+      <div className="extension-error" role="alert">
+        <div>
+          <strong>{lookupProblem.title}</strong>
+          <p>{lookupProblem.message}</p>
+        </div>
+      </div>
+    )
   );
   if (!tabs.length && !links.length) return lookupNotice || null;
   const ns = contributionKind(kind, group) === "/Namespace" ? name : (namespace ?? "");

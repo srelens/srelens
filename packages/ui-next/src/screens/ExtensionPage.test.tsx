@@ -50,6 +50,13 @@ it("says the clusters could not be listed rather than that a limited app is not 
  fireEvent.click(within(alert).getByRole("button",{name:"Retry"}));
  await waitFor(()=>expect(setContexts).toHaveBeenCalledWith(listed,""));
 });
+it("says a cluster shares its ID with another rather than that a limited app is not enabled",async()=>{
+ Object.assign(clusters,{contexts:[{name:"cluster/a",stableId:"/kube/x#y#z"},{name:"z",stableId:"/kube/x#y#z"}],status:"loaded"});
+ limitedTo("/kube/x#y#z");
+ openKustomizations();
+ expect(await screen.findByText(/shares its ID with another context/)).toBeTruthy();
+ expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
+});
 it("says the cluster is gone rather than that a limited app is not enabled",async()=>{
  Object.assign(clusters,{contexts:[{name:"cluster/b",stableId:"/kube/b.yaml#cluster/b"}],status:"loaded"});
  limitedTo("/kube/a.yaml#cluster/a");

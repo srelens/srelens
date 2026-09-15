@@ -364,6 +364,55 @@ it("allows every cluster again, and keeps listing a chosen cluster the kubeconfi
     expect(configureExtensions).toHaveBeenCalledWith({ action: "clusters", id: "org.test.gitops", contexts: null }),
   );
 });
+it("offers a cluster added while the app details stay open", async () => {
+  const { KUBECONFIG_FILES_CHANGED } = await import("@srelens/core");
+  vi.mocked(listContexts)
+    .mockResolvedValueOnce({ contexts: [{ name: "cluster/a", stableId: "/kube/a.yaml#cluster/a" }] } as any)
+    .mockResolvedValue({
+      contexts: [
+        { name: "cluster/a", stableId: "/kube/a.yaml#cluster/a" },
+        { name: "edge", stableId: "/kube/edge.yaml#edge" },
+      ],
+    } as any);
+  const app = { ...updated(), contexts: ["/kube/a.yaml#cluster/a"] };
+  const details = await openDetails(app);
+  const clusters = within(details).getByRole("group", { name: "Clusters" });
+  expect(await within(clusters).findByRole("button", { name: "Remove cluster/a" })).toBeTruthy();
+  // Connections adds a kubeconfig; storage may not even hold it yet.
+  act(() => {
+    window.dispatchEvent(new CustomEvent(KUBECONFIG_FILES_CHANGED, { detail: ["/kube/edge.yaml"] }));
+  });
+  await waitFor(() => expect(listContexts).toHaveBeenLastCalledWith(["/kube/edge.yaml"]));
+  fireEvent.click(within(clusters).getByRole("combobox", { name: "Add a cluster" }));
+  expect(await screen.findByRole("option", { name: "edge" })).toBeTruthy();
+});
+it("does not offer a limited app on two clusters that share one stable ID", async () => {
+  const { ExtensionResourceSlot } = await import("./Extensions");
+  const installed = structuredClone(plugin);
+  installed.manifest.contributions.detailTabs = [
+    { id: "detail", title: "GitOps apps", capability: "list", forKinds: ["/Namespace"] },
+  ];
+  installed.contexts = ["/kube/a#b#c"];
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [installed] });
+  // `a` + `b#c` and `a#b` + `c` read the same; the host refuses both, so neither is offered.
+  vi.mocked(listContexts).mockResolvedValue({
+    contexts: [
+      { name: "b#c", stableId: "/kube/a#b#c" },
+      { name: "c", stableId: "/kube/a#b#c" },
+    ],
+  } as any);
+  render(
+    <>
+      <div data-testid="b#c"><ExtensionResourceSlot context="b#c" kind="Namespace" namespace={null} name="argo" /></div>
+      <div data-testid="c"><ExtensionResourceSlot context="c" kind="Namespace" namespace={null} name="argo" /></div>
+    </>,
+  );
+  await waitFor(() => expect(listContexts).toHaveBeenCalled());
+  const alerts = await screen.findAllByRole("alert");
+  expect(alerts.map((a) => a.closest("[data-testid]")?.getAttribute("data-testid")).sort()).toEqual(["b#c", "c"]);
+  expect(alerts[0].textContent).toContain("shares its ID");
+  expect(screen.queryByRole("tab", { name: "GitOps apps" })).toBeNull();
+});
 it("says why the cluster list could not be loaded, and retries it", async () => {
   vi.mocked(listContexts)
     .mockResolvedValueOnce({ error: "kubeconfig unreadable" })

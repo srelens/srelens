@@ -67,14 +67,18 @@ impl ResolvedContext {
     /// Unlike `stable_id`, it names exactly one context: `#` and `%` in the path are
     /// percent-encoded, so the first `#` is always the delimiter. A path `a` with context
     /// `b#c` and a path `a#b` with context `c` share a stable ID but not a pinned one.
-    pub fn pinned_id(&self) -> String {
-        let source = std::path::absolute(&self.source).unwrap_or_else(|_| self.source.clone());
+    ///
+    /// `None` when the path cannot be made absolute (an empty path, or a working directory
+    /// that no longer exists): a relative fallback would not be recognised as an ID, so a
+    /// caller must refuse rather than dispatch under it.
+    pub fn pinned_id(&self) -> Option<String> {
+        let source = std::path::absolute(&self.source).ok()?;
         let source = source
             .display()
             .to_string()
             .replace('%', "%25")
             .replace('#', "%23");
-        format!("{source}#{}", self.original_name)
+        Some(format!("{source}#{}", self.original_name))
     }
 }
 
@@ -342,7 +346,9 @@ pub fn resolve_context(paths: &[PathBuf], name: &str) -> Option<ResolvedContext>
 pub fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedContext> {
     let by_id: Vec<&ResolvedContext> = all
         .iter()
-        .filter(|context| context.pinned_id() == name || context.stable_id() == name)
+        .filter(|context| {
+            context.pinned_id().as_deref() == Some(name) || context.stable_id() == name
+        })
         .collect();
     let by_name = all
         .iter()
@@ -350,9 +356,7 @@ pub fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedConte
         .or_else(|| all.iter().find(|context| context.original_name == name));
     match (by_id.as_slice(), by_name) {
         ([found], None) => return Some((*found).clone()),
-        ([found], Some(named)) if found.pinned_id() == named.pinned_id() => {
-            return Some((*found).clone())
-        }
+        ([found], Some(named)) if std::ptr::eq(*found, named) => return Some((*found).clone()),
         ([], _) => {}
         _ => return None,
     }
@@ -748,11 +752,11 @@ mod tests {
             "/kube/other.yaml",
             &format!(
                 "clusters:\n  - name: c\n    cluster: {{ server: https://other }}\ncontexts:\n  - name: '{}'\n    context: {{ cluster: c, user: u }}\n",
-                prod.pinned_id()
+                prod.pinned_id().unwrap()
             ),
         );
         let both = resolve_from(&[cfg("/kube/kube_prod.yaml", PROD), named_like_prod]);
-        assert_eq!(both[1].display_name, prod.pinned_id());
+        assert_eq!(both[1].display_name, prod.pinned_id().unwrap());
         // By that display name: not prod.
         assert!(find_context(&both, &both[1].display_name).is_none());
         // Prod itself stays reachable by its own name.
@@ -767,7 +771,7 @@ mod tests {
         // Settings persist the stable ID, so a relative kubeconfig path must stay in it.
         let listed = resolve_from(&[cfg("kube/prod.yaml", PROD)]);
         assert_eq!(listed[0].stable_id(), "kube/prod.yaml#default");
-        let pinned = listed[0].pinned_id();
+        let pinned = listed[0].pinned_id().unwrap();
         assert!(Path::new(&pinned).is_absolute(), "{pinned}");
         assert_eq!(
             find_context(&listed, &pinned).unwrap().server,
@@ -786,6 +790,18 @@ mod tests {
         assert!(find_context(&with_impostor[..1], &pinned).is_none());
     }
 
+    /// A pinned ID is only ever absolute. When the path cannot be made absolute (an empty
+    /// path, or a working directory that no longer exists), there is no pinned ID rather
+    /// than a relative one that a lookup would take for a name.
+    #[test]
+    fn a_context_whose_path_cannot_be_made_absolute_has_no_pinned_id() {
+        let unplaceable = resolve_from(&[cfg("", PROD)]).remove(0);
+        assert_eq!(unplaceable.stable_id(), "#default");
+        assert_eq!(unplaceable.pinned_id(), None);
+        let placeable = resolve_from(&[cfg("/kube/prod.yaml", PROD)]).remove(0);
+        assert!(placeable.pinned_id().is_some());
+    }
+
     #[test]
     fn contexts_that_share_a_stable_id_have_distinct_pinned_ids_and_resolve_to_neither() {
         // `a` + `b#c` and `a#b` + `c` both read `/kube/a#b#c`.
@@ -799,10 +815,8 @@ mod tests {
         assert_eq!(both[0].stable_id(), both[1].stable_id());
         assert_ne!(both[0].pinned_id(), both[1].pinned_id());
         for context in &both {
-            assert_eq!(
-                find_context(&both, &context.pinned_id()).unwrap().server,
-                context.server
-            );
+            let pinned = context.pinned_id().unwrap();
+            assert_eq!(find_context(&both, &pinned).unwrap().server, context.server);
         }
         // The shared stable ID names no single context, so it reaches none.
         assert!(find_context(&both, &both[0].stable_id()).is_none());

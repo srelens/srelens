@@ -83,13 +83,19 @@ async fn request_context(
         // carries (`a` + `b#c` and `a#b` + `c`) does not say which cluster was chosen, so
         // neither context may use the app under it.
         let id = resolved.stable_id();
-        if let Some(other) = all
-            .iter()
-            .find(|c| c.pinned_id() != resolved.pinned_id() && c.stable_id() == id)
-        {
+        if let Some(other) = all.iter().find(|c| {
+            (c.source != resolved.source || c.original_name != resolved.original_name)
+                && c.stable_id() == id
+        }) {
             return Err(format!(
                 "the context ID \"{id}\" is shared by another context, \"{}\"; rename one of them",
                 other.display_name
+            ));
+        }
+        // The request goes on under the pinned ID; without one it cannot go on safely.
+        if resolved.pinned_id().is_none() {
+            return Err(format!(
+                "the kubeconfig path of \"{context}\" cannot be made absolute"
             ));
         }
         return Ok(resolved);
@@ -913,7 +919,8 @@ pub fn register(
                     .register(&mut registry, manifest, &plugin.grants)
                     .map_err(CapabilityError::Handler)?;
                 let context = resolved
-                    .map(|context| context.pinned_id())
+                    .ok()
+                    .and_then(|context| context.pinned_id())
                     .unwrap_or(input.context);
                 let mut args = json!({ "context": context });
                 if plugin

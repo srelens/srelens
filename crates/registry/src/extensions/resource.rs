@@ -60,7 +60,8 @@ async fn resolve(
     let resource = ResourceIn {
         // The pinned ID of the context scope was checked as (see `request_context`).
         context: resolved
-            .map(|context| context.pinned_id())
+            .ok()
+            .and_then(|context| context.pinned_id())
             .unwrap_or(selection.context),
         namespace: selection.namespace,
         name: selection.name,

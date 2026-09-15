@@ -189,6 +189,24 @@ it("says why the classic Apps navigation cannot show a limited app, and retries"
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
+it("says a cluster shares its ID with another rather than that a limited app is not enabled", async () => {
+  vi.mocked(listContexts).mockResolvedValue({
+    contexts: [
+      { name: "b#c", stableId: "/kube/a#b#c" },
+      { name: "c", stableId: "/kube/a#b#c" },
+    ],
+  } as any);
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [{ ...plugin, contexts: ["/kube/a#b#c"] }],
+  });
+  const { ClassicAppPage } = await import("./Extensions");
+  render(<ClassicAppPage context="b#c" id={manifest.id} page={manifest.contributions.pages[0].id} onPage={vi.fn()} />);
+  expect(await screen.findByText(/shares its ID with another context/)).toBeTruthy();
+  expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
+});
+
 it("says the cluster is gone rather than that a limited app is not enabled", async () => {
   vi.mocked(listContexts).mockResolvedValue({
     contexts: [{ name: "cluster/b", stableId: "/kube/b.yaml#cluster/b" }],

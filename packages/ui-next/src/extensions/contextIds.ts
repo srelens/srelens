@@ -16,6 +16,11 @@ import { KUBECONFIG_FILES_CHANGED, listContexts, loadKubeconfigFiles } from "@sr
 type ContextIds = {
   /** Undefined until a listing has answered. */
   ids?: ReadonlyMap<string, string>;
+  /**
+   * Names whose stable ID another listed context also carries (`a` + `b#c` and `a#b` + `c`
+   * read the same). The host refuses such an ID for both, so neither is "found".
+   */
+  shared?: ReadonlySet<string>;
   /** Why the latest listing failed, when it did. */
   error?: string;
 };
@@ -27,7 +32,8 @@ let generation = 0;
 /** The kubeconfig files in use, once a change has been published; storage may not hold them (a refused save). */
 let files: string[] | undefined;
 
-const key = ({ ids, error }: ContextIds) => JSON.stringify([ids ? [...ids] : null, error ?? null]);
+const key = ({ ids, shared, error }: ContextIds) =>
+  JSON.stringify([ids ? [...ids] : null, shared ? [...shared] : null, error ?? null]);
 
 /** List the contexts again. */
 export async function refreshContextIds() {
@@ -40,10 +46,19 @@ export async function refreshContextIds() {
   }
   if (!listeners.size || started !== generation) return;
   const listed = outcome?.contexts ?? (outcome?.error ? undefined : []);
-  const next: ContextIds = {
-    ids: listed ? new Map(listed.map((context) => [context.name, context.stableId])) : state.ids,
-    error: outcome?.error || undefined,
-  };
+  let next: ContextIds;
+  if (listed) {
+    const holders = new Map<string, number>();
+    for (const context of listed) holders.set(context.stableId, (holders.get(context.stableId) ?? 0) + 1);
+    const unique = listed.filter((context) => holders.get(context.stableId) === 1);
+    next = {
+      ids: new Map(unique.map((context) => [context.name, context.stableId])),
+      shared: new Set(listed.filter((context) => holders.get(context.stableId)! > 1).map((context) => context.name)),
+      error: outcome?.error || undefined,
+    };
+  } else {
+    next = { ids: state.ids, shared: state.shared, error: outcome?.error || undefined };
+  }
   if (key(next) !== key(state)) {
     state = next;
     for (const listener of listeners) listener();
@@ -87,17 +102,26 @@ export function useContextId(name: string): string | undefined {
   return useSyncExternalStore(subscribe, getState, getState).ids?.get(name);
 }
 
-/** The context named `name`: found, still being listed, or not found because the listing failed or lacks it. */
+/** What a page can say when a limited app's cluster cannot be checked, by lookup status. */
+export const SHARED_CONTEXT_ID_MESSAGE =
+  "This cluster shares its ID with another context, so apps limited to it cannot be checked. Rename one of them in your kubeconfig files.";
+
+/**
+ * The context named `name`: found; still being listed; not found because the listing
+ * failed; sharing its stable ID with another context; or missing from a listing that worked.
+ */
 export type ContextLookup =
   | { status: "found"; id: string }
   | { status: "loading" }
   | { status: "failed"; error: string }
+  | { status: "shared" }
   | { status: "missing" };
 
 export function useContextLookup(name: string): ContextLookup {
-  const { ids, error } = useSyncExternalStore(subscribe, getState, getState);
+  const { ids, shared, error } = useSyncExternalStore(subscribe, getState, getState);
   const id = ids?.get(name);
   if (id !== undefined) return { status: "found", id };
+  if (shared?.has(name)) return { status: "shared" };
   if (error) return { status: "failed", error };
   return ids ? { status: "missing" } : { status: "loading" };
 }

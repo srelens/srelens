@@ -1,5 +1,6 @@
-import { useContext, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import {
+  KUBECONFIG_FILES_CHANGED,
   listContexts,
   loadKubeconfigFiles,
   type ExtensionChange,
@@ -29,7 +30,22 @@ export function ExtensionClusters({
   const saved = plugin.contexts;
   const [limited, setLimited] = useState(Boolean(saved));
   const [chosen, setChosen] = useState<string[]>(saved ?? []);
-  const listing = useResource(() => listContexts(loadKubeconfigFiles()), [], () => false);
+  // The kubeconfig files in use: what Connections last published, or else what is stored.
+  // A published list wins because storage may have refused the save.
+  const files = useRef<string[] | undefined>(undefined);
+  const listing = useResource(() => listContexts(files.current ?? loadKubeconfigFiles()), [], () => false);
+  // Settings → Apps can stay mounted while Connections adds or removes a kubeconfig; list
+  // again then, so the picker offers a new cluster and stops offering a removed one.
+  const { reload } = listing;
+  useEffect(() => {
+    const onFilesChanged = (event: Event) => {
+      const detail = (event as CustomEvent<string[]>).detail;
+      if (Array.isArray(detail)) files.current = detail;
+      reload();
+    };
+    window.addEventListener(KUBECONFIG_FILES_CHANGED, onFilesChanged);
+    return () => window.removeEventListener(KUBECONFIG_FILES_CHANGED, onFilesChanged);
+  }, [reload]);
   // `listContexts` reports a failed listing in its result as well as by rejecting.
   const failure = listing.status === "error" ? listing.error : listing.data?.error;
   const names = new Map((listing.data?.contexts ?? []).map((context) => [context.stableId, context.name]));

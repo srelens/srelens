@@ -1,5 +1,6 @@
 import { ExtensionResourceDetails } from "../extensions/ExtensionResourceDetails";
 import { ErrorNotice } from "../extensions/ExtensionResults";
+import { SHARED_CONTEXT_ID_MESSAGE } from "../extensions/contextIds";
 import { ExtensionResourceNavigation } from "../extensions/resourceNavigation";
 import { extensionEnabledFor, extensionRoute, extensionResourceRoute, listContexts, parseExtensionRoute } from "@srelens/core";
 import { Button, Screen } from "@srelens/ui-kit";
@@ -36,6 +37,9 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
   // An app limited to some clusters can only be checked once its cluster is listed, and a
   // listing that failed says nothing about whether the app is enabled there.
   const unchecked = Boolean(plugin?.contexts) && !cluster;
+  // A stable ID two contexts share does not say which was chosen; the host refuses both.
+  const shared =
+    Boolean(plugin?.contexts) && !!cluster && contexts.filter((c) => c.stableId === cluster.stableId).length > 1;
   return (
     <Screen
       title={target.resourceName ?? page?.title ?? "App"}
@@ -58,6 +62,8 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             message={contextsError}
             retry={() => void relistContexts()}
           />
+        ) : shared ? (
+          <p className="extension-message">{SHARED_CONTEXT_ID_MESSAGE}</p>
         ) : unchecked ? (
           <p className="extension-message">
             This cluster is no longer in your kubeconfig files, so its apps cannot be opened here.
