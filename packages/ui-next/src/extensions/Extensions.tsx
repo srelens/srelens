@@ -208,7 +208,7 @@ export function ExtensionManager() {
       </div>
       </details>
 
-      <p className="extension-message extension-catalog-meta">Apps are installed app-wide and available across clusters. Each page checks the APIs it needs when opened.</p>
+      <p className="extension-message extension-catalog-meta">Apps are installed app-wide and are available on every cluster unless an app's Details limit it to chosen clusters. Each page checks the APIs it needs when opened.</p>
       {state.plugins.length === 0 && (
         <p className="extension-message">No apps installed.</p>
       )}
