@@ -10,6 +10,7 @@ The extension documentation has moved to [docs/extensions](extensions/introducti
 - [UI contributions](extensions/ui-contributions.md)
 - [Capabilities](extensions/capabilities.md)
 - [Security](extensions/security.md)
+- [Threat model](extensions/threat-model.md): assets, adversaries, mitigations and residual risk
 - [Distribution](extensions/distribution.md)
 - [Testing](extensions/testing.md)
 - [Migration](extensions/migration.md)
