@@ -287,7 +287,7 @@ fn resolve_contexts_with(
     resolve_from(&configs)
 }
 
-/// Find a resolved context by display name or [stable ID](ResolvedContext::stable_id),
+/// Find a resolved context by [stable ID](ResolvedContext::stable_id) or display name,
 /// falling back to a raw original name (for MCP/tests that pass the kubeconfig's own
 /// context name directly).
 ///
@@ -299,9 +299,17 @@ pub fn resolve_context(paths: &[PathBuf], name: &str) -> Option<ResolvedContext>
 }
 
 fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedContext> {
+    if let Some(pinned) = all.iter().find(|context| context.stable_id() == name) {
+        return Some(pinned.clone());
+    }
+    // A context can be named anything, including another context's stable ID. A name shaped
+    // like one (an absolute kubeconfig path, `#`, a context name) is taken as an ID, so once
+    // its context is gone it reaches nothing rather than whichever context carries that name.
+    if name.contains('#') && Path::new(name).is_absolute() {
+        return None;
+    }
     all.iter()
         .find(|context| context.display_name == name)
-        .or_else(|| all.iter().find(|context| context.stable_id() == name))
         .or_else(|| all.iter().find(|context| context.original_name == name))
         .cloned()
 }
@@ -662,6 +670,18 @@ mod tests {
         // With prod's file gone, the ID finds nothing rather than the other `default`.
         let stage_only = resolve_from(&[cfg("/kube/kube_stage.yaml", STAGE)]);
         assert!(find_context(&stage_only, &id).is_none());
+
+        // A context literally named after prod's ID never takes it, with prod listed or gone.
+        let impostor = cfg(
+            "/kube/impostor.yaml",
+            "clusters:\n  - name: c\n    cluster: { server: https://impostor }\ncontexts:\n  - name: \"/kube/kube_prod.yaml#default\"\n    context: { cluster: c, user: u }\n",
+        );
+        let listed = resolve_from(&[impostor, cfg("/kube/kube_prod.yaml", PROD)]);
+        assert_eq!(
+            find_context(&listed, &id).unwrap().server,
+            "https://prod:6443"
+        );
+        assert!(find_context(&listed[..1], &id).is_none());
     }
 
     #[test]

@@ -1429,6 +1429,22 @@ mod tests {
             .unwrap();
         assert_eq!(output["context"], format!("{}#default", first.display()));
     }
+    /// A context can be named anything, including another context's stable ID. A request the
+    /// broker sends under that ID reaches the context the ID names, and never the one that
+    /// happens to be called it, even once the named context is gone.
+    #[test]
+    fn a_context_named_like_a_stable_id_cannot_take_a_pinned_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let first_default = format!("{}#default", first.display());
+        let impostor = kubeconfig(dir.path(), "impostor.yaml", &[&first_default]);
+        let reached = |paths: &[PathBuf]| {
+            srelens_kube::context_resolve::resolve_context(paths, &first_default)
+                .map(|context| context.source)
+        };
+        assert_eq!(reached(&[impostor.clone(), first.clone()]), Some(first));
+        assert_eq!(reached(&[impostor]), None);
+    }
     #[test]
     fn history_keeps_the_three_versions_before_the_installed_one() {
         let dir = tempfile::tempdir().unwrap();
