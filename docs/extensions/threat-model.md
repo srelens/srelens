@@ -216,7 +216,7 @@ An attacker who holds the srelens app signing key, or controls a release reposit
 
 | ID | Threat | STRIDE | Mitigation | Status |
 |---|---|---|---|---|
-| PUB-1 | Forge an official release without the key | S, T | Official releases carry a detached Ed25519 signature over the exact manifest bytes, checked against a key compiled into the host (`PUBLISHERS` and `verify_key` in `crates/registry/src/extensions/signing.rs`). Catalog metadata cannot supply a key. Each official app ID is pinned to one repository, and its manifest must be that repository's `v<version>/manifest.json` release asset (`signature_url` in `crates/registry/src/extensions/catalog.rs`). A catalog entry that names a reserved ID or a srelens repository must be signed. | Shipped |
+| PUB-1 | Forge an official release without the key | S, T | Official releases carry a detached Ed25519 signature over the exact manifest bytes, checked against a key compiled into the host (`PUBLISHERS` and `verify_key` in `crates/registry/src/extensions/signing.rs`). Catalog metadata cannot supply a key. Each official app ID is pinned to one repository, and its manifest must be that repository's `v<version>/manifest.json` release asset (`signature_url` in `crates/registry/src/extensions/catalog.rs`). The repository is compared case-insensitively, as GitHub resolves it ([#604]); the asset URL must match exactly. A catalog entry that names a reserved ID or a srelens repository must be signed. | Shipped |
 | PUB-2 | Alter a signed installation after install | T | The verified bytes and signature are stored as `signatureProof`. Every inventory load verifies them again and checks that they parse to the installed manifest (`reverify`, `verify_proof` in `crates/registry/src/extensions.rs`); an app that fails is quarantined on its own. | Shipped |
 | PUB-3 | Use a stolen key | S, E | A manifest signed with a stolen key installs as official on every host that trusts the key. It is still a declarative app, held to the rules above and to the user's permission review. A host release that removes the key quarantines every app it signed and leaves the rest working. | Quarantine shipped. Rotation planned in [#560]; revocation and a kill switch in [#561] |
 | PUB-4 | Reinstall an older, vulnerable signed release | T | A validly signed older manifest still installs through `extensions.configure`, and a rollback restores a kept one. Both need the user's review, and nothing warns about the older version. | Planned: revocation in [#561], downgrade protection in [#563] |
@@ -247,7 +247,7 @@ An attacker who can alter traffic, or who controls `catalog.json`.
 |---|---|---|---|---|
 | NET-1 | Intercept or redirect a download | T, S | Every download is HTTPS with no credentials, fragment or custom port (`https_url`). Only the fixed `CATALOG_URL`, `github.com/<owner>/<repo>/releases/download/…` and `release-assets.githubusercontent.com` are fetched, and every redirect is checked against the same list, at most four of them (`allowed_download`, `download` in `crates/registry/src/extensions/catalog.rs`). Requests time out after 20 seconds, 10 to connect, and a body is read only to one byte past its limit. | Shipped |
 | NET-2 | Swap the manifest between listing and review | T | The catalog pins each release's SHA-256. The downloaded bytes must match it, and their ID, version and API range must equal the entry's (`verify_manifest`). Review names the release by ID and checksum, so a changed catalog needs a new review. | Shipped |
-| NET-3 | List a malicious or look-alike app from a compromised catalog | S, T | The catalog is not signed; its integrity rests on TLS and on control of the `srelens/extensions` repository. It cannot make an app official, because reserved IDs and srelens repositories need the pinned signature (PUB-1). Every entry is validated (`parse_catalog`), and every manifest passes the same rules and permission review as a pasted one. | Signed catalog planned in [#559] |
+| NET-3 | List a malicious or look-alike app from a compromised catalog | S, T | The catalog is not signed; its integrity rests on TLS and on control of the `srelens/extensions` repository. It cannot make an app official, because reserved IDs and srelens repositories need the pinned signature (PUB-1), whatever the case of the repository URL ([#604]). Every entry is validated (`parse_catalog`), and every manifest passes the same rules and permission review as a pasted one. | Signed catalog planned in [#559] |
 | NET-4 | Freeze or roll back the catalog | T, D | A failed refresh keeps the cached catalog, marks it stale and shows the error with the original time (`load_with`). A `schemaVersion` other than 1 is refused. Nothing detects an older catalog that is still well formed. | Planned: signed catalog in [#559], revocation in [#561] |
 | NET-5 | Alter the catalog cache on disk | T | A cached catalog is validated again on every load, and one that fails is fetched again. `source: catalog` only records that the installed bytes match a cached release; it grants nothing. | Shipped |
 
@@ -256,11 +256,6 @@ Residual risk:
 - A compromised catalog can list an unsigned app with any name, description and
   repository link, served from any GitHub release. It is labelled unsigned and still needs
   the user's review.
-- `claims_official` compares the repository as a case-sensitive string prefix. An entry
-  whose repository is `https://github.com/SRELENS/extension-argocd`, which GitHub resolves
-  to the srelens repository, is not required to be signed. Its ID cannot be reserved, so it
-  still installs as unsigned without a bundled logo; only its repository link misleads.
-  Planned in [#604].
 
 ### MCP client abuse
 
@@ -338,7 +333,6 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 | [#581] | APP-12, VULN-4: performance budgets |
 | [#601] | APP-3: refuse built-in API groups in reader bindings |
 | [#602] | APP-9, LOCAL-1: quarantine stored unsigned apps under reserved IDs |
-| [#604] | NET-3: match trusted repositories case-insensitively |
 | [#605] | VULN-3: redact extension settings in the MCP audit log |
 | [#607] | MCP-1: refuse non-loopback addresses for headless HTTP unless explicitly exposed |
 | [#608] | APP-3: show what an app binds in the install review |

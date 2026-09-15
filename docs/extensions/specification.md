@@ -261,3 +261,7 @@ update.
   - The app `name`, every `title` and a page `group` refuse Unicode format characters (category Cf), such as right-to-left overrides and zero-width spaces, with `EXTENSION_INVALID_VALUE` at the field's path. See [Identifiers](#identifiers).
   - A catalog entry whose `name` or `description` holds one is refused, and the catalog with it, as for any other invalid entry.
   - This narrows accepted values within API 0.1, which [Compatibility rules](#compatibility-rules) classify as breaking. The exception is made because such a label can display as a different app's name. An installed app whose label holds one fails re-verification and is quarantined.
+- **#604:** security fix, in catalog validation rather than the manifest contract.
+  - A catalog entry's `repository` is matched against the trusted-publisher table case-insensitively, as GitHub resolves owner and repository names. An entry whose repository is `https://github.com/SRELENS/…` must carry the srelens signature, exactly as the lowercase form must.
+  - A lookalike owner such as `srelensx` is a different repository, and its entries stay ordinary unsigned third-party apps.
+  - The release asset URL must still equal the pinned repository's `v<version>/manifest.json`, so an official entry writes it in the pinned form.

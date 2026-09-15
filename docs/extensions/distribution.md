@@ -54,6 +54,12 @@ Catalog metadata cannot supply a trusted key.
 - A catalog entry that names a reserved ID *or* a trusted publisher's repository must
   be signed. Missing signatures, modified bytes and repository substitution are rejected
   before review.
+- Repository URLs are compared case-insensitively, because GitHub resolves owner and
+  repository names that way: `https://github.com/SRELENS/extension-argocd` is the
+  trusted repository and needs the same signature. A lookalike owner such as `srelensx`
+  is a different repository, and its apps are ordinary unsigned third-party apps. The
+  release asset URL itself must still equal the pinned repository's
+  `v<version>/manifest.json`.
 - Installation re-verifies the proof and stores it, and every inventory load checks it
   against the installed manifest ([architecture.md](architecture.md#quarantine)).
 - Permission review is still required. A checksum alone is not a publisher signature.
