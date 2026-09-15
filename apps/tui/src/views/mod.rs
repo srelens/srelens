@@ -1,3 +1,5 @@
+pub mod argo_view;
+pub mod argo_detail_view;
 pub mod assistant_view;
 pub mod cracked_lens;
 pub mod describe_view;

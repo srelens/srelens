@@ -125,6 +125,22 @@ Synthesize the findings into an executive briefing with high-priority risks and 
         is_utility: false,
     },
     SkillDef {
+        name: "argo-triage",
+        command: "argo",
+        aliases: &["argo-triage", "argocd", "progressing"],
+        description: "Diagnose ArgoCD application stuck in Progressing, Degraded, or OutOfSync",
+        target_kind: Some("Application"),
+        instructions: "When an ArgoCD application is stuck in Progressing, Degraded, or failing to sync:\n\
+1. Check the Application's sync status, health status, and health message.\n\
+2. Inspect the operation phase and error message of the last sync.\n\
+3. Identify which specific child resources are Degraded, Progressing, or Missing.\n\
+4. Check for drift between live cluster state and the target Git revision.\n\
+5. Inspect SyncHook jobs or PreSync/PostSync failures.\n\
+6. Check the target namespace and cluster destination connectivity.\n\n\
+Report the root cause why the application is stuck or degraded and provide concrete remediation steps (sync flags, manifest fix, or controller action).",
+        is_utility: false,
+    },
+    SkillDef {
         name: "clear-chat",
         command: "clear",
         aliases: &["cls", "reset"],
@@ -214,6 +230,7 @@ pub fn expand_slash_command(
             Some("Node") => "Scan the cluster for any nodes experiencing pressure or unreadiness and triage them.".to_string(),
             Some("Deployment") => format!("Scan {} for any stalled or degraded rollouts and triage them.", ns_desc),
             Some("Service") => format!("Scan {} for any services with zero endpoints or connection issues and triage them.", ns_desc),
+            Some("Application") => format!("Scan {} for any ArgoCD applications stuck in Progressing, Degraded, or OutOfSync and triage them.", ns_desc),
             _ => format!("Investigate cluster '{}' in {}.", active_context, ns_desc),
         },
     };

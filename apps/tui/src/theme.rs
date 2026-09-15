@@ -24,6 +24,9 @@ pub enum ThemeId {
     RosePine,
     Cyberpunk,
     OneDark,
+    SreHighContrast,
+    TokyoStorm,
+    GitHubDarkHc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +38,7 @@ pub struct ThemePalette {
     pub is_light: bool,
     pub bg: Color,
     pub fg: Color,
+    pub label: Color,
     pub dim: Color,
     pub accent: Color,
     pub cyan: Color,
@@ -65,6 +69,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         is_light: false,
         bg: Color::Reset,
         fg: Color::Rgb(220, 224, 232),
+        label: Color::Rgb(186, 194, 222),
         dim: Color::Rgb(110, 115, 135),
         accent: Color::Rgb(139, 92, 246),
         cyan: Color::Rgb(56, 189, 248),
@@ -93,6 +98,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         is_light: false,
         bg: Color::Reset,
         fg: Color::Rgb(192, 202, 245),
+        label: Color::Rgb(169, 177, 214),
         dim: Color::Rgb(86, 95, 137),
         accent: Color::Rgb(122, 162, 247),
         cyan: Color::Rgb(125, 207, 255),
@@ -121,6 +127,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         is_light: false,
         bg: Color::Reset,
         fg: Color::Rgb(248, 248, 242),
+        label: Color::Rgb(189, 194, 215),
         dim: Color::Rgb(98, 114, 164),
         accent: Color::Rgb(189, 147, 249),
         cyan: Color::Rgb(139, 233, 253),
@@ -149,6 +156,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         is_light: false,
         bg: Color::Reset,
         fg: Color::Rgb(236, 239, 244),
+        label: Color::Rgb(216, 222, 233),
         dim: Color::Rgb(76, 86, 106),
         accent: Color::Rgb(136, 192, 208),
         cyan: Color::Rgb(129, 161, 193),
@@ -177,6 +185,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         is_light: false,
         bg: Color::Reset,
         fg: Color::Rgb(235, 219, 178),
+        label: Color::Rgb(213, 196, 161),
         dim: Color::Rgb(146, 131, 116),
         accent: Color::Rgb(254, 128, 25),
         cyan: Color::Rgb(131, 165, 152),
@@ -205,6 +214,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         is_light: false,
         bg: Color::Reset,
         fg: Color::Rgb(131, 148, 150),
+        label: Color::Rgb(147, 161, 161),
         dim: Color::Rgb(88, 110, 117),
         accent: Color::Rgb(38, 139, 210),
         cyan: Color::Rgb(42, 161, 152),
@@ -233,6 +243,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         is_light: false,
         bg: Color::Reset,
         fg: Color::Rgb(252, 252, 250),
+        label: Color::Rgb(200, 200, 196),
         dim: Color::Rgb(114, 112, 114),
         accent: Color::Rgb(255, 216, 102),
         cyan: Color::Rgb(120, 220, 232),
@@ -261,6 +272,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         is_light: true,
         bg: Color::Reset,
         fg: Color::Rgb(76, 79, 105),
+        label: Color::Rgb(92, 95, 119),
         dim: Color::Rgb(156, 160, 176),
         accent: Color::Rgb(136, 57, 239),
         cyan: Color::Rgb(30, 102, 245),
@@ -289,6 +301,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         is_light: false,
         bg: Color::Reset,
         fg: Color::Rgb(225, 230, 235),
+        label: Color::Rgb(175, 185, 200),
         dim: Color::Rgb(105, 115, 125),
         accent: Color::Rgb(250, 204, 21),
         cyan: Color::Rgb(56, 189, 248),
@@ -317,6 +330,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         is_light: false,
         bg: Color::Reset,
         fg: Color::Rgb(224, 222, 244),
+        label: Color::Rgb(196, 194, 218),
         dim: Color::Rgb(110, 106, 134),
         accent: Color::Rgb(235, 188, 186),
         cyan: Color::Rgb(156, 207, 216),
@@ -345,6 +359,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         is_light: false,
         bg: Color::Reset,
         fg: Color::Rgb(240, 245, 255),
+        label: Color::Rgb(190, 180, 225),
         dim: Color::Rgb(100, 90, 130),
         accent: Color::Rgb(255, 0, 127),
         cyan: Color::Rgb(0, 240, 255),
@@ -373,6 +388,7 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         is_light: false,
         bg: Color::Reset,
         fg: Color::Rgb(171, 178, 191),
+        label: Color::Rgb(190, 198, 212),
         dim: Color::Rgb(92, 99, 112),
         accent: Color::Rgb(97, 175, 239),
         cyan: Color::Rgb(86, 182, 194),
@@ -393,6 +409,93 @@ pub static ALL_THEMES: &[ThemePalette] = &[
         brand_icon: "⚡ ",
         show_live_clock: false,
     },
+    ThemePalette {
+        id: ThemeId::SreHighContrast,
+        name: "sre-high-contrast",
+        display_name: "SRE High-Contrast",
+        description: "Maximum readability — crisp silver labels, luminous text, vivid indicators",
+        is_light: false,
+        bg: Color::Reset,
+        fg: Color::Rgb(248, 250, 252),
+        label: Color::Rgb(203, 213, 225),
+        dim: Color::Rgb(148, 163, 184),
+        accent: Color::Rgb(129, 140, 248),
+        cyan: Color::Rgb(56, 189, 248),
+        green: Color::Rgb(34, 197, 94),
+        yellow: Color::Rgb(250, 204, 21),
+        red: Color::Rgb(248, 113, 113),
+        orange: Color::Rgb(251, 146, 60),
+        border: Color::Rgb(100, 116, 139),
+        border_focus: Color::Rgb(129, 140, 248),
+        sel_bg: Color::Rgb(51, 65, 85),
+        sel_fg: Color::Rgb(255, 255, 255),
+        marked_bg: Color::Rgb(67, 56, 202),
+        marked_fg: Color::Rgb(250, 204, 21),
+        header_style: HeaderStyle::Standard,
+        border_type: BorderType::Rounded,
+        prompt_glyph: "❯ ",
+        bullet_glyph: "●",
+        brand_icon: "⚡ ",
+        show_live_clock: false,
+    },
+    ThemePalette {
+        id: ThemeId::TokyoStorm,
+        name: "tokyo-storm",
+        display_name: "Tokyo Storm",
+        description: "Stormy indigo, cool mist lavender labels, electric cyan & spring green",
+        is_light: false,
+        bg: Color::Reset,
+        fg: Color::Rgb(215, 225, 255),
+        label: Color::Rgb(180, 190, 230),
+        dim: Color::Rgb(130, 140, 180),
+        accent: Color::Rgb(187, 154, 247),
+        cyan: Color::Rgb(125, 207, 255),
+        green: Color::Rgb(158, 206, 106),
+        yellow: Color::Rgb(224, 175, 104),
+        red: Color::Rgb(247, 118, 142),
+        orange: Color::Rgb(255, 158, 100),
+        border: Color::Rgb(86, 95, 137),
+        border_focus: Color::Rgb(187, 154, 247),
+        sel_bg: Color::Rgb(46, 56, 94),
+        sel_fg: Color::Rgb(255, 255, 255),
+        marked_bg: Color::Rgb(65, 50, 95),
+        marked_fg: Color::Rgb(224, 175, 104),
+        header_style: HeaderStyle::Standard,
+        border_type: BorderType::Rounded,
+        prompt_glyph: "▶ ",
+        bullet_glyph: "●",
+        brand_icon: "⚡ ",
+        show_live_clock: false,
+    },
+    ThemePalette {
+        id: ThemeId::GitHubDarkHc,
+        name: "github-dark-hc",
+        display_name: "GitHub Dark High-Contrast",
+        description: "Official GitHub high-contrast spec — bright steel labels & crisp borders",
+        is_light: false,
+        bg: Color::Reset,
+        fg: Color::Rgb(255, 255, 255),
+        label: Color::Rgb(201, 209, 217),
+        dim: Color::Rgb(139, 148, 158),
+        accent: Color::Rgb(163, 113, 247),
+        cyan: Color::Rgb(88, 166, 255),
+        green: Color::Rgb(63, 185, 80),
+        yellow: Color::Rgb(210, 153, 34),
+        red: Color::Rgb(248, 81, 73),
+        orange: Color::Rgb(219, 109, 40),
+        border: Color::Rgb(72, 79, 88),
+        border_focus: Color::Rgb(88, 166, 255),
+        sel_bg: Color::Rgb(33, 38, 45),
+        sel_fg: Color::Rgb(255, 255, 255),
+        marked_bg: Color::Rgb(56, 40, 80),
+        marked_fg: Color::Rgb(210, 153, 34),
+        header_style: HeaderStyle::Standard,
+        border_type: BorderType::Rounded,
+        prompt_glyph: ":",
+        bullet_glyph: "●",
+        brand_icon: "⚡ ",
+        show_live_clock: false,
+    },
 ];
 
 static ACTIVE_THEME_IDX: AtomicUsize = AtomicUsize::new(0);
@@ -404,6 +507,7 @@ impl Theme {
     // Compile-time default constant fallbacks for tests and constant evaluation
     pub const BG: Color = Color::Reset;
     pub const FG: Color = Color::Rgb(220, 224, 232);
+    pub const LABEL: Color = Color::Rgb(186, 194, 222);   // Clear silver-lavender field labels
     pub const DIM: Color = Color::Rgb(110, 115, 135);
     pub const ACCENT: Color = Color::Rgb(139, 92, 246);      // Purple / Violet (SRElens brand)
     pub const CYAN: Color = Color::Rgb(56, 189, 248);        // Sky blue
@@ -464,6 +568,19 @@ impl Theme {
                 || (lower == "onedark" && p.id == ThemeId::OneDark)
                 || (lower == "one-dark" && p.id == ThemeId::OneDark)
                 || (lower == "atom" && p.id == ThemeId::OneDark)
+                || (lower == "sre" && p.id == ThemeId::SreHighContrast)
+                || (lower == "srehighcontrast" && p.id == ThemeId::SreHighContrast)
+                || (lower == "sre-high-contrast" && p.id == ThemeId::SreHighContrast)
+                || (lower == "contrast" && p.id == ThemeId::SreHighContrast)
+                || (lower == "highcontrast" && p.id == ThemeId::SreHighContrast)
+                || (lower == "storm" && p.id == ThemeId::TokyoStorm)
+                || (lower == "tokyostorm" && p.id == ThemeId::TokyoStorm)
+                || (lower == "tokyo-storm" && p.id == ThemeId::TokyoStorm)
+                || (lower == "github" && p.id == ThemeId::GitHubDarkHc)
+                || (lower == "githubdark" && p.id == ThemeId::GitHubDarkHc)
+                || (lower == "github-dark" && p.id == ThemeId::GitHubDarkHc)
+                || (lower == "githubhc" && p.id == ThemeId::GitHubDarkHc)
+                || (lower == "github-dark-hc" && p.id == ThemeId::GitHubDarkHc)
             {
                 ACTIVE_THEME_IDX.store(i, Ordering::Relaxed);
                 return Some(p);
@@ -487,6 +604,7 @@ impl Theme {
     // Dynamic color accessors reading live from the active theme
     pub fn bg() -> Color { Self::active_palette().bg }
     pub fn fg() -> Color { Self::active_palette().fg }
+    pub fn label() -> Color { Self::active_palette().label }
     pub fn dim() -> Color { Self::active_palette().dim }
     pub fn accent() -> Color { Self::active_palette().accent }
     pub fn cyan() -> Color { Self::active_palette().cyan }
@@ -506,7 +624,7 @@ impl Theme {
     }
 
     pub fn header_label() -> Style {
-        Style::default().fg(Self::dim())
+        Style::default().fg(Self::label())
     }
 
     pub fn header_val() -> Style {
@@ -563,7 +681,7 @@ impl Theme {
     }
 
     pub fn key_hint_desc() -> Style {
-        Style::default().fg(Self::dim())
+        Style::default().fg(Self::label())
     }
 
     pub fn prompt() -> Style {

@@ -824,7 +824,7 @@ fn bold(style: Style) -> bool {
 fn every_theme_style_uses_its_palette_colour() {
     assert_eq!(Theme::header().fg, Some(Theme::CYAN));
     assert!(bold(Theme::header()));
-    assert_eq!(Theme::header_label().fg, Some(Theme::DIM));
+    assert_eq!(Theme::header_label().fg, Some(Theme::LABEL));
     assert!(!bold(Theme::header_label()));
     assert_eq!(Theme::header_val().fg, Some(Theme::FG));
     assert_eq!(Theme::title().fg, Some(Theme::ACCENT));
@@ -838,7 +838,7 @@ fn every_theme_style_uses_its_palette_colour() {
     assert_eq!(Theme::status_error().fg, Some(Theme::RED));
     assert_eq!(Theme::status_dim().fg, Some(Theme::DIM));
     assert_eq!(Theme::key_hint_key().fg, Some(Theme::CYAN));
-    assert_eq!(Theme::key_hint_desc().fg, Some(Theme::DIM));
+    assert_eq!(Theme::key_hint_desc().fg, Some(Theme::LABEL));
     assert_eq!(Theme::prompt().fg, Some(Theme::ACCENT));
     assert!(bold(Theme::prompt()));
     let badge = Theme::badge(Theme::RED, Theme::SEL_FG);
@@ -1967,6 +1967,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_max_visible: 12,
         command_popup_density: CommandPopupDensity::Large,
         show_feature_banner: true,
+        argo_hub_context: None,
+        argo_hub_kubeconfig: None,
     };
     cfg.save().expect("save succeeds");
     assert!(file.is_file());
@@ -1983,6 +1985,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_max_visible: 1,
         command_popup_density: CommandPopupDensity::Compact,
         show_feature_banner: true,
+        argo_hub_context: None,
+        argo_hub_kubeconfig: None,
     };
     clamped.clamp();
     assert_eq!(clamped.command_popup_max_width, 200);
@@ -1995,6 +1999,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_max_visible: 99,
         command_popup_density: CommandPopupDensity::Large,
         show_feature_banner: false,
+        argo_hub_context: None,
+        argo_hub_kubeconfig: None,
     };
     low.clamp();
     assert_eq!(low.command_popup_max_width, 40);

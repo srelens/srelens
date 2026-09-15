@@ -1348,7 +1348,7 @@ fn the_assistant_title_names_the_provider_model_and_key_hints() {
     let text = assistant_text(200, 30, &state);
     let settings = AiSettings::default();
     let model = settings.get_model(settings.default_provider);
-    assert!(text.contains(&format!(" SRElens AI Assistant[Anthropic (Claude) - {model}] [<Ctrl+c> Copy, <Ctrl+t> Tools, <Ctrl+e> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ")), "{text}");
+    assert!(text.contains(&format!(" SRElens AI Assistant[Anthropic (Claude) - {model}] [<Ctrl+c> Copy, <Ctrl+t> Tools, <Ctrl+o> Save, <Ctrl+l> Clear, <Ctrl+s> Settings, <Esc> Back] ")), "{text}");
     assert!(text.contains("SRElens [10:00:00]:"), "{text}");
     assert!(
         text.contains("Hello! I am your SRElens AI Assistant."),
@@ -1384,7 +1384,7 @@ fn the_assistant_title_reflects_context_caveman_tokens_selection_and_folded_tool
         "{text}"
     );
     assert!(
-        text.contains("[⚡  1,234 tokens, <Ctrl+c> Copy Selection, <Ctrl+t> Fold Tools, <Ctrl+e> Save"),
+        text.contains("[⚡  1,234 tokens, <Ctrl+c> Copy Selection, <Ctrl+t> Fold Tools, <Ctrl+o> Save"),
         "{text}"
     );
 }
@@ -2397,9 +2397,14 @@ fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
     assert!(text_enabled.contains(":overview"), "shows overview command");
     assert!(text_enabled.contains(":gpuinfo"), "shows gpuinfo command");
     assert!(text_enabled.contains(":workloads"), "shows workloads command");
+    assert!(text_enabled.contains(":argo"), "shows argo gitops command");
     assert!(text_enabled.contains(":ai"), "shows ai assistant command");
     assert!(text_enabled.contains(":ai-settings"), "shows ai-settings command");
     assert!(text_enabled.contains(":config"), "shows config command");
+    assert!(text_enabled.contains(":banner"), "shows banner command");
+    assert!(text_enabled.contains(":nodes"), "shows nodes command");
+    assert!(text_enabled.contains("[0]"), "shows jump key 0");
+    assert!(text_enabled.contains("[9]"), "shows jump key 9");
     assert!(text_enabled.contains("[●]"), "shows enabled checkbox dot");
     assert!(text_enabled.contains("Show this feature banner on startup"), "shows checkbox label");
     assert!(text_enabled.contains("to dismiss"), "shows dismiss key hint");

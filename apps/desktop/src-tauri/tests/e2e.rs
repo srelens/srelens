@@ -210,6 +210,10 @@ impl Harness {
 /// A capability registered later with no case here fails the coverage
 /// assertion at the end of `full_capability_suite`.
 const EXCLUDED: &[(&str, &str)] = &[
+    ("k8s.nodeJournalLogs", "requires SSH access to the node host; exercised via unit tests with mocked sessions"),
+    ("k8s.nodeRuntimeDiagnostics", "requires host-level runtime CLI (crictl/containerd) via SSH; exercised via unit tests"),
+    ("k8s.nodeServiceRestart", "requires node host systemd access via SSH; exercised via unit tests"),
+    ("k8s.nodeServiceStatus", "requires node host systemctl access via SSH; exercised via unit tests"),
     (
         "toolbox.installKubectl",
         "downloads a real ~50MB binary from dl.k8s.io; kubectl is already provided by the \
