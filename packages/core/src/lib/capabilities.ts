@@ -29,6 +29,8 @@ export interface CapabilityFacts {
    * capability is neither read-only nor destructive and is gated too.
    */
   requiresConfirm: boolean;
+  /** Reads or reveals secret material, e.g. `k8s.getSecret`. */
+  sensitive: boolean;
 }
 
 /** Every capability the backend registers, sorted by id. */

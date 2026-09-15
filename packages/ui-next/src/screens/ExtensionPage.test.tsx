@@ -12,7 +12,7 @@ import {listExtensions,extensionRoute,extensionResourceRoute} from "@srelens/cor
 import {openTab} from "../lib/tabsStore";
 import {ExtensionPage} from "./ExtensionPage";
 import manifest from "../../../../examples/extensions/flux.json";
-beforeEach(()=>{vi.clearAllMocks();vi.mocked(listExtensions).mockResolvedValue({schemaVersion:1,nextRevision:2,plugins:[{manifest:manifest as any,enabled:true,revision:1,grants:manifest.permissions,settings:{}}]});});
+beforeEach(()=>{vi.clearAllMocks();vi.mocked(listExtensions).mockResolvedValue({schemaVersion:1,nextRevision:2,plugins:[{manifest:manifest as any,enabled:true,revision:1,grants:manifest.permissions,settings:{},source:"catalog",installedAt:1,history:[]}]});});
 it("promotes a selected resource using the page's pinned cluster rather than the rail",async()=>{
  render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionRoute("cluster/a",manifest.id,"kustomizations")}/>);
  fireEvent.click(await screen.findByText("Open resource"));

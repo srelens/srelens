@@ -24,6 +24,22 @@ application never silently replaces a manifest or expands its grants.
 For example, the updated Flux release requests an additional event-read grant for its
 dashboard, which the review shows.
 
+## Rolling back
+
+Each update keeps the version it replaced, up to the last three per app, with the
+grants, source and install time it had. The oldest are dropped sooner when keeping them
+would take the inventory past its 1 MiB limit, so an app with very large manifests keeps
+fewer. **Settings → Apps → Details → Previous
+versions** restores one:
+
+- A version whose permissions differ from what is granted now goes through permission
+  review again. One with the same permissions asks for confirmation.
+- The restored version is checked as installing it now would be: against its publisher
+  signature, if it had one, and against this host's rules.
+- Settings are kept. The versions after the restored one are discarded, so going forward
+  again means installing the newer release.
+- The app gets a new revision, so open views refresh against the restored version.
+
 ## Reserved IDs
 
 Since #528, IDs under `org.srelens.` install only with the srelens signature:
@@ -42,7 +58,9 @@ its apps disabled; the field is dropped on the next save.
 
 Inventory changes are one-way. A host older than #511 cannot read an inventory written
 by #511 or later, because `developerMode` was removed and `signatureProof` added, and
-older hosts reject both. After such a downgrade, Settings → Apps reports the inventory as
+older hosts reject both. Since #534 every installed app also records `source`,
+`installedAt` and `history`, so an inventory saved before #534 is not readable either;
+move it aside and reinstall the apps. After such a downgrade, Settings → Apps reports the inventory as
 unreadable. Upgrade again, or move `settings.extensions.json` aside to start with no
 apps.
 

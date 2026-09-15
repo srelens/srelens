@@ -30,6 +30,12 @@ pub struct Installed {
     enabled: bool,
     revision: u64,
     settings: serde_json::Map<String, Value>,
+    source: Source,
+    /// When this version was installed, in seconds since the Unix epoch.
+    #[serde(rename = "installedAt")]
+    installed_at: u64,
+    /// The versions this one replaced, newest first, at most [`KEPT_VERSIONS`].
+    history: Vec<PreviousVersion>,
 }
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +43,33 @@ struct SignatureProof {
     manifest: String,
     signature: Vec<u8>,
 }
+/// Where an installed version came from. The host decides: `catalog` means the exact
+/// bytes of a release listed in the cached catalog, whoever submitted them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum Source {
+    Local,
+    Catalog,
+}
+/// A version an update replaced, kept so it can be restored.
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PreviousVersion {
+    #[serde(
+        default,
+        rename = "signatureProof",
+        skip_serializing_if = "Option::is_none"
+    )]
+    signature_proof: Option<SignatureProof>,
+    manifest: Manifest,
+    grants: Vec<String>,
+    revision: u64,
+    source: Source,
+    #[serde(rename = "installedAt")]
+    installed_at: u64,
+}
+/// How many replaced versions each app keeps for rollback.
+const KEPT_VERSIONS: usize = 3;
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Inventory {
@@ -73,6 +106,14 @@ enum Configure {
     Settings {
         id: String,
         settings: serde_json::Map<String, Value>,
+    },
+    /// Restores a kept version. Its permissions are granted again, so `grants` is the
+    /// caller's consent, as at install.
+    #[serde(rename = "rollback")]
+    Rollback {
+        id: String,
+        revision: u64,
+        grants: Vec<String>,
     },
 }
 #[derive(Deserialize, JsonSchema)]
@@ -156,17 +197,25 @@ fn read(path: &Path) -> Result<Inventory, String> {
 fn reverify(plugin: &Installed) -> Result<(), String> {
     plugin.manifest.validate()?;
     if let Some(proof) = &plugin.signature_proof {
-        signing::verify(proof.manifest.as_bytes(), &proof.signature)?;
-        let parsed = Manifest::parse(&proof.manifest)?;
-        if serde_json::to_value(parsed).map_err(|e| e.to_string())?
-            != serde_json::to_value(&plugin.manifest).map_err(|e| e.to_string())?
-        {
-            return Err("Installed app does not match its signed manifest".into());
-        }
+        verify_proof(proof, &plugin.manifest)?;
     }
     Ok(())
 }
-fn write(path: &Path, state: &Inventory) -> Result<(), String> {
+/// The publisher signature verifies over the kept bytes, and those bytes are `manifest`.
+fn verify_proof(proof: &SignatureProof, manifest: &Manifest) -> Result<(), String> {
+    signing::verify(proof.manifest.as_bytes(), &proof.signature)?;
+    let parsed = Manifest::parse(&proof.manifest)?;
+    if serde_json::to_value(parsed).map_err(|e| e.to_string())?
+        != serde_json::to_value(manifest).map_err(|e| e.to_string())?
+    {
+        return Err("Installed app does not match its signed manifest".into());
+    }
+    Ok(())
+}
+/// The largest inventory `write` saves, measured in its saved form.
+const MAX_INVENTORY_BYTES: usize = 1024 * 1024;
+/// The inventory exactly as `write` saves it.
+fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
     // Quarantine is recomputed on every load. Persisting it would also make the file
     // unreadable to hosts that predate the field.
     let mut stored = serde_json::to_value(state).map_err(|e| e.to_string())?;
@@ -175,8 +224,11 @@ fn write(path: &Path, state: &Inventory) -> Result<(), String> {
             plugin.remove("quarantined");
         }
     }
-    let raw = serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())?;
-    if raw.len() > 1024 * 1024 {
+    serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())
+}
+fn write(path: &Path, state: &Inventory) -> Result<(), String> {
+    let raw = saved_form(state)?;
+    if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
     }
     let parent = path
@@ -448,6 +500,19 @@ fn check_install(
     problems.into_result()?;
     Ok(manifest)
 }
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+fn take_revision(state: &mut Inventory) -> Result<u64, String> {
+    let revision = state.next_revision;
+    state.next_revision = revision
+        .checked_add(1)
+        .ok_or("extension revision limit reached")?;
+    Ok(revision)
+}
 fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventory, String> {
     let _lock = super::settings::write_lock(path)?;
     let mut state = read(path)?;
@@ -458,19 +523,58 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             signature,
         } => {
             let manifest = check_install(&source, &grants, signature.as_deref(), core)?;
+            let checksum = format!(
+                "{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(source.as_bytes())
+            );
+            let origin = if catalog::cached_release(
+                &path.with_extension("catalog.json"),
+                &manifest.id,
+                &checksum,
+            ) {
+                Source::Catalog
+            } else {
+                Source::Local
+            };
             let signature_proof = signature.map(|signature| SignatureProof {
                 manifest: source,
                 signature,
             });
-            let revision = state.next_revision;
-            state.next_revision = revision
-                .checked_add(1)
-                .ok_or("extension revision limit reached")?;
+            let revision = take_revision(&mut state)?;
             let previous = state
                 .plugins
                 .iter()
                 .position(|p| p.manifest.id == manifest.id)
                 .map(|i| state.plugins.remove(i));
+            // An update keeps the app's settings, and the version it replaces for rollback.
+            let (settings, history) = match previous {
+                Some(Installed {
+                    signature_proof: replaced_proof,
+                    manifest: replaced,
+                    grants: replaced_grants,
+                    revision: replaced_revision,
+                    source: replaced_source,
+                    installed_at: replaced_at,
+                    settings,
+                    mut history,
+                    ..
+                }) => {
+                    history.insert(
+                        0,
+                        PreviousVersion {
+                            signature_proof: replaced_proof,
+                            manifest: replaced,
+                            grants: replaced_grants,
+                            revision: replaced_revision,
+                            source: replaced_source,
+                            installed_at: replaced_at,
+                        },
+                    );
+                    history.truncate(KEPT_VERSIONS);
+                    (settings, history)
+                }
+                None => (Default::default(), Vec::new()),
+            };
             state.plugins.push(Installed {
                 signature_proof,
                 quarantined: None,
@@ -478,11 +582,60 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 grants,
                 enabled: true,
                 revision,
-                settings: previous.map(|p| p.settings).unwrap_or_default(),
+                settings,
+                source: origin,
+                installed_at: now(),
+                history,
             });
             state
                 .plugins
                 .sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
+            // Kept versions give way, oldest first, before the saved inventory outgrows its
+            // limit; the update itself is not refused. Other apps' versions are left alone.
+            while saved_form(&state)?.len() > MAX_INVENTORY_BYTES {
+                let updated = state
+                    .plugins
+                    .iter_mut()
+                    .find(|p| p.revision == revision)
+                    .ok_or("the updated app is missing from the inventory")?;
+                if updated.history.pop().is_none() {
+                    break;
+                }
+            }
+        }
+        Configure::Rollback {
+            id,
+            revision,
+            grants,
+        } => {
+            let next = take_revision(&mut state)?;
+            let app = state
+                .plugins
+                .iter_mut()
+                .find(|p| p.manifest.id == id)
+                .ok_or("Extension is not installed")?;
+            let index = app
+                .history
+                .iter()
+                .position(|p| p.revision == revision)
+                .ok_or("That version of the app is no longer kept")?;
+            let target = app.history[index].clone();
+            // A restored version is checked as installing it now would be: against its
+            // publisher signature, and against this host's rules with the grants given now.
+            if let Some(proof) = &target.signature_proof {
+                verify_proof(proof, &target.manifest)?;
+            }
+            validate_app(&target.manifest, &grants, core)?;
+            // Going back discards the versions after the restored one.
+            app.history.drain(..=index);
+            app.signature_proof = target.signature_proof;
+            app.manifest = target.manifest;
+            app.grants = grants;
+            app.source = target.source;
+            app.installed_at = target.installed_at;
+            app.quarantined = None;
+            // A new revision, so views pinned to the rolled-away version refresh.
+            app.revision = next;
         }
         Configure::Enable { id, enabled } => {
             let p = state
@@ -867,6 +1020,174 @@ mod tests {
             grants: vec!["k8s.listCustomResource".into()],
         }
     }
+    fn configure(path: &Path, input: Value) -> Result<Inventory, String> {
+        let input = serde_json::from_value::<Configure>(input).map_err(|e| e.to_string())?;
+        mutate(path, fake_core(), input)
+    }
+    /// The example manifest at another version.
+    fn manifest_at(version: &str) -> String {
+        let mut value: Value = serde_json::from_str(&manifest()).unwrap();
+        value["version"] = json!(version);
+        value.to_string()
+    }
+    #[test]
+    fn update_then_rollback_restores_the_previous_manifest_and_grants_under_a_new_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let first = install(&path, fake_core());
+        configure(
+            &path,
+            json!({"action":"settings","id":"org.example.argocd","settings":{"team":"platform"}}),
+        )
+        .unwrap();
+        // The update also reads events, so it asks for a second grant.
+        let mut updated: Value = serde_json::from_str(&manifest_at("0.2.0")).unwrap();
+        updated["permissions"] = json!(["k8s.listCustomResource", "k8s.listEvents"]);
+        updated["capabilities"].as_array_mut().unwrap().push(json!({
+            "name":"events", "title":"Events", "target":"k8s.listEvents",
+            "arguments":{}, "inputs":["context","namespace"]
+        }));
+        let state = configure(
+            &path,
+            json!({"action":"install","manifest":updated.to_string(),
+                "grants":["k8s.listCustomResource","k8s.listEvents"]}),
+        )
+        .unwrap();
+        let app = &state.plugins[0];
+        let second = app.revision;
+        assert_eq!(app.manifest.version, "0.2.0");
+        assert_eq!(app.history.len(), 1);
+        assert_eq!(app.history[0].revision, first);
+        assert_eq!(app.history[0].manifest.version, "0.1.0");
+        assert_eq!(app.history[0].grants, ["k8s.listCustomResource"]);
+
+        // Rolling back grants the older manifest's permissions again, so it takes them.
+        let rollback = |grants: Value, revision: u64| {
+            configure(
+                &path,
+                json!({"action":"rollback","id":"org.example.argocd","revision":revision,"grants":grants}),
+            )
+        };
+        assert!(rollback(json!([]), first).is_err());
+        let state = rollback(json!(["k8s.listCustomResource"]), first).unwrap();
+        let app = &state.plugins[0];
+        assert_eq!(
+            serde_json::to_value(&app.manifest).unwrap(),
+            serde_json::to_value(Manifest::parse(&manifest()).unwrap()).unwrap()
+        );
+        assert_eq!(app.grants, ["k8s.listCustomResource"]);
+        assert!(app.revision > second, "open views see a new revision");
+        assert!(
+            app.history.is_empty(),
+            "versions after the restored one are discarded"
+        );
+        assert_eq!(app.settings["team"], "platform");
+        assert_eq!(read(&path).unwrap().plugins[0].revision, app.revision);
+        // Only a kept version can be restored.
+        assert!(rollback(json!(["k8s.listCustomResource"]), second).is_err());
+    }
+    #[test]
+    fn install_records_its_source_and_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        install(&path, fake_core());
+        let local = read(&path).unwrap().plugins[0].clone();
+        assert_eq!(serde_json::to_value(&local.source).unwrap(), "local");
+        assert!(local.installed_at >= started);
+        // The exact bytes of a cached catalog release are recorded as from the catalog, even
+        // when the cache is stale: the host decides this, not the caller.
+        let catalog: Value =
+            serde_json::from_slice(include_bytes!("../tests/fixtures/extension-catalog.json"))
+                .unwrap();
+        fs::write(
+            path.with_extension("catalog.json"),
+            serde_json::to_vec(&json!({
+                "catalog": catalog, "fetchedAt": 0, "stale": false, "error": null, "incompatible": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        mutate(&path, fake_core(), signed_argocd()).unwrap();
+        let state = read(&path).unwrap();
+        let source = |id: &str| {
+            let app = state.plugins.iter().find(|p| p.manifest.id == id).unwrap();
+            serde_json::to_value(&app.source).unwrap()
+        };
+        assert_eq!(source("org.srelens.argocd"), "catalog");
+        assert_eq!(
+            source("org.example.argocd"),
+            "local",
+            "other bytes are not the release"
+        );
+    }
+    #[test]
+    fn kept_versions_give_way_before_the_inventory_outgrows_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        // A valid manifest with thousands of small entries. The inventory is saved
+        // pretty-printed, so each copy takes about 400 KiB there: the installed version
+        // and three kept ones cannot all fit in 1 MiB.
+        let large = |version: &str| {
+            let mut value: Value = serde_json::from_str(&manifest_at(version)).unwrap();
+            value["capabilities"][0]["arguments"]["printerColumns"] =
+                json!(vec![json!({"name": "c", "jsonPath": ".a"}); 4300]);
+            value.to_string()
+        };
+        for minor in 1..=4 {
+            let version = format!("0.{minor}.0");
+            configure(
+                &path,
+                json!({"action":"install","manifest":large(&version),"grants":["k8s.listCustomResource"]}),
+            )
+            .unwrap_or_else(|error| panic!("install {version}: {error}"));
+        }
+        let app = &read(&path).unwrap().plugins[0];
+        assert_eq!(app.manifest.version, "0.4.0");
+        assert!(
+            !app.history.is_empty() && app.history.len() < KEPT_VERSIONS,
+            "kept {} versions",
+            app.history.len()
+        );
+        assert_eq!(
+            app.history[0].manifest.version, "0.3.0",
+            "the newest are kept"
+        );
+        assert!(fs::metadata(&path).unwrap().len() <= 1024 * 1024);
+    }
+    #[test]
+    fn history_keeps_the_three_versions_before_the_installed_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let mut revisions = Vec::new();
+        for minor in 1..=5 {
+            let state = configure(
+                &path,
+                json!({"action":"install","manifest":manifest_at(&format!("0.{minor}.0")),
+                    "grants":["k8s.listCustomResource"]}),
+            )
+            .unwrap();
+            revisions.push(state.plugins[0].revision);
+        }
+        let app = &read(&path).unwrap().plugins[0];
+        assert_eq!(app.manifest.version, "0.5.0");
+        let kept: Vec<_> = app
+            .history
+            .iter()
+            .map(|previous| (previous.manifest.version.as_str(), previous.revision))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("0.4.0", revisions[3]),
+                ("0.3.0", revisions[2]),
+                ("0.2.0", revisions[1])
+            ]
+        );
+    }
     #[test]
     fn events_are_an_explicit_read_only_grant() {
         let core = Arc::new(crate::build_registry_with_paths(
@@ -888,7 +1209,7 @@ mod tests {
     fn native_only_inventory_skips_retired_archives_and_preserves_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("extensions.json");
-        let native = json!({"manifest":serde_json::from_str::<Value>(&manifest()).unwrap(),"grants":["k8s.listCustomResource"],"enabled":true,"revision":2,"settings":{"namespace":"team"}});
+        let native = json!({"manifest":serde_json::from_str::<Value>(&manifest()).unwrap(),"grants":["k8s.listCustomResource"],"enabled":true,"revision":2,"settings":{"namespace":"team"},"source":"local","installedAt":1,"history":[]});
         let retired =
             json!({"freelens":"legacy-archive","manifest":{"id":"org.freelensapp.fluxcd"}});
         fs::write(&path, serde_json::to_vec(&json!({"schemaVersion":1,"developerMode":true,"nextRevision":3,"plugins":[retired,native.clone()]})).unwrap()).unwrap();

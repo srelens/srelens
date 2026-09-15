@@ -21,6 +21,8 @@ pub struct CatalogEntry {
     /// `Agent access` pane shipped six invented ids from the mock (`node.drain`,
     /// `resource.delete`, …) under a heading claiming completeness.
     pub requires_confirm: bool,
+    /// Reads or reveals secret material. Shown beside the capabilities an app is granted.
+    pub sensitive: bool,
 }
 
 /// Project a registry into a sorted catalog for the frontend bridge.
@@ -32,6 +34,7 @@ pub fn catalog_of(reg: &Registry) -> Vec<CatalogEntry> {
             read_only: c.annotations.read_only,
             destructive: c.annotations.destructive,
             requires_confirm: c.annotations.requires_confirm,
+            sensitive: c.annotations.sensitive,
         })
         .collect();
     out.sort();
@@ -51,24 +54,39 @@ mod tests {
     #[test]
     fn carries_the_gate_flag_no_other_field_implies() {
         let mut reg = Registry::new();
-        let mut sensitive = Capability::read_only("t.secret", "reads a secret", |_| async {
-            Ok(json!({}))
-        });
+        let mut sensitive =
+            Capability::read_only("t.secret", "reads a secret", |_| async { Ok(json!({})) });
         sensitive.annotations = Annotations::SENSITIVE_READ;
         reg.register(sensitive);
-        let mut mutating = Capability::read_only("t.install", "installs a tool", |_| async {
-            Ok(json!({}))
-        });
+        let mut mutating =
+            Capability::read_only("t.install", "installs a tool", |_| async { Ok(json!({})) });
         mutating.annotations = Annotations::MUTATING;
         reg.register(mutating);
-        reg.register(Capability::read_only("t.list", "lists", |_| async { Ok(json!({})) }));
+        reg.register(Capability::read_only("t.list", "lists", |_| async {
+            Ok(json!({}))
+        }));
 
-        let by_id = |id: &str| -> (bool, bool, bool) {
-            let e = catalog_of(&reg).into_iter().find(|e| e.id == id).expect("registered");
-            (e.read_only, e.destructive, e.requires_confirm)
+        let by_id = |id: &str| -> (bool, bool, bool, bool) {
+            let e = catalog_of(&reg)
+                .into_iter()
+                .find(|e| e.id == id)
+                .expect("registered");
+            (e.read_only, e.destructive, e.requires_confirm, e.sensitive)
         };
-        assert_eq!(by_id("t.secret"), (true, false, true), "a sensitive read is gated");
-        assert_eq!(by_id("t.install"), (false, false, true), "a non-destructive change is gated");
-        assert_eq!(by_id("t.list"), (true, false, false), "an ordinary read is not");
+        assert_eq!(
+            by_id("t.secret"),
+            (true, false, true, true),
+            "a sensitive read is gated"
+        );
+        assert_eq!(
+            by_id("t.install"),
+            (false, false, true, false),
+            "a non-destructive change is gated"
+        );
+        assert_eq!(
+            by_id("t.list"),
+            (true, false, false, false),
+            "an ordinary read is not"
+        );
     }
 }

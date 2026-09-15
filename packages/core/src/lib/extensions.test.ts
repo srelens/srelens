@@ -59,6 +59,16 @@ it("matches explicit API identity, including custom and unmapped built-in kinds"
   expect(contributionKind("Deployment", "example.io")).toBe("example.io/Deployment");
 });
 
+it("rolls back to a kept revision with the grants reviewed for it", async () => {
+  await configureExtensions({ action: "rollback", id: "org.test.app", revision: 3, grants: ["k8s.listCustomResource"] });
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.configure", {
+    action: "rollback",
+    id: "org.test.app",
+    revision: 3,
+    grants: ["k8s.listCustomResource"],
+  });
+});
+
 it("validates the exact reviewed manifest with its grants and optional signature", async () => {
   const { validateExtension } = await import("./extensions");
   await validateExtension("{}", ["k8s.listCustomResource"]);
