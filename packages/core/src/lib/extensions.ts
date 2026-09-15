@@ -44,6 +44,18 @@ export interface ExtensionManifest {
     rowActions: ExtensionRowAction[];
   };
 }
+/** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */
+export type ExtensionSource = "local" | "catalog";
+/** A version an update replaced, kept so it can be restored. */
+export interface ExtensionPreviousVersion {
+  signatureProof?: {manifest:string;signature:number[]};
+  manifest: ExtensionManifest;
+  grants: string[];
+  revision: number;
+  source: ExtensionSource;
+  /** Seconds since the Unix epoch. */
+  installedAt: number;
+}
 export interface InstalledExtension {
   signatureProof?: {manifest:string;signature:number[]};
   /** Set by the host when a stored app failed re-verification; the app is disabled. */
@@ -53,6 +65,11 @@ export interface InstalledExtension {
   revision: number;
   grants: string[];
   settings: Record<string, unknown>;
+  source: ExtensionSource;
+  /** When this version was installed, in seconds since the Unix epoch. */
+  installedAt: number;
+  /** The versions this one replaced, newest first; at most three. */
+  history: ExtensionPreviousVersion[];
 }
 export interface ExtensionInventory {
   schemaVersion: number;
@@ -63,6 +80,8 @@ export type ExtensionChange =
   | { action: "install"; manifest: string; grants: string[]; signature?: number[] }
   | { action: "enable"; id: string; enabled: boolean }
   | { action: "remove"; id: string }
+  /** Restores a kept version; `grants` are what the user reviewed and grants again. */
+  | { action: "rollback"; id: string; revision: number; grants: string[] }
   | { action: "settings"; id: string; settings: Record<string, unknown> };
 export const EXTENSIONS_CHANGED = "srelens:extensions-changed";
 export const listExtensions = () =>

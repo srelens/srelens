@@ -45,7 +45,13 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
 
 - Saves use a private temporary file, sync and atomic replacement under a
   cross-process lock.
-- Updating an ID preserves its settings and assigns a new revision.
+- Updating an ID preserves its settings and assigns a new revision. The app keeps up to
+  the last three versions it replaced, fewer when they would take the inventory past
+  1 MiB; restoring one grants its permissions again after
+  review, keeps settings and assigns a new revision
+  (see [migration.md](migration.md#rolling-back)).
+- Each installed version records its source: `catalog` when its exact bytes are a
+  release in the cached catalog, otherwise `local`. The host decides this, not the caller.
 - Every read checks the durable inventory and revision, so a disabled, removed or
   replaced installation cannot be invoked through an old registry instance. Calls
   already admitted may finish.

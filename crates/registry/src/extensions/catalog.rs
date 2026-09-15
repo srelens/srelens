@@ -286,6 +286,19 @@ fn load_with(
 fn load(path: &Path, refresh: bool) -> Result<Snapshot, String> {
     load_with(path, refresh, || download(CATALOG_URL, MAX_CATALOG))
 }
+/// Whether the cached catalog, fresh or stale, lists this exact release. Never fetches.
+pub(super) fn cached_release(path: &Path, id: &str, sha256: &str) -> bool {
+    load_with(path, false, || {
+        Err("the cached catalog is read without fetching".into())
+    })
+    .is_ok_and(|snapshot| {
+        snapshot
+            .catalog
+            .extensions
+            .iter()
+            .any(|entry| entry.id == id && entry.release.sha256 == sha256)
+    })
+}
 fn verify_manifest(entry: &Entry, raw: &[u8]) -> Result<String, String> {
     if raw.len() > MAX_MANIFEST_BYTES {
         return Err("Manifest exceeds size limit".into());
@@ -371,6 +384,24 @@ mod tests {
     use super::*;
     fn fixture() -> Vec<u8> {
         include_bytes!("../../tests/fixtures/extension-catalog.json").to_vec()
+    }
+    #[test]
+    fn a_cached_release_is_known_by_id_and_exact_checksum_without_fetching() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.catalog.json");
+        let entry = parse_catalog(&fixture()).unwrap().extensions.remove(0);
+        assert!(
+            !cached_release(&path, &entry.id, &entry.release.sha256),
+            "no cache yet"
+        );
+        load_with(&path, true, || Ok(fixture())).unwrap();
+        assert!(cached_release(&path, &entry.id, &entry.release.sha256));
+        assert!(!cached_release(&path, &entry.id, &"0".repeat(64)));
+        assert!(!cached_release(
+            &path,
+            "org.other.app",
+            &entry.release.sha256
+        ));
     }
     #[test]
     fn validates_catalog_and_reports_api_compatibility() {

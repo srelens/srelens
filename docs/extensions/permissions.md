@@ -33,7 +33,9 @@ version, plural, kind and scope, plus explicitly granted `k8s.listEvents` reader
 Annotations come from the host capability and cannot be weakened by a binding. The
 app-level operations follow the normal MCP consent gate:
 
-- `extensions.configure` (install, enable, remove, settings) is mutating.
+- `extensions.configure` (install, enable, remove, settings, rollback) is mutating. A
+  rollback takes the grants explicitly, like an install, because it grants the restored
+  version's permissions again.
 - `extensions.action` (host GitOps actions) is mutating, and in the UI every action
   opens a review naming the cluster and resource first.
 

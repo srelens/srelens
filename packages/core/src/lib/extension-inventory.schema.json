@@ -147,6 +147,19 @@
           },
           "type": "array"
         },
+        "history": {
+          "description": "The versions this one replaced, newest first, at most [`KEPT_VERSIONS`].",
+          "items": {
+            "$ref": "#/definitions/PreviousVersion"
+          },
+          "type": "array"
+        },
+        "installedAt": {
+          "description": "When this version was installed, in seconds since the Unix epoch.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "manifest": {
           "$ref": "#/definitions/Manifest"
         },
@@ -175,14 +188,20 @@
               "type": "null"
             }
           ]
+        },
+        "source": {
+          "$ref": "#/definitions/Source"
         }
       },
       "required": [
         "enabled",
         "grants",
+        "history",
+        "installedAt",
         "manifest",
         "revision",
-        "settings"
+        "settings",
+        "source"
       ],
       "type": "object"
     },
@@ -292,6 +311,52 @@
       ],
       "type": "object"
     },
+    "PreviousVersion": {
+      "additionalProperties": false,
+      "description": "A version an update replaced, kept so it can be restored.",
+      "properties": {
+        "grants": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "installedAt": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "manifest": {
+          "$ref": "#/definitions/Manifest"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "signatureProof": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SignatureProof"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "$ref": "#/definitions/Source"
+        }
+      },
+      "required": [
+        "grants",
+        "installedAt",
+        "manifest",
+        "revision",
+        "source"
+      ],
+      "type": "object"
+    },
     "RowAction": {
       "additionalProperties": false,
       "properties": {
@@ -339,6 +404,14 @@
         "signature"
       ],
       "type": "object"
+    },
+    "Source": {
+      "description": "Where an installed version came from. The host decides: `catalog` means the exact bytes of a release listed in the cached catalog, whoever submitted them.",
+      "enum": [
+        "local",
+        "catalog"
+      ],
+      "type": "string"
     },
     "StatusColumns": {
       "additionalProperties": false,
