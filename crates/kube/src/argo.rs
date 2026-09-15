@@ -77,55 +77,169 @@ pub struct ArgoApplication {
 impl ArgoApplication {
     pub fn from_json(val: &Value) -> Self {
         let meta = val.get("metadata");
-        let name = meta.and_then(|m| m.get("name")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let namespace = meta.and_then(|m| m.get("namespace")).and_then(|v| v.as_str()).unwrap_or("argocd").to_string();
-        let created_at = meta.and_then(|m| m.get("creationTimestamp")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = meta
+            .and_then(|m| m.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let namespace = meta
+            .and_then(|m| m.get("namespace"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("argocd")
+            .to_string();
+        let created_at = meta
+            .and_then(|m| m.get("creationTimestamp"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let spec = val.get("spec");
-        let project = spec.and_then(|s| s.get("project")).and_then(|v| v.as_str()).unwrap_or("default").to_string();
+        let project = spec
+            .and_then(|s| s.get("project"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .to_string();
 
         let source = spec.and_then(|s| s.get("source"));
-        let repo_url = source.and_then(|s| s.get("repoURL")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let target_revision = source.and_then(|s| s.get("targetRevision")).and_then(|v| v.as_str()).unwrap_or("HEAD").to_string();
-        let path = source.and_then(|s| s.get("path")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let repo_url = source
+            .and_then(|s| s.get("repoURL"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let target_revision = source
+            .and_then(|s| s.get("targetRevision"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("HEAD")
+            .to_string();
+        let path = source
+            .and_then(|s| s.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let dest = spec.and_then(|s| s.get("destination"));
-        let destination_server = dest.and_then(|d| d.get("server")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let destination_name = dest.and_then(|d| d.get("name")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let destination_namespace = dest.and_then(|d| d.get("namespace")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let destination_server = dest
+            .and_then(|d| d.get("server"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let destination_name = dest
+            .and_then(|d| d.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let destination_namespace = dest
+            .and_then(|d| d.get("namespace"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let sync_policy = spec.and_then(|s| s.get("syncPolicy"));
         let automated = sync_policy.and_then(|p| p.get("automated"));
         let auto_sync_enabled = automated.is_some() && !automated.unwrap().is_null();
-        let self_heal_enabled = automated.and_then(|a| a.get("selfHeal")).and_then(|v| v.as_bool()).unwrap_or(false);
-        let prune_enabled = automated.and_then(|a| a.get("prune")).and_then(|v| v.as_bool()).unwrap_or(false);
+        let self_heal_enabled = automated
+            .and_then(|a| a.get("selfHeal"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let prune_enabled = automated
+            .and_then(|a| a.get("prune"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let status = val.get("status");
         let sync = status.and_then(|s| s.get("sync"));
-        let sync_status = sync.and_then(|s| s.get("status")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let sync_revision = sync.and_then(|s| s.get("revision")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let sync_status = sync
+            .and_then(|s| s.get("status"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let sync_revision = sync
+            .and_then(|s| s.get("revision"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let health = status.and_then(|s| s.get("health"));
-        let health_status = health.and_then(|h| h.get("status")).and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
-        let health_message = health.and_then(|h| h.get("message")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let health_status = health
+            .and_then(|h| h.get("status"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+        let health_message = health
+            .and_then(|h| h.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let op_state = status.and_then(|s| s.get("operationState"));
-        let operation_phase = op_state.and_then(|o| o.get("phase")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let operation_message = op_state.and_then(|o| o.get("message")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let last_sync_time = op_state.and_then(|o| o.get("finishedAt")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let operation_phase = op_state
+            .and_then(|o| o.get("phase"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let operation_message = op_state
+            .and_then(|o| o.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let last_sync_time = op_state
+            .and_then(|o| o.get("finishedAt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let mut resources = Vec::new();
-        if let Some(res_arr) = status.and_then(|s| s.get("resources")).and_then(|r| r.as_array()) {
+        if let Some(res_arr) = status
+            .and_then(|s| s.get("resources"))
+            .and_then(|r| r.as_array())
+        {
             for r in res_arr {
-                let group = r.get("group").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let version = r.get("version").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let kind = r.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let ns = r.get("namespace").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let r_name = r.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let r_status = r.get("status").and_then(|v| v.as_str()).unwrap_or("Synced").to_string();
-                let r_health = r.get("health").and_then(|h| h.get("status")).and_then(|v| v.as_str()).unwrap_or("Healthy").to_string();
-                let r_msg = r.get("health").and_then(|h| h.get("message")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let hook = r.get("hook").and_then(|v| v.as_str()).map(ToString::to_string);
+                let group = r
+                    .get("group")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let version = r
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let kind = r
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let ns = r
+                    .get("namespace")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let r_name = r
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let r_status = r
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Synced")
+                    .to_string();
+                let r_health = r
+                    .get("health")
+                    .and_then(|h| h.get("status"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Healthy")
+                    .to_string();
+                let r_msg = r
+                    .get("health")
+                    .and_then(|h| h.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let hook = r
+                    .get("hook")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
 
                 resources.push(ArgoResourceItem {
                     group,
@@ -142,14 +256,33 @@ impl ArgoApplication {
         }
 
         let mut sync_history = Vec::new();
-        if let Some(hist_arr) = status.and_then(|s| s.get("history")).and_then(|h| h.as_array()) {
+        if let Some(hist_arr) = status
+            .and_then(|s| s.get("history"))
+            .and_then(|h| h.as_array())
+        {
             for h in hist_arr {
                 let id = h.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
-                let rev = h.get("revision").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let deployed_at = h.get("deployedAt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let rev = h
+                    .get("revision")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let deployed_at = h
+                    .get("deployedAt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let h_src = h.get("source");
-                let h_url = h_src.and_then(|s| s.get("repoURL")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let h_path = h_src.and_then(|s| s.get("path")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let h_url = h_src
+                    .and_then(|s| s.get("repoURL"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let h_path = h_src
+                    .and_then(|s| s.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
 
                 sync_history.push(ArgoSyncHistoryItem {
                     id,
@@ -215,7 +348,9 @@ impl ArgoClusterMapping {
     }
 
     pub fn server_for_name(&self, name: &str) -> Option<&str> {
-        self.name_to_server.get(&name.trim().to_lowercase()).map(|s| s.as_str())
+        self.name_to_server
+            .get(&name.trim().to_lowercase())
+            .map(|s| s.as_str())
     }
 
     pub fn name_for_server(&self, server: &str) -> Option<&str> {
@@ -265,8 +400,9 @@ struct ArgoAppsCacheKey {
     target_namespace: Option<String>,
 }
 
-static ARGO_APPS_CACHE: RwLock<Option<HashMap<ArgoAppsCacheKey, (Instant, ArgoApplicationsFetchResult)>>> =
-    RwLock::new(None);
+static ARGO_APPS_CACHE: RwLock<
+    Option<HashMap<ArgoAppsCacheKey, (Instant, ArgoApplicationsFetchResult)>>,
+> = RwLock::new(None);
 const ARGO_APPS_CACHE_TTL: Duration = Duration::from_secs(30);
 
 pub fn invalidate_argo_applications_cache() {
@@ -551,7 +687,10 @@ pub async fn fetch_argo_applications_cached(
             };
 
             if !is_not_found {
-                return Err(format!("Failed to list ArgoCD Applications on '{}': {}", current_context, e));
+                return Err(format!(
+                    "Failed to list ArgoCD Applications on '{}': {}",
+                    current_context, e
+                ));
             }
 
             // CRD is not installed on the selected cluster.
@@ -571,9 +710,8 @@ pub async fn fetch_argo_applications_cached(
 
             let hub_api: Api<DynamicObject> = Api::all_with(hub_client.clone(), &ar);
 
-            let mapping_fut = async {
-                Some(get_or_fetch_argo_cluster_mapping(&hub_client, hub).await)
-            };
+            let mapping_fut =
+                async { Some(get_or_fetch_argo_cluster_mapping(&hub_client, hub).await) };
 
             let list_fut = async {
                 match tokio::time::timeout(timeout_dur, hub_api.list(&ListParams::default())).await {
@@ -627,7 +765,8 @@ pub async fn fetch_argo_applications_cached(
                         return false;
                     }
                     if let Some(ns) = target_namespace {
-                        if !ns.is_empty() && app.destination_namespace != ns && app.namespace != ns {
+                        if !ns.is_empty() && app.destination_namespace != ns && app.namespace != ns
+                        {
                             return false;
                         }
                     }
@@ -671,10 +810,12 @@ pub async fn fetch_argo_application_detail(
     let ar = argo_application_resource();
     let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
 
-    let obj = api
-        .get(name)
-        .await
-        .map_err(|e| format!("Failed to get ArgoCD Application '{}/{}': {}", namespace, name, e))?;
+    let obj = api.get(name).await.map_err(|e| {
+        format!(
+            "Failed to get ArgoCD Application '{}/{}': {}",
+            namespace, name, e
+        )
+    })?;
 
     let val = serde_json::to_value(&obj).unwrap_or_default();
     Ok(ArgoApplication::from_json(&val))
@@ -868,14 +1009,20 @@ mod tests {
         assert_eq!(app.namespace, "argocd");
         assert_eq!(app.project, "core");
         assert_eq!(app.destination_name, "prod-us-east");
-        assert_eq!(app.destination_server, "https://api.prod-us-east.corp.internal:6443");
+        assert_eq!(
+            app.destination_server,
+            "https://api.prod-us-east.corp.internal:6443"
+        );
         assert_eq!(app.destination_namespace, "payments");
         assert_eq!(app.repo_url, "https://github.com/acme/infra");
         assert_eq!(app.target_revision, "main");
         assert_eq!(app.path, "apps/payments");
         assert_eq!(app.sync_status, "OutOfSync");
         assert_eq!(app.health_status, "Degraded");
-        assert_eq!(app.health_message, "Deployment/payments-api has 0 available replicas");
+        assert_eq!(
+            app.health_message,
+            "Deployment/payments-api has 0 available replicas"
+        );
         assert_eq!(app.sync_revision, "8f3b12a");
         assert_eq!(app.operation_phase, "Failed");
         assert!(app.auto_sync_enabled);
@@ -937,21 +1084,84 @@ mod tests {
         };
 
         // Match by server URL (with trailing slash differences)
-        assert!(matches_destination(&app, "any-context", None, Some("https://api.prod.example.com:6443"), None, false));
-        assert!(matches_destination(&app, "any-context", None, Some("https://api.prod.example.com:6443/"), None, false));
+        assert!(matches_destination(
+            &app,
+            "any-context",
+            None,
+            Some("https://api.prod.example.com:6443"),
+            None,
+            false
+        ));
+        assert!(matches_destination(
+            &app,
+            "any-context",
+            None,
+            Some("https://api.prod.example.com:6443/"),
+            None,
+            false
+        ));
 
         // Match by cluster name and suffix (e.g. GKE / EKS context name)
-        assert!(matches_destination(&app, "prod-cluster", None, None, None, true));
-        assert!(matches_destination(&app, "prod-cluster", None, Some("https://other-url.com"), None, true));
-        assert!(matches_destination(&app, "gke_org-prod_us-east1_prod-cluster", None, None, None, true));
-        assert!(matches_destination(&app, "arn:aws:eks:us-east-1:123456789012:cluster/prod-cluster", None, None, None, true));
+        assert!(matches_destination(
+            &app,
+            "prod-cluster",
+            None,
+            None,
+            None,
+            true
+        ));
+        assert!(matches_destination(
+            &app,
+            "prod-cluster",
+            None,
+            Some("https://other-url.com"),
+            None,
+            true
+        ));
+        assert!(matches_destination(
+            &app,
+            "gke_org-prod_us-east1_prod-cluster",
+            None,
+            None,
+            None,
+            true
+        ));
+        assert!(matches_destination(
+            &app,
+            "arn:aws:eks:us-east-1:123456789012:cluster/prod-cluster",
+            None,
+            None,
+            None,
+            true
+        ));
 
         // Match by explicit cluster name
-        assert!(matches_destination(&app, "some-generic-context", Some("prod-cluster"), None, None, false));
+        assert!(matches_destination(
+            &app,
+            "some-generic-context",
+            Some("prod-cluster"),
+            None,
+            None,
+            false
+        ));
 
         // Mismatches
-        assert!(!matches_destination(&app, "staging", None, Some("https://api.staging.example.com:6443"), None, false));
-        assert!(!matches_destination(&app, "gke_org-prod_us-east1_staging-cluster", None, None, None, true));
+        assert!(!matches_destination(
+            &app,
+            "staging",
+            None,
+            Some("https://api.staging.example.com:6443"),
+            None,
+            false
+        ));
+        assert!(!matches_destination(
+            &app,
+            "gke_org-prod_us-east1_staging-cluster",
+            None,
+            None,
+            None,
+            true
+        ));
     }
 
     #[test]
@@ -1094,18 +1304,137 @@ mod tests {
             sync_history: vec![],
         };
 
-        assert!(matches_destination(
-            &spoke_server_app,
-            "data-processing-stage-eu-dus1",
-            Some("data-processing-stage-eu-dus1"),
-            Some("https://10.200.1.1:6443"),
-            Some(&mapping),
-            false,
-        ), "App targeting active cluster via registered destination_server must match");
+        assert!(
+            matches_destination(
+                &spoke_server_app,
+                "data-processing-stage-eu-dus1",
+                Some("data-processing-stage-eu-dus1"),
+                Some("https://10.200.1.1:6443"),
+                Some(&mapping),
+                false,
+            ),
+            "App targeting active cluster via registered destination_server must match"
+        );
+    }
+
+    static CACHE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_argo_application_resource() {
+        let res = argo_application_resource();
+        assert_eq!(res.group, "argoproj.io");
+        assert_eq!(res.version, "v1alpha1");
+        assert_eq!(res.api_version, "argoproj.io/v1alpha1");
+        assert_eq!(res.kind, "Application");
+        assert_eq!(res.plural, "applications");
+    }
+
+    #[test]
+    fn test_normalize_server_url() {
+        assert_eq!(
+            normalize_server_url("https://10.0.0.1:6443/"),
+            "https://10.0.0.1:6443"
+        );
+        assert_eq!(
+            normalize_server_url("  https://KUBERNETES.default.svc/  "),
+            "https://kubernetes.default.svc"
+        );
+        assert_eq!(normalize_server_url(""), "");
+        assert_eq!(normalize_server_url("///"), "");
+    }
+
+    #[test]
+    fn test_argo_cluster_mapping_methods() {
+        let mut mapping = ArgoClusterMapping::new();
+        assert_eq!(mapping.server_for_name("cluster-a"), None);
+        assert_eq!(mapping.name_for_server("https://10.0.0.1"), None);
+
+        // Insertion ignores empty name or server
+        mapping.insert("", "https://10.0.0.1");
+        mapping.insert("cluster-b", "");
+        assert_eq!(mapping.server_for_name(""), None);
+
+        mapping.insert(" Cluster-PROD ", "https://api.prod.local:6443/ ");
+        assert_eq!(
+            mapping.server_for_name("cluster-prod"),
+            Some("https://api.prod.local:6443")
+        );
+        assert_eq!(
+            mapping.server_for_name("CLUSTER-PROD"),
+            Some("https://api.prod.local:6443")
+        );
+        assert_eq!(
+            mapping.name_for_server("https://api.prod.local:6443/"),
+            Some("cluster-prod")
+        );
+        assert_eq!(
+            mapping.name_for_server("https://api.prod.local:6443"),
+            Some("cluster-prod")
+        );
+    }
+
+    #[test]
+    fn test_argo_application_from_json_minimal_and_edge_cases() {
+        // 1. Completely empty JSON
+        let app = ArgoApplication::from_json(&serde_json::json!({}));
+        assert_eq!(app.name, "");
+        assert_eq!(app.namespace, "argocd");
+        assert_eq!(app.project, "default");
+        assert_eq!(app.target_revision, "HEAD");
+        assert_eq!(app.destination_server, "");
+        assert_eq!(app.destination_name, "");
+        assert_eq!(app.destination_namespace, "");
+        assert_eq!(app.sync_status, "");
+        assert_eq!(app.health_status, "Unknown");
+        assert!(!app.auto_sync_enabled);
+        assert!(!app.self_heal_enabled);
+        assert!(!app.prune_enabled);
+        assert!(app.resources.is_empty());
+        assert!(app.sync_history.is_empty());
+
+        // 2. Partial JSON with nulls and arrays containing missing fields
+        let partial = serde_json::json!({
+            "metadata": {
+                "name": "edge-app",
+                "namespace": null
+            },
+            "spec": {
+                "destination": null,
+                "syncPolicy": {
+                    "automated": null
+                }
+            },
+            "status": {
+                "resources": [
+                    {
+                        "name": "pod-1"
+                    },
+                    null
+                ],
+                "history": [
+                    {
+                        "id": "not-a-number",
+                        "revision": "abc"
+                    },
+                    null
+                ]
+            }
+        });
+        let app2 = ArgoApplication::from_json(&partial);
+        assert_eq!(app2.name, "edge-app");
+        assert_eq!(app2.namespace, "argocd");
+        assert_eq!(app2.resources.len(), 2);
+        assert_eq!(app2.resources[0].name, "pod-1");
+        assert_eq!(app2.resources[0].status, "Synced");
+        assert_eq!(app2.resources[0].health, "Healthy");
+        assert_eq!(app2.sync_history.len(), 2);
+        assert_eq!(app2.sync_history[0].id, 0);
+        assert_eq!(app2.sync_history[0].revision, "abc");
     }
 
     #[test]
     fn argo_applications_cache_stores_and_invalidates() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap();
         invalidate_argo_applications_cache();
         let key = ArgoAppsCacheKey {
             current_context: "spoke-cluster".to_string(),
@@ -1146,6 +1475,7 @@ mod tests {
 
     #[test]
     fn cluster_mapping_cache_stores_and_invalidates() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap();
         invalidate_argo_cluster_mapping_cache();
         let mut mapping = ArgoClusterMapping::new();
         mapping.insert("spoke-cluster", "https://10.0.0.1:6443");
@@ -1221,6 +1551,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_argo_applications_cached_returns_cache_hit_without_contacting_cluster() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap();
         invalidate_argo_applications_cache();
         let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
 
@@ -1262,6 +1593,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_argo_applications_cached_reports_connect_failure_on_cache_miss() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap();
         invalidate_argo_applications_cache();
         let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
 
@@ -1278,5 +1610,105 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("Failed to connect to cluster"));
+    }
+
+    #[tokio::test]
+    async fn fetch_argo_applications_passthrough_and_actions_connect_failures() {
+        let _lock = CACHE_TEST_MUTEX.lock().unwrap();
+        invalidate_argo_applications_cache();
+        let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
+
+        // 1. fetch_argo_applications wrapper calls cached with false
+        let err = fetch_argo_applications(&cache, "nonexistent-ctx", None, None, None, None, false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+
+        // 2. fetch_argo_application_detail reports connect error
+        let err = fetch_argo_application_detail(&cache, "nonexistent-ctx", "my-app", "argocd")
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+
+        // 3. trigger_argo_sync reports connect error
+        let err = trigger_argo_sync(&cache, "nonexistent-ctx", "my-app", "argocd", false, false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+
+        // 4. toggle_argo_auto_sync reports connect error (enable true and false)
+        let err = toggle_argo_auto_sync(&cache, "nonexistent-ctx", "my-app", "argocd", true)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+
+        let err = toggle_argo_auto_sync(&cache, "nonexistent-ctx", "my-app", "argocd", false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+
+        // 5. trigger_argo_hard_refresh reports connect error
+        let err = trigger_argo_hard_refresh(&cache, "nonexistent-ctx", "my-app", "argocd")
+            .await
+            .unwrap_err();
+        assert!(err.contains("Failed to connect to cluster"));
+    }
+
+    #[test]
+    fn matches_destination_name_delimiters_and_mapping_edges() {
+        let mut app = ArgoApplication::from_json(&serde_json::json!({}));
+        app.destination_name = "prod-cluster".to_string();
+
+        // Delimiter matching (_ / -)
+        assert!(matches_destination(
+            &app,
+            "gke_prod-cluster",
+            None,
+            None,
+            None,
+            false
+        ));
+        assert!(matches_destination(
+            &app,
+            "my-org/prod-cluster",
+            None,
+            None,
+            None,
+            false
+        ));
+        assert!(matches_destination(
+            &app,
+            "east-prod-cluster",
+            None,
+            None,
+            None,
+            false
+        ));
+
+        // Mapping with server URL matching
+        let mut mapping = ArgoClusterMapping::new();
+        mapping.insert("staging-cluster", "https://k8s.staging.example.com:6443");
+        app.destination_name = "staging-cluster".to_string();
+
+        assert!(matches_destination(
+            &app,
+            "arbitrary-ctx",
+            None,
+            Some("https://k8s.staging.example.com:6443/"),
+            Some(&mapping),
+            false,
+        ));
+
+        // App destination_server matching mapped cluster
+        app.destination_name = String::new();
+        app.destination_server = "https://k8s.staging.example.com:6443".to_string();
+        assert!(matches_destination(
+            &app,
+            "staging-cluster",
+            None,
+            None,
+            Some(&mapping),
+            false,
+        ));
     }
 }

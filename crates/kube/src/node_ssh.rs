@@ -20,14 +20,19 @@ const DEFAULT_SSH_TIMEOUT_SECS: u64 = 15;
 pub fn validate_node(node: &str) -> Result<(), CapabilityError> {
     let trimmed = node.trim();
     if trimmed.is_empty() {
-        return Err(CapabilityError::InvalidInput("Node address cannot be empty".into()));
+        return Err(CapabilityError::InvalidInput(
+            "Node address cannot be empty".into(),
+        ));
     }
     if trimmed.starts_with('-') {
         return Err(CapabilityError::InvalidInput(format!(
             "Node address '{node}' must not start with '-'"
         )));
     }
-    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':')) {
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+    {
         return Err(CapabilityError::InvalidInput(format!(
             "Node address '{node}' contains invalid characters"
         )));
@@ -39,14 +44,19 @@ pub fn validate_node(node: &str) -> Result<(), CapabilityError> {
 pub fn validate_service(service: &str) -> Result<(), CapabilityError> {
     let trimmed = service.trim();
     if trimmed.is_empty() {
-        return Err(CapabilityError::InvalidInput("Service name cannot be empty".into()));
+        return Err(CapabilityError::InvalidInput(
+            "Service name cannot be empty".into(),
+        ));
     }
     if trimmed.starts_with('-') {
         return Err(CapabilityError::InvalidInput(format!(
             "Service name '{service}' must not start with '-'"
         )));
     }
-    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@')) {
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@'))
+    {
         return Err(CapabilityError::InvalidInput(format!(
             "Service name '{service}' contains invalid characters (only alphanumeric, ., -, _, @ allowed)"
         )));
@@ -59,14 +69,19 @@ pub fn validate_user(user: Option<&str>) -> Result<(), CapabilityError> {
     if let Some(u) = user {
         let trimmed = u.trim();
         if trimmed.is_empty() {
-            return Err(CapabilityError::InvalidInput("User cannot be empty if specified".into()));
+            return Err(CapabilityError::InvalidInput(
+                "User cannot be empty if specified".into(),
+            ));
         }
         if trimmed.starts_with('-') {
             return Err(CapabilityError::InvalidInput(format!(
                 "User '{u}' must not start with '-'"
             )));
         }
-        if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')) {
+        if !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        {
             return Err(CapabilityError::InvalidInput(format!(
                 "User '{u}' contains invalid characters"
             )));
@@ -80,7 +95,9 @@ pub fn validate_identity_file(path: Option<&str>) -> Result<(), CapabilityError>
     if let Some(p) = path {
         let trimmed = p.trim();
         if trimmed.is_empty() {
-            return Err(CapabilityError::InvalidInput("Identity file path cannot be empty".into()));
+            return Err(CapabilityError::InvalidInput(
+                "Identity file path cannot be empty".into(),
+            ));
         }
         if trimmed.starts_with('-') {
             return Err(CapabilityError::InvalidInput(format!(
@@ -103,7 +120,10 @@ pub fn validate_since(since: Option<&str>) -> Result<(), CapabilityError> {
                 "Time window '{s}' must not start with '-'"
             )));
         }
-        if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | ':' | '+' | '/')) {
+        if !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | ':' | '+' | '/'))
+        {
             return Err(CapabilityError::InvalidInput(format!(
                 "Time window '{s}' contains invalid characters"
             )));
@@ -115,7 +135,14 @@ pub fn validate_since(since: Option<&str>) -> Result<(), CapabilityError> {
 /// Validate `grep` filter for journalctl.
 pub fn validate_grep(grep: Option<&str>) -> Result<(), CapabilityError> {
     if let Some(g) = grep {
-        if g.contains('\n') || g.contains('\r') || g.contains(';') || g.contains('&') || g.contains('|') || g.contains('`') || g.contains('$') {
+        if g.contains('\n')
+            || g.contains('\r')
+            || g.contains(';')
+            || g.contains('&')
+            || g.contains('|')
+            || g.contains('`')
+            || g.contains('$')
+        {
             return Err(CapabilityError::InvalidInput(
                 "Grep pattern contains disallowed shell metacharacters".into(),
             ));
@@ -137,15 +164,30 @@ pub async fn resolve_node_target(
     if let Some(ctx) = context {
         if let Ok(client) = cache.get(ctx).await {
             let node_api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(client);
-            if let Ok(Ok(node_obj)) = tokio::time::timeout(Duration::from_secs(3), node_api.get(node)).await {
-                if let Some(addresses) = node_obj.status.as_ref().and_then(|s| s.addresses.as_ref()) {
-                    if let Some(internal) = addresses.iter().find(|a| a.type_ == "InternalIP").map(|a| a.address.clone()) {
+            if let Ok(Ok(node_obj)) =
+                tokio::time::timeout(Duration::from_secs(3), node_api.get(node)).await
+            {
+                if let Some(addresses) = node_obj.status.as_ref().and_then(|s| s.addresses.as_ref())
+                {
+                    if let Some(internal) = addresses
+                        .iter()
+                        .find(|a| a.type_ == "InternalIP")
+                        .map(|a| a.address.clone())
+                    {
                         return internal;
                     }
-                    if let Some(external) = addresses.iter().find(|a| a.type_ == "ExternalIP").map(|a| a.address.clone()) {
+                    if let Some(external) = addresses
+                        .iter()
+                        .find(|a| a.type_ == "ExternalIP")
+                        .map(|a| a.address.clone())
+                    {
                         return external;
                     }
-                    if let Some(hostname) = addresses.iter().find(|a| a.type_ == "Hostname").map(|a| a.address.clone()) {
+                    if let Some(hostname) = addresses
+                        .iter()
+                        .find(|a| a.type_ == "Hostname")
+                        .map(|a| a.address.clone())
+                    {
                         return hostname;
                     }
                 }
@@ -198,13 +240,12 @@ pub async fn run_ssh_command(
     cmd.args(args);
     cmd.kill_on_drop(true);
 
-    let output = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        cmd.output(),
-    )
-    .await
-    .map_err(|_| CapabilityError::Handler(format!("SSH command timed out after {timeout_secs}s")))?
-    .map_err(|e| CapabilityError::Handler(format!("Failed to execute ssh: {e}")))?;
+    let output = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output())
+        .await
+        .map_err(|_| {
+            CapabilityError::Handler(format!("SSH command timed out after {timeout_secs}s"))
+        })?
+        .map_err(|e| CapabilityError::Handler(format!("Failed to execute ssh: {e}")))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -303,7 +344,8 @@ pub fn node_service_status_capability(cache: Arc<ClientCache>) -> Capability {
                 validate_user(input.user.as_deref())?;
                 validate_identity_file(input.identity_file.as_deref())?;
 
-                let target_host = resolve_node_target(&cache, input.context.as_deref(), &input.node).await;
+                let target_host =
+                    resolve_node_target(&cache, input.context.as_deref(), &input.node).await;
                 let remote_cmd = format!("systemctl status {} --no-pager", input.service);
                 let args = build_ssh_args(
                     &target_host,
@@ -313,7 +355,8 @@ pub fn node_service_status_capability(cache: Arc<ClientCache>) -> Capability {
                     &remote_cmd,
                 );
 
-                let (stdout, stderr, exit_code) = run_ssh_command(&args, DEFAULT_SSH_TIMEOUT_SECS).await?;
+                let (stdout, stderr, exit_code) =
+                    run_ssh_command(&args, DEFAULT_SSH_TIMEOUT_SECS).await?;
 
                 if exit_code == 255 && !stderr.is_empty() && stdout.is_empty() {
                     return Err(CapabilityError::Handler(format!(
@@ -367,7 +410,11 @@ pub fn build_journalctl_command(
     since: Option<&str>,
     grep: Option<&str>,
 ) -> String {
-    let mut cmd = format!("journalctl -u {} -n {} --no-pager", service, lines.min(2000));
+    let mut cmd = format!(
+        "journalctl -u {} -n {} --no-pager",
+        service,
+        lines.min(2000)
+    );
     if let Some(s) = since.filter(|s| !s.trim().is_empty()) {
         cmd.push_str(&format!(" --since \"{}\"", s.trim()));
     }
@@ -392,7 +439,8 @@ pub fn node_journal_logs_capability(cache: Arc<ClientCache>) -> Capability {
                 validate_since(input.since.as_deref())?;
                 validate_grep(input.grep.as_deref())?;
 
-                let target_host = resolve_node_target(&cache, input.context.as_deref(), &input.node).await;
+                let target_host =
+                    resolve_node_target(&cache, input.context.as_deref(), &input.node).await;
                 let lines = input.lines.unwrap_or(100);
                 let remote_cmd = build_journalctl_command(
                     &input.service,
@@ -409,7 +457,8 @@ pub fn node_journal_logs_capability(cache: Arc<ClientCache>) -> Capability {
                     &remote_cmd,
                 );
 
-                let (stdout, stderr, exit_code) = run_ssh_command(&args, DEFAULT_SSH_TIMEOUT_SECS).await?;
+                let (stdout, stderr, exit_code) =
+                    run_ssh_command(&args, DEFAULT_SSH_TIMEOUT_SECS).await?;
 
                 if exit_code == 255 && !stderr.is_empty() && stdout.is_empty() {
                     return Err(CapabilityError::Handler(format!(
@@ -450,7 +499,9 @@ pub struct NodeRuntimeDiagnosticsOut {
     pub output: String,
 }
 
-pub fn build_diagnostics_command(check: &str) -> Result<(&'static str, &'static str), CapabilityError> {
+pub fn build_diagnostics_command(
+    check: &str,
+) -> Result<(&'static str, &'static str), CapabilityError> {
     match check.trim().to_ascii_lowercase().as_str() {
         "containers" => Ok((
             "containers",
@@ -552,7 +603,8 @@ pub fn node_service_restart_capability(cache: Arc<ClientCache>) -> Capability {
                 validate_user(input.user.as_deref())?;
                 validate_identity_file(input.identity_file.as_deref())?;
 
-                let target_host = resolve_node_target(&cache, input.context.as_deref(), &input.node).await;
+                let target_host =
+                    resolve_node_target(&cache, input.context.as_deref(), &input.node).await;
                 let remote_cmd = format!("sudo systemctl restart {}", input.service);
 
                 let args = build_ssh_args(
@@ -574,7 +626,10 @@ pub fn node_service_restart_capability(cache: Arc<ClientCache>) -> Capability {
 
                 let success = exit_code == 0;
                 let message = if success {
-                    format!("Successfully restarted service '{}' on node '{}'", input.service, target_host)
+                    format!(
+                        "Successfully restarted service '{}' on node '{}'",
+                        input.service, target_host
+                    )
                 } else {
                     format!(
                         "Failed to restart service '{}' on node '{}' (exit code: {})",
@@ -648,9 +703,12 @@ mod tests {
         assert_eq!(
             args,
             vec![
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=10",
-                "-o", "StrictHostKeyChecking=accept-new",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
                 "10.0.0.5",
                 "uptime"
             ]
@@ -666,11 +724,16 @@ mod tests {
         assert_eq!(
             args_full,
             vec![
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=10",
-                "-o", "StrictHostKeyChecking=accept-new",
-                "-p", "2222",
-                "-i", "/tmp/key.pem",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                "2222",
+                "-i",
+                "/tmp/key.pem",
                 "root@worker-1",
                 "systemctl status kubelet"
             ]
@@ -682,12 +745,7 @@ mod tests {
         let cmd = build_journalctl_command("rke2-server", 50, None, None);
         assert_eq!(cmd, "journalctl -u rke2-server -n 50 --no-pager");
 
-        let cmd_filtered = build_journalctl_command(
-            "kubelet",
-            200,
-            Some("10m ago"),
-            Some("error"),
-        );
+        let cmd_filtered = build_journalctl_command("kubelet", 200, Some("10m ago"), Some("error"));
         assert_eq!(
             cmd_filtered,
             "journalctl -u kubelet -n 200 --no-pager --since \"10m ago\" --grep \"error\""
@@ -789,7 +847,10 @@ mod tests {
         assert_eq!(status_in.identity_file.as_deref(), Some("/path/to/key.pem"));
 
         let restart_in: NodeServiceRestartIn = serde_json::from_value(json_payload).unwrap();
-        assert_eq!(restart_in.identity_file.as_deref(), Some("/path/to/key.pem"));
+        assert_eq!(
+            restart_in.identity_file.as_deref(),
+            Some("/path/to/key.pem")
+        );
     }
 
     #[test]
@@ -835,6 +896,94 @@ mod tests {
         assert_eq!(
             resolve_node_target(&cache, None, "worker-01").await,
             "worker-01"
+        );
+    }
+
+    #[test]
+    fn parses_systemctl_status_empty_and_malformed() {
+        let parsed = parse_systemctl_status("", 1);
+        assert!(!parsed.active);
+        assert_eq!(parsed.load_state, "unknown");
+        assert_eq!(parsed.active_state, "unknown");
+        assert_eq!(parsed.sub_state, "unknown");
+        assert_eq!(parsed.exit_code, 1);
+
+        let parsed2 = parse_systemctl_status("Loaded:\nActive: unknown", 0);
+        assert!(!parsed2.active);
+        assert_eq!(parsed2.load_state, "unknown");
+        assert_eq!(parsed2.active_state, "unknown");
+        assert_eq!(parsed2.sub_state, "unknown");
+    }
+
+    #[tokio::test]
+    async fn capabilities_reject_invalid_inputs() {
+        let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
+
+        // 1. Status capability
+        let status = node_service_status_capability(cache.clone());
+        assert!(
+            (status.handler)(serde_json::json!({ "node": "-bad", "service": "rke2" }))
+                .await
+                .is_err()
+        );
+        assert!(
+            (status.handler)(serde_json::json!({ "node": "worker-1", "service": "-bad" }))
+                .await
+                .is_err()
+        );
+        assert!((status.handler)(
+            serde_json::json!({ "node": "worker-1", "service": "rke2", "user": "-bad" })
+        )
+        .await
+        .is_err());
+        assert!((status.handler)(
+            serde_json::json!({ "node": "worker-1", "service": "rke2", "identityFile": "-bad" })
+        )
+        .await
+        .is_err());
+
+        // 2. Logs capability
+        let logs = node_journal_logs_capability(cache.clone());
+        assert!(
+            (logs.handler)(serde_json::json!({ "node": "-bad", "service": "kubelet" }))
+                .await
+                .is_err()
+        );
+        assert!((logs.handler)(
+            serde_json::json!({ "node": "worker-1", "service": "kubelet", "since": "-bad" })
+        )
+        .await
+        .is_err());
+        assert!((logs.handler)(
+            serde_json::json!({ "node": "worker-1", "service": "kubelet", "grep": "`bad`" })
+        )
+        .await
+        .is_err());
+
+        // 3. Diagnostics capability
+        let diag = node_runtime_diagnostics_capability(cache.clone());
+        assert!(
+            (diag.handler)(serde_json::json!({ "node": "-bad", "check": "disk" }))
+                .await
+                .is_err()
+        );
+        assert!((diag.handler)(
+            serde_json::json!({ "node": "worker-1", "check": "invalid_check" })
+        )
+        .await
+        .is_err());
+
+        // 4. Restart capability
+        let restart = node_service_restart_capability(cache);
+        assert!(
+            (restart.handler)(serde_json::json!({ "node": "-bad", "service": "rke2" }))
+                .await
+                .is_err()
+        );
+        assert!(
+            (restart.handler)(serde_json::json!({ "node": "worker-1", "service": "-bad" }))
+                .await
+                .is_err()
         );
     }
 }

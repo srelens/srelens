@@ -65,7 +65,9 @@ impl ArgoViewState {
             self.error = None;
             return;
         }
-        let sel_target = self.selected_application().map(|a| (a.name.clone(), a.namespace.clone()));
+        let sel_target = self
+            .selected_application()
+            .map(|a| (a.name.clone(), a.namespace.clone()));
         self.applications = apps;
         self.all_applications = all_apps;
         self.is_remote_hub = is_remote_hub;
@@ -237,21 +239,31 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
     }
 
     if let Some(ref err) = state.error {
-        let msg = if err.contains("No ArgoCD deployment in this cluster") || err.contains("no argocd deployment") {
+        let msg = if err.contains("No ArgoCD deployment in this cluster")
+            || err.contains("no argocd deployment")
+        {
             format!("⚠ {}", err)
         } else {
             format!("⚠ Failed to load ArgoCD applications: {}", err)
         };
         let lines = vec![
-            Line::from(vec![
-                Span::styled(msg, Style::default().fg(Theme::red()).add_modifier(Modifier::BOLD)),
-            ]),
+            Line::from(vec![Span::styled(
+                msg,
+                Style::default()
+                    .fg(Theme::red())
+                    .add_modifier(Modifier::BOLD),
+            )]),
             Line::from(vec![
                 Span::styled(
                     "Hint: In a Hub-and-Spoke setup, press ",
                     Style::default().fg(Theme::dim()),
                 ),
-                Span::styled("<c>", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "<c>",
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     " to configure the ArgoCD Hub context or external kubeconfig in ':config'.",
                     Style::default().fg(Theme::dim()),
@@ -306,7 +318,11 @@ pub fn render_argo_view(f: &mut Frame, area: Rect, state: &ArgoViewState) {
         let (sync_text, _) = sync_status_badge(&app.sync_status);
         let (health_text, _) = health_status_badge(&app.health_status);
         let auto_sync_len = if app.auto_sync_enabled { 7 } else { 6 };
-        let last_sync_len = if app.last_sync_time.is_empty() { 1 } else { format_iso_age(&app.last_sync_time).len() };
+        let last_sync_len = if app.last_sync_time.is_empty() {
+            1
+        } else {
+            format_iso_age(&app.last_sync_time).len()
+        };
         let age_len = format_iso_age(&app.created_at).len();
 
         let dest_str = if !app.destination_name.is_empty() {
@@ -497,8 +513,14 @@ mod tests {
 
     #[test]
     fn test_repo_basename() {
-        assert_eq!(repo_basename("https://github.com/argoproj/argocd-example-apps.git"), "argocd-example-apps");
-        assert_eq!(repo_basename("git@github.com:argoproj/argocd-example-apps.git"), "argocd-example-apps");
+        assert_eq!(
+            repo_basename("https://github.com/argoproj/argocd-example-apps.git"),
+            "argocd-example-apps"
+        );
+        assert_eq!(
+            repo_basename("git@github.com:argoproj/argocd-example-apps.git"),
+            "argocd-example-apps"
+        );
         assert_eq!(repo_basename("https://gitlab.com/org/repo/"), "repo");
         assert_eq!(repo_basename("custom-repo"), "custom-repo");
         assert_eq!(repo_basename(""), "");
@@ -518,5 +540,157 @@ mod tests {
         assert_eq!(label, "- Unknown");
         let (label, _) = sync_status_badge("Failed");
         assert_eq!(label, "✖ Error");
+    }
+
+    #[test]
+    fn test_health_status_badge() {
+        let (label, _) = health_status_badge("Healthy");
+        assert_eq!(label, "● Healthy");
+        let (label, _) = health_status_badge("Progressing");
+        assert_eq!(label, "⟳ Progressing");
+        let (label, _) = health_status_badge("Degraded");
+        assert_eq!(label, "✖ Degraded");
+        let (label, _) = health_status_badge("Missing");
+        assert_eq!(label, "✖ Missing");
+        let (label, _) = health_status_badge("Suspended");
+        assert_eq!(label, "⏸ Suspended");
+        let (label, _) = health_status_badge("");
+        assert_eq!(label, "- Unknown");
+        let (label, _) = health_status_badge("Unknown");
+        assert_eq!(label, "? Unknown");
+        let (label, _) = health_status_badge("Custom");
+        assert_eq!(label, "? Unknown");
+    }
+
+    #[test]
+    fn test_format_iso_age() {
+        assert_eq!(format_iso_age(""), "-");
+        assert_eq!(format_iso_age("invalid-iso-date"), "-");
+        let now_iso = chrono::Utc::now().to_rfc3339();
+        let formatted = format_iso_age(&now_iso);
+        assert!(!formatted.is_empty() && formatted != "-");
+    }
+
+    #[test]
+    fn test_argo_view_state_navigation_and_filtering() {
+        let mut state = ArgoViewState::new();
+        assert!(state.is_loading);
+        assert_eq!(state.selected_idx, 0);
+        assert!(state.displayed_applications().is_empty());
+        assert!(state.selected_application().is_none());
+
+        let mut app1 = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": "frontend", "namespace": "argocd" },
+            "spec": { "project": "web", "destination": { "name": "prod", "namespace": "prod" } },
+            "status": { "sync": { "status": "Synced" }, "health": { "status": "Healthy" } }
+        }));
+        app1.name = "frontend".to_string();
+
+        let mut app2 = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": "backend", "namespace": "argocd" },
+            "spec": { "project": "api", "destination": { "name": "prod", "namespace": "prod" } },
+            "status": { "sync": { "status": "OutOfSync" }, "health": { "status": "Degraded" } }
+        }));
+        app2.name = "backend".to_string();
+
+        state.set_applications(
+            vec![app1.clone()],
+            vec![app1.clone(), app2.clone()],
+            true,
+            Some("hub-ctx".to_string()),
+        );
+        assert!(!state.is_loading);
+        assert_eq!(state.displayed_applications().len(), 1);
+        assert_eq!(state.selected_application().unwrap().name, "frontend");
+
+        // Toggle show all hub apps
+        state.toggle_show_all();
+        assert!(state.show_all_hub_apps);
+        assert_eq!(state.displayed_applications().len(), 2);
+
+        // Selection navigation
+        state.select_next();
+        assert_eq!(state.selected_idx, 1);
+        assert_eq!(state.selected_application().unwrap().name, "backend");
+        state.select_next(); // At end
+        assert_eq!(state.selected_idx, 1);
+        state.select_prev();
+        assert_eq!(state.selected_idx, 0);
+        state.select_prev(); // At start
+        assert_eq!(state.selected_idx, 0);
+
+        // Filter query
+        state.filter_query = "back".to_string();
+        let filtered = state.filtered_indices();
+        assert_eq!(filtered, vec![1]);
+        assert_eq!(state.selected_application().unwrap().name, "backend");
+
+        // Filter with no match
+        state.filter_query = "nonexistent-query".to_string();
+        assert!(state.filtered_indices().is_empty());
+        assert!(state.selected_application().is_none());
+
+        // Error state
+        state.set_error("Failed to connect".to_string());
+        assert_eq!(state.error.as_deref(), Some("Failed to connect"));
+        assert!(!state.is_loading);
+    }
+
+    #[test]
+    fn test_render_argo_view_states() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // 1. Loading state
+        let mut state = ArgoViewState::new();
+        terminal
+            .draw(|f| {
+                render_argo_view(f, f.area(), &state);
+            })
+            .unwrap();
+
+        // 2. Error state
+        state.set_error("Failed to connect to cluster".to_string());
+        terminal
+            .draw(|f| {
+                render_argo_view(f, f.area(), &state);
+            })
+            .unwrap();
+
+        // 3. Empty state
+        state.set_applications(vec![], vec![], false, None);
+        terminal
+            .draw(|f| {
+                render_argo_view(f, f.area(), &state);
+            })
+            .unwrap();
+
+        // 4. Populated table state with remote hub
+        let app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": "web-app", "namespace": "argocd" },
+            "spec": {
+                "project": "default",
+                "source": { "repoURL": "https://github.com/org/repo", "targetRevision": "main" },
+                "destination": { "name": "prod", "namespace": "default" }
+            },
+            "status": {
+                "sync": { "status": "Synced" },
+                "health": { "status": "Healthy" }
+            }
+        }));
+        state.set_applications(
+            vec![app.clone()],
+            vec![app],
+            true,
+            Some("hub-ctx".to_string()),
+        );
+        terminal
+            .draw(|f| {
+                render_argo_view(f, f.area(), &state);
+            })
+            .unwrap();
     }
 }

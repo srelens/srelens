@@ -207,7 +207,9 @@ pub fn render_argo_detail_view(f: &mut Frame, area: Rect, state: &ArgoDetailView
     let drift_count = state.drift_items().len();
 
     let extra_hints = match state.active_tab {
-        ArgoDetailTab::ManagedResources | ArgoDetailTab::Drift => "  <Enter/d> Describe  <y> YAML  <x> Actions / AI ",
+        ArgoDetailTab::ManagedResources | ArgoDetailTab::Drift => {
+            "  <Enter/d> Describe  <y> YAML  <x> Actions / AI "
+        }
         _ => "  <x> Actions / AI ",
     };
 
@@ -499,26 +501,69 @@ fn render_overview_tab(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::border()))
-            .title(Span::styled(" Last Synchronization Operation ", Theme::title())),
+            .title(Span::styled(
+                " Last Synchronization Operation ",
+                Theme::title(),
+            )),
     );
     f.render_widget(p3, chunks[2]);
 
     // 4. Action Levers summary
     let actions = vec![
         Line::from(vec![
-            Span::styled("<s>", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<s>",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Trigger Sync (with prune option)        "),
-            Span::styled("<p>", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
-            Span::raw(format!(" {} Auto-Sync (SRE lever)        ", if app.auto_sync_enabled { "Pause" } else { "Resume" })),
-            Span::styled("<R>", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<p>",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                " {} Auto-Sync (SRE lever)        ",
+                if app.auto_sync_enabled {
+                    "Pause"
+                } else {
+                    "Resume"
+                }
+            )),
+            Span::styled(
+                "<R>",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Hard Refresh (force Git fetch)"),
         ]),
         Line::from(vec![
-            Span::styled("<g>", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<g>",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Open Git Repository in browser          "),
-            Span::styled("<2>", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
-            Span::raw(format!(" Managed Resources ({})             ", app.resources.len())),
-            Span::styled("<3>", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<2>",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                " Managed Resources ({})             ",
+                app.resources.len()
+            )),
+            Span::styled(
+                "<3>",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(format!(" Drift Inspection ({})", state.drift_items().len())),
         ]),
     ];
@@ -527,7 +572,10 @@ fn render_overview_tab(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::border()))
-            .title(Span::styled(" Emergency SRE Incident Levers & Navigation ", Theme::title())),
+            .title(Span::styled(
+                " Emergency SRE Incident Levers & Navigation ",
+                Theme::title(),
+            )),
     );
     f.render_widget(p4, chunks[3]);
 }
@@ -822,5 +870,219 @@ mod tests {
         assert_eq!(label, "- Unknown");
         let (label, _) = sync_status_badge("Failed");
         assert_eq!(label, "✖ Error");
+    }
+
+    #[test]
+    fn test_health_status_badge() {
+        assert_eq!(health_status_badge("Healthy").0, "● Healthy");
+        assert_eq!(health_status_badge("Progressing").0, "⟳ Progressing");
+        assert_eq!(health_status_badge("Degraded").0, "✖ Degraded");
+        assert_eq!(health_status_badge("Missing").0, "✖ Missing");
+        assert_eq!(health_status_badge("Suspended").0, "⏸ Suspended");
+        assert_eq!(health_status_badge("").0, "- Unknown");
+        assert_eq!(health_status_badge("Unknown").0, "? Unknown");
+        assert_eq!(health_status_badge("Other").0, "? Unknown");
+    }
+
+    #[test]
+    fn test_argo_detail_tab_transitions_and_titles() {
+        assert_eq!(ArgoDetailTab::Overview.title(0), "1: Overview");
+        assert_eq!(
+            ArgoDetailTab::ManagedResources.title(0),
+            "2: Managed Resources"
+        );
+        assert_eq!(ArgoDetailTab::Drift.title(0), "3: Drift / Out-of-Sync (0)");
+        assert_eq!(
+            ArgoDetailTab::Drift.title(3),
+            "3: Drift / Out-of-Sync (3) ⚠"
+        );
+        assert_eq!(
+            ArgoDetailTab::RevisionHistory.title(0),
+            "4: Revision History"
+        );
+
+        assert_eq!(ArgoDetailTab::from_index(0), ArgoDetailTab::Overview);
+        assert_eq!(
+            ArgoDetailTab::from_index(1),
+            ArgoDetailTab::ManagedResources
+        );
+        assert_eq!(ArgoDetailTab::from_index(2), ArgoDetailTab::Drift);
+        assert_eq!(ArgoDetailTab::from_index(3), ArgoDetailTab::RevisionHistory);
+        assert_eq!(ArgoDetailTab::from_index(99), ArgoDetailTab::Overview);
+    }
+
+    #[test]
+    fn test_argo_detail_view_state_navigation_and_selection() {
+        let mut state = ArgoDetailViewState::new(
+            "my-app".to_string(),
+            "argocd".to_string(),
+            Some("hub".to_string()),
+        );
+        assert!(state.is_loading);
+        assert_eq!(state.active_tab, ArgoDetailTab::Overview);
+        assert!(state.drift_items().is_empty());
+        assert!(state.selected_resource().is_none());
+
+        // Tab cycling
+        state.next_tab();
+        assert_eq!(state.active_tab, ArgoDetailTab::ManagedResources);
+        state.next_tab();
+        assert_eq!(state.active_tab, ArgoDetailTab::Drift);
+        state.next_tab();
+        assert_eq!(state.active_tab, ArgoDetailTab::RevisionHistory);
+        state.next_tab();
+        assert_eq!(state.active_tab, ArgoDetailTab::Overview);
+        state.prev_tab();
+        assert_eq!(state.active_tab, ArgoDetailTab::RevisionHistory);
+        state.set_tab(ArgoDetailTab::ManagedResources);
+        assert_eq!(state.active_tab, ArgoDetailTab::ManagedResources);
+
+        // Populate application
+        let app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": "my-app", "namespace": "argocd" },
+            "spec": {
+                "project": "default",
+                "source": { "repoURL": "https://github.com/org/repo", "targetRevision": "v1.0" },
+                "destination": { "name": "spoke-1", "namespace": "default" }
+            },
+            "status": {
+                "resources": [
+                    { "group": "apps", "version": "v1", "kind": "Deployment", "namespace": "default", "name": "web", "status": "Synced", "health": { "status": "Healthy" } },
+                    { "group": "", "version": "v1", "kind": "Service", "namespace": "default", "name": "web-svc", "status": "OutOfSync", "health": { "status": "Degraded" } }
+                ],
+                "history": [
+                    { "id": 1, "revision": "rev-1", "deployedAt": "2026-03-01T00:00:00Z", "source": { "repoURL": "https://github.com/org/repo", "targetRevision": "v1.0", "path": "deploy" } },
+                    { "id": 2, "revision": "rev-2", "deployedAt": "2026-03-02T00:00:00Z", "source": { "repoURL": "https://github.com/org/repo", "targetRevision": "v2.0", "path": "deploy" } }
+                ]
+            }
+        }));
+        state.set_application(app);
+        assert!(!state.is_loading);
+
+        // Drift items: only the OutOfSync/Degraded item
+        let drift = state.drift_items();
+        assert_eq!(drift.len(), 1);
+        assert_eq!(drift[0].name, "web-svc");
+
+        // Managed resources selection
+        state.set_tab(ArgoDetailTab::ManagedResources);
+        assert_eq!(state.selected_resource().unwrap().name, "web");
+        state.select_next();
+        assert_eq!(state.selected_resource().unwrap().name, "web-svc");
+        state.select_next(); // At end
+        assert_eq!(state.selected_resource().unwrap().name, "web-svc");
+        state.select_prev();
+        assert_eq!(state.selected_resource().unwrap().name, "web");
+        state.select_prev(); // At start
+        assert_eq!(state.selected_resource().unwrap().name, "web");
+
+        // Drift selection
+        state.set_tab(ArgoDetailTab::Drift);
+        assert_eq!(state.selected_resource().unwrap().name, "web-svc");
+        state.select_next();
+        assert_eq!(state.selected_resource().unwrap().name, "web-svc");
+        state.select_prev();
+        assert_eq!(state.selected_resource().unwrap().name, "web-svc");
+
+        // Revision history selection
+        state.set_tab(ArgoDetailTab::RevisionHistory);
+        assert_eq!(state.selected_history_idx, 0);
+        state.select_next();
+        assert_eq!(state.selected_history_idx, 1);
+        state.select_next();
+        assert_eq!(state.selected_history_idx, 1);
+        state.select_prev();
+        assert_eq!(state.selected_history_idx, 0);
+
+        // Overview scroll
+        state.set_tab(ArgoDetailTab::Overview);
+        state.select_next();
+        assert_eq!(state.scroll_offset, 1);
+        state.select_prev();
+        assert_eq!(state.scroll_offset, 0);
+
+        // Error state
+        state.set_error("Application deleted".to_string());
+        assert_eq!(state.error.as_deref(), Some("Application deleted"));
+    }
+
+    #[test]
+    fn test_render_argo_detail_view_all_tabs_and_states() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // 1. Loading state
+        let mut state = ArgoDetailViewState::new("app".to_string(), "argocd".to_string(), None);
+        terminal
+            .draw(|f| {
+                render_argo_detail_view(f, f.area(), &state);
+            })
+            .unwrap();
+
+        // 2. Error state
+        state.set_error("Network timeout".to_string());
+        terminal
+            .draw(|f| {
+                render_argo_detail_view(f, f.area(), &state);
+            })
+            .unwrap();
+
+        // 3. Render all 4 populated tabs
+        let app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": { "name": "my-app", "namespace": "argocd", "creationTimestamp": "2026-03-01T00:00:00Z" },
+            "spec": {
+                "project": "core",
+                "source": { "repoURL": "https://github.com/org/repo", "targetRevision": "main", "path": "apps/web" },
+                "destination": { "name": "prod-cluster", "server": "https://10.0.0.1:6443", "namespace": "web" },
+                "syncPolicy": { "automated": { "prune": true, "selfHeal": true } }
+            },
+            "status": {
+                "sync": { "status": "OutOfSync", "revision": "abcdef1" },
+                "health": { "status": "Degraded", "message": "1 replica unavailable" },
+                "operationState": { "phase": "Failed", "message": "hook failed", "finishedAt": "2026-03-01T01:00:00Z" },
+                "resources": [
+                    { "group": "apps", "version": "v1", "kind": "Deployment", "namespace": "web", "name": "web-deployment", "status": "OutOfSync", "health": { "status": "Degraded", "message": "waiting" } }
+                ],
+                "history": [
+                    { "id": 1, "revision": "rev-1", "deployedAt": "2026-03-01T00:00:00Z", "source": { "repoURL": "https://github.com/org/repo", "targetRevision": "main", "path": "apps/web" } }
+                ]
+            }
+        }));
+        state.set_application(app);
+
+        // Tab 1: Overview
+        state.set_tab(ArgoDetailTab::Overview);
+        terminal
+            .draw(|f| {
+                render_argo_detail_view(f, f.area(), &state);
+            })
+            .unwrap();
+
+        // Tab 2: Managed Resources
+        state.set_tab(ArgoDetailTab::ManagedResources);
+        terminal
+            .draw(|f| {
+                render_argo_detail_view(f, f.area(), &state);
+            })
+            .unwrap();
+
+        // Tab 3: Drift
+        state.set_tab(ArgoDetailTab::Drift);
+        terminal
+            .draw(|f| {
+                render_argo_detail_view(f, f.area(), &state);
+            })
+            .unwrap();
+
+        // Tab 4: Revision History
+        state.set_tab(ArgoDetailTab::RevisionHistory);
+        terminal
+            .draw(|f| {
+                render_argo_detail_view(f, f.area(), &state);
+            })
+            .unwrap();
     }
 }
