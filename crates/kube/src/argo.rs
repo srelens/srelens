@@ -496,6 +496,37 @@ pub fn matches_destination(
 
     let app_dest_name = &app.destination_name;
 
+    // The explicit opt-in: match on names alone, whatever the servers say.
+    let name_fallback = || {
+        match_by_name
+            && !app_dest_name.is_empty()
+            && (name_matches(current_context, app_dest_name)
+                || current_cluster_name.is_some_and(|c| name_matches(c, app_dest_name)))
+    };
+
+    // Server identity outranks names. The app's server is its own
+    // destination.server, or what Argo's cluster secrets register for its
+    // destination.name. When that and the current server are both known and
+    // differ, this is another cluster however alike the names read — context
+    // `prod` passes `name_matches` against destination `team-prod` — and
+    // listing it would let a sync land on the wrong spoke (#615). Only the
+    // explicit `match_by_name` opt-in can still match it.
+    let app_server = if !app.destination_server.trim().is_empty() {
+        Some(app.destination_server.as_str())
+    } else if !app_dest_name.is_empty() {
+        cluster_mapping.and_then(|mapping| mapping.server_for_name(app_dest_name))
+    } else {
+        None
+    };
+    if let (Some(current), Some(app_server)) = (
+        current_server_url.filter(|s| !s.trim().is_empty()),
+        app_server,
+    ) {
+        if normalize_server_url(current) != normalize_server_url(app_server) {
+            return name_fallback();
+        }
+    }
+
     // 1. Direct match by destination_name against context or cluster name
     if !app_dest_name.is_empty() {
         if name_matches(current_context, app_dest_name) {
@@ -552,18 +583,7 @@ pub fn matches_destination(
     }
 
     // 4. Fallback match_by_name if enabled
-    if match_by_name && !app_dest_name.is_empty() {
-        if name_matches(current_context, app_dest_name) {
-            return true;
-        }
-        if let Some(c_cluster) = current_cluster_name {
-            if name_matches(c_cluster, app_dest_name) {
-                return true;
-            }
-        }
-    }
-
-    false
+    name_fallback()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1315,6 +1335,60 @@ mod tests {
             ),
             "App targeting active cluster via registered destination_server must match"
         );
+    }
+
+    #[test]
+    fn a_known_different_server_outranks_a_similar_name() {
+        // #615: context `prod` passes `name_matches` against destination
+        // `team-prod`. Once both servers are known and differ, that app belongs
+        // to another spoke and must not be listed, or synced, from this one.
+        let mut mapping = ArgoClusterMapping::new();
+        mapping.insert("prod", "https://10.0.0.1:6443");
+        mapping.insert("team-prod", "https://10.0.0.2:6443");
+        let mut by_name = ArgoApplication::from_json(&serde_json::json!({}));
+        by_name.destination_name = "team-prod".to_string();
+        let mut by_server = ArgoApplication::from_json(&serde_json::json!({}));
+        by_server.destination_server = "https://10.0.0.2:6443".to_string();
+
+        for app in [&by_name, &by_server] {
+            assert!(!matches_destination(
+                app,
+                "prod",
+                Some("prod"),
+                Some("https://10.0.0.1:6443"),
+                Some(&mapping),
+                false,
+            ));
+        }
+
+        // `match_by_name` is the explicit opt-in to names over servers.
+        assert!(matches_destination(
+            &by_name,
+            "prod",
+            None,
+            Some("https://10.0.0.1:6443"),
+            Some(&mapping),
+            true,
+        ));
+
+        // With no server known on one side, the name is the only signal there
+        // is, and fuzzy matching still applies.
+        assert!(matches_destination(
+            &by_name,
+            "prod",
+            None,
+            None,
+            Some(&mapping),
+            false
+        ));
+        assert!(matches_destination(
+            &by_name,
+            "prod",
+            None,
+            Some("https://10.0.0.1:6443"),
+            Some(&ArgoClusterMapping::new()),
+            false,
+        ));
     }
 
     static CACHE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
