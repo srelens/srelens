@@ -109,8 +109,10 @@ Deprecated or planned:
 - `hostApiVersion` in the `extensions.catalog` output is deprecated in favour of
   `hostApiVersions`. It stays, set to the newest supported version, until a new API
   line removes it.
-- `rowActions` becomes `detailLinks`
-  ([#537](https://github.com/srelens/srelens/issues/537)).
+- `rowActions` is a reserved contribution name. It was renamed to `detailLinks` before
+  extensions went live ([#537](https://github.com/srelens/srelens/issues/537)) and will
+  name declared mutations ([#549](https://github.com/srelens/srelens/issues/549)). Until
+  then a manifest that uses it is rejected as an unknown field.
 
 ## Unknown fields
 
@@ -180,7 +182,7 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   already installed is an explicit replacement after permission review. It keeps the
   app's settings and assigns a new revision.
 - **Names inside a manifest.** Capability `name`s are unique. Contribution `id`s are
-  unique across `pages`, `detailTabs` and `rowActions`. Both use `A–Z`, `a–z`, `0–9`
+  unique across `pages`, `detailTabs` and `detailLinks`. Both use `A–Z`, `a–z`, `0–9`
   and `-`, up to 64 characters. Titles are 1–120 characters with no control
   characters.
 - **Derived names.** Operations are addressed as `plugin/<id>/<name>`. App routes
@@ -202,12 +204,12 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ### 0.1.0
 
-The only supported API version. The manifest contract has not changed since it was
-introduced; the entries below are host additions that existing `^0.1` manifests
-receive without an update.
+The only supported API version. Apart from one pre-release rename (#537), the manifest
+contract has not changed since it was introduced; the other entries are host additions
+that existing `^0.1` manifests receive without an update.
 
 - **#508:** API 0.1 manifests.
-  - Contributions: `pages` (with `group`, `statusColumns`, `dashboard`), `detailTabs`, `rowActions`.
+  - Contributions: `pages` (with `group`, `statusColumns`, `dashboard`), `detailTabs`, `rowActions` (renamed `detailLinks` in #537).
   - Readers: `k8s.listCustomResource` and `k8s.listEvents`.
   - Backend-owned inventory.
 - **#511:**
@@ -242,3 +244,8 @@ receive without an update.
   - `extensions.configure` gains `rollback`, which restores a kept version with explicit grants, keeps settings and assigns a new revision.
   - Settings → Apps shows an app's manifest, grants with their annotations, source and install time; it exports settings as JSON, resets them to defaults, and rolls back.
   - The capability catalog carries a `sensitive` flag.
+- **#537:** pre-release rename.
+  - The `rowActions` contribution is now `detailLinks`, with the same shape. Each entry opens a read-only results panel from the resource detail view's **App links** menu; it was never a row menu or a cluster write.
+  - A manifest that still uses `rowActions` is rejected with `EXTENSION_UNKNOWN_FIELD`. There is no alias and API 0.1 is not bumped: a rename is breaking under [Compatibility rules](#compatibility-rules), and this one is an exception made because extensions had not gone live.
+  - `rowActions` is reserved for declared mutations ([#549](https://github.com/srelens/srelens/issues/549)).
+  - The official releases moved to `detailLinks` as Argo CD 0.2.0 and Flux 0.3.0, signed with a rotated srelens publisher key ([#560](https://github.com/srelens/srelens/issues/560)) that the host now pins. Signatures under the previous key no longer verify; nothing had been released under it, so no transition is kept.

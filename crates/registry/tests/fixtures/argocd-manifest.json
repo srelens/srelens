@@ -1,7 +1,7 @@
 {
   "id": "org.srelens.argocd",
   "name": "Argo CD",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "srelensApiVersion": "^0.1",
   "kind": "declarative",
   "permissions": [
@@ -55,7 +55,7 @@
         ]
       }
     ],
-    "rowActions": [
+    "detailLinks": [
       {
         "id": "inspect-namespace",
         "title": "Inspect Argo CD resources",

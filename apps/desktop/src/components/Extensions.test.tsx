@@ -69,7 +69,7 @@ it("renders the same namespace contribution using classic resource tabs", async 
       true,
     ),
   );
-  fireEvent.click(screen.getByText("App actions"));
+  fireEvent.click(screen.getByText("App links"));
   expect(
     screen.getByRole("button", { name: "Inspect Argo CD resources" }),
   ).toBeTruthy();

@@ -60,7 +60,7 @@ To exercise the local installer instead:
    classic design opens separate app tabs; both designs pin the cluster. Settings has
    no cluster selector or page launcher; it manages app-wide installation only.
 4. Open a Namespace's resource overview. Its **Apps** section contains the declared
-   detail view and an **App actions** menu, scoped to that namespace.
+   detail view and an **App links** menu, scoped to that namespace.
 5. Disable or remove the app to remove its contributions, or install the same ID
    again to update it. Open views refresh against the new revision. JSON settings are
    preserved across updates and restarts, and deleted on removal.

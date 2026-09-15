@@ -18,7 +18,8 @@ export interface ExtensionDetailTab extends ExtensionContributionBase {
   /** Qualified Kubernetes kinds, e.g. `argoproj.io/Application`. */
   forKinds: string[];
 }
-export interface ExtensionRowAction extends ExtensionContributionBase {
+/** Opens a read-only results panel from a resource detail view; never a cluster write. */
+export interface ExtensionDetailLink extends ExtensionContributionBase {
   /** Qualified Kubernetes kinds, e.g. `argoproj.io/Application`. */
   forKinds: string[];
 }
@@ -41,7 +42,7 @@ export interface ExtensionManifest {
   contributions: {
     pages: ExtensionPage[];
     detailTabs: ExtensionDetailTab[];
-    rowActions: ExtensionRowAction[];
+    detailLinks: ExtensionDetailLink[];
   };
 }
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */

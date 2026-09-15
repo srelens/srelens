@@ -4,13 +4,13 @@
   "plugins": [
     {
       "signatureProof": {
-        "manifest": "{\n  \"id\": \"org.srelens.argocd\",\n  \"name\": \"Argo CD\",\n  \"version\": \"0.1.0\",\n  \"srelensApiVersion\": \"^0.1\",\n  \"kind\": \"declarative\",\n  \"permissions\": [\n    \"k8s.listCustomResource\"\n  ],\n  \"capabilities\": [\n    {\n      \"name\": \"applications\",\n      \"title\": \"List Applications\",\n      \"target\": \"k8s.listCustomResource\",\n      \"arguments\": {\n        \"group\": \"argoproj.io\",\n        \"version\": \"v1alpha1\",\n        \"plural\": \"applications\",\n        \"kind\": \"Application\",\n        \"namespaced\": true,\n        \"printerColumns\": [\n          {\n            \"name\": \"Health\",\n            \"jsonPath\": \".status.health.status\",\n            \"type\": \"string\"\n          },\n          {\n            \"name\": \"Sync\",\n            \"jsonPath\": \".status.sync.status\",\n            \"type\": \"string\"\n          }\n        ]\n      },\n      \"inputs\": [\n        \"context\",\n        \"namespace\"\n      ]\n    }\n  ],\n  \"contributions\": {\n    \"pages\": [\n      {\n        \"id\": \"applications\",\n        \"title\": \"Applications\",\n        \"capability\": \"applications\"\n      }\n    ],\n    \"detailTabs\": [\n      {\n        \"id\": \"namespace-resources\",\n        \"title\": \"Argo CD\",\n        \"capability\": \"applications\",\n        \"forKinds\": [\n          \"/Namespace\"\n        ]\n      }\n    ],\n    \"rowActions\": [\n      {\n        \"id\": \"inspect-namespace\",\n        \"title\": \"Inspect Argo CD resources\",\n        \"capability\": \"applications\",\n        \"forKinds\": [\n          \"/Namespace\"\n        ]\n      }\n    ]\n  }\n}\n",
-        "signature": [81, 85, 160, 208, 71, 162, 77, 188, 243, 175, 151, 252, 61, 125, 198, 199, 23, 247, 203, 32, 137, 163, 149, 190, 124, 59, 146, 91, 144, 176, 234, 127, 56, 35, 129, 14, 229, 71, 255, 180, 216, 60, 246, 216, 136, 137, 35, 184, 25, 138, 24, 33, 86, 61, 3, 20, 41, 67, 195, 66, 20, 247, 91, 9]
+        "manifest": "{\n  \"id\": \"org.srelens.argocd\",\n  \"name\": \"Argo CD\",\n  \"version\": \"0.2.0\",\n  \"srelensApiVersion\": \"^0.1\",\n  \"kind\": \"declarative\",\n  \"permissions\": [\n    \"k8s.listCustomResource\"\n  ],\n  \"capabilities\": [\n    {\n      \"name\": \"applications\",\n      \"title\": \"List Applications\",\n      \"target\": \"k8s.listCustomResource\",\n      \"arguments\": {\n        \"group\": \"argoproj.io\",\n        \"version\": \"v1alpha1\",\n        \"plural\": \"applications\",\n        \"kind\": \"Application\",\n        \"namespaced\": true,\n        \"printerColumns\": [\n          {\n            \"name\": \"Health\",\n            \"jsonPath\": \".status.health.status\",\n            \"type\": \"string\"\n          },\n          {\n            \"name\": \"Sync\",\n            \"jsonPath\": \".status.sync.status\",\n            \"type\": \"string\"\n          }\n        ]\n      },\n      \"inputs\": [\n        \"context\",\n        \"namespace\"\n      ]\n    }\n  ],\n  \"contributions\": {\n    \"pages\": [\n      {\n        \"id\": \"applications\",\n        \"title\": \"Applications\",\n        \"capability\": \"applications\"\n      }\n    ],\n    \"detailTabs\": [\n      {\n        \"id\": \"namespace-resources\",\n        \"title\": \"Argo CD\",\n        \"capability\": \"applications\",\n        \"forKinds\": [\n          \"/Namespace\"\n        ]\n      }\n    ],\n    \"detailLinks\": [\n      {\n        \"id\": \"inspect-namespace\",\n        \"title\": \"Inspect Argo CD resources\",\n        \"capability\": \"applications\",\n        \"forKinds\": [\n          \"/Namespace\"\n        ]\n      }\n    ]\n  }\n}\n",
+        "signature": [248, 240, 99, 181, 200, 218, 19, 52, 161, 178, 228, 222, 147, 106, 71, 223, 155, 226, 209, 91, 148, 146, 246, 50, 128, 19, 224, 210, 75, 127, 7, 229, 15, 59, 243, 67, 37, 139, 206, 252, 151, 100, 186, 192, 92, 149, 209, 199, 197, 188, 93, 53, 4, 199, 123, 46, 21, 64, 202, 69, 207, 122, 236, 11]
       },
       "manifest": {
         "id": "org.srelens.argocd",
         "name": "Argo CD",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "srelensApiVersion": "^0.1",
         "kind": "declarative",
         "permissions": [
@@ -64,7 +64,7 @@
               ]
             }
           ],
-          "rowActions": [
+          "detailLinks": [
             {
               "id": "inspect-namespace",
               "title": "Inspect Argo CD resources",
@@ -91,7 +91,7 @@
         "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json",
         "id": "org.example.argocd",
         "name": "Argo CD",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "srelensApiVersion": "^0.1",
         "kind": "declarative",
         "permissions": [
@@ -145,7 +145,7 @@
               ]
             }
           ],
-          "rowActions": [
+          "detailLinks": [
             {
               "id": "inspect-namespace",
               "title": "Inspect Argo CD resources",
@@ -173,7 +173,7 @@
             "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json",
             "id": "org.example.argocd",
             "name": "Argo CD",
-            "version": "0.0.1",
+            "version": "0.1.0",
             "srelensApiVersion": "^0.1",
             "kind": "declarative",
             "permissions": [
@@ -227,7 +227,7 @@
                   ]
                 }
               ],
-              "rowActions": [
+              "detailLinks": [
                 {
                   "id": "inspect-namespace",
                   "title": "Inspect Argo CD resources",

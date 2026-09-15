@@ -8,9 +8,9 @@
       "repository": "https://github.com/srelens/extension-argocd",
       "license": "MIT",
       "release": {
-        "version": "0.1.0",
-        "manifestUrl": "https://github.com/srelens/extension-argocd/releases/download/v0.1.0/manifest.json",
-        "sha256": "88d6a282207ac41a79fbf21c659d40053bcde2c26ed813819583928bbdc909b4",
+        "version": "0.2.0",
+        "manifestUrl": "https://github.com/srelens/extension-argocd/releases/download/v0.2.0/manifest.json",
+        "sha256": "22e3578a76715a2611b557ab74c3a4002cd55ac1d1ff759668799a61076890db",
         "srelensApiVersion": "^0.1",
         "prerelease": true
       },
@@ -26,9 +26,9 @@
       "repository": "https://github.com/srelens/extension-flux",
       "license": "MIT",
       "release": {
-        "version": "0.2.0",
-        "manifestUrl": "https://github.com/srelens/extension-flux/releases/download/v0.2.0/manifest.json",
-        "sha256": "51addeddc2db1bc26ff94518147aa12c7bb493181933e698019d9c226031ccc2",
+        "version": "0.3.0",
+        "manifestUrl": "https://github.com/srelens/extension-flux/releases/download/v0.3.0/manifest.json",
+        "sha256": "777c3afa8b036ffc2976dc3803f712f366f82549434c8d51219054567b7c2085",
         "srelensApiVersion": "^0.1",
         "prerelease": true
       },

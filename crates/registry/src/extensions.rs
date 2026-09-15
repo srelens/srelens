@@ -385,10 +385,10 @@ fn validate_app(
                 .collect(),
         ),
         (
-            "rowActions",
+            "detailLinks",
             manifest
                 .contributions
-                .row_actions
+                .detail_links
                 .iter()
                 .map(|p| &p.capability)
                 .collect(),
@@ -1043,7 +1043,7 @@ mod tests {
         )
         .unwrap();
         // The update also reads events, so it asks for a second grant.
-        let mut updated: Value = serde_json::from_str(&manifest_at("0.2.0")).unwrap();
+        let mut updated: Value = serde_json::from_str(&manifest_at("0.3.0")).unwrap();
         updated["permissions"] = json!(["k8s.listCustomResource", "k8s.listEvents"]);
         updated["capabilities"].as_array_mut().unwrap().push(json!({
             "name":"events", "title":"Events", "target":"k8s.listEvents",
@@ -1057,10 +1057,10 @@ mod tests {
         .unwrap();
         let app = &state.plugins[0];
         let second = app.revision;
-        assert_eq!(app.manifest.version, "0.2.0");
+        assert_eq!(app.manifest.version, "0.3.0");
         assert_eq!(app.history.len(), 1);
         assert_eq!(app.history[0].revision, first);
-        assert_eq!(app.history[0].manifest.version, "0.1.0");
+        assert_eq!(app.history[0].manifest.version, "0.2.0");
         assert_eq!(app.history[0].grants, ["k8s.listCustomResource"]);
 
         // Rolling back grants the older manifest's permissions again, so it takes them.

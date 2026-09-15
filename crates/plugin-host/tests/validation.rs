@@ -10,7 +10,7 @@ fn manifest() -> Value {
         "capabilities":[{"name":"applications","title":"List applications", "target":"k8s.listCustomResource",
             "arguments":{"group":"argoproj.io"},"inputs":["context","namespace"]}],
         "contributions":{"pages":[{"id":"applications","title":"Applications","capability":"applications"}],
-            "detailTabs":[],"rowActions":[]}
+            "detailTabs":[],"detailLinks":[]}
     })
 }
 
@@ -53,6 +53,9 @@ fn independent_problems_are_all_reported_with_their_paths() {
     value["contributions"]["detailTabs"] = json!([{
         "id":"detail", "title":"Details", "capability":"applications", "forKinds":["Application"]
     }]);
+    value["contributions"]["detailLinks"] = json!([{
+        "id":"inspect", "title":"Inspect", "capability":"applications", "forKinds":["Application"]
+    }]);
     let errors = errors(&value);
     assert_eq!(
         problems(&errors),
@@ -65,6 +68,10 @@ fn independent_problems_are_all_reported_with_their_paths() {
             (
                 "EXTENSION_INVALID_KIND",
                 "contributions.detailTabs[0].forKinds[0]"
+            ),
+            (
+                "EXTENSION_INVALID_KIND",
+                "contributions.detailLinks[0].forKinds[0]"
             ),
         ])
     );
@@ -80,11 +87,21 @@ fn independent_problems_are_all_reported_with_their_paths() {
 
 #[test]
 fn schema_errors_name_the_field_rather_than_a_line_and_column() {
-    let cases: [(fn(&mut Value), &str, &str); 4] = [
+    let cases: [(fn(&mut Value), &str, &str); 5] = [
         (
             |value| value["contributions"]["pages"][0]["badge"] = json!("new"),
             "EXTENSION_UNKNOWN_FIELD",
             "contributions.pages[0].badge",
+        ),
+        // The pre-release name, renamed to `detailLinks` and reserved for declared mutations.
+        (
+            |value| {
+                let contributions = value["contributions"].as_object_mut().unwrap();
+                contributions.remove("detailLinks");
+                contributions.insert("rowActions".into(), json!([]));
+            },
+            "EXTENSION_UNKNOWN_FIELD",
+            "contributions.rowActions",
         ),
         (
             |value| value["capabilities"][0]["inputs"] = json!("context"),

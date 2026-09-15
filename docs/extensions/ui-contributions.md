@@ -45,10 +45,10 @@ with an explicit error notice.
 
 Failed reads keep their error and a retry; they never become zero-count summaries.
 
-## Detail tabs and row actions
+## Detail tabs and detail links
 
 A Namespace's resource overview has an **Apps** section with the app's declared detail
-views and an **App actions** menu, scoped to that namespace. `rowActions` open read
+views and an **App links** menu, scoped to that namespace. `detailLinks` open read
 panels there; they do not write to the cluster.
 
 ## Requirement checks

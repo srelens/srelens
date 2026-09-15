@@ -64,7 +64,7 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
   Contributions: {
     pages: "required",
     detailTabs: "required",
-    rowActions: "required",
+    detailLinks: "required",
   } satisfies Presence<Contributions>,
   Page: {
     id: "required",
@@ -93,12 +93,12 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     capability: "required",
     forKinds: "required",
   } satisfies Presence<Contributions["detailTabs"][number]>,
-  RowAction: {
+  DetailLink: {
     id: "required",
     title: "required",
     capability: "required",
     forKinds: "required",
-  } satisfies Presence<Contributions["rowActions"][number]>,
+  } satisfies Presence<Contributions["detailLinks"][number]>,
 };
 
 const kinds = { declarative: true } satisfies Record<ExtensionManifest["kind"], true>;
