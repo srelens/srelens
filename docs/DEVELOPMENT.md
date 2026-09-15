@@ -36,6 +36,8 @@ The first `pnpm dev` compiles the full Rust dependency tree and takes a few minu
 | `pnpm tauri icon apps/desktop/src-tauri/icons/icon.svg` | Regenerate the full app icon set from the source SVG |
 | `UPDATE_CATALOG=1 cargo test -p srelens-registry` | Regenerate the committed capability catalog after adding a capability |
 | `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema` | Regenerate the committed extension manifest schema after changing a manifest field |
+| `PROPTEST_RNG_SEED=7 PROPTEST_CASES=10000 cargo test -p srelens-registry --lib fuzzing` | Run the extension parser property tests past their fixed cases |
+| `cargo +nightly fuzz run manifest` | Fuzz an extension parser (Linux or macOS, nightly); setup in [docs/extensions/testing.md](extensions/testing.md#fuzzing) |
 
 Live-cluster suites are `#[ignore]`d and need an explicit run — see [Testing standards](#testing-standards).
 
@@ -314,6 +316,8 @@ technology, and its version.
 - **integration (kind)** — spins up a kind cluster and helm, then runs the `#[ignore]`d live-cluster suites: the full capability e2e suite (which enforces capability coverage) and the helm lifecycle suite. Without this job a new capability could land with no end-to-end case.
 
 All three must be green.
+
+A separate Fuzz workflow (`.github/workflows/fuzz.yml`) runs the extension parsers' cargo-fuzz targets on nightly: for a minute each on a pull request that touches those parsers, their fixtures or `Cargo.lock`, and for fifteen minutes each night. It is not a required check. See [docs/extensions/testing.md](extensions/testing.md#fuzzing).
 
 A separate Release workflow (`.github/workflows/release.yml`) publishes on pushes to `main` — Conventional-Commit-driven stable releases. Rolling `dev` pre-releases are **not** cut on every push: they come from a daily 18:00 UTC cron, or on demand via *Run workflow*. AUR publishing is split into `.github/workflows/aur-publish.yml` so it can also be run by hand.
 
