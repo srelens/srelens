@@ -7,3 +7,7 @@
 # Scoped to *.sh on purpose. A repository-wide rule here would renormalize a
 # working tree that is CRLF throughout.
 *.sh text eol=lf
+
+# Signed release bytes. Tests verify a published Ed25519 signature over this exact
+# file, so its line endings must never be converted on checkout.
+crates/registry/tests/fixtures/argocd-manifest.json -text

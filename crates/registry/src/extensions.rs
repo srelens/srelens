@@ -512,7 +512,7 @@ mod tests {
     fn signed_install_rechecks_and_persists_proof_without_trusting_labels() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("apps.json");
-        let source = include_str!("../../../examples/extensions/argocd.json");
+        let source = include_str!("../tests/fixtures/argocd-manifest.json");
         let signature = include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec();
         let install = |manifest: String, signature: Vec<u8>| serde_json::from_value::<Configure>(json!({
             "action": "install", "manifest": manifest,
@@ -534,13 +534,13 @@ mod tests {
     }
     /// The example manifest under an unreserved ID, as a local author would install it.
     fn manifest() -> String {
-        include_str!("../../../examples/extensions/argocd.json")
+        include_str!("../tests/fixtures/argocd-manifest.json")
             .replace("\"org.srelens.argocd\"", "\"org.example.argocd\"")
     }
     fn signed_argocd() -> Configure {
         Configure::Install {
             signature: Some(include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec()),
-            manifest: include_str!("../../../examples/extensions/argocd.json").into(),
+            manifest: include_str!("../tests/fixtures/argocd-manifest.json").into(),
             grants: vec!["k8s.listCustomResource".into()],
         }
     }
@@ -1045,7 +1045,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("extensions.json");
         let core = fake_core();
-        let official = include_str!("../../../examples/extensions/argocd.json");
+        let official = include_str!("../tests/fixtures/argocd-manifest.json");
         let unsigned = |manifest: &str| Configure::Install {
             signature: None,
             manifest: manifest.into(),

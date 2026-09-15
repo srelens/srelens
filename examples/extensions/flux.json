@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json",
   "id": "org.srelens.flux",
   "name": "Flux",
   "version": "0.2.0",

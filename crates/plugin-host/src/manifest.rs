@@ -139,6 +139,10 @@ pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
+    /// Editor metadata: the JSON Schema the manifest is written against. The host ignores
+    /// it; it is the one key allowed that is not part of the contract.
+    #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
+    pub schema_url: Option<String>,
     pub id: String,
     pub name: String,
     pub version: String,

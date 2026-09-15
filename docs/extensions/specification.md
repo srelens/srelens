@@ -116,7 +116,8 @@ Deprecated or planned:
 
 - **Manifests are strict.** An unknown field at any level is an error. Silently
   ignoring one would let an app look installed on a host that does not implement
-  what it declares.
+  what it declares. The one exception is a top-level `$schema` string naming the
+  manifest's JSON Schema, which is editor metadata that the host ignores.
 - **Catalog metadata is tolerant.** Hosts ignore catalog fields they do not
   recognize and still validate the fields they do. A breaking catalog change bumps
   the catalog's `schemaVersion` (currently `1`), which older hosts refuse.
@@ -191,3 +192,6 @@ receive without an update.
   - A manifest whose range the host does not support is rejected with the versions it needs and the host supports, before strict schema checks.
   - A manifest may use only fields available in every supported API version its range admits (`API_FIELDS`, empty while 0.1 is the only version).
   - `extensions.catalog` also reports `hostApiVersions`, the full list. `hostApiVersion` stays, set to the newest supported version, and is deprecated (see [Deprecation](#deprecation)).
+- **#531:**
+  - The manifest JSON Schema is committed at `schemas/extension-manifest.v0.1.json`, and CI fails when it drifts from the host.
+  - A manifest may name that schema in a top-level `$schema` key, which the host ignores.

@@ -5,16 +5,36 @@ fields are normative and live in [specification.md](specification.md); this page
 the field reference. Complete examples: [argocd.json](../../examples/extensions/argocd.json)
 and [flux.json](../../examples/extensions/flux.json).
 
-Generate the JSON Schema for your editor or validator with:
+## JSON Schema
+
+The schema for API 0.1 is committed at
+[`schemas/extension-manifest.v0.1.json`](../../schemas/extension-manifest.v0.1.json).
+Point your editor at it by naming it in the manifest:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json",
+  "id": "io.example.cert-manager"
+}
+```
+
+The file is generated from the host's `Manifest` type, and `cargo test` fails when the
+two differ. After changing a manifest field, regenerate it with:
 
 ```sh
-cargo run -p srelens-plugin-host --example extension_host -- --schema
+UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema
 ```
+
+The schema checks shape only. The host also enforces the rules on this page that a
+schema cannot express, such as identifier syntax, unique names and permission
+coverage, so validate with the [developer harness](testing.md#developer-harness)
+before publishing.
 
 ## Top-level fields
 
 | Field | Required | Meaning |
 |---|---|---|
+| `$schema` | No | The JSON Schema URL, for editors. The host ignores it. |
 | `id` | Yes | Reverse-domain identifier. See [Identifiers](specification.md#identifiers). |
 | `name` | Yes | Display name, 1–120 characters. |
 | `version` | Yes | The app's own SemVer version. |
