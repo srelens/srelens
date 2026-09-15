@@ -86,7 +86,10 @@ sh fuzz/seed.sh                 # start from the examples and fixtures
 cargo +nightly fuzz run manifest -- -dict=fuzz/extensions.dict -max_total_time=300
 ```
 
-`+nightly` is needed because `rust-toolchain.toml` pins the repository to stable. To
+`+nightly` is needed because `rust-toolchain.toml` pins the repository to stable. A
+prebuilt cargo-fuzz (from `cargo binstall`, as CI gets it) is a static musl binary and
+builds for musl by default, which AddressSanitizer refuses; pass
+`--target x86_64-unknown-linux-gnu` to both `fuzz build` and `fuzz run`. To
 explore past the fixed cases without the fuzzer, on any platform, give the property tests a
 seed and a count:
 

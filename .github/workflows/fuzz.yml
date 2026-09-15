@@ -47,6 +47,11 @@ jobs:
     env:
       # A minute a target on a pull request, fifteen on the daily run.
       SECONDS_PER_TARGET: ${{ github.event_name == 'pull_request' && '60' || inputs.seconds || '900' }}
+      # cargo-fuzz builds for the platform it was itself compiled for unless told otherwise.
+      # install-action gets it prebuilt through cargo-binstall, as a static musl binary, and
+      # AddressSanitizer refuses musl's statically linked libc: the first run on #606 failed
+      # before compiling anything. So both `fuzz build` and `fuzz run` name the runner's own.
+      FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pinned by SHA, so `toolchain` has to be explicit, as in ci.yml. libFuzzer's
@@ -66,7 +71,7 @@ jobs:
         with:
           workspaces: fuzz
       - name: Build the targets
-        run: cargo +nightly fuzz build
+        run: cargo +nightly fuzz build --target "$FUZZ_TARGET_TRIPLE"
       - name: Seed the corpora from the examples and fixtures
         run: sh fuzz/seed.sh
       - name: Fuzz each target
@@ -75,7 +80,7 @@ jobs:
           status=0
           for target in manifest catalog signed-manifest inventory; do
             echo "::group::$target"
-            cargo +nightly fuzz run "$target" -- \
+            cargo +nightly fuzz run --target "$FUZZ_TARGET_TRIPLE" "$target" -- \
               -dict=fuzz/extensions.dict \
               -max_total_time="$SECONDS_PER_TARGET" \
               -max_len=65536 \
