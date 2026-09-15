@@ -1143,4 +1143,79 @@ mod tests {
             assert!(guard.is_none());
         }
     }
+
+    #[test]
+    fn cluster_mapping_cache_stores_and_invalidates() {
+        invalidate_argo_cluster_mapping_cache();
+        let mut mapping = ArgoClusterMapping::new();
+        mapping.insert("spoke-cluster", "https://10.0.0.1:6443");
+
+        // Cache insert
+        if let Ok(mut guard) = CLUSTER_MAPPING_CACHE.write() {
+            let map = guard.get_or_insert_with(HashMap::new);
+            map.insert("hub-cluster".to_string(), (Instant::now(), mapping.clone()));
+        }
+
+        // Cache hit
+        {
+            let guard = CLUSTER_MAPPING_CACHE.read().unwrap();
+            let map = guard.as_ref().unwrap();
+            let (fetched_at, cached) = map.get("hub-cluster").unwrap();
+            assert_eq!(cached, &mapping);
+            assert!(fetched_at.elapsed() < Duration::from_secs(10));
+        }
+
+        // Invalidation clears cache
+        invalidate_argo_cluster_mapping_cache();
+        {
+            let guard = CLUSTER_MAPPING_CACHE.read().unwrap();
+            assert!(guard.is_none());
+        }
+    }
+
+    #[test]
+    fn extract_secret_str_reads_byte_data_then_string_data_then_none() {
+        use k8s_openapi::api::core::v1::Secret;
+        use std::collections::BTreeMap;
+
+        // Byte `data` takes priority when present and valid UTF-8.
+        let mut data = BTreeMap::new();
+        data.insert(
+            "server".to_string(),
+            k8s_openapi::ByteString(b"https://10.0.0.1:6443".to_vec()),
+        );
+        let secret = Secret {
+            data: Some(data),
+            ..Default::default()
+        };
+        assert_eq!(
+            extract_secret_str(&secret, "server"),
+            Some("https://10.0.0.1:6443".to_string())
+        );
+
+        // Falls back to `string_data` when `data` doesn't have the key.
+        let mut string_data = BTreeMap::new();
+        string_data.insert("name".to_string(), "  spoke-cluster  ".to_string());
+        let secret = Secret {
+            data: None,
+            string_data: Some(string_data),
+            ..Default::default()
+        };
+        assert_eq!(
+            extract_secret_str(&secret, "name"),
+            Some("spoke-cluster".to_string())
+        );
+
+        // Empty/whitespace-only values and missing keys yield None.
+        let secret = Secret::default();
+        assert_eq!(extract_secret_str(&secret, "server"), None);
+
+        let mut blank_string_data = BTreeMap::new();
+        blank_string_data.insert("server".to_string(), "   ".to_string());
+        let secret = Secret {
+            string_data: Some(blank_string_data),
+            ..Default::default()
+        };
+        assert_eq!(extract_secret_str(&secret, "server"), None);
+    }
 }

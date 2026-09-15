@@ -7257,6 +7257,221 @@ mod tests {
         assert!(app.modal.is_none());
         assert!(app.toast.as_ref().unwrap().0.contains("Triggering sync for 'payment-service'..."));
     }
+
+    fn render_to_string(app: &mut srelens_tui::app::App, width: u16, height: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..buffer.area.width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn test_argo_view_renders_loading_error_empty_hub_and_table_states() {
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // Loading state
+        app.active_view = ActiveView::Argo(ArgoViewState::new());
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("Loading ArgoCD applications"));
+
+        // Error banner (generic failure path)
+        if let ActiveView::Argo(ref mut s) = app.active_view {
+            s.set_error("connection refused".to_string());
+        }
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("Failed to load ArgoCD applications"));
+
+        // Empty state (no error, no apps)
+        if let ActiveView::Argo(ref mut s) = app.active_view {
+            s.error = None;
+            s.is_loading = false;
+        }
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("No ArgoCD applications found in cluster"));
+
+        // Remote hub notice: spoke-filtered view is empty but the Hub has apps
+        let hub_app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "hub-app", "namespace": "argocd"},
+            "spec": {"destination": {"name": "other-spoke"}},
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}}
+        }));
+        if let ActiveView::Argo(ref mut s) = app.active_view {
+            s.set_applications(vec![], vec![hub_app], true, Some("hub-ctx".to_string()));
+        }
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("Hub: hub-ctx"));
+        assert!(content.contains("View All Hub Apps"));
+        assert!(content.contains("Press <a> to view all Hub applications"));
+
+        // Standard populated table with a filter query narrowing the rows
+        let app1 = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "payments-api", "namespace": "prod"},
+            "spec": {"project": "core", "destination": {"name": "in-cluster"}},
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}}
+        }));
+        let app2 = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "billing-api", "namespace": "prod"},
+            "spec": {"project": "core", "destination": {"name": "in-cluster"}},
+            "status": {"sync": {"status": "OutOfSync"}, "health": {"status": "Degraded"}}
+        }));
+        if let ActiveView::Argo(ref mut s) = app.active_view {
+            s.is_remote_hub = false;
+            s.set_applications(vec![app1, app2], vec![], false, None);
+            s.filter_query = "payments".to_string();
+        }
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("payments-api"));
+        assert!(!content.contains("billing-api"));
+    }
+
+    #[tokio::test]
+    async fn test_argo_detail_view_renders_all_tabs() {
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::views::argo_detail_view::{ArgoDetailTab, ArgoDetailViewState};
+        use srelens_kube::argo::ArgoApplication;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        let argo_app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "payments-api", "namespace": "prod", "creationTimestamp": "2026-01-01T00:00:00Z"},
+            "spec": {
+                "project": "core",
+                "source": {"repoURL": "https://github.com/example/repo.git", "targetRevision": "main", "path": "k8s/payments"},
+                "destination": {"name": "in-cluster", "namespace": "prod"},
+                "syncPolicy": {"automated": {"selfHeal": true, "prune": false}}
+            },
+            "status": {
+                "sync": {"status": "OutOfSync", "revision": "abc123"},
+                "health": {"status": "Degraded", "message": "replica unavailable"},
+                "operationState": {"phase": "Failed", "message": "sync error", "finishedAt": "2026-01-02T00:00:00Z"},
+                "resources": [
+                    {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "prod", "name": "payments-api",
+                     "status": "OutOfSync", "health": {"status": "Degraded", "message": "1/2 ready"}}
+                ],
+                "history": [
+                    {"id": 1, "revision": "abc123", "deployedAt": "2026-01-02T00:00:00Z",
+                     "source": {"repoURL": "https://github.com/example/repo.git", "path": "k8s/payments"}}
+                ]
+            }
+        }));
+
+        for tab in [
+            ArgoDetailTab::Overview,
+            ArgoDetailTab::ManagedResources,
+            ArgoDetailTab::Drift,
+            ArgoDetailTab::RevisionHistory,
+        ] {
+            let mut detail = ArgoDetailViewState::new("payments-api".to_string(), "prod".to_string(), None);
+            detail.set_application(argo_app.clone());
+            detail.set_tab(tab);
+            app.active_view = ActiveView::ArgoDetail(detail);
+
+            let content = render_to_string(&mut app, 160, 40);
+            match tab {
+                ArgoDetailTab::Overview => {
+                    assert!(content.contains("Status & Policies"));
+                    assert!(content.contains("payments-api"));
+                }
+                ArgoDetailTab::ManagedResources => assert!(content.contains("Deployment")),
+                ArgoDetailTab::Drift => assert!(content.contains("Drift / Out-of-Sync")),
+                ArgoDetailTab::RevisionHistory => assert!(content.contains("abc123")),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_argo_sync_and_toggle_auto_confirm_modals_render() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::dialogs::Modal;
+        use srelens_tui::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        let argo_app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "payments-api", "namespace": "prod"},
+            "spec": {"project": "core", "destination": {"name": "in-cluster"}},
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}}
+        }));
+
+        let mut state = ArgoViewState::new();
+        state.set_applications(vec![argo_app], vec![], false, None);
+        app.active_view = ActiveView::Argo(state);
+
+        // 's' opens a sync confirmation
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        match &app.modal {
+            Some(Modal::Confirm { action_name, is_destructive, .. }) => {
+                assert!(action_name.starts_with("argo_sync:"));
+                assert!(!is_destructive);
+            }
+            other => panic!("expected argo_sync Modal::Confirm, got {other:?}"),
+        }
+
+        // The prompt line embeds the full action_name (including the JSON
+        // payload), which is wider than the modal, so only its start is
+        // visible once ratatui clips/centers the line.
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("Sync ArgoCD Application"));
+        assert!(content.contains("[Enter/y]"));
+
+        app.modal = None;
+
+        // 'p' opens an auto-sync toggle confirmation
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)).await;
+        match &app.modal {
+            Some(Modal::Confirm { action_name, .. }) => {
+                assert!(action_name.starts_with("argo_toggle_auto:"));
+            }
+            other => panic!("expected argo_toggle_auto Modal::Confirm, got {other:?}"),
+        }
+
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("Auto-Sync"));
+        assert!(content.contains("[Enter/y]"));
+    }
 }
 
 
