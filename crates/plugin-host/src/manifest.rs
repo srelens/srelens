@@ -8,6 +8,45 @@ use std::collections::BTreeSet;
 /// is specified in docs/extensions/specification.md.
 pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.1.0"];
 
+/// The `format` values JSON Schema draft-07 defines.
+const STANDARD_FORMATS: &[&str] = &[
+    "date-time",
+    "date",
+    "time",
+    "email",
+    "idn-email",
+    "hostname",
+    "idn-hostname",
+    "ipv4",
+    "ipv6",
+    "uri",
+    "uri-reference",
+    "iri",
+    "iri-reference",
+    "uri-template",
+    "json-pointer",
+    "relative-json-pointer",
+    "regex",
+];
+
+fn strip_nonstandard_formats(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            // A string `format` is the keyword; a property named `format` is an object.
+            if map
+                .get("format")
+                .and_then(Value::as_str)
+                .is_some_and(|format| !STANDARD_FORMATS.contains(&format))
+            {
+                map.remove("format");
+            }
+            map.values_mut().for_each(strip_nonstandard_formats);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_nonstandard_formats),
+        _ => {}
+    }
+}
+
 /// The highest version in `supported` that `range` matches.
 pub fn negotiate_api_version_in(
     range: &semver::VersionReq,
@@ -307,8 +346,14 @@ impl Manifest {
         Ok(manifest)
     }
 
+    /// The published JSON Schema. schemars annotates Rust integers with formats such as
+    /// `uint`, which JSON Schema does not define and strict validators reject; the
+    /// `minimum` it emits beside them already carries the constraint.
     pub fn schema() -> Value {
-        serde_json::to_value(schemars::schema_for!(Self)).expect("manifest schema serializes")
+        let mut schema =
+            serde_json::to_value(schemars::schema_for!(Self)).expect("manifest schema serializes");
+        strip_nonstandard_formats(&mut schema);
+        schema
     }
 
     /// Rejects a field the manifest uses that is missing from any version in `supported`

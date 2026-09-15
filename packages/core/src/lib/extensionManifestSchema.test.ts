@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Ajv from "ajv";
@@ -12,11 +12,19 @@ const repoFile = (path: string) => readFileSync(resolve(repoRoot, path), "utf8")
 const SCHEMA_URL =
   "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json";
 const schema = JSON.parse(repoFile("schemas/extension-manifest.v0.1.json"));
-const examples = ["examples/extensions/argocd.json", "examples/extensions/flux.json"];
+// Every example, so a new one cannot skip validation.
+const examples = readdirSync(resolve(repoRoot, "examples/extensions"))
+  .filter((name) => name.endsWith(".json"))
+  .map((name) => `examples/extensions/${name}`);
 
 describe("committed extension manifest schema", () => {
-  // schemars emits Rust integer formats such as "uint"; they are not JSON Schema formats.
-  const validate = new Ajv({ allErrors: true, strict: false, validateFormats: false }).compile(schema);
+  // Ajv's default options, as an author's validator would use: strict mode rejects
+  // formats JSON Schema does not define.
+  const validate = new Ajv({ allErrors: true }).compile(schema);
+
+  it("finds the examples", () => {
+    expect(examples.length).toBeGreaterThan(0);
+  });
 
   it.each(examples)("accepts %s and is named by it", (path) => {
     const manifest = JSON.parse(repoFile(path));

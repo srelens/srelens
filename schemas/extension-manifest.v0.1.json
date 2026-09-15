@@ -219,7 +219,6 @@
       "additionalProperties": false,
       "properties": {
         "progressing": {
-          "format": "uint",
           "minimum": 0.0,
           "type": [
             "integer",
@@ -227,12 +226,10 @@
           ]
         },
         "ready": {
-          "format": "uint",
           "minimum": 0.0,
           "type": "integer"
         },
         "suspended": {
-          "format": "uint",
           "minimum": 0.0,
           "type": [
             "integer",
