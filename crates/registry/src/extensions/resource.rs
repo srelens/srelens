@@ -26,7 +26,7 @@ async fn resolve(
     cache: Arc<srelens_kube::client_cache::ClientCache>,
     selection: Selection,
 ) -> Result<ResourceIn, CapabilityError> {
-    let context_id = context_id(&cache, &selection.context).await;
+    let resolved = request_context(&cache, &selection.context).await;
     let state = tokio::task::spawn_blocking(move || read(&path))
         .await
         .map_err(|e| CapabilityError::Handler(e.to_string()))?
@@ -40,7 +40,7 @@ async fn resolve(
                 "App was disabled, removed or updated; refresh the view".into(),
             )
         })?;
-    plugin.check_scope(&context_id)?;
+    plugin.check_scope(&resolved)?;
     validate_app(&plugin.manifest, &plugin.grants, core)
         .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
     let binding = plugin
@@ -58,8 +58,10 @@ async fn resolve(
             .to_owned()
     };
     let resource = ResourceIn {
-        // The context scope was checked as (see `context_id`).
-        context: context_id.unwrap_or(selection.context),
+        // The pinned ID of the context scope was checked as (see `request_context`).
+        context: resolved
+            .map(|context| context.pinned_id())
+            .unwrap_or(selection.context),
         namespace: selection.namespace,
         name: selection.name,
         group: field("group"),

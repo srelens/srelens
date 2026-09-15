@@ -52,11 +52,18 @@ impl ResolvedContext {
     /// user never touched can be renamed by adding an unrelated file — taking
     /// every per-context setting keyed by that name with it (#265). The
     /// declaring file plus the name inside that file does not move.
-    ///
-    /// The file is always given as an absolute path, even when the kubeconfig was
-    /// added by a relative one, so an ID is always recognisable as one (see
-    /// `find_context`) and does not depend on the working directory.
     pub fn stable_id(&self) -> String {
+        format!("{}#{}", self.source.display(), self.original_name)
+    }
+
+    /// [`stable_id`](Self::stable_id) with the kubeconfig path made absolute: the form a
+    /// caller that has already checked this context passes on, so a later lookup reaches
+    /// this context and nothing else.
+    ///
+    /// Always absolute, so [`resolve_context`] never takes it for a context name, even when
+    /// the kubeconfig was added by a relative path. Never persisted: settings keep
+    /// `stable_id`, which must not change for relative paths.
+    pub fn pinned_id(&self) -> String {
         let source = std::path::absolute(&self.source).unwrap_or_else(|_| self.source.clone());
         format!("{}#{}", source.display(), self.original_name)
     }
@@ -305,11 +312,11 @@ fn resolve_contexts_with(
     resolve_from(&configs)
 }
 
-/// Find a resolved context by [stable ID](ResolvedContext::stable_id) or display name,
-/// falling back to a raw original name (for MCP/tests that pass the kubeconfig's own
-/// context name directly).
+/// Find a resolved context by [stable ID](ResolvedContext::stable_id),
+/// [pinned ID](ResolvedContext::pinned_id) or display name, falling back to a raw original
+/// name (for MCP/tests that pass the kubeconfig's own context name directly).
 ///
-/// A caller that has checked a context passes its stable ID on, so the lookup reaches the
+/// A caller that has checked a context passes its pinned ID on, so the lookup reaches the
 /// context that was checked: a display name can pass to another cluster when kubeconfig
 /// files change in between (#265).
 pub fn resolve_context(paths: &[PathBuf], name: &str) -> Option<ResolvedContext> {
@@ -317,11 +324,14 @@ pub fn resolve_context(paths: &[PathBuf], name: &str) -> Option<ResolvedContext>
 }
 
 fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedContext> {
-    if let Some(pinned) = all.iter().find(|context| context.stable_id() == name) {
+    if let Some(pinned) = all
+        .iter()
+        .find(|context| context.stable_id() == name || context.pinned_id() == name)
+    {
         return Some(pinned.clone());
     }
-    // A context can be named anything, including another context's stable ID. A name shaped
-    // like one (an absolute kubeconfig path, `#`, a context name) is taken as an ID, so once
+    // A context can be named anything, including another context's ID. A name shaped like a
+    // pinned ID (an absolute kubeconfig path, `#`, a context name) is taken as one, so once
     // its context is gone it reaches nothing rather than whichever context carries that name.
     if name.contains('#') && Path::new(name).is_absolute() {
         return None;
@@ -700,6 +710,33 @@ mod tests {
             "https://prod:6443"
         );
         assert!(find_context(&listed[..1], &id).is_none());
+    }
+
+    #[test]
+    fn a_relative_kubeconfig_keeps_its_stable_id_and_pins_by_an_absolute_one() {
+        // Settings persist the stable ID, so a relative kubeconfig path must stay in it.
+        let listed = resolve_from(&[cfg("kube/prod.yaml", PROD)]);
+        assert_eq!(listed[0].stable_id(), "kube/prod.yaml#default");
+        let pinned = listed[0].pinned_id();
+        assert!(Path::new(&pinned).is_absolute(), "{pinned}");
+        assert_eq!(
+            find_context(&listed, &pinned).unwrap().server,
+            "https://prod:6443"
+        );
+
+        // A context literally named after the pinned ID never takes it.
+        let impostor = cfg(
+            "/kube/impostor.yaml",
+            &format!(
+                "clusters:\n  - name: c\n    cluster: {{ server: https://impostor }}\ncontexts:\n  - name: '{pinned}'\n    context: {{ cluster: c, user: u }}\n"
+            ),
+        );
+        let with_impostor = resolve_from(&[impostor, cfg("kube/prod.yaml", PROD)]);
+        assert_eq!(
+            find_context(&with_impostor, &pinned).unwrap().server,
+            "https://prod:6443"
+        );
+        assert!(find_context(&with_impostor[..1], &pinned).is_none());
     }
 
     #[test]
