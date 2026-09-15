@@ -191,7 +191,8 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   U+202A–U+202E, U+2066–U+2069), zero-width spaces and joiners (U+200B–U+200D, U+2060),
   the byte order mark (U+FEFF), the soft hyphen (U+00AD) and tags. Letters, marks and
   symbols in any script are allowed, but an emoji sequence joined with U+200D is not.
-  A catalog entry's `name` and `description` refuse the same format characters.
+  A catalog entry's `name` and `description` are held to the same rule, and refuse both
+  control and format characters.
 - **Derived names.** Operations are addressed as `plugin/<id>/<name>`. App routes
   carry the cluster, app ID, page and, where relevant, namespace and resource name.
 - **Kinds.** `forKinds` entries are group-qualified: `argoproj.io/Application`, and
@@ -259,7 +260,8 @@ update.
   - The official releases moved to `detailLinks` as Argo CD 0.2.0 and Flux 0.3.0, signed with a rotated srelens publisher key ([#560](https://github.com/srelens/srelens/issues/560)) that the host now pins. Signatures under the previous key no longer verify; nothing had been released under it, so no transition is kept.
 - **#603:** security fix.
   - The app `name`, every `title` and a page `group` refuse Unicode format characters (category Cf), such as right-to-left overrides and zero-width spaces, with `EXTENSION_INVALID_VALUE` at the field's path. See [Identifiers](#identifiers).
-  - A catalog entry whose `name` or `description` holds one is refused, and the catalog with it, as for any other invalid entry.
+  - A catalog entry whose `name` or `description` holds a control or format character is refused, and the catalog with it, as for any other invalid entry.
+  - The install review shows a manifest's own name only once the host has accepted it; until then, and for one it refuses, it says "This manifest".
   - This narrows accepted values within API 0.1, which [Compatibility rules](#compatibility-rules) classify as breaking. The exception is made because such a label can display as a different app's name. An installed app whose label holds one fails re-verification and is quarantined.
 - **#604:** security fix, in catalog validation rather than the manifest contract.
   - A catalog entry's `repository` is matched against the trusted-publisher table case-insensitively, as GitHub resolves owner and repository names. An entry whose repository is `https://github.com/SRELENS/…` must carry the srelens signature, exactly as the lowercase form must.

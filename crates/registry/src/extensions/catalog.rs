@@ -165,13 +165,15 @@ pub(super) fn parse_catalog(raw: &[u8]) -> Result<Catalog, String> {
             return Err("Missing catalog metadata".into());
         }
         // A format character, such as a right-to-left override, can make one app's name
-        // display as another's.
+        // display as another's, and a control character can hide or reshape the rest of
+        // the line. The catalog's name and description are rendered as a manifest label
+        // is, so they are held to the same rule (`label` in srelens-plugin-host).
         if [&entry.name, &entry.description]
             .iter()
-            .any(|s| s.chars().any(is_format_character))
+            .any(|s| s.chars().any(|c| c.is_control() || is_format_character(c)))
         {
             return Err(format!(
-                "Catalog app {} has a bidirectional or invisible format character in its name or description",
+                "Catalog app {} has a control or invisible formatting character in its name or description",
                 entry.id
             ));
         }
@@ -664,6 +666,11 @@ mod tests {
                 "GitOps \u{2066}dashboards\u{2069}",
             ),
             ("/extensions/1/description", "\u{FEFF}Flux"),
+            // Control characters are refused too: catalog text is rendered as a name and a
+            // description, exactly as a manifest label is.
+            ("/extensions/0/name", "Argo CD\u{0008}\u{0008}X"),
+            ("/extensions/1/name", "Flux\u{007F}"),
+            ("/extensions/0/description", "GitOps\nresources"),
         ] {
             let mut value = base.clone();
             *value.pointer_mut(pointer).unwrap() = json!(text);

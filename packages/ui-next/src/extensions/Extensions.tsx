@@ -129,7 +129,11 @@ export function ExtensionManager() {
         {review && (
           <section className="extension-install extension-permission-review" aria-label="Review app permissions">
             <p>
-              <strong>{review.name}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) requests:{" "}
+              {/* The name is the manifest's own text, and a manifest that has not passed
+                  the host's checks may hold one that displays as another app's, or that
+                  reorders this line. Until the host accepts it, the review says
+                  "This manifest" instead. */}
+              <strong>{review.errors?.length === 0 ? review.name : "This manifest"}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) requests:{" "}
               {review.permissions.join(", ") || "no permissions"}. Installing an existing ID
               replaces its manifest and refreshes its open pages.
             </p>
