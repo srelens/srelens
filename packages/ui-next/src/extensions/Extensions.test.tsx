@@ -177,6 +177,49 @@ it("lists every manifest problem with its path and does not offer to install", a
   expect(screen.queryByText("Install and grant permissions")).toBeNull();
   expect(configureExtensions).not.toHaveBeenCalled();
 });
+it("does not show a pasted manifest's name until the host has accepted it", async () => {
+  // A right-to-left override reorders the review line it is rendered into, so the name
+  // is untrusted text until the host, which refuses such names, has checked it.
+  const spoofed = { ...plugin.manifest, name: "‮Argo CD" };
+  const source = JSON.stringify(spoofed);
+  let finish!: (report: { errors: { code: string; path: string; message: string }[] }) => void;
+  vi.mocked(validateExtension).mockImplementationOnce(
+    () => new Promise((resolve) => { finish = resolve; }),
+  );
+  render(<ExtensionManager />);
+  fireEvent.change(
+    await screen.findByLabelText("Local app manifest (JSON)"),
+    { target: { value: source } },
+  );
+  fireEvent.click(screen.getByText("Review manifest"));
+  const review = await screen.findByLabelText("Review app permissions");
+  // While the check is still running.
+  expect(review.textContent).not.toContain("‮");
+  expect(review.textContent).toContain("This manifest");
+  await act(async () => {
+    finish({
+      errors: [
+        { code: "EXTENSION_INVALID_VALUE", path: "name", message: "Must be 1–120 characters" },
+      ],
+    });
+  });
+  // And once it comes back refusing the name.
+  await screen.findByRole("list", { name: "Manifest problems" });
+  expect(review.textContent).not.toContain("‮");
+  expect(review.textContent).toContain("This manifest");
+});
+it("shows the name of a manifest the host accepted", async () => {
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  render(<ExtensionManager />);
+  fireEvent.change(
+    await screen.findByLabelText("Local app manifest (JSON)"),
+    { target: { value: JSON.stringify(plugin.manifest) } },
+  );
+  fireEvent.click(screen.getByText("Review manifest"));
+  await screen.findByText("Install and grant permissions");
+  const review = screen.getByLabelText("Review app permissions");
+  expect(within(review).getByText("GitOps")).toBeTruthy();
+});
 it("says the manifest check failed, offers a retry and does not offer to install", async () => {
   vi.mocked(validateExtension).mockRejectedValueOnce(new Error("bridge timed out"));
   render(<ExtensionManager />);
