@@ -179,12 +179,25 @@ export function loadKubeconfigFiles(): string[] {
   }
 }
 
+/**
+ * Dispatched on `window` when the additional kubeconfig files change, as a `CustomEvent`
+ * whose `detail` is the list now in use, for stores that list contexts on their own.
+ *
+ * The list travels with the event because the caller keeps using it whether or not
+ * storage took the save: a listener that re-read storage after a refused save would
+ * list with the old files and lose the cluster the caller just added.
+ */
+export const KUBECONFIG_FILES_CHANGED = "srelens:kubeconfig-files-changed";
+
 export function saveKubeconfigFiles(paths: string[]): void {
+  const files = [...new Set(paths)];
   try {
-    settingsStorage.setItem(KUBECONFIG_FILES_KEY, JSON.stringify([...new Set(paths)]));
+    settingsStorage.setItem(KUBECONFIG_FILES_KEY, JSON.stringify(files));
   } catch {
     // ignore unavailable/quota-exceeded storage
   }
+  if (typeof window !== "undefined")
+    window.dispatchEvent(new CustomEvent<string[]>(KUBECONFIG_FILES_CHANGED, { detail: files }));
 }
 
 const HIDDEN_COLUMNS_KEY = "srelens.hiddenColumns";
