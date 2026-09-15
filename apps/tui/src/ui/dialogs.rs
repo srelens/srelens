@@ -30,6 +30,11 @@ pub enum Modal {
         current_replicas: i32,
         input: String,
     },
+    NodeSsh {
+        node_name: String,
+        destination_input: String,
+        cursor_pos: usize,
+    },
     PortForward {
         pod_name: String,
         namespace: String,
@@ -88,9 +93,15 @@ pub enum QuickActionId {
     PlaybookRollout,
     PlaybookEndpoints,
     PlaybookNodePressure,
+    PlaybookArgoProgressing,
+    ArgoDetails,
+    ArgoSync,
+    ArgoRefresh,
+    ArgoOpenGit,
     RelationshipTree,
     ViewLogs,
     OpenShell,
+    NodeSsh,
     PortForward,
     StopPortForward,
     Describe,
@@ -262,6 +273,59 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let hints = Paragraph::new(Line::from(vec![
                 Span::styled("[Enter]", Theme::key_hint_key()),
                 Span::styled(" Apply  ", Theme::key_hint_desc()),
+                Span::styled("[Esc]", Theme::key_hint_key()),
+                Span::styled(" Cancel", Theme::key_hint_desc()),
+            ])).alignment(Alignment::Center);
+            f.render_widget(hints, chunks[2]);
+        }
+        Modal::NodeSsh { node_name, destination_input, cursor_pos } => {
+            let modal_area = centered_rect(55, 30, area);
+            f.render_widget(Clear, modal_area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(Theme::border_type())
+                .border_style(Style::default().fg(Theme::ACCENT))
+                .title(format!(" 🔑 SSH into Node: {} ", node_name));
+
+            let inner = block.inner(modal_area);
+            f.render_widget(block, modal_area);
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                    Constraint::Length(2),
+                ])
+                .split(inner);
+
+            let info = Paragraph::new("Direct SSH to host OS (works when kubelet is down)")
+                .style(Style::default().fg(Theme::DIM))
+                .alignment(Alignment::Center);
+            f.render_widget(info, chunks[0]);
+
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(Theme::border_type())
+                .border_style(Style::default().fg(Theme::CYAN))
+                .title(" Destination (IP, hostname, or user@host) ");
+
+            let chars: Vec<char> = destination_input.chars().collect();
+            let pos = (*cursor_pos).min(chars.len());
+            let before: String = chars[..pos].iter().collect();
+            let after: String = chars[pos..].iter().collect();
+            let display_text = format!("{}█{}", before, after);
+
+            let input_widget = Paragraph::new(display_text)
+                .style(Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD))
+                .alignment(Alignment::Center)
+                .block(input_block);
+            f.render_widget(input_widget, chunks[1]);
+
+            let hints = Paragraph::new(Line::from(vec![
+                Span::styled("[Enter]", Theme::key_hint_key()),
+                Span::styled(" Connect  ", Theme::key_hint_desc()),
                 Span::styled("[Esc]", Theme::key_hint_key()),
                 Span::styled(" Cancel", Theme::key_hint_desc()),
             ])).alignment(Alignment::Center);
@@ -759,7 +823,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
 pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: bool) {
     let modal_width = (area.width.saturating_sub(4)).clamp(48, 94).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(14, 21).min(area.height);
+    let modal_height = (area.height.saturating_sub(2)).clamp(16, 24).min(area.height);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
@@ -782,7 +846,7 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2), // Top description
-            Constraint::Min(7),   // Features list
+            Constraint::Min(10),  // Features list
             Constraint::Length(3), // Checkbox and key hints
         ])
         .split(inner);
@@ -797,7 +861,7 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
         ]),
         Line::from(vec![
             Span::styled(
-                "Key built-in features you should know (press [1-7] to jump directly, or type ':' for command prompt):",
+                "Key built-in features you should know (press [0-9] to jump directly, or type ':' for command prompt):",
                 Style::default().fg(Theme::dim()),
             ),
         ]),
@@ -810,9 +874,12 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
         ("[2]", ":overview",    "[Cluster]",       "Cluster overview, health summary & node/pod capacity",          ":overview"),
         ("[3]", ":gpuinfo",     "[Hardware]",      "GPU hardware inspector, specs & per-pod VRAM allocations",     ":gpuinfo"),
         ("[4]", ":workloads",   "[Workload]",      "Unified workloads view (Pods, Deployments, STS, DS, Jobs)",     ":workloads [ns]"),
-        ("[5]", ":ai",          "[AI Assistant]",  "Interactive AI troubleshooting chat for automated RCA",         ":ai"),
-        ("[6]", ":ai-settings", "[AI Config]",     "Configure AI providers (Claude, OpenAI, Gemini), models & keys", ":ai-settings"),
-        ("[7]", ":config",      "[Lens Settings]", "Lens settings: popup width, visible rows, text scale & banner",  ":config"),
+        ("[5]", ":argo",        "[GitOps]",        "ArgoCD applications, sync status, drift & GitOps control",      ":argo [ns]"),
+        ("[6]", ":ai",          "[AI Assistant]",  "Interactive AI troubleshooting chat for automated RCA",         ":ai"),
+        ("[7]", ":ai-settings", "[AI Config]",     "Configure AI providers (Claude, OpenAI, Gemini), models & keys", ":ai-settings"),
+        ("[8]", ":config",      "[Lens Settings]", "Lens settings: popup width, visible rows, text scale & banner",  ":config"),
+        ("[9]", ":banner",      "[Guide]",         "Re-display this feature highlights banner & startup guide",     ":banner"),
+        ("[0]", ":nodes",       "[Node SSH]",      "Direct SSH to host OS for node recovery (<S> on node)",         ":nodes -> <S>"),
     ];
 
     let inner_w = chunks[1].width as usize;
@@ -868,7 +935,7 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
             Span::styled(", or ", Style::default().fg(Theme::dim())),
             Span::styled("q", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
             Span::styled(" to dismiss  |  Press ", Style::default().fg(Theme::dim())),
-            Span::styled("1-7", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled("0-9", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
             Span::styled(" to jump directly  |  ", Style::default().fg(Theme::dim())),
             Span::styled(":banner", Style::default().fg(Theme::accent())),
             Span::styled(" to reopen anytime", Style::default().fg(Theme::dim())),

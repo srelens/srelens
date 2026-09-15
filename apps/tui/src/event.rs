@@ -50,6 +50,22 @@ pub enum AppEvent {
         revision: Option<i64>,
         result: Result<srelens_kube::helm::HelmReleaseDetail, String>,
     },
+    ArgoApplicationsResult {
+        context: String,
+        is_remote_hub: bool,
+        hub_context: Option<String>,
+        result: Result<srelens_kube::argo::ArgoApplicationsFetchResult, String>,
+    },
+    ArgoDetailResult {
+        context: String,
+        namespace: String,
+        name: String,
+        result: Result<srelens_kube::argo::ArgoApplication, String>,
+    },
+    ArgoActionResult {
+        action: String,
+        result: Result<String, String>,
+    },
 }
 
 pub struct EventHandler {

@@ -3456,3 +3456,168 @@ async fn the_overview_falls_back_to_header_counts_without_cached_data() {
     assert_eq!(ov.data.context_name, "test-cluster");
     assert!(!ov.data.is_reachable);
 }
+
+#[tokio::test]
+async fn node_ssh_opens_modal_and_executes_suspend_action() {
+    let (mut app, _rx) = common::app().await;
+
+    app.active_view = ActiveView::Table(table_with(
+        ResourceKind::Nodes,
+        vec![serde_json::json!({ "name": "worker-1", "status": "Ready", "internalIp": "10.0.1.20" })],
+    ));
+
+    // 'S' opens NodeSsh modal prefilled with internal IP
+    app.handle_key_event(common::ch('S')).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { node_name, destination_input, cursor_pos }) => {
+            assert_eq!(node_name, "worker-1");
+            assert_eq!(destination_input, "10.0.1.20");
+            assert_eq!(*cursor_pos, 9);
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // Pressing Enter in the modal triggers terminal suspend with NodeSsh action
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
+    assert!(app.modal.is_none());
+    assert!(matches!(
+        &app.requires_terminal_suspend,
+        Some(SuspendAction::NodeSsh { destination }) if destination == "10.0.1.20"
+    ));
+}
+
+#[tokio::test]
+async fn test_node_ssh_modal_cursor_navigation() {
+    let (mut app, _) = common::app().await;
+
+    // Open NodeSsh modal with "worker-1" and "10.0.1.20"
+    app.modal = Some(Modal::NodeSsh {
+        node_name: "worker-1".to_string(),
+        destination_input: "10.0.1.20".to_string(),
+        cursor_pos: 9,
+    });
+
+    // 1. Left moves cursor left
+    app.handle_key_event(common::key(KeyCode::Left)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8),
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 2. Right moves cursor right
+    app.handle_key_event(common::key(KeyCode::Right)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 9),
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 3. Ctrl+A moves cursor to start (0)
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, destination_input, .. }) => {
+            assert_eq!(*cursor_pos, 0);
+            assert_eq!(destination_input, "10.0.1.20");
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 4. Typing at cursor 0 inserts at beginning
+    app.handle_key_event(common::ch('x')).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, destination_input, .. }) => {
+            assert_eq!(*cursor_pos, 1);
+            assert_eq!(destination_input, "x10.0.1.20");
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 5. Ctrl+E jumps to end
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, destination_input, .. }) => {
+            assert_eq!(*cursor_pos, 10);
+            assert_eq!(destination_input, "x10.0.1.20");
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 6. Backspace at end removes last char
+    app.handle_key_event(common::key(KeyCode::Backspace)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, destination_input, .. }) => {
+            assert_eq!(*cursor_pos, 9);
+            assert_eq!(destination_input, "x10.0.1.2");
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 7. Home jumps to 0
+    app.handle_key_event(common::key(KeyCode::Home)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 0),
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 8. Delete at 0 removes first char ('x')
+    app.handle_key_event(common::key(KeyCode::Delete)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, destination_input, .. }) => {
+            assert_eq!(*cursor_pos, 0);
+            assert_eq!(destination_input, "10.0.1.2");
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 9. End jumps to end
+    app.handle_key_event(common::key(KeyCode::End)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8),
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 10. Cmd+Left (Super+Left) jumps to start
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 0),
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 11. Cmd+Right (Super+Right) jumps to end
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8),
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 12. Alt+Left and Alt+Right word skipping with multiple words
+    app.modal = Some(Modal::NodeSsh {
+        node_name: "worker-1".to_string(),
+        destination_input: "-p 2222 root@10.0.1.2".to_string(),
+        cursor_pos: 21,
+    });
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8), // before root@10.0.1.2
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 3), // before 2222
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8), // after 2222 and space
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // 13. Ctrl+W deletes previous word
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { destination_input, cursor_pos, .. }) => {
+            assert_eq!(destination_input, "-p root@10.0.1.2");
+            assert_eq!(*cursor_pos, 3);
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+}

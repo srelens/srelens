@@ -8,13 +8,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 const CATALOG_URL: &str = "https://raw.githubusercontent.com/srelens/extensions/main/catalog.json";
-const MAX_CATALOG: usize = 1024 * 1024;
+pub(super) const MAX_CATALOG: usize = 1024 * 1024;
 const TTL: u64 = 24 * 60 * 60;
 // Catalog metadata is additive. Released hosts ignore fields they don't know, so the
 // catalog can gain publishers, categories or revocations without every installed
 // host rejecting it; a breaking change bumps `schemaVersion` instead.
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
-struct Catalog {
+pub(super) struct Catalog {
     #[serde(rename = "schemaVersion")]
     schema_version: u32,
     extensions: Vec<Entry>,
@@ -133,7 +133,7 @@ fn hex(value: &str, len: usize) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn parse_catalog(raw: &[u8]) -> Result<Catalog, String> {
+pub(super) fn parse_catalog(raw: &[u8]) -> Result<Catalog, String> {
     if raw.len() > MAX_CATALOG {
         return Err("Catalog exceeds 1 MiB".into());
     }
@@ -459,6 +459,54 @@ mod tests {
         entry.id = "org.srelensx.argocd".into();
         entry.repository = "https://github.com/srelensx/extension-argocd".into();
         assert_eq!(signature_url(&entry).unwrap(), None);
+    }
+    #[test]
+    fn verify_manifest_rejects_oversized_and_invalid_encoding() {
+        let entry = parse_catalog(&fixture()).unwrap().extensions.remove(0);
+        assert!(verify_manifest(&entry, &vec![b' '; MAX_MANIFEST_BYTES + 1])
+            .unwrap_err()
+            .contains("size"));
+        let bad_utf8 = vec![0xff, 0xff];
+        let mut entry2 = entry.clone();
+        entry2.release.sha256 = format!("{:x}", Sha256::digest(&bad_utf8));
+        assert!(verify_manifest(&entry2, &bad_utf8)
+            .unwrap_err()
+            .contains("UTF-8"));
+    }
+    #[test]
+    fn verify_release_rejects_unrecognized_signature() {
+        let mut manifest_val: Value =
+            serde_json::from_slice(include_bytes!("../../tests/fixtures/argocd-manifest.json"))
+                .unwrap();
+        manifest_val["id"] = json!("org.thirdparty.app");
+        let raw = serde_json::to_vec(&manifest_val).unwrap();
+        let mut entry = parse_catalog(&fixture()).unwrap().extensions.remove(0);
+        entry.id = "org.thirdparty.app".into();
+        entry.repository = "https://github.com/thirdparty/app".into();
+        entry.release.sha256 = format!("{:x}", Sha256::digest(&raw));
+        assert!(verify_release(&entry, &raw, Some(vec![1, 2, 3]))
+            .unwrap_err()
+            .contains("Unrecognized"));
+    }
+    #[tokio::test]
+    async fn catalog_capabilities_registered_and_invoked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        fs::write(&path, fixture()).unwrap();
+
+        let mut reg = Registry::new();
+        let core = Arc::new(Registry::new());
+        register(&mut reg, path, core);
+
+        let cap_list = reg.get("extensions.catalog").unwrap();
+        let list_res = (cap_list.handler)(serde_json::json!({"refresh": false})).await;
+        assert!(list_res.is_ok());
+
+        let cap_manifest = reg.get("extensions.catalogManifest").unwrap();
+        let err_res =
+            (cap_manifest.handler)(serde_json::json!({"id": "nonexistent", "sha256": "fake"}))
+                .await;
+        assert!(err_res.is_err());
     }
     #[test]
     fn additive_catalog_fields_do_not_break_released_hosts() {

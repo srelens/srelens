@@ -20,7 +20,9 @@
 //!
 //! Override the context with `SRELENS_E2E_CONTEXT` (default
 //! `kind-srelens-helm-e2e`). The suite creates and tears down a `srelens-e2e`
-//! namespace plus one CRD; it never touches the real `~/.kube/config` (the
+//! namespace, one CRD of its own, and the minimal Flux and Argo CD CRDs in
+//! `tests/fixtures/gitops-crds.yaml`, which it refuses to apply over a
+//! cluster's real ones; it never touches the real `~/.kube/config` (the
 //! `k8s.deleteContext` case operates on a throwaway copy). It cordons and
 //! drains the (single) node near the end and always uncordons it again, even
 //! on panic, so the cluster is left usable and the suite is re-runnable
@@ -72,6 +74,29 @@ const WIDGET: &str = "e2e-widget";
 
 const HELM_RELEASE: &str = "e2e-cap-suite";
 
+// Extension apps and host GitOps actions (#536). The CRDs are a pinned fixture the
+// suite applies itself; the manifests are the examples app authors start from.
+const GITOPS_CRDS: &str = include_str!("fixtures/gitops-crds.yaml");
+/// Every fixture CRD carries this label. Teardown deletes by it, never by name.
+const GITOPS_CRD_SELECTOR: &str = "srelens-e2e-fixture=gitops";
+const GITOPS_CRD_NAMES: [&str; 2] = [
+    "kustomizations.kustomize.toolkit.fluxcd.io",
+    "applications.argoproj.io",
+];
+const KUSTOMIZATION: &str = "e2e-kustomization";
+const ARGO_APP: &str = "e2e-application";
+const FLUX_EXAMPLE: &str = include_str!("../../../../examples/extensions/flux.json");
+const ARGOCD_EXAMPLE: &str = include_str!("../../../../examples/extensions/argocd.json");
+/// The published Argo CD release bytes and their publisher signature. The signature
+/// covers these exact bytes, which `.gitattributes` keeps from line-ending conversion.
+const SIGNED_ARGOCD: &str =
+    include_str!("../../../../crates/registry/tests/fixtures/argocd-manifest.json");
+const SIGNED_ARGOCD_SIG: &[u8] =
+    include_bytes!("../../../../crates/registry/tests/fixtures/argocd-manifest.sig");
+/// A catalog that lists that release by its checksum.
+const CATALOG: &str =
+    include_str!("../../../../crates/registry/tests/fixtures/extension-catalog.json");
+
 fn context() -> String {
     std::env::var("SRELENS_E2E_CONTEXT").unwrap_or_else(|_| "kind-srelens-helm-e2e".to_string())
 }
@@ -88,22 +113,32 @@ fn cache() -> Arc<ClientCache> {
     ClientCache::new_many(kubeconfig_paths())
 }
 
-/// Keeps the settings capability e2e isolated from a developer's real app
-/// preferences, including when the suite unwinds after a failed assertion.
+/// Keeps the settings and extension capabilities isolated from a developer's
+/// real app data, including when the suite unwinds after a failed assertion.
+/// The host keeps the extension inventory, its catalog cache and their lock
+/// files beside the settings file, so the whole directory is the suite's own.
 struct TempSettings(PathBuf);
 
 impl TempSettings {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!(
-            "srelens-e2e-settings-{}.json",
-            uuid::Uuid::new_v4()
-        )))
+        let dir = std::env::temp_dir().join(format!("srelens-e2e-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create the e2e settings directory");
+        Self(dir.join("settings.json"))
+    }
+
+    /// Where the host caches the extension catalog for this settings file:
+    /// `crates/registry` puts the inventory at `<settings>.extensions.json` and
+    /// the cache beside it as `<settings>.extensions.catalog.json`.
+    fn catalog_cache(&self) -> PathBuf {
+        self.0.with_extension("extensions.catalog.json")
     }
 }
 
 impl Drop for TempSettings {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if let Some(dir) = self.0.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -175,16 +210,10 @@ impl Harness {
 /// A capability registered later with no case here fails the coverage
 /// assertion at the end of `full_capability_suite`.
 const EXCLUDED: &[(&str, &str)] = &[
-    ("k8s.getCustomResource", "needs custom APIs; GitOps mock HTTP tests exercise resource GET and event RBAC failure"),
-    ("k8s.gitOpsAction", "needs running Flux/Argo controllers; mock HTTP tests verify conditional PATCH and rejected writes"),
-    ("extensions.resource", "requires installed app; isolated registry tests verify pinned identity and revocation"),
-    ("extensions.action", "requires installed app; isolated registry and MCP tests verify scope and consent"),
-    ("extensions.catalog", "desktop public catalog; offline cache and validation use isolated registry tests"),
-    ("extensions.catalogManifest", "release download needs the public catalog; checksum/identity and permission validation use registry tests"),
-    ("extensions.validate", "checks a manifest without a cluster or installing it; registry tests cover manifest, host and signature rules"),
-    ("extensions.list", "desktop-local inventory; registry lifecycle tests use an isolated temporary store"),
-    ("extensions.configure", "explicit grants and atomic persistence are exercised with an isolated temporary store"),
-    ("extensions.read", "requires an installed extension and GitOps CRDs; registry tests exercise the real binding against an injected core handler"),
+    ("k8s.nodeJournalLogs", "requires SSH access to the node host; exercised via unit tests with mocked sessions"),
+    ("k8s.nodeRuntimeDiagnostics", "requires host-level runtime CLI (crictl/containerd) via SSH; exercised via unit tests"),
+    ("k8s.nodeServiceRestart", "requires node host systemd access via SSH; exercised via unit tests"),
+    ("k8s.nodeServiceStatus", "requires node host systemctl access via SSH; exercised via unit tests"),
     (
         "toolbox.installKubectl",
         "downloads a real ~50MB binary from dl.k8s.io; kubectl is already provided by the \
@@ -533,6 +562,64 @@ fn widget_yaml() -> String {
     )
 }
 
+/// One object of each fixture GitOps kind. Nothing reconciles them; the suite
+/// only reads them and requests actions on them.
+fn gitops_resources_yaml() -> String {
+    format!(
+        r#"apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: {KUSTOMIZATION}
+  namespace: {NS}
+spec:
+  interval: 10m
+  path: ./deploy
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: e2e-source
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {ARGO_APP}
+  namespace: {NS}
+spec:
+  project: default
+  source:
+    repoURL: https://example.com/e2e.git
+    path: deploy
+    targetRevision: HEAD
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: {NS}
+"#
+    )
+}
+
+/// Applies custom resources whose CRDs were just created. A new CRD's REST
+/// endpoint is not served the instant the CRD exists, so retry until the
+/// apiserver has established it.
+async fn apply_once_served(h: &Harness, ctx: &str, yaml: &str, what: &str) {
+    let dl = deadline(60);
+    loop {
+        match h
+            .reg
+            .invoke("k8s.applyManifest", json!({ "context": ctx, "yaml": yaml }))
+            .await
+        {
+            Ok(v) if v["applied"] == true => break,
+            Ok(v) if Instant::now() > dl => {
+                panic!("timed out waiting for {what} to become available: {v}")
+            }
+            Err(e) if Instant::now() > dl => {
+                panic!("timed out waiting for {what} to become available: {e:?}")
+            }
+            _ => poll_sleep().await,
+        }
+    }
+}
+
 /// A self-contained chart whose rendered ConfigMap echoes `.Values.message`,
 /// so we can prove values actually reach helm (mirrors
 /// `crates/kube/tests/helm_lifecycle.rs`).
@@ -620,30 +707,9 @@ async fn run_suite() {
         "fixture apply must fully succeed: {out}"
     );
 
-    // The CRD's REST endpoint isn't live the instant the CRD object is
-    // created — retry the widget instance apply until the apiserver has
-    // finished establishing it.
-    let dl = deadline(60);
-    loop {
-        match h
-            .reg
-            .invoke(
-                "k8s.applyManifest",
-                json!({ "context": ctx, "yaml": widget_yaml() }),
-            )
-            .await
-        {
-            Ok(v) if v["applied"] == true => break,
-            Ok(v) if Instant::now() > dl => {
-                panic!("timed out waiting for CRD {CRD_NAME} to become available: {v}")
-            }
-            Err(e) if Instant::now() > dl => {
-                panic!("timed out waiting for CRD {CRD_NAME} to become available: {e:?}")
-            }
-            _ => poll_sleep().await,
-        }
-    }
+    apply_once_served(&h, &ctx, &widget_yaml(), &format!("CRD {CRD_NAME}")).await;
     println!("fixtures applied: namespace, CRD, workloads, widget instance");
+    apply_gitops_fixtures(&mut h, &ctx).await;
 
     // Wait for the Deployment's pods to be Running before pod-dependent
     // assertions — poll listPods with a timeout, never a blind sleep.
@@ -1211,6 +1277,8 @@ async fn run_suite() {
         .unwrap()
         .iter()
         .any(|i| i["name"] == WIDGET));
+
+    extensions_and_gitops(&mut h, &ctx, &settings).await;
 
     let out = h
         .ok(
@@ -2308,6 +2376,387 @@ async fn run_suite() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Extension apps and host GitOps actions, issue #536
+// ---------------------------------------------------------------------------
+
+/// Refuses a cluster whose Flux or Argo CD CRDs are real. Applying the fixtures
+/// would replace their schemas, and teardown deletes the fixture CRDs, which
+/// deletes every object of that kind: for Argo CD, every Application.
+async fn refuse_real_gitops_crds(ctx: &str) {
+    let kubectl = |args: &[&str]| {
+        let mut command = tokio::process::Command::new("kubectl");
+        command.arg("--context").arg(ctx).args(args);
+        async move {
+            let out = command.output().await.expect("run kubectl");
+            assert!(
+                out.status.success(),
+                "kubectl failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+    };
+    let fixtures = kubectl(&["get", "crd", "-l", GITOPS_CRD_SELECTOR, "-o", "name"]).await;
+    for name in GITOPS_CRD_NAMES {
+        let present = kubectl(&["get", "crd", name, "--ignore-not-found", "-o", "name"]).await;
+        assert!(
+            present.trim().is_empty() || fixtures.contains(name),
+            "{ctx} already has a real {name} CRD. This suite would replace it and then delete \
+             it, which deletes every object of that kind; run it against a throwaway cluster"
+        );
+    }
+}
+
+/// The Flux and Argo CD fixture CRDs, and one object of each kind.
+async fn apply_gitops_fixtures(h: &mut Harness, ctx: &str) {
+    refuse_real_gitops_crds(ctx).await;
+    let out = h
+        .ok(
+            "k8s.applyManifest",
+            json!({ "context": ctx, "yaml": GITOPS_CRDS }),
+        )
+        .await;
+    assert_eq!(
+        out["applied"], true,
+        "GitOps fixture CRDs must apply: {out}"
+    );
+    apply_once_served(h, ctx, &gitops_resources_yaml(), "the GitOps fixture CRDs").await;
+    println!("fixtures applied: Flux Kustomization and Argo CD Application CRDs and objects");
+}
+
+/// An example manifest under a local ID. `org.srelens.` IDs install only with the
+/// publisher's signature, and no signature covers the examples' bytes.
+fn local_copy(manifest: &str) -> String {
+    let copy = manifest.replacen("\"id\": \"org.srelens.", "\"id\": \"org.example.", 1);
+    assert_ne!(
+        copy, manifest,
+        "the example no longer declares an org.srelens. ID"
+    );
+    copy
+}
+
+/// What the install review grants: exactly the permissions the manifest declares.
+fn declared_permissions(manifest: &str) -> Value {
+    serde_json::from_str::<Value>(manifest).expect("manifest JSON")["permissions"].clone()
+}
+
+fn resource_version(inspected: &Value) -> String {
+    inspected["resource"]["metadata"]["resourceVersion"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no resourceVersion in {inspected}"))
+        .to_owned()
+}
+
+fn item_names(list: &Value) -> Vec<&str> {
+    list["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no items in {list}"))
+        .iter()
+        .map(|i| i["name"].as_str().unwrap_or_default())
+        .collect()
+}
+
+/// Every extension capability, and the host GitOps capabilities beneath them,
+/// against the fixture CRDs. Each payload is the one
+/// `packages/core/src/lib/extensions.ts` sends, spelled as it spells it, so a
+/// renamed field fails here instead of in the app (AGENTS.md).
+async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettings) {
+    println!("=== extensions: validate, catalog, install ===");
+    // As shipped, the examples carry reserved IDs. Unsigned, that is refused, and
+    // the refusal names the field.
+    let out = h
+        .ok(
+            "extensions.validate",
+            json!({ "manifest": FLUX_EXAMPLE, "grants": declared_permissions(FLUX_EXAMPLE) }),
+        )
+        .await;
+    assert!(
+        out["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["code"] == "EXTENSION_RESERVED_ID" && e["path"] == "id"),
+        "an unsigned org.srelens. manifest must be refused for its ID: {out}"
+    );
+    let flux = local_copy(FLUX_EXAMPLE);
+    let argocd = local_copy(ARGOCD_EXAMPLE);
+    let apps = [
+        json!({ "manifest": flux, "grants": declared_permissions(&flux) }),
+        json!({ "manifest": argocd, "grants": declared_permissions(&argocd) }),
+        json!({
+            "manifest": SIGNED_ARGOCD,
+            "grants": declared_permissions(SIGNED_ARGOCD),
+            "signature": SIGNED_ARGOCD_SIG,
+        }),
+    ];
+    for app in &apps {
+        let out = h.ok("extensions.validate", app.clone()).await;
+        assert_eq!(out["errors"], json!([]), "must validate: {out}");
+    }
+
+    // The catalog is a cache seeded with the committed fixture, so this suite never
+    // depends on the public catalog. extension-catalog.yml checks the live one.
+    let fetched_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let snapshot = json!({
+        "catalog": serde_json::from_str::<Value>(CATALOG).unwrap(),
+        "fetchedAt": fetched_at, "stale": false, "error": null, "incompatible": [],
+    });
+    std::fs::write(
+        settings.catalog_cache(),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+    let catalog = h
+        .ok("extensions.catalog", json!({ "refresh": false }))
+        .await;
+    assert_eq!(
+        catalog["fetchedAt"], fetched_at,
+        "the seeded cache must be what was read: {catalog}"
+    );
+    assert_eq!(catalog["stale"], false, "{catalog}");
+    let sha256 = catalog["catalog"]["extensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "org.srelens.argocd")
+        .unwrap_or_else(|| panic!("the catalog lists Argo CD: {catalog}"))["release"]["sha256"]
+        .clone();
+    // A release the catalog does not list is refused before anything downloads.
+    let err = h
+        .err(
+            "extensions.catalogManifest",
+            json!({ "id": "org.srelens.argocd", "sha256": "0".repeat(64) }),
+        )
+        .await;
+    assert!(err.contains("Catalog release changed"), "{err}");
+    // The listed release, downloaded and verified for review. That needs GitHub,
+    // so a failure is reported, not failed on; a review that does come back must
+    // be exactly the signed bytes.
+    match h
+        .try_call(
+            "extensions.catalogManifest",
+            json!({ "id": "org.srelens.argocd", "sha256": sha256 }),
+        )
+        .await
+    {
+        Ok(review) => {
+            assert_eq!(review["manifest"], SIGNED_ARGOCD, "{review}");
+            assert_eq!(review["signature"], json!(SIGNED_ARGOCD_SIG), "{review}");
+        }
+        Err(e) => {
+            println!("  extensions.catalogManifest: live release not verified (needs GitHub): {e}")
+        }
+    }
+
+    for app in &apps {
+        let mut install = app.clone();
+        install["action"] = json!("install");
+        h.ok("extensions.configure", install).await;
+    }
+    let listed = h.ok("extensions.list", json!({})).await;
+    let installed = |id: &str| {
+        listed["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["manifest"]["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} is not installed: {listed}"))
+    };
+    let flux_app = installed("org.example.flux");
+    let argocd_app = installed("org.example.argocd");
+    let signed_app = installed("org.srelens.argocd");
+    for app in [&flux_app, &argocd_app] {
+        assert_eq!(app["enabled"], true, "{app}");
+        assert_eq!(app["source"], "local", "{app}");
+    }
+    // The signed bytes are the release the cached catalog lists: the host records
+    // where they came from, keeps the proof, and still trusts it on reading back.
+    assert_eq!(signed_app["enabled"], true, "{signed_app}");
+    assert_eq!(signed_app["source"], "catalog", "{signed_app}");
+    assert!(signed_app["signatureProof"].is_object(), "{signed_app}");
+    assert!(signed_app.get("quarantined").is_none(), "{signed_app}");
+    let revision = |app: &Value| app["revision"].as_u64().expect("revision");
+
+    println!("=== extensions: read ===");
+    let out = h
+        .ok(
+            "extensions.read",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "capability": "kustomizations", "context": ctx, "namespace": NS
+            }),
+        )
+        .await;
+    assert!(item_names(&out).contains(&KUSTOMIZATION), "{out}");
+    for app in [&argocd_app, &signed_app] {
+        let out = h
+            .ok(
+                "extensions.read",
+                json!({
+                    "id": app["manifest"]["id"], "revision": revision(app),
+                    "capability": "applications", "context": ctx, "namespace": NS
+                }),
+            )
+            .await;
+        assert!(item_names(&out).contains(&ARGO_APP), "{out}");
+    }
+
+    println!("=== extensions: inspect, suspend and resume (Flux) ===");
+    let flux_selection = json!({
+        "id": "org.example.flux", "revision": revision(&flux_app),
+        "capability": "kustomizations", "context": ctx, "namespace": NS, "name": KUSTOMIZATION
+    });
+    let detail = h.ok("extensions.resource", flux_selection.clone()).await;
+    assert_eq!(
+        detail["resource"]["metadata"]["name"], KUSTOMIZATION,
+        "{detail}"
+    );
+    assert_eq!(
+        detail["actions"],
+        json!(["suspend", "resume", "reconcile"]),
+        "{detail}"
+    );
+    assert!(
+        detail["eventsError"].is_null(),
+        "the object's events must be readable: {detail}"
+    );
+    let uid = detail["resource"]["metadata"]["uid"]
+        .as_str()
+        .expect("uid")
+        .to_owned();
+    let reviewed = resource_version(&detail);
+    let act = |action: &str, version: &str| json!({ "resource": flux_selection, "action": action, "uid": uid, "resourceVersion": version });
+    let out = h.ok("extensions.action", act("suspend", &reviewed)).await;
+    assert_eq!(out, json!({ "requested": true }));
+    // Read back through the host capability itself, not the app, to see what landed.
+    let flux_object = json!({
+        "context": ctx, "group": "kustomize.toolkit.fluxcd.io", "version": "v1",
+        "plural": "kustomizations", "kind": "Kustomization", "namespaced": true,
+        "namespace": NS, "name": KUSTOMIZATION
+    });
+    let suspended = h.ok("k8s.getCustomResource", flux_object.clone()).await;
+    assert_eq!(
+        suspended["resource"]["spec"]["suspend"], true,
+        "{suspended}"
+    );
+    let current = resource_version(&suspended);
+    assert_ne!(
+        current, reviewed,
+        "the suspend patch must have written the object"
+    );
+    // The field is `resourceVersion`, as the wrapper sends it. The struct's own
+    // spelling is refused, not silently ignored.
+    let mut misspelled = act("resume", &current);
+    let version = misspelled
+        .as_object_mut()
+        .unwrap()
+        .remove("resourceVersion")
+        .unwrap();
+    misspelled["resource_version"] = version;
+    let err = h.err("extensions.action", misspelled).await;
+    assert!(err.contains("resource_version"), "{err}");
+    // An action reviewed against a version that is no longer current is refused,
+    // and nothing is written.
+    let err = h.err("extensions.action", act("resume", &reviewed)).await;
+    assert!(err.contains("Resource changed or was replaced"), "{err}");
+    let unchanged = h.ok("k8s.getCustomResource", flux_object.clone()).await;
+    assert_eq!(
+        unchanged["resource"]["spec"]["suspend"], true,
+        "{unchanged}"
+    );
+    assert_eq!(
+        resource_version(&unchanged),
+        current,
+        "a refused action must not write"
+    );
+    let out = h.ok("extensions.action", act("resume", &current)).await;
+    assert_eq!(out, json!({ "requested": true }));
+    let resumed = h.ok("k8s.getCustomResource", flux_object).await;
+    assert_eq!(resumed["resource"]["spec"]["suspend"], false, "{resumed}");
+
+    println!("=== GitOps: inspect and refresh (Argo CD) ===");
+    let argo_detail = h
+        .ok(
+            "extensions.resource",
+            json!({
+                "id": "org.example.argocd", "revision": revision(&argocd_app),
+                "capability": "applications", "context": ctx, "namespace": NS, "name": ARGO_APP
+            }),
+        )
+        .await;
+    assert_eq!(
+        argo_detail["actions"],
+        json!(["refresh", "hard-refresh", "sync"]),
+        "{argo_detail}"
+    );
+    // The same object through the host capabilities, the identity spelled out.
+    let argo_object = json!({
+        "context": ctx, "group": "argoproj.io", "version": "v1alpha1",
+        "plural": "applications", "kind": "Application", "namespaced": true,
+        "namespace": NS, "name": ARGO_APP
+    });
+    let before = h.ok("k8s.getCustomResource", argo_object.clone()).await;
+    assert_eq!(before["actions"], argo_detail["actions"], "{before}");
+    let argo_uid = before["resource"]["metadata"]["uid"]
+        .as_str()
+        .expect("uid")
+        .to_owned();
+    let reviewed = resource_version(&before);
+    let out = h
+        .ok(
+            "k8s.gitOpsAction",
+            json!({ "resource": argo_object, "action": "refresh", "uid": argo_uid, "resourceVersion": reviewed }),
+        )
+        .await;
+    assert_eq!(out, json!({ "requested": true }));
+    let refreshed = h.ok("k8s.getCustomResource", argo_object.clone()).await;
+    assert_eq!(
+        refreshed["resource"]["metadata"]["annotations"]["argocd.argoproj.io/refresh"], "normal",
+        "{refreshed}"
+    );
+    let err = h
+        .err(
+            "k8s.gitOpsAction",
+            json!({ "resource": argo_object, "action": "hard-refresh", "uid": argo_uid, "resourceVersion": reviewed }),
+        )
+        .await;
+    assert!(err.contains("Resource changed or was replaced"), "{err}");
+    let unchanged = h.ok("k8s.getCustomResource", argo_object).await;
+    assert_eq!(
+        unchanged["resource"]["metadata"]["annotations"]["argocd.argoproj.io/refresh"], "normal",
+        "a refused hard refresh must not write: {unchanged}"
+    );
+    assert_eq!(resource_version(&unchanged), resource_version(&refreshed));
+
+    println!("=== extensions: disable and remove ===");
+    // A disabled app's views stop reading, and say why.
+    h.ok(
+        "extensions.configure",
+        json!({ "action": "enable", "id": "org.example.flux", "enabled": false }),
+    )
+    .await;
+    let err = h.err("extensions.resource", flux_selection).await;
+    assert!(err.contains("disabled"), "{err}");
+    for id in [
+        "org.example.flux",
+        "org.example.argocd",
+        "org.srelens.argocd",
+    ] {
+        h.ok(
+            "extensions.configure",
+            json!({ "action": "remove", "id": id }),
+        )
+        .await;
+    }
+    let listed = h.ok("extensions.list", json!({})).await;
+    assert_eq!(listed["plugins"], json!([]), "{listed}");
+}
+
 /// `k8s.deleteContext` REMOVES A CONTEXT FROM THE KUBECONFIG ON DISK. Never
 /// run it against the real kubeconfig: copy the file that declares `ctx` to a
 /// private temp file, build a SEPARATE `ClientCache`/registry pointing only at
@@ -2582,6 +3031,31 @@ async fn teardown() {
             String::from_utf8_lossy(&o.stderr)
         ),
         Err(e) => println!("teardown: failed to run kubectl to delete CRD: {e}"),
+    }
+
+    // Only the GitOps CRDs the suite applied, by their fixture label. A real Flux
+    // or Argo CD CRD never matches, and the suite refuses to run over one.
+    let gitops_out = tokio::process::Command::new("kubectl")
+        .args([
+            "--context",
+            &ctx,
+            "delete",
+            "crd",
+            "-l",
+            GITOPS_CRD_SELECTOR,
+            "--ignore-not-found",
+            "--wait=true",
+            "--timeout=60s",
+        ])
+        .output()
+        .await;
+    match gitops_out {
+        Ok(o) if o.status.success() => println!("teardown: GitOps fixture CRDs deleted"),
+        Ok(o) => println!(
+            "teardown: GitOps fixture CRD delete non-zero exit: {}",
+            String::from_utf8_lossy(&o.stderr)
+        ),
+        Err(e) => println!("teardown: failed to run kubectl to delete GitOps fixture CRDs: {e}"),
     }
 
     // Belt-and-suspenders: make sure every node ends up uncordoned even if

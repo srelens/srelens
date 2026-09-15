@@ -1,0 +1,47 @@
+[package]
+name = "srelens-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+srelens-plugin-host = { path = "../crates/plugin-host", features = ["fuzzing"] }
+srelens-registry = { path = "../crates/registry", features = ["fuzzing"] }
+
+# Its own workspace, not a member of the root one: libFuzzer needs a nightly toolchain and a
+# C++ compiler, and `cargo test --workspace` has to build on stable, on every platform.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "catalog"
+path = "fuzz_targets/catalog.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signed-manifest"
+path = "fuzz_targets/signed-manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inventory"
+path = "fuzz_targets/inventory.rs"
+test = false
+doc = false
+bench = false

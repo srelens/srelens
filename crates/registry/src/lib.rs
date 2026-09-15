@@ -15,6 +15,10 @@ mod catalog;
 pub use catalog::{catalog_of, CatalogEntry};
 mod settings;
 mod extensions;
+/// The extension readers' fuzz entry points, for the targets in `fuzz/`. Not an API.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use extensions::fuzzing;
 pub use settings::default_settings_path;
 
 // Test-only: every consumer of this module — `render_catalog` (regenerated via
@@ -376,6 +380,18 @@ pub fn build_registry_with_paths_and_settings(
         cache.clone(),
     ));
     reg.register(srelens_kube::nodes::list_nodes_capability(cache.clone()));
+    reg.register(srelens_kube::node_ssh::node_service_status_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::node_ssh::node_journal_logs_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::node_ssh::node_runtime_diagnostics_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::node_ssh::node_service_restart_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::manifest::get_manifest_capability(
         cache.clone(),
     ));

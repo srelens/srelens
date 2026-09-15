@@ -34,6 +34,7 @@ pub enum ResourceKind {
     CustomResourceDefinitions,
     CustomResource(CrdMeta),
     HelmReleases,
+    ArgoApplications,
     PortForwards,
     Overview,
     Toolbox,
@@ -102,6 +103,7 @@ impl ResourceKind {
             Self::CustomResourceDefinitions => "CustomResourceDefinitions",
             Self::CustomResource(crd) => crd.kind.as_str(),
             Self::HelmReleases => "Helm Releases",
+            Self::ArgoApplications => "ArgoCD Applications",
             Self::PortForwards => "Port Forwards",
             Self::Overview => "Cluster Overview",
             Self::Toolbox => "Toolbox Diagnostics",
@@ -420,6 +422,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         target: CommandTarget::Resource(ResourceKind::HelmReleases),
     },
     CommandDef {
+        name: "argo",
+        aliases: &["argocd", "apps", "gitops"],
+        description: "ArgoCD applications, sync status, drift & GitOps control",
+        target: CommandTarget::Resource(ResourceKind::ArgoApplications),
+    },
+    CommandDef {
         name: "portforwards",
         aliases: &["pf", "portforward"],
         description: "Active port forwards",
@@ -464,7 +472,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
     CommandDef {
         name: "features",
         aliases: &["banner", "guide", "welcome"],
-        description: "Show SRElens feature highlights banner (:helm, :overview, :gpuinfo, :workloads, :ai, :ai-settings, :config)",
+        description: "Show SRElens feature highlights banner (:helm, :overview, :gpuinfo, :workloads, :argo, :ai, :ai-settings, :config, :banner)",
         target: CommandTarget::FeatureBanner,
     },
     CommandDef {
@@ -568,6 +576,7 @@ impl DynamicCommandDef {
                 | ResourceKind::Events
                 | ResourceKind::CustomResourceDefinitions => "Cluster",
                 ResourceKind::HelmReleases => "Helm",
+                ResourceKind::ArgoApplications => "GitOps",
                 ResourceKind::PortForwards => "Forward",
                 ResourceKind::Overview => "Overview",
                 ResourceKind::Toolbox => "Diagnostic",
@@ -600,6 +609,7 @@ impl DynamicCommandDef {
             CommandTarget::Resource(ResourceKind::Nodes) => ":nodes",
             CommandTarget::Resource(ResourceKind::Events) => ":events [ns]",
             CommandTarget::Resource(ResourceKind::HelmReleases) => ":helm [ns]",
+            CommandTarget::Resource(ResourceKind::ArgoApplications) => ":argo [ns]",
             CommandTarget::Resource(ResourceKind::Workloads) => ":workloads [ns]",
             CommandTarget::Resource(ResourceKind::Ingresses) => ":ingresses [ns]",
             CommandTarget::Resource(ResourceKind::TopPods) => ":toppods [ns]",

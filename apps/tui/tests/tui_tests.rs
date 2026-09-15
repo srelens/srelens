@@ -198,6 +198,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -296,6 +298,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -406,6 +410,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -590,6 +596,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -806,6 +814,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1004,6 +1014,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1146,6 +1158,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1471,6 +1485,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1602,6 +1618,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1700,6 +1718,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1790,6 +1810,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -1921,6 +1943,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2056,6 +2080,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2216,6 +2242,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2322,6 +2350,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2734,6 +2764,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -2858,6 +2890,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3089,6 +3123,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3207,6 +3243,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3322,6 +3360,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3532,6 +3572,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -3735,6 +3777,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -4581,6 +4625,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -4776,6 +4822,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -5009,6 +5057,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -5148,6 +5198,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -5207,7 +5259,7 @@ mod tests {
         use ratatui::widgets::BorderType;
         use srelens_tui::theme::{HeaderStyle, Theme, ThemeId, ALL_THEMES};
 
-        assert_eq!(ALL_THEMES.len(), 12);
+        assert_eq!(ALL_THEMES.len(), 15);
 
         // Test theme lookup and setting by id/name
         let nord = Theme::set_theme_by_name("nord");
@@ -5274,6 +5326,23 @@ mod tests {
         assert_eq!(Theme::active_palette().id, ThemeId::OneDark);
         assert_eq!(Theme::header_style(), HeaderStyle::Standard);
         assert_eq!(Theme::border_type(), BorderType::Plain);
+
+        let sre_hc = Theme::set_theme_by_name("sre-high-contrast");
+        assert!(sre_hc.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::SreHighContrast);
+        assert_eq!(Theme::active_palette().label, ratatui::style::Color::Rgb(203, 213, 225));
+
+        let sre_alias = Theme::set_theme_by_name("contrast");
+        assert!(sre_alias.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::SreHighContrast);
+
+        let storm = Theme::set_theme_by_name("tokyo-storm");
+        assert!(storm.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::TokyoStorm);
+
+        let github = Theme::set_theme_by_name("github-dark-hc");
+        assert!(github.is_some());
+        assert_eq!(Theme::active_palette().id, ThemeId::GitHubDarkHc);
 
         // Reset to default Mocha
         let mocha = Theme::set_theme_by_name("catppuccin-mocha");
@@ -5975,6 +6044,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -6171,6 +6242,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -6314,6 +6387,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -6485,6 +6560,8 @@ mod tests {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -6900,6 +6977,646 @@ mod tests {
         assert!(detail_state.search_query.is_empty());
         assert!(detail_state.search_matches.is_empty());
         assert!(detail_state.current_match_idx.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_argo_views_navigation_and_interactions() {
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::Modal;
+        use srelens_tui::views::argo_detail_view::ArgoDetailTab;
+        use srelens_tui::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        let app1 = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {
+                "name": "payment-service",
+                "namespace": "argocd",
+            },
+            "spec": {
+                "project": "default",
+                "source": {
+                    "repoURL": "https://github.com/acme/infra.git",
+                    "targetRevision": "HEAD",
+                    "path": "services/payment",
+                },
+                "destination": {
+                    "server": "https://kubernetes.default.svc",
+                    "namespace": "prod",
+                },
+                "syncPolicy": {
+                    "automated": {
+                        "prune": true,
+                        "selfHeal": true,
+                    }
+                }
+            },
+            "status": {
+                "sync": {
+                    "status": "Synced",
+                },
+                "health": {
+                    "status": "Healthy",
+                }
+            }
+        }));
+
+        let app2 = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {
+                "name": "auth-api",
+                "namespace": "argocd",
+            },
+            "spec": {
+                "project": "default",
+                "source": {
+                    "repoURL": "https://github.com/acme/infra.git",
+                    "targetRevision": "v1.2.0",
+                    "path": "services/auth",
+                },
+                "destination": {
+                    "server": "https://10.0.0.1:6443",
+                    "name": "staging-cluster",
+                    "namespace": "staging",
+                },
+            },
+            "status": {
+                "sync": {
+                    "status": "OutOfSync",
+                },
+                "health": {
+                    "status": "Degraded",
+                }
+            }
+        }));
+
+        let mut argo_state = ArgoViewState::new();
+        let apps = vec![app1, app2];
+        argo_state.set_applications(
+            apps.clone(),
+            apps,
+            true,
+            Some("mgmt-hub".to_string()),
+        );
+        app.active_view = ActiveView::Argo(argo_state);
+
+        // 1. Navigate down
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        if let ActiveView::Argo(ref argo) = app.active_view {
+            assert_eq!(argo.selected_application().unwrap().name, "auth-api");
+        }
+
+        // 2. Open detail view on Enter
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        match &app.active_view {
+            ActiveView::ArgoDetail(detail) => {
+                assert_eq!(detail.app_name, "auth-api");
+                assert_eq!(detail.active_tab, ArgoDetailTab::Overview);
+                assert_eq!(detail.hub_context.as_deref(), Some("mgmt-hub"));
+            }
+            _ => panic!("Expected ActiveView::ArgoDetail"),
+        }
+
+        // 3. Cycle tabs with Tab key
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref detail) = app.active_view {
+            assert_eq!(detail.active_tab, ArgoDetailTab::ManagedResources);
+        }
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref detail) = app.active_view {
+            assert_eq!(detail.active_tab, ArgoDetailTab::Drift);
+        }
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref detail) = app.active_view {
+            assert_eq!(detail.active_tab, ArgoDetailTab::RevisionHistory);
+        }
+
+        // Jump directly with number keys
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref detail) = app.active_view {
+            assert_eq!(detail.active_tab, ArgoDetailTab::Overview);
+        }
+
+        // 4. Test SRE Emergency Lever: 's' key triggers Sync modal confirmation
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        assert!(app.modal.is_some());
+        if let Some(Modal::Confirm { ref action_name, .. }) = app.modal {
+            assert!(action_name.starts_with("argo_sync:"));
+            let val: serde_json::Value = serde_json::from_str(action_name.strip_prefix("argo_sync:").unwrap()).unwrap();
+            assert_eq!(val["ctx"], "mgmt-hub");
+            assert_eq!(val["ns"], "argocd");
+            assert_eq!(val["name"], "auth-api");
+            assert_eq!(val["prune"], false);
+        } else {
+            panic!("Expected Modal::Confirm for argo_sync");
+        }
+        app.modal = None;
+
+        // Test Prune Sync Lever: 'S' key triggers Sync with prune=true modal
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT)).await;
+        assert!(app.modal.is_some());
+        if let Some(Modal::Confirm { ref action_name, .. }) = app.modal {
+            assert!(action_name.starts_with("argo_sync:"));
+            let val: serde_json::Value = serde_json::from_str(action_name.strip_prefix("argo_sync:").unwrap()).unwrap();
+            assert_eq!(val["ctx"], "mgmt-hub");
+            assert_eq!(val["ns"], "argocd");
+            assert_eq!(val["name"], "auth-api");
+            assert_eq!(val["prune"], true);
+        } else {
+            panic!("Expected Modal::Confirm for argo_sync with prune");
+        }
+        app.modal = None;
+
+        // Test Auto-Sync Pause Lever: 'p' key triggers Pause/Resume modal
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)).await;
+        assert!(app.modal.is_some());
+        if let Some(Modal::Confirm { ref action_name, .. }) = app.modal {
+            assert!(action_name.starts_with("argo_toggle_auto:"));
+            let val: serde_json::Value = serde_json::from_str(action_name.strip_prefix("argo_toggle_auto:").unwrap()).unwrap();
+            assert_eq!(val["ctx"], "mgmt-hub");
+            assert_eq!(val["ns"], "argocd");
+            assert_eq!(val["name"], "auth-api");
+            assert_eq!(val["enable"], true);
+        } else {
+            panic!("Expected Modal::Confirm for argo_toggle_auto");
+        }
+        app.modal = None;
+
+        // 5. Esc exits detail view back to Argo list view
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        match &app.active_view {
+            ActiveView::Argo(state) => {
+                assert_eq!(state.selected_application().unwrap().name, "auth-api");
+            }
+            _ => panic!("Expected ActiveView::Argo after Esc"),
+        }
+    }
+
+    #[test]
+    fn test_argo_hub_spoke_configuration_resolution() {
+        use srelens_tui::tui_config::TuiConfig;
+        use std::path::PathBuf;
+
+        // When unset
+        let mut cfg = TuiConfig::default();
+        assert_eq!(cfg.resolved_argo_hub_context(), None);
+        assert_eq!(cfg.resolved_argo_hub_kubeconfig(), None);
+
+        // When configured in TuiConfig
+        cfg.argo_hub_context = Some("platform-mgmt".to_string());
+        cfg.argo_hub_kubeconfig = Some(PathBuf::from("/etc/kube/mgmt.yaml"));
+        assert_eq!(cfg.resolved_argo_hub_context(), Some("platform-mgmt".to_string()));
+        assert_eq!(cfg.resolved_argo_hub_kubeconfig(), Some(PathBuf::from("/etc/kube/mgmt.yaml")));
+
+        // Environment variables override config
+        std::env::set_var("SRELENS_ARGO_HUB_CONTEXT", "env-override-hub");
+        std::env::set_var("SRELENS_ARGO_HUB_KUBECONFIG", "/env/kubeconfig");
+        assert_eq!(cfg.resolved_argo_hub_context(), Some("env-override-hub".to_string()));
+        assert_eq!(cfg.resolved_argo_hub_kubeconfig(), Some(PathBuf::from("/env/kubeconfig")));
+
+        // Clean up environment variables
+        std::env::remove_var("SRELENS_ARGO_HUB_CONTEXT");
+        std::env::remove_var("SRELENS_ARGO_HUB_KUBECONFIG");
+        assert_eq!(cfg.resolved_argo_hub_context(), Some("platform-mgmt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_colon_command_with_namespace_argument() {
+        use srelens_tui::app::{ActiveView, App};
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+        app.active_namespace = "default".to_string();
+
+        // :argo argocd should switch to Argo and set filter_query to argocd
+        app.execute_colon_command("argo argocd").await;
+        assert_eq!(app.active_namespace, "argocd");
+        match &app.active_view {
+            ActiveView::Argo(state) => {
+                assert_eq!(state.filter_query, "argocd");
+            }
+            _ => panic!("Expected ActiveView::Argo"),
+        }
+
+        // :helm dev should switch to Helm and set active_namespace to dev
+        app.execute_colon_command("helm dev").await;
+        assert_eq!(app.active_namespace, "dev");
+        assert!(matches!(app.active_view, ActiveView::Helm(_)));
+    }
+
+    #[tokio::test]
+    async fn test_argo_confirm_modal_with_eks_arn_context() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::App;
+        use srelens_tui::ui::dialogs::Modal;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+        let eks_arn_ctx = "arn:aws:eks:us-east-1:123456789012:cluster/prod";
+        let payload = serde_json::json!({
+            "ctx": eks_arn_ctx,
+            "ns": "argocd",
+            "name": "payment-service",
+            "prune": false,
+            "dry_run": false,
+        });
+        app.modal = Some(Modal::Confirm {
+            title: "Sync".into(),
+            message: "Sync?".into(),
+            action_name: format!("argo_sync:{}", payload),
+            is_destructive: false,
+        });
+
+        // Confirming should safely parse the ARN without splitting on ARN colons
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(app.modal.is_none());
+        assert!(app.toast.as_ref().unwrap().0.contains("Triggering sync for 'payment-service'..."));
+    }
+
+    fn render_to_string(app: &mut srelens_tui::app::App, width: u16, height: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                let mut line = String::new();
+                for x in 0..buffer.area.width {
+                    line.push_str(buffer[(x, y)].symbol());
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn test_argo_view_renders_loading_error_empty_hub_and_table_states() {
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // Loading state
+        app.active_view = ActiveView::Argo(ArgoViewState::new());
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("Loading ArgoCD applications"));
+
+        // Error banner (generic failure path)
+        if let ActiveView::Argo(ref mut s) = app.active_view {
+            s.set_error("connection refused".to_string());
+        }
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("Failed to load ArgoCD applications"));
+
+        // Empty state (no error, no apps)
+        if let ActiveView::Argo(ref mut s) = app.active_view {
+            s.error = None;
+            s.is_loading = false;
+        }
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("No ArgoCD applications found in cluster"));
+
+        // Remote hub notice: spoke-filtered view is empty but the Hub has apps
+        let hub_app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "hub-app", "namespace": "argocd"},
+            "spec": {"destination": {"name": "other-spoke"}},
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}}
+        }));
+        if let ActiveView::Argo(ref mut s) = app.active_view {
+            s.set_applications(vec![], vec![hub_app], true, Some("hub-ctx".to_string()));
+        }
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("Hub: hub-ctx"));
+        assert!(content.contains("View All Hub Apps"));
+        assert!(content.contains("Press <a> to view all Hub applications"));
+
+        // Standard populated table with a filter query narrowing the rows
+        let app1 = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "payments-api", "namespace": "prod"},
+            "spec": {"project": "core", "destination": {"name": "in-cluster"}},
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}}
+        }));
+        let app2 = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "billing-api", "namespace": "prod"},
+            "spec": {"project": "core", "destination": {"name": "in-cluster"}},
+            "status": {"sync": {"status": "OutOfSync"}, "health": {"status": "Degraded"}}
+        }));
+        if let ActiveView::Argo(ref mut s) = app.active_view {
+            s.is_remote_hub = false;
+            s.set_applications(vec![app1, app2], vec![], false, None);
+            s.filter_query = "payments".to_string();
+        }
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("payments-api"));
+        assert!(!content.contains("billing-api"));
+    }
+
+    #[tokio::test]
+    async fn test_argo_detail_view_renders_all_tabs() {
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::views::argo_detail_view::{ArgoDetailTab, ArgoDetailViewState};
+        use srelens_kube::argo::ArgoApplication;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        let argo_app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "payments-api", "namespace": "prod", "creationTimestamp": "2026-01-01T00:00:00Z"},
+            "spec": {
+                "project": "core",
+                "source": {"repoURL": "https://github.com/example/repo.git", "targetRevision": "main", "path": "k8s/payments"},
+                "destination": {"name": "in-cluster", "namespace": "prod"},
+                "syncPolicy": {"automated": {"selfHeal": true, "prune": false}}
+            },
+            "status": {
+                "sync": {"status": "OutOfSync", "revision": "abc123"},
+                "health": {"status": "Degraded", "message": "replica unavailable"},
+                "operationState": {"phase": "Failed", "message": "sync error", "finishedAt": "2026-01-02T00:00:00Z"},
+                "resources": [
+                    {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "prod", "name": "payments-api",
+                     "status": "OutOfSync", "health": {"status": "Degraded", "message": "1/2 ready"}}
+                ],
+                "history": [
+                    {"id": 1, "revision": "abc123", "deployedAt": "2026-01-02T00:00:00Z",
+                     "source": {"repoURL": "https://github.com/example/repo.git", "path": "k8s/payments"}}
+                ]
+            }
+        }));
+
+        for tab in [
+            ArgoDetailTab::Overview,
+            ArgoDetailTab::ManagedResources,
+            ArgoDetailTab::Drift,
+            ArgoDetailTab::RevisionHistory,
+        ] {
+            let mut detail = ArgoDetailViewState::new("payments-api".to_string(), "prod".to_string(), None);
+            detail.set_application(argo_app.clone());
+            detail.set_tab(tab);
+            app.active_view = ActiveView::ArgoDetail(detail);
+
+            let content = render_to_string(&mut app, 160, 40);
+            match tab {
+                ArgoDetailTab::Overview => {
+                    assert!(content.contains("Status & Policies"));
+                    assert!(content.contains("payments-api"));
+                }
+                ArgoDetailTab::ManagedResources => assert!(content.contains("Deployment")),
+                ArgoDetailTab::Drift => assert!(content.contains("Drift / Out-of-Sync")),
+                ArgoDetailTab::RevisionHistory => assert!(content.contains("abc123")),
+            }
+        }
+
+        // A healthy, fully-synced app with no resources/history reported
+        // exercises the "nothing to show" branch of each tab instead.
+        let clean_app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "clean-app", "namespace": "prod"},
+            "spec": {"project": "core", "destination": {"name": "in-cluster"}},
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}}
+        }));
+        for (tab, expected) in [
+            (ArgoDetailTab::ManagedResources, "No managed Kubernetes resources reported by ArgoCD."),
+            (ArgoDetailTab::Drift, "No Drift Detected"),
+            (ArgoDetailTab::RevisionHistory, "No synchronization history available."),
+        ] {
+            let mut detail = ArgoDetailViewState::new("clean-app".to_string(), "prod".to_string(), None);
+            detail.set_application(clean_app.clone());
+            detail.set_tab(tab);
+            app.active_view = ActiveView::ArgoDetail(detail);
+
+            let content = render_to_string(&mut app, 160, 40);
+            assert!(content.contains(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_argo_sync_and_toggle_auto_confirm_modals_render() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::ui::dialogs::Modal;
+        use srelens_tui::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        let argo_app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "payments-api", "namespace": "prod"},
+            "spec": {"project": "core", "destination": {"name": "in-cluster"}},
+            "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}}
+        }));
+
+        let mut state = ArgoViewState::new();
+        state.set_applications(vec![argo_app], vec![], false, None);
+        app.active_view = ActiveView::Argo(state);
+
+        // 's' opens a sync confirmation
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        match &app.modal {
+            Some(Modal::Confirm { action_name, is_destructive, .. }) => {
+                assert!(action_name.starts_with("argo_sync:"));
+                assert!(!is_destructive);
+            }
+            other => panic!("expected argo_sync Modal::Confirm, got {other:?}"),
+        }
+
+        // The prompt line embeds the full action_name (including the JSON
+        // payload), which is wider than the modal, so only its start is
+        // visible once ratatui clips/centers the line.
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("Sync ArgoCD Application"));
+        assert!(content.contains("[Enter/y]"));
+
+        app.modal = None;
+
+        // 'p' opens an auto-sync toggle confirmation
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)).await;
+        match &app.modal {
+            Some(Modal::Confirm { action_name, .. }) => {
+                assert!(action_name.starts_with("argo_toggle_auto:"));
+            }
+            other => panic!("expected argo_toggle_auto Modal::Confirm, got {other:?}"),
+        }
+
+        let content = render_to_string(&mut app, 160, 30);
+        assert!(content.contains("Auto-Sync"));
+        assert!(content.contains("[Enter/y]"));
+    }
+
+    #[tokio::test]
+    async fn test_argo_list_and_detail_key_handlers_exercise_side_panels_safely() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::views::argo_detail_view::ArgoDetailTab;
+        use srelens_tui::views::argo_view::ArgoViewState;
+        use srelens_kube::argo::ArgoApplication;
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        ).await.unwrap();
+
+        // No repoURL, so the 'g' handler below hits the safe "no repo
+        // configured" branch instead of actually spawning a browser process.
+        let argo_app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "payments-api", "namespace": "prod"},
+            "spec": {"project": "core", "destination": {"name": "in-cluster"}},
+            "status": {
+                "sync": {"status": "OutOfSync"},
+                "health": {"status": "Degraded"},
+                "resources": [
+                    {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "prod", "name": "payments-api",
+                     "status": "OutOfSync", "health": {"status": "Degraded", "message": "1/2 ready"}}
+                ]
+            }
+        }));
+
+        let mut state = ArgoViewState::new();
+        state.set_applications(
+            vec![argo_app.clone()],
+            vec![argo_app],
+            true,
+            Some("hub-ctx".to_string()),
+        );
+        app.active_view = ActiveView::Argo(state);
+
+        // List view: hard refresh, reload, config hub, toggle-show-all,
+        // deep-link copy, and git-open with an empty repoURL.
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Triggering hard refresh"));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Refreshing ArgoCD applications"));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("no repoURL configured"));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).await;
+        if let ActiveView::Argo(ref s) = app.active_view {
+            assert!(s.show_all_hub_apps);
+        } else {
+            panic!("expected ActiveView::Argo");
+        }
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Copied deep link"));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::TuiConfig(_)));
+
+        // Back to the Argo list (config hub pushed it onto nav_stack), then
+        // open the detail view.
+        if let Some(prev) = app.nav_stack.pop() {
+            app.active_view = prev;
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::ArgoDetail(_)));
+
+        // Detail view: tab navigation (number keys, arrows, BackTab),
+        // resource selection, hard refresh, reload, and deep-link copy.
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref d) = app.active_view {
+            assert_eq!(d.active_tab, ArgoDetailTab::ManagedResources);
+        }
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref d) = app.active_view {
+            assert_eq!(d.active_tab, ArgoDetailTab::Drift);
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref d) = app.active_view {
+            assert_eq!(d.active_tab, ArgoDetailTab::ManagedResources);
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)).await;
+        if let ActiveView::ArgoDetail(ref d) = app.active_view {
+            assert_eq!(d.active_tab, ArgoDetailTab::Overview);
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)).await;
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)).await;
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Triggering hard refresh"));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Refreshing application details"));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        assert!(app.toast.as_ref().unwrap().0.contains("Copied deep link"));
+
+        // Describe (Enter/d) and YAML (y/v) on the selected Managed Resource,
+        // then the action palette (x).
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Describe(_)));
+
+        if let Some(prev) = app.nav_stack.pop() {
+            app.active_view = prev;
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).await;
+        assert!(matches!(app.active_view, ActiveView::Yaml(_)));
+
+        if let Some(prev) = app.nav_stack.pop() {
+            app.active_view = prev;
+        }
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).await;
+        assert!(app.modal.is_some());
     }
 }
 

@@ -189,6 +189,14 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
             Cell::from("Helm 3 release management (history, values, manifest diff, rollback)"),
         ]),
         Row::new(vec![
+            Cell::from(Span::styled("  :argo", Theme::key_hint_key())),
+            Cell::from("ArgoCD GitOps application manager (sync status, drift & rollouts)"),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("  :banner / :features", Theme::key_hint_key())),
+            Cell::from("Show SRElens feature highlights banner & key navigation guide"),
+        ]),
+        Row::new(vec![
             Cell::from(Span::styled("  :tb", Theme::key_hint_key())),
             Cell::from("Toolbox diagnostics (kubectl, helm, krew, plugins status)"),
         ]),

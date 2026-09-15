@@ -146,6 +146,8 @@ pub struct TuiConfig {
     #[serde(alias = "commandPopupTextScale")]
     pub command_popup_density: CommandPopupDensity,
     pub show_feature_banner: bool,
+    pub argo_hub_context: Option<String>,
+    pub argo_hub_kubeconfig: Option<PathBuf>,
 }
 
 impl Default for TuiConfig {
@@ -155,6 +157,8 @@ impl Default for TuiConfig {
             command_popup_max_visible: DEFAULT_COMMAND_POPUP_MAX_VISIBLE,
             command_popup_density: CommandPopupDensity::default(),
             show_feature_banner: DEFAULT_SHOW_FEATURE_BANNER,
+            argo_hub_context: None,
+            argo_hub_kubeconfig: None,
         }
     }
 }
@@ -177,6 +181,52 @@ impl TuiConfig {
         self.command_popup_density = CommandPopupDensity::from_scale(
             scale.clamp(MIN_COMMAND_POPUP_TEXT_SCALE, MAX_COMMAND_POPUP_TEXT_SCALE),
         );
+    }
+
+    pub fn resolved_argo_hub_context(&self) -> Option<String> {
+        if let Ok(val) = std::env::var("SRELENS_ARGO_HUB_CONTEXT") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(ref ctx) = self.argo_hub_context {
+            let trimmed = ctx.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(kc_path) = self.resolved_argo_hub_kubeconfig() {
+            if let Ok(kc) = srelens_kube::kube::config::Kubeconfig::read_from(&kc_path) {
+                if let Some(curr) = kc.current_context {
+                    let trimmed = curr.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn resolved_argo_hub_kubeconfig(&self) -> Option<PathBuf> {
+        let raw = if let Ok(val) = std::env::var("SRELENS_ARGO_HUB_KUBECONFIG") {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                Some(PathBuf::from(trimmed))
+            } else {
+                None
+            }
+        } else {
+            self.argo_hub_kubeconfig.clone()
+        };
+        raw.map(|p| {
+            if let Ok(stripped) = p.strip_prefix("~") {
+                dirs::home_dir().map(|h| h.join(stripped)).unwrap_or(p)
+            } else {
+                p
+            }
+        })
     }
 
     pub fn config_file_path() -> PathBuf {
@@ -217,5 +267,28 @@ impl TuiConfig {
             .map_err(|e| format!("Failed to serialize TuiConfig: {}", e))?;
         std::fs::write(&path, json)
             .map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolved_argo_hub_context_fallback_to_kubeconfig() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let kc_path = temp_dir.path().join("hub.kubeconfig");
+        let kc_yaml = "apiVersion: v1\nclusters: []\ncontexts:\n- context:\n    cluster: my-hub\n    user: me\n  name: hub-cluster-ctx\ncurrent-context: hub-cluster-ctx\nusers: []\n";
+        std::fs::write(&kc_path, kc_yaml).unwrap();
+
+        let mut cfg = TuiConfig::default();
+        cfg.argo_hub_context = None;
+        cfg.argo_hub_kubeconfig = Some(kc_path);
+
+        assert_eq!(cfg.resolved_argo_hub_context(), Some("hub-cluster-ctx".to_string()));
+
+        // Explicit context overrides kubeconfig current-context
+        cfg.argo_hub_context = Some("explicit-ctx".to_string());
+        assert_eq!(cfg.resolved_argo_hub_context(), Some("explicit-ctx".to_string()));
     }
 }
