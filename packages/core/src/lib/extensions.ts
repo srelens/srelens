@@ -76,6 +76,23 @@ export async function configureExtensions(change: ExtensionChange) {
     window.dispatchEvent(new Event(EXTENSIONS_CHANGED));
   return state;
 }
+/**
+ * One manifest problem. `code` is stable (docs/extensions/specification.md); `path` names
+ * the value at fault, e.g. `contributions.pages[2].capability`, and is empty for the whole
+ * manifest.
+ */
+export interface ExtensionValidationError {
+  code: string;
+  path: string;
+  message: string;
+}
+/** Checks a manifest exactly as installing it with these grants would, without installing. */
+export const validateExtension = (manifest: string, grants: string[], signature?: number[]) =>
+  invokeCapability<{ errors: ExtensionValidationError[] }>("extensions.validate", {
+    manifest,
+    grants,
+    ...(signature ? { signature } : {}),
+  });
 export interface ExtensionResourceResult {
   printerColumns?: Array<{name:string;jsonPath:string;type?:string}>;
   columnsError?: string;

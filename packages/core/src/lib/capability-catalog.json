@@ -42,6 +42,12 @@
     "requiresConfirm": false
   },
   {
+    "id": "extensions.validate",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
     "id": "k8s.applyManifest",
     "readOnly": false,
     "destructive": false,

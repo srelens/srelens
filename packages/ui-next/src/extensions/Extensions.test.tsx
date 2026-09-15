@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
@@ -7,6 +7,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   reviewCatalogExtension: vi.fn(),
   listExtensions: vi.fn(),
   configureExtensions: vi.fn(),
+  validateExtension: vi.fn(),
   readExtension: vi.fn(),
   inspectExtensionResource: vi.fn(),
 }));
@@ -15,6 +16,7 @@ import {
   reviewCatalogExtension,
   listExtensions,
   configureExtensions,
+  validateExtension,
   readExtension,
 } from "@srelens/core";
 import { ExtensionManager, ExtensionResults } from "./Extensions";
@@ -45,6 +47,7 @@ beforeEach(() => {
     plugins: [],
   } as any);
   vi.mocked(configureExtensions).mockResolvedValue({} as any);
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
 });
 it("shows backend errors and retries instead of claiming no apps", async () => {
   vi.mocked(listExtensions).mockRejectedValueOnce(new Error("disk unreadable"));
@@ -124,6 +127,7 @@ it("reviews the exact manifest and reports rejected installs without claiming su
     nextRevision: 1,
     plugins: [],
   });
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
   vi.mocked(configureExtensions).mockRejectedValueOnce(
     new Error("Unsupported API version"),
   );
@@ -135,7 +139,7 @@ it("reviews the exact manifest and reports rejected installs without claiming su
   );
   fireEvent.click(screen.getByText("Review manifest"));
   expect(configureExtensions).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByText("Install and grant permissions"));
+  fireEvent.click(await screen.findByText("Install and grant permissions"));
   expect((await screen.findByRole("alert")).textContent).toContain(
     "Unsupported API version",
   );
@@ -144,6 +148,75 @@ it("reviews the exact manifest and reports rejected installs without claiming su
     manifest: source,
     grants: plugin.manifest.permissions,
   });
+});
+it("lists every manifest problem with its path and does not offer to install", async () => {
+  const errors = [
+    { code: "EXTENSION_INVALID_ID", path: "id", message: "App ID must be a reverse-domain identifier" },
+    { code: "EXTENSION_UNRESOLVED_CAPABILITY", path: "contributions.pages[0].capability", message: 'Capability "applications.delete" is not declared' },
+    { code: "EXTENSION_INVALID_KIND", path: "contributions.detailTabs[0].forKinds[0]", message: "Qualify the kind with its API group" },
+  ];
+  vi.mocked(validateExtension).mockResolvedValue({ errors });
+  render(<ExtensionManager />);
+  const source = JSON.stringify(plugin.manifest);
+  fireEvent.change(
+    await screen.findByLabelText("Local app manifest (JSON)"),
+    { target: { value: source } },
+  );
+  fireEvent.click(screen.getByText("Review manifest"));
+  const list = await screen.findByRole("list", { name: "Manifest problems" });
+  const items = within(list).getAllByRole("listitem");
+  expect(items).toHaveLength(3);
+  errors.forEach((error, index) => {
+    expect(items[index].textContent).toContain(error.path);
+    expect(items[index].textContent).toContain(error.message);
+    expect(items[index].textContent).toContain(error.code);
+  });
+  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, undefined);
+  expect(screen.queryByText("Install and grant permissions")).toBeNull();
+  expect(configureExtensions).not.toHaveBeenCalled();
+});
+it("says the manifest check failed, offers a retry and does not offer to install", async () => {
+  vi.mocked(validateExtension).mockRejectedValueOnce(new Error("bridge timed out"));
+  render(<ExtensionManager />);
+  const source = JSON.stringify(plugin.manifest);
+  fireEvent.change(
+    await screen.findByLabelText("Local app manifest (JSON)"),
+    { target: { value: source } },
+  );
+  fireEvent.click(screen.getByText("Review manifest"));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("bridge timed out");
+  expect(within(alert).getByText("Could not check the manifest")).toBeTruthy();
+  expect(screen.queryByText("Install and grant permissions")).toBeNull();
+  fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+  await screen.findByText("Install and grant permissions");
+  expect(validateExtension).toHaveBeenCalledTimes(2);
+  expect(validateExtension).toHaveBeenLastCalledWith(source, plugin.manifest.permissions, undefined);
+  expect(configureExtensions).not.toHaveBeenCalled();
+});
+it("applies a manifest check only to the review that asked for it", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] });
+  const source = JSON.stringify(plugin.manifest);
+  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source, signature: [1, 2, 3] });
+  vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [{ id: plugin.manifest.id, name: "Catalog GitOps", description: "GitOps resources", repository: "https://github.com/example/gitops", license: "MIT", release: { version: "0.1.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: true } }] }, fetchedAt: 1, stale: false, error: null, hostApiVersions: ["0.1.0"], incompatible: [] } as any);
+  let finishSigned!: (report: { errors: [] }) => void;
+  vi.mocked(validateExtension)
+    .mockImplementationOnce(() => new Promise((resolve) => { finishSigned = resolve; }))
+    .mockResolvedValueOnce({ errors: [{ code: "EXTENSION_RESERVED_ID", path: "id", message: "Reserved for signed releases" }] });
+  render(<ExtensionManager />);
+  // A signed catalog review is still being checked...
+  fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
+  fireEvent.click(await screen.findByText("Review installation"));
+  await waitFor(() => expect(validateExtension).toHaveBeenCalledTimes(1));
+  // ...when the same bytes are reviewed unsigned, and that check finds a problem.
+  fireEvent.click(screen.getByRole("tab", { name: "Apps" }));
+  fireEvent.change(screen.getByLabelText("Local app manifest (JSON)"), { target: { value: source } });
+  fireEvent.click(screen.getByText("Review manifest"));
+  await screen.findByRole("list", { name: "Manifest problems" });
+  // The signed check answering late must not clear the unsigned review's problem.
+  await act(async () => { finishSigned({ errors: [] }); });
+  expect(screen.getByRole("list", { name: "Manifest problems" })).toBeTruthy();
+  expect(screen.queryByText("Install and grant permissions")).toBeNull();
 });
 it("persists settings, disable and remove through the backend", async () => {
   vi.mocked(listExtensions).mockResolvedValue({
@@ -483,6 +556,7 @@ it.each([undefined, [1,2,3]])("installs catalog bytes and signature %j only afte
   fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
   fireEvent.click(await screen.findByText("Review installation"));
   const install = await screen.findByText("Install and grant permissions");
+  expect(validateExtension).toHaveBeenCalledWith(source, plugin.manifest.permissions, signature);
   expect(configureExtensions).not.toHaveBeenCalled();
   expect(readExtension).not.toHaveBeenCalled();
   fireEvent.click(install);

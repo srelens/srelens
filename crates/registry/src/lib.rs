@@ -566,7 +566,7 @@ mod tests {
         let reg = build_registry_with_paths(cache, vec![]);
         assert!(!reg.ids().contains(&"settings.get"));
         assert!(!reg.ids().contains(&"settings.set"));
-        for id in ["extensions.catalog", "extensions.catalogManifest", "extensions.list", "extensions.configure", "extensions.read"] { assert!(reg.get(id).is_none()); }
+        for id in ["extensions.catalog", "extensions.catalogManifest", "extensions.list", "extensions.configure", "extensions.validate", "extensions.read"] { assert!(reg.get(id).is_none()); }
     }
 
     #[test]

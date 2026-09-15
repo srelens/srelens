@@ -17,11 +17,14 @@ export function ErrorNotice({
   message,
   retry,
   cluster = false,
+  title,
   guidance,
 }: {
   message?: string;
   retry: () => void;
   cluster?: boolean;
+  /** Names what failed, keeping the reason `describeError` gives. */
+  title?: string;
   guidance?: { title: string; detail: string };
 }) {
   const { Button } = useContext(ExtensionControls);
@@ -31,7 +34,7 @@ export function ErrorNotice({
   return (
     <div className="extension-error" role="alert">
       <div>
-        <strong>{guidance?.title ?? error.title}</strong>
+        <strong>{guidance?.title ?? title ?? error.title}</strong>
         <p>{guidance?.detail ?? error.detail}</p>
         {error.raw !== (guidance?.detail ?? error.detail) && (
           <details>

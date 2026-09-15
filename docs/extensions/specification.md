@@ -126,6 +126,45 @@ Deprecated or planned:
 - **The inventory is host-owned.** `settings.extensions.json` is not an authoring
   surface. Its format changes are listed in [migration.md](migration.md).
 
+## Validation errors
+
+A rejected manifest reports every problem the host finds. Each is
+`{code, path, message}`:
+
+- **`code`** is one of the codes below. A published code never changes meaning; new
+  codes may be added.
+- **`path`** runs from the manifest root, with `.` between fields and `[i]` for array
+  elements, for example `contributions.pages[2].capability`. It is empty when the
+  whole manifest is at fault.
+- **`message`** is for the author and may change between releases.
+
+A schema problem (an unknown field, a missing field or a wrong JSON type) stops
+decoding, so those are reported one at a time. Once a manifest matches the schema,
+every rule violation is reported together, including the desktop app's rules in
+[manifest.md](manifest.md#rules-the-desktop-app-adds). `extensions.validate` returns
+the list without installing, `extensions.configure` refuses an install with the same
+list, and the [developer harness](testing.md#developer-harness) prints one per line.
+
+| Code | Meaning |
+|---|---|
+| `EXTENSION_INVALID_JSON` | The manifest is not JSON. |
+| `EXTENSION_TOO_LARGE` | The manifest exceeds 256 KiB. |
+| `EXTENSION_UNKNOWN_FIELD` | A field the schema does not define. See [Unknown fields](#unknown-fields). |
+| `EXTENSION_INVALID_FIELD` | A required field is missing, or a field has the wrong JSON type. |
+| `EXTENSION_INVALID_ID` | The app `id` is not a reverse-domain identifier. See [Identifiers](#identifiers). |
+| `EXTENSION_RESERVED_ID` | The `id` is in a namespace reserved for a signed publisher, and the manifest is unsigned. |
+| `EXTENSION_INVALID_SIGNATURE` | The publisher signature does not verify against these exact bytes. |
+| `EXTENSION_INVALID_VERSION` | `version` is not SemVer, or `srelensApiVersion` is not a SemVer range. |
+| `EXTENSION_API_INCOMPATIBLE` | The host supports no API version the range admits, or the manifest uses a field missing from one it admits. |
+| `EXTENSION_INVALID_VALUE` | A value breaks a documented limit: the syntax of a name, title or group, a count, or a column index. |
+| `EXTENSION_DUPLICATE_IDENTIFIER` | A capability name, contribution ID, permission or other list entry repeats. |
+| `EXTENSION_PERMISSION_MISMATCH` | `permissions` does not name exactly the bound host capabilities, or they were not all granted. |
+| `EXTENSION_UNSUPPORTED_TARGET` | A binding or contribution uses a host capability that is not allowed there. |
+| `EXTENSION_INVALID_BINDING` | A binding's arguments or inputs break its target's rules. |
+| `EXTENSION_UNRESOLVED_CAPABILITY` | A contribution or dashboard names a capability the manifest does not declare. |
+| `EXTENSION_UNRESOLVED_PAGE` | A dashboard names a page the manifest does not declare. |
+| `EXTENSION_INVALID_KIND` | The manifest `kind` is not `declarative`, or a `forKinds` entry is not a qualified Kubernetes kind. |
+
 ## Identifiers
 
 - **App `id`.** Reverse-domain: at least two dot-separated segments, each 1–64
@@ -195,3 +234,6 @@ receive without an update.
 - **#531:**
   - The manifest JSON Schema is committed at `schemas/extension-manifest.v0.1.json`, and CI fails when it drifts from the host.
   - A manifest may name that schema in a top-level `$schema` key, which the host ignores.
+- **#533:**
+  - A rejected manifest reports every problem found, each with a stable `code`, the `path` of the value at fault and a `message` (see [Validation errors](#validation-errors)), instead of only the first problem as text.
+  - `extensions.validate` returns those problems without installing, and the install review in Settings → Apps lists them before offering to install.

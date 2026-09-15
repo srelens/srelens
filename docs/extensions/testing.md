@@ -23,6 +23,12 @@ cargo run -p srelens-plugin-host --example extension_host -- --schema
 application's install-consent flow. The harness uses the normal kubeconfig sources and
 never passes credentials to app code.
 
+A manifest that breaks the contract is not registered. The harness prints every
+problem, one per line as `path: message (CODE)`, and exits with a failure status. The
+codes are listed in [Validation errors](specification.md#validation-errors). It checks
+the manifest's own rules; the desktop app's narrower rules are checked by
+`extensions.validate` and the install review in Settings → Apps.
+
 To expose only the manifest's operations to an MCP client, add `--mcp`. Supply
 `context` on every call, and optionally `namespace`; omitting it lists across
 namespaces. For example:

@@ -1,20 +1,28 @@
 //! Developer-only manifest runner. It never loads extension JavaScript/binaries.
 use srelens_capability::Registry;
 use srelens_plugin_host::{Manifest, PluginHost};
-use std::{error::Error, sync::Arc};
+use std::{error::Error, process::ExitCode, sync::Arc};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<ExitCode, Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.as_slice() == ["--schema"] {
         println!("{}", serde_json::to_string_pretty(&Manifest::schema())?);
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
     let path = args
         .first()
         .ok_or("usage: extension_host <manifest.json> --grant=<host-capability> [--mcp]")?;
     let source = std::fs::read_to_string(path)?;
-    let manifest = Manifest::parse(&source)?;
+    // Every problem, one per line as `path: message (CODE)`, so an author can fix them in
+    // one pass.
+    let manifest = match Manifest::parse(&source) {
+        Ok(manifest) => manifest,
+        Err(errors) => {
+            eprintln!("{errors}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
     let grants: Vec<String> = args
         .iter()
         .skip(1)
@@ -42,5 +50,5 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }))?
         );
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }

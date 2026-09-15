@@ -5,7 +5,9 @@ import {
   configureExtensions,
   contributionKind,
   isTauri,
+  validateExtension,
   type ExtensionChange,
+  type ExtensionValidationError,
   type InstalledExtension,
 } from "@srelens/core";
 
@@ -33,6 +35,15 @@ export function ExtensionManager() {
     signature?: number[];
     name: string;
     permissions: string[];
+    /** Undefined while the host is still checking the manifest. */
+    errors?: ExtensionValidationError[];
+    /** Why the check itself failed, as opposed to the problems it found. */
+    checkError?: string;
+    /**
+     * This review's identity. The same bytes can be reviewed signed and unsigned, so a
+     * check that answers late is applied only to the review that asked for it.
+     */
+    request: object;
   } | null>(null);
   const [settings, setSettings] = useState<{ id: string; text: string } | null>(
     null,
@@ -51,6 +62,33 @@ export function ExtensionManager() {
       return false;
     } finally {
       setBusy(false);
+    }
+  }
+  /** Opens the permission review, and offers to install only once the host finds no problems. */
+  async function reviewManifest(manifest: string, signature?: number[]) {
+    let parsed: { name?: unknown; permissions?: unknown } = {};
+    try {
+      const value: unknown = JSON.parse(manifest);
+      if (value && typeof value === "object") parsed = value as typeof parsed;
+    } catch {
+      // The host reports invalid JSON with a code and path, like any other problem.
+    }
+    const permissions =
+      Array.isArray(parsed.permissions) && parsed.permissions.every((p) => typeof p === "string")
+        ? (parsed.permissions as string[])
+        : [];
+    const name = typeof parsed.name === "string" ? parsed.name : "This manifest";
+    const request = {};
+    setError("");
+    setReview({ request, source: manifest, signature, name, permissions });
+    try {
+      const { errors } = await validateExtension(manifest, permissions, signature);
+      setReview((current) => (current?.request === request ? { ...current, errors } : current));
+    } catch (e) {
+      // The check did not run, which says nothing about the manifest: keep the review
+      // open with the reason and a retry, and do not offer to install.
+      const checkError = e instanceof Error ? e.message : String(e);
+      setReview((current) => (current?.request === request ? { ...current, checkError } : current));
     }
   }
   if (!isTauri())
@@ -89,22 +127,46 @@ export function ExtensionManager() {
           <section className="extension-install extension-permission-review" aria-label="Review app permissions">
             <p>
               <strong>{review.name}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) requests:{" "}
-              {review.permissions.join(", ")}. Installing an existing ID
+              {review.permissions.join(", ") || "no permissions"}. Installing an existing ID
               replaces its manifest and refreshes its open pages.
             </p>
-            <Button
-              disabled={busy}
-              onClick={() =>
-                void change({
-                  action: "install",
-                  manifest: review.source,
-                  ...(review.signature ? {signature: review.signature} : {}),
-                  grants: review.permissions,
-                })
-              }
-            >
-              Install and grant permissions
-            </Button>
+            {review.checkError ? (
+              <ErrorNotice
+                title="Could not check the manifest"
+                message={review.checkError}
+                retry={() => void reviewManifest(review.source, review.signature)}
+              />
+            ) : !review.errors ? (
+              <p role="status" className="extension-message">Checking the manifest…</p>
+            ) : review.errors.length > 0 ? (
+              <div className="extension-problems">
+                <p>
+                  Fix {review.errors.length === 1 ? "this problem" : `these ${review.errors.length} problems`} in the manifest before installing:
+                </p>
+                <ul aria-label="Manifest problems">
+                  {review.errors.map((problem, index) => (
+                    <li key={`${index}:${problem.code}:${problem.path}`}>
+                      <code className="extension-problem-path">{problem.path || "manifest"}</code> {problem.message}{" "}
+                      <span className="extension-problem-code">{problem.code}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <Button
+                disabled={busy}
+                onClick={() =>
+                  void change({
+                    action: "install",
+                    manifest: review.source,
+                    ...(review.signature ? {signature: review.signature} : {}),
+                    grants: review.permissions,
+                  })
+                }
+              >
+                Install and grant permissions
+              </Button>
+            )}
             <Button variant="secondary" onClick={() => setReview(null)}>
               Cancel
             </Button>
@@ -112,11 +174,7 @@ export function ExtensionManager() {
         )}
       <div hidden={tab !== "catalog"}>
         {catalogOpened && (
-      <ExtensionCatalog autoLoad installed={state.plugins} onReview={(manifest, signature) => {
-        const parsed = JSON.parse(manifest);
-        setReview({ source: manifest, signature, name: parsed.name, permissions: parsed.permissions });
-        setError("");
-      }} />
+      <ExtensionCatalog autoLoad installed={state.plugins} onReview={(manifest, signature) => void reviewManifest(manifest, signature)} />
         )}
       </div>
       <div hidden={tab !== "installed"}>
@@ -139,21 +197,7 @@ export function ExtensionManager() {
         />
         <Button
           disabled={!source.trim() || busy}
-          onClick={() => {
-            try {
-              const m = JSON.parse(source);
-              if (
-                typeof m.name !== "string" ||
-                !Array.isArray(m.permissions) ||
-                !m.permissions.every((p: unknown) => typeof p === "string")
-              )
-                throw new Error("Manifest must declare a name and permissions");
-              setReview({ source, name: m.name, permissions: m.permissions });
-              setError("");
-            } catch (e) {
-              setError(e instanceof Error ? e.message : String(e));
-            }
-          }}
+          onClick={() => void reviewManifest(source)}
         >
           Review manifest
         </Button>

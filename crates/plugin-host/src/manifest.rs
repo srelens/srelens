@@ -1,3 +1,4 @@
+use crate::{ValidationCode as Code, ValidationError, ValidationErrors};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -296,54 +297,144 @@ fn identifier(value: &str) -> bool {
 fn label(value: &str) -> bool {
     !value.trim().is_empty() && value.len() <= 120 && !value.chars().any(char::is_control)
 }
-fn keys(values: impl Iterator<Item = String>) -> Result<BTreeSet<String>, String> {
+/// Records a problem for each value already seen, and returns the distinct values.
+fn unique<'a>(
+    problems: &mut ValidationErrors,
+    values: impl IntoIterator<Item = (String, &'a str)>,
+) -> BTreeSet<&'a str> {
     let mut seen = BTreeSet::new();
-    for key in values {
-        if !seen.insert(key.clone()) {
-            return Err(format!("duplicate identifier: {key}"));
+    for (path, value) in values {
+        if !seen.insert(value) {
+            problems.push(
+                Code::DuplicateIdentifier,
+                path,
+                format!("\"{value}\" is listed more than once"),
+            );
         }
     }
-    Ok(seen)
+    seen
 }
-fn kinds(values: &[String]) -> Result<(), String> {
+fn kinds(problems: &mut ValidationErrors, path: &str, values: &[String]) {
     if values.is_empty() || values.len() > 32 {
-        return Err("forKinds must contain 1–32 qualified kinds".into());
+        problems.push(
+            Code::InvalidValue,
+            path,
+            "forKinds must list 1–32 qualified kinds",
+        );
     }
-    for value in values {
-        let Some((group, kind)) = value.split_once('/') else {
-            return Err(format!("qualify kind with its API group: {value}"));
-        };
-        if !identifier(kind) || (!group.is_empty() && !group.split('.').all(identifier)) {
-            return Err(format!("invalid qualified kind: {value}"));
+    for (index, value) in values.iter().enumerate() {
+        let at = format!("{path}[{index}]");
+        match value.split_once('/') {
+            None => problems.push(
+                Code::InvalidKind,
+                at,
+                format!("Qualify \"{value}\" with its API group, for example apps/Deployment, or /Pod for the core group"),
+            ),
+            Some((group, kind))
+                if !identifier(kind) || (!group.is_empty() && !group.split('.').all(identifier)) =>
+            {
+                problems.push(Code::InvalidKind, at, format!("\"{value}\" is not a qualified Kubernetes kind"))
+            }
+            Some(_) => {}
         }
     }
-    keys(values.iter().cloned())?;
-    Ok(())
+    unique(
+        problems,
+        values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (format!("{path}[{index}]"), value.as_str())),
+    );
+}
+
+/// Maps a schema error to the field it names, without serde's line and column.
+fn schema_error(error: &serde_path_to_error::Error<serde_json::Error>) -> ValidationError {
+    let inner = error.inner();
+    let mut message = inner.to_string();
+    let position = format!(" at line {} column {}", inner.line(), inner.column());
+    if let Some(stripped) = message.strip_suffix(&position) {
+        message = stripped.to_owned();
+    }
+    let mut path = error.path().to_string();
+    if path == "." {
+        path.clear();
+    }
+    let named = |prefix: &str| {
+        message
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.split('`').next())
+            .map(str::to_owned)
+    };
+    let (code, field) = if let Some(field) = named("unknown field `") {
+        (Code::UnknownField, Some(field))
+    } else if let Some(field) = named("missing field `") {
+        (Code::InvalidField, Some(field))
+    } else if path == "kind" && message.starts_with("unknown variant") {
+        (Code::InvalidKind, None)
+    } else {
+        (Code::InvalidField, None)
+    };
+    // A missing field is reported at the object that lacks it; point at the field.
+    if let Some(field) = field {
+        if path != field && !path.ends_with(&format!(".{field}")) {
+            path = if path.is_empty() {
+                field
+            } else {
+                format!("{path}.{field}")
+            };
+        }
+    }
+    ValidationError::new(code, path, message)
 }
 
 impl Manifest {
-    pub fn parse(source: &str) -> Result<Self, String> {
-        if source.len() > MAX_MANIFEST_BYTES {
-            return Err("extension manifest exceeds 256 KiB".into());
-        }
-        // Check the API range before the strict schema, so a manifest written for a newer API
-        // is told which version it needs rather than which field this host does not know.
-        let raw = serde_json::from_str::<Value>(source).ok();
-        if let Some(range) = raw
-            .as_ref()
-            .and_then(|raw| raw.get("srelensApiVersion"))
-            .and_then(Value::as_str)
-        {
-            if semver::VersionReq::parse(range)
-                .is_ok_and(|req| matching_api_versions_in(&req, SUPPORTED_API_VERSIONS).is_empty())
-            {
-                return Err(unsupported_api(range));
-            }
-        }
-        let manifest: Self =
-            serde_json::from_str(source).map_err(|e| format!("invalid extension manifest: {e}"))?;
+    /// Decodes and validates a manifest, reporting every problem found.
+    pub fn parse(source: &str) -> Result<Self, ValidationErrors> {
+        let manifest = Self::decode(source)?;
         manifest.validate()?;
         Ok(manifest)
+    }
+
+    /// Decodes a manifest against the schema without checking its rules. A schema problem
+    /// stops decoding, so those are reported one at a time; [`Manifest::validate`] then
+    /// reports every rule violation together.
+    pub fn decode(source: &str) -> Result<Self, ValidationErrors> {
+        if source.len() > MAX_MANIFEST_BYTES {
+            return Err(
+                ValidationError::new(Code::TooLarge, "", "Manifest exceeds 256 KiB").into(),
+            );
+        }
+        let raw: Value = serde_json::from_str(source).map_err(|e| {
+            ValidationError::new(
+                Code::InvalidJson,
+                "",
+                format!("Manifest is not valid JSON: {e}"),
+            )
+        })?;
+        let unsupported = raw
+            .get("srelensApiVersion")
+            .and_then(Value::as_str)
+            .filter(|range| {
+                semver::VersionReq::parse(range).is_ok_and(|req| {
+                    matching_api_versions_in(&req, SUPPORTED_API_VERSIONS).is_empty()
+                })
+            });
+        // Decode the source, not `raw`: a repeated key is an error rather than last-wins.
+        let mut deserializer = serde_json::Deserializer::from_str(source);
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+            // A manifest written for an API this host lacks is told the version it needs,
+            // not the field this host does not know. One that still decodes goes on to
+            // `validate`, which reports the version together with every other problem.
+            let problem = match unsupported {
+                Some(range) => ValidationError::new(
+                    Code::ApiIncompatible,
+                    "srelensApiVersion",
+                    unsupported_api(range),
+                ),
+                None => schema_error(&error),
+            };
+            ValidationErrors::from(problem)
+        })
     }
 
     /// The published JSON Schema. schemars annotates Rust integers with formats such as
@@ -367,132 +458,296 @@ impl Manifest {
         check_api_fields_in(&value, &admitted, fields)
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    /// Checks the manifest's rules, reporting every violation with the path at fault.
+    pub fn validate(&self) -> Result<(), ValidationErrors> {
+        const LABEL: &str = "Must be 1–120 characters with no control characters";
+        const IDENTIFIER: &str = "Must be 1–64 letters, digits and -";
+        let mut problems = ValidationErrors::default();
         if self.id.len() > 128 || !self.id.contains('.') || !self.id.split('.').all(identifier) {
-            return Err("extension id must be a reverse-domain identifier".into());
+            problems.push(
+                Code::InvalidId,
+                "id",
+                "App ID must be reverse-domain: at least two dot-separated segments of letters, digits and -, at most 128 characters",
+            );
         }
         if !label(&self.name) {
-            return Err("invalid extension name".into());
+            problems.push(Code::InvalidValue, "name", LABEL);
         }
-        semver::Version::parse(&self.version)
-            .map_err(|e| format!("invalid extension version: {e}"))?;
-        let range = semver::VersionReq::parse(&self.api_version)
-            .map_err(|e| format!("invalid srelensApiVersion: {e}"))?;
-        if negotiate_api_version(&range).is_none() {
-            return Err(unsupported_api(&self.api_version));
+        if let Err(e) = semver::Version::parse(&self.version) {
+            problems.push(
+                Code::InvalidVersion,
+                "version",
+                format!("Version must be SemVer: {e}"),
+            );
         }
-        // Stored manifests are rechecked here as well, so an app using a field a newer
-        // host no longer admits is quarantined rather than left enabled.
-        self.check_api_fields(SUPPORTED_API_VERSIONS, API_FIELDS)?;
+        match semver::VersionReq::parse(&self.api_version) {
+            Err(e) => problems.push(
+                Code::InvalidVersion,
+                "srelensApiVersion",
+                format!("srelensApiVersion must be a SemVer range: {e}"),
+            ),
+            Ok(range) if negotiate_api_version(&range).is_none() => problems.push(
+                Code::ApiIncompatible,
+                "srelensApiVersion",
+                unsupported_api(&self.api_version),
+            ),
+            // Stored manifests are rechecked here as well, so an app using a field a newer
+            // host no longer admits is quarantined rather than left enabled.
+            Ok(_) => {
+                if let Err(reason) = self.check_api_fields(SUPPORTED_API_VERSIONS, API_FIELDS) {
+                    problems.push(Code::ApiIncompatible, "srelensApiVersion", reason);
+                }
+            }
+        }
         if self.capabilities.is_empty() || self.capabilities.len() > 32 {
-            return Err("declare 1–32 capabilities".into());
+            problems.push(
+                Code::InvalidValue,
+                "capabilities",
+                "Declare 1–32 capabilities",
+            );
         }
-        let names = keys(self.capabilities.iter().map(|c| c.name.clone()))?;
-        let permissions = keys(self.permissions.iter().cloned())?;
+        let names = unique(
+            &mut problems,
+            self.capabilities
+                .iter()
+                .enumerate()
+                .map(|(index, c)| (format!("capabilities[{index}].name"), c.name.as_str())),
+        );
+        let permissions = unique(
+            &mut problems,
+            self.permissions
+                .iter()
+                .enumerate()
+                .map(|(index, p)| (format!("permissions[{index}]"), p.as_str())),
+        );
         let mut targets = BTreeSet::new();
-        for binding in &self.capabilities {
-            if !identifier(&binding.name) || !label(&binding.title) {
-                return Err("invalid capability name or title".into());
+        for (index, binding) in self.capabilities.iter().enumerate() {
+            let at = format!("capabilities[{index}]");
+            if !identifier(&binding.name) {
+                problems.push(Code::InvalidValue, format!("{at}.name"), IDENTIFIER);
+            }
+            if !label(&binding.title) {
+                problems.push(Code::InvalidValue, format!("{at}.title"), LABEL);
             }
             if binding.target.starts_with("plugin/") {
-                return Err("extension-to-extension forwarding is unsupported".into());
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("{at}.target"),
+                    "An app cannot forward to another app's capability",
+                );
             }
-            targets.insert(binding.target.clone());
-            let inputs = keys(binding.inputs.iter().cloned())?;
-            if inputs.iter().any(|k| binding.arguments.contains_key(k)) {
-                return Err("a bound argument cannot also be an input".into());
+            targets.insert(binding.target.as_str());
+            unique(
+                &mut problems,
+                binding
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(position, input)| (format!("{at}.inputs[{position}]"), input.as_str())),
+            );
+            for (position, input) in binding.inputs.iter().enumerate() {
+                if binding.arguments.contains_key(input) {
+                    problems.push(
+                        Code::InvalidBinding,
+                        format!("{at}.inputs[{position}]"),
+                        format!("\"{input}\" is a bound argument, so it cannot also be an input"),
+                    );
+                }
             }
         }
         if targets != permissions {
-            return Err("permissions must exactly name the bound host capabilities".into());
+            let targets: Vec<_> = targets.into_iter().collect();
+            problems.push(
+                Code::PermissionMismatch,
+                "permissions",
+                format!(
+                    "permissions must name exactly the bound host capabilities: {}",
+                    targets.join(", ")
+                ),
+            );
         }
-        let mut ids = BTreeSet::new();
-        let entries = self
-            .contributions
-            .pages
-            .iter()
-            .map(|p| (&p.id, &p.title, &p.capability))
-            .chain(
+        let contributions: [(&str, Vec<(&String, &String, &String)>); 3] = [
+            (
+                "pages",
+                self.contributions
+                    .pages
+                    .iter()
+                    .map(|p| (&p.id, &p.title, &p.capability))
+                    .collect(),
+            ),
+            (
+                "detailTabs",
                 self.contributions
                     .detail_tabs
                     .iter()
-                    .map(|p| (&p.id, &p.title, &p.capability)),
-            )
-            .chain(
+                    .map(|p| (&p.id, &p.title, &p.capability))
+                    .collect(),
+            ),
+            (
+                "rowActions",
                 self.contributions
                     .row_actions
                     .iter()
-                    .map(|p| (&p.id, &p.title, &p.capability)),
+                    .map(|p| (&p.id, &p.title, &p.capability))
+                    .collect(),
+            ),
+        ];
+        if contributions
+            .iter()
+            .map(|(_, entries)| entries.len())
+            .sum::<usize>()
+            > 64
+        {
+            problems.push(
+                Code::InvalidValue,
+                "contributions",
+                "Declare at most 64 pages, detail tabs and row actions in total",
             );
-        for (id, title, capability) in entries {
-            if ids.len() >= 64
-                || !identifier(id)
-                || !label(title)
-                || !names.contains(capability)
-                || !ids.insert(id)
-            {
-                return Err(format!(
-                    "invalid, duplicate or unresolved contribution: {id}"
-                ));
+        }
+        let mut ids = BTreeSet::new();
+        for (list, entries) in &contributions {
+            for (index, (id, title, capability)) in entries.iter().enumerate() {
+                let at = format!("contributions.{list}[{index}]");
+                if !identifier(id) {
+                    problems.push(Code::InvalidValue, format!("{at}.id"), IDENTIFIER);
+                } else if !ids.insert(id.as_str()) {
+                    problems.push(
+                        Code::DuplicateIdentifier,
+                        format!("{at}.id"),
+                        format!(
+                            "\"{id}\" is already used by another page, detail tab or row action"
+                        ),
+                    );
+                }
+                if !label(title) {
+                    problems.push(Code::InvalidValue, format!("{at}.title"), LABEL);
+                }
+                if !names.contains(capability.as_str()) {
+                    problems.push(
+                        Code::UnresolvedCapability,
+                        format!("{at}.capability"),
+                        format!("Capability \"{capability}\" is not declared"),
+                    );
+                }
             }
         }
-        for page in &self.contributions.pages {
+        for (index, page) in self.contributions.pages.iter().enumerate() {
+            let at = format!("contributions.pages[{index}]");
             if page.group.as_ref().is_some_and(|group| !label(group)) {
-                return Err("invalid page group".into());
+                problems.push(Code::InvalidValue, format!("{at}.group"), LABEL);
             }
             if let Some(status) = &page.status_columns {
-                if [Some(status.ready), status.suspended, status.progressing]
-                    .into_iter()
-                    .flatten()
-                    .any(|i| i >= 64)
-                {
-                    return Err("status column index must be below 64".into());
-                }
-            }
-            if let Some(dashboard) = &page.dashboard {
-                if dashboard.pages.is_empty() || dashboard.pages.len() > 12 {
-                    return Err("dashboard must reference 1–12 resource pages".into());
-                }
-                keys(dashboard.pages.iter().cloned())?;
-                for id in &dashboard.pages {
-                    if !self
-                        .contributions
-                        .pages
-                        .iter()
-                        .any(|p| &p.id == id && p.dashboard.is_none() && p.status_columns.is_some())
-                    {
-                        return Err(
-                            "dashboard must reference a resource page with status columns".into(),
+                for (field, column) in [
+                    ("ready", Some(status.ready)),
+                    ("suspended", status.suspended),
+                    ("progressing", status.progressing),
+                ] {
+                    if column.is_some_and(|column| column >= 64) {
+                        problems.push(
+                            Code::InvalidValue,
+                            format!("{at}.statusColumns.{field}"),
+                            "Status column index must be below 64",
                         );
                     }
                 }
-                if let Some(events) = &dashboard.events {
-                    if !self
-                        .capabilities
-                        .iter()
-                        .any(|c| c.name == events.capability && c.target == "k8s.listEvents")
-                        || events.api_groups.is_empty()
-                        || events.api_groups.len() > 32
-                        || events
-                            .api_groups
-                            .iter()
-                            .any(|g| !g.contains('.') || !g.split('.').all(identifier))
+            }
+            let Some(dashboard) = &page.dashboard else {
+                continue;
+            };
+            if dashboard.pages.is_empty() || dashboard.pages.len() > 12 {
+                problems.push(
+                    Code::InvalidValue,
+                    format!("{at}.dashboard.pages"),
+                    "A dashboard references 1–12 resource pages",
+                );
+            }
+            unique(
+                &mut problems,
+                dashboard.pages.iter().enumerate().map(|(position, id)| {
+                    (format!("{at}.dashboard.pages[{position}]"), id.as_str())
+                }),
+            );
+            for (position, id) in dashboard.pages.iter().enumerate() {
+                let path = format!("{at}.dashboard.pages[{position}]");
+                match self.contributions.pages.iter().find(|p| &p.id == id) {
+                    None => problems.push(
+                        Code::UnresolvedPage,
+                        path,
+                        format!("Page \"{id}\" is not declared"),
+                    ),
+                    Some(target)
+                        if target.dashboard.is_some() || target.status_columns.is_none() =>
                     {
-                        return Err(
-                            "dashboard events require an event reader and explicit API groups"
-                                .into(),
-                        );
+                        problems.push(
+                            Code::InvalidValue,
+                            path,
+                            format!("Page \"{id}\" must be a resource page with statusColumns"),
+                        )
                     }
-                    keys(events.api_groups.iter().cloned())?;
+                    Some(_) => {}
                 }
             }
+            let Some(events) = &dashboard.events else {
+                continue;
+            };
+            let at = format!("{at}.dashboard.events");
+            if !self
+                .capabilities
+                .iter()
+                .any(|c| c.name == events.capability && c.target == "k8s.listEvents")
+            {
+                problems.push(
+                    Code::UnresolvedCapability,
+                    format!("{at}.capability"),
+                    format!(
+                        "\"{}\" is not a declared k8s.listEvents capability",
+                        events.capability
+                    ),
+                );
+            }
+            if events.api_groups.is_empty() || events.api_groups.len() > 32 {
+                problems.push(
+                    Code::InvalidValue,
+                    format!("{at}.apiGroups"),
+                    "List 1–32 API groups",
+                );
+            }
+            for (position, group) in events.api_groups.iter().enumerate() {
+                if !group.contains('.') || !group.split('.').all(identifier) {
+                    problems.push(
+                        Code::InvalidValue,
+                        format!("{at}.apiGroups[{position}]"),
+                        format!(
+                            "\"{group}\" is not an API group, for example source.toolkit.fluxcd.io"
+                        ),
+                    );
+                }
+            }
+            unique(
+                &mut problems,
+                events
+                    .api_groups
+                    .iter()
+                    .enumerate()
+                    .map(|(position, group)| {
+                        (format!("{at}.apiGroups[{position}]"), group.as_str())
+                    }),
+            );
         }
-        for tab in &self.contributions.detail_tabs {
-            kinds(&tab.for_kinds)?;
+        for (index, tab) in self.contributions.detail_tabs.iter().enumerate() {
+            kinds(
+                &mut problems,
+                &format!("contributions.detailTabs[{index}].forKinds"),
+                &tab.for_kinds,
+            );
         }
-        for action in &self.contributions.row_actions {
-            kinds(&action.for_kinds)?;
+        for (index, action) in self.contributions.row_actions.iter().enumerate() {
+            kinds(
+                &mut problems,
+                &format!("contributions.rowActions[{index}].forKinds"),
+                &action.for_kinds,
+            );
         }
-        Ok(())
+        problems.into_result()
     }
 }

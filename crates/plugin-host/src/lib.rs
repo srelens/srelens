@@ -3,7 +3,9 @@
 //! No package code is loaded here. A trusted installer supplies explicit
 //! grants for native srelens manifests.
 mod manifest;
+mod validation;
 pub use manifest::*;
+pub use validation::*;
 
 use serde_json::{Map, Value};
 use srelens_capability::{Capability, CapabilityError, Registry};
@@ -41,6 +43,76 @@ impl PluginHost {
         Self { core }
     }
 
+    /// Every way `binding`, the manifest's `index`th capability, does not fit its target:
+    /// a target the host lacks, an argument or input the target does not take, or a
+    /// required one left unbound.
+    pub fn binding_problems(&self, index: usize, binding: &Binding) -> Vec<ValidationError> {
+        let at = format!("capabilities[{index}]");
+        let mut problems = ValidationErrors::default();
+        let Some(target) = self.core.get(&binding.target) else {
+            problems.push(
+                ValidationCode::UnsupportedTarget,
+                format!("{at}.target"),
+                format!("{} is not a host capability", binding.target),
+            );
+            return problems.0;
+        };
+        let Some(properties) = target
+            .input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+        else {
+            problems.push(
+                ValidationCode::UnsupportedTarget,
+                format!("{at}.target"),
+                format!("{} does not take an object input", binding.target),
+            );
+            return problems.0;
+        };
+        for (position, input) in binding.inputs.iter().enumerate() {
+            if !properties.contains_key(input) {
+                problems.push(
+                    ValidationCode::InvalidBinding,
+                    format!("{at}.inputs[{position}]"),
+                    format!("{} has no input \"{input}\"", binding.target),
+                );
+            }
+        }
+        for key in binding.arguments.keys() {
+            if !properties.contains_key(key) {
+                problems.push(
+                    ValidationCode::InvalidBinding,
+                    format!("{at}.arguments.{key}"),
+                    format!("{} has no argument \"{key}\"", binding.target),
+                );
+            }
+        }
+        for key in Self::required_inputs(&target.input_schema) {
+            if !binding.arguments.contains_key(&key) && !binding.inputs.contains(&key) {
+                problems.push(
+                    ValidationCode::InvalidBinding,
+                    format!("{at}.arguments.{key}"),
+                    format!(
+                        "{} requires \"{key}\"; bind it or accept it as an input",
+                        binding.target
+                    ),
+                );
+            }
+        }
+        problems.0
+    }
+
+    fn required_inputs(schema: &Value) -> Vec<String> {
+        schema
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    }
+
     pub fn register(
         &self,
         registry: &mut Registry,
@@ -57,10 +129,13 @@ impl PluginHost {
         }
         let active = Arc::new(AtomicBool::new(true));
         let mut capabilities = Vec::new();
-        for binding in &manifest.capabilities {
+        for (index, binding) in manifest.capabilities.iter().enumerate() {
             let id = format!("plugin/{}/{}", manifest.id, binding.name);
             if registry.get(&id).is_some() {
                 return Err(format!("capability already registered: {id}"));
+            }
+            if let Some(problem) = self.binding_problems(index, binding).into_iter().next() {
+                return Err(problem.to_string());
             }
             let target = self
                 .core
@@ -72,31 +147,7 @@ impl PluginHost {
                 .get("properties")
                 .and_then(Value::as_object)
                 .ok_or("host capability needs an object input schema")?;
-            if binding
-                .inputs
-                .iter()
-                .chain(binding.arguments.keys())
-                .any(|k| !properties.contains_key(k))
-            {
-                return Err(format!("unknown argument for {}", binding.target));
-            }
-            let required: Vec<String> = schema
-                .get("required")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect();
-            if required
-                .iter()
-                .any(|k| !binding.arguments.contains_key(k) && !binding.inputs.contains(k))
-            {
-                return Err(format!(
-                    "binding omits a required argument for {}",
-                    binding.target
-                ));
-            }
+            let required = Self::required_inputs(&schema);
             let exposed: Map<String, Value> = binding
                 .inputs
                 .iter()

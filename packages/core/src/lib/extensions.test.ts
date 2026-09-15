@@ -59,6 +59,21 @@ it("matches explicit API identity, including custom and unmapped built-in kinds"
   expect(contributionKind("Deployment", "example.io")).toBe("example.io/Deployment");
 });
 
+it("validates the exact reviewed manifest with its grants and optional signature", async () => {
+  const { validateExtension } = await import("./extensions");
+  await validateExtension("{}", ["k8s.listCustomResource"]);
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.validate", {
+    manifest: "{}",
+    grants: ["k8s.listCustomResource"],
+  });
+  await validateExtension("{}", [], [1, 2]);
+  expect(invokeCapability).toHaveBeenLastCalledWith("extensions.validate", {
+    manifest: "{}",
+    grants: [],
+    signature: [1, 2],
+  });
+});
+
 it("uses backend catalog payloads without sending URLs or connecting a cluster", async () => {
   const { listExtensionCatalog, reviewCatalogExtension } = await import("./extensions");
   await listExtensionCatalog(true);

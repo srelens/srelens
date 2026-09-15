@@ -56,8 +56,13 @@ pub(super) fn repository(id: &str) -> Option<&'static str> {
 pub(super) fn verify(raw: &[u8], signature: &[u8]) -> Result<(), String> {
     let source = std::str::from_utf8(raw).map_err(|_| "Signed manifest is not UTF-8")?;
     let manifest = Manifest::parse(source)?;
-    let (publisher, _) =
-        publisher(&manifest.id).ok_or("Signing key is not trusted for this app ID")?;
+    verify_for(&manifest.id, raw, signature)
+}
+
+/// Checks `signature` over `raw` with the key of the publisher that owns `id`. It does not
+/// depend on the manifest passing its rules, so both can be reported together.
+pub(super) fn verify_for(id: &str, raw: &[u8], signature: &[u8]) -> Result<(), String> {
+    let (publisher, _) = publisher(id).ok_or("Signing key is not trusted for this app ID")?;
     verify_key(publisher.key, raw, signature)
 }
 
