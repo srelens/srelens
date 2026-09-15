@@ -360,7 +360,31 @@
     "requiresConfirm": false
   },
   {
+    "id": "k8s.nodeJournalLogs",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
     "id": "k8s.nodeMetrics",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
+    "id": "k8s.nodeRuntimeDiagnostics",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false
+  },
+  {
+    "id": "k8s.nodeServiceRestart",
+    "readOnly": false,
+    "destructive": true,
+    "requiresConfirm": true
+  },
+  {
+    "id": "k8s.nodeServiceStatus",
     "readOnly": true,
     "destructive": false,
     "requiresConfirm": false

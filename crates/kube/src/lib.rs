@@ -176,3 +176,4 @@ pub mod workloads;
 pub mod lineage;
 pub mod node_inspector;
 pub mod gpu_info;
+pub mod node_ssh;

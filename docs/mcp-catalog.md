@@ -5,11 +5,11 @@
 
 Everything this server exposes over MCP, generated from the live registry so it cannot drift. Written for someone wiring an agent to srelens; the narrative reference is [MCP.md](MCP.md).
 
-## Tools (94)
+## Tools (98)
 
 Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
-### Kubernetes — read-only (54)
+### Kubernetes — read-only (57)
 
 | Tool | Summary |
 | --- | --- |
@@ -50,7 +50,10 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.listServices` | list services in a namespace of a connected kube context |
 | `k8s.listStatefulSets` | list StatefulSets in a namespace of a connected kube context |
 | `k8s.listStorageClasses` | list StorageClasses of a connected kube context (cluster-scoped) |
+| `k8s.nodeJournalLogs` | retrieve journalctl logs for a service on a node via SSH |
 | `k8s.nodeMetrics` | node CPU/memory usage (requires metrics-server) |
+| `k8s.nodeRuntimeDiagnostics` | run non-invasive host diagnostics (containers, dmesg, disk, memory, process) on a node via SSH |
+| `k8s.nodeServiceStatus` | check the status of a systemd service (e.g. rke2-server, kubelet) on a node via SSH |
 | `k8s.openApiSchema` | fetch the OpenAPI schema for a resource kind (for field autocomplete) |
 | `k8s.podCount` | running vs total pod counts for a cluster, counted without listing pod bodies |
 | `k8s.podLogs` | fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large) |
@@ -88,7 +91,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.scale` | set the replica count of a workload (Deployment/StatefulSet/ReplicaSet) |
 | `k8s.updateConfigData` | update ConfigMap or Secret values in place (merge patch) |
 
-### Kubernetes — destructive (7)
+### Kubernetes — destructive (8)
 
 | Tool | Summary |
 | --- | --- |
@@ -99,6 +102,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.deleteResource` | delete any supported resource by kind/namespace/name (destructive) |
 | `k8s.drainNode` | cordon a node and evict its evictable pods (destructive) |
 | `k8s.evictPod` | evict a pod via the eviction API (respects PodDisruptionBudgets) |
+| `k8s.nodeServiceRestart` | restart a system service (e.g. rke2-server, kubelet) on a node via SSH (confirm-gated) |
 
 ### Helm — read-only (5)
 

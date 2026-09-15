@@ -30,6 +30,10 @@ pub enum Modal {
         current_replicas: i32,
         input: String,
     },
+    NodeSsh {
+        node_name: String,
+        destination_input: String,
+    },
     PortForward {
         pod_name: String,
         namespace: String,
@@ -96,6 +100,7 @@ pub enum QuickActionId {
     RelationshipTree,
     ViewLogs,
     OpenShell,
+    NodeSsh,
     PortForward,
     StopPortForward,
     Describe,
@@ -267,6 +272,52 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let hints = Paragraph::new(Line::from(vec![
                 Span::styled("[Enter]", Theme::key_hint_key()),
                 Span::styled(" Apply  ", Theme::key_hint_desc()),
+                Span::styled("[Esc]", Theme::key_hint_key()),
+                Span::styled(" Cancel", Theme::key_hint_desc()),
+            ])).alignment(Alignment::Center);
+            f.render_widget(hints, chunks[2]);
+        }
+        Modal::NodeSsh { node_name, destination_input } => {
+            let modal_area = centered_rect(55, 30, area);
+            f.render_widget(Clear, modal_area);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(Theme::border_type())
+                .border_style(Style::default().fg(Theme::ACCENT))
+                .title(format!(" 🔑 SSH into Node: {} ", node_name));
+
+            let inner = block.inner(modal_area);
+            f.render_widget(block, modal_area);
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                    Constraint::Length(2),
+                ])
+                .split(inner);
+
+            let info = Paragraph::new("Direct SSH to host OS (works when kubelet is down)")
+                .style(Style::default().fg(Theme::DIM))
+                .alignment(Alignment::Center);
+            f.render_widget(info, chunks[0]);
+
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(Theme::border_type())
+                .border_style(Style::default().fg(Theme::CYAN))
+                .title(" Destination (IP, hostname, or user@host) ");
+            let input_widget = Paragraph::new(format!("{}█", destination_input))
+                .style(Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD))
+                .alignment(Alignment::Center)
+                .block(input_block);
+            f.render_widget(input_widget, chunks[1]);
+
+            let hints = Paragraph::new(Line::from(vec![
+                Span::styled("[Enter]", Theme::key_hint_key()),
+                Span::styled(" Connect  ", Theme::key_hint_desc()),
                 Span::styled("[Esc]", Theme::key_hint_key()),
                 Span::styled(" Cancel", Theme::key_hint_desc()),
             ])).alignment(Alignment::Center);

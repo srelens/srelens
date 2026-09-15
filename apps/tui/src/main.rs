@@ -622,6 +622,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.set_toast(e, theme::Theme::status_error());
                     }
                 }
+                SuspendAction::NodeSsh { destination } => {
+                    if let Err(e) = views::ExecRunner::run_node_ssh(&destination) {
+                        app.set_toast(e, theme::Theme::status_error());
+                    }
+                }
             }
 
             // 3. Flush any leftover leaked sequences from child process (e.g. vim OSC queries)

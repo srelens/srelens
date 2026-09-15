@@ -3456,3 +3456,31 @@ async fn the_overview_falls_back_to_header_counts_without_cached_data() {
     assert_eq!(ov.data.context_name, "test-cluster");
     assert!(!ov.data.is_reachable);
 }
+
+#[tokio::test]
+async fn node_ssh_opens_modal_and_executes_suspend_action() {
+    let (mut app, _rx) = common::app().await;
+
+    app.active_view = ActiveView::Table(table_with(
+        ResourceKind::Nodes,
+        vec![serde_json::json!({ "name": "worker-1", "status": "Ready", "internalIp": "10.0.1.20" })],
+    ));
+
+    // 'S' opens NodeSsh modal prefilled with internal IP
+    app.handle_key_event(common::ch('S')).await;
+    match &app.modal {
+        Some(Modal::NodeSsh { node_name, destination_input }) => {
+            assert_eq!(node_name, "worker-1");
+            assert_eq!(destination_input, "10.0.1.20");
+        }
+        _ => panic!("expected Modal::NodeSsh"),
+    }
+
+    // Pressing Enter in the modal triggers terminal suspend with NodeSsh action
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
+    assert!(app.modal.is_none());
+    assert!(matches!(
+        &app.requires_terminal_suspend,
+        Some(SuspendAction::NodeSsh { destination }) if destination == "10.0.1.20"
+    ));
+}

@@ -121,6 +121,7 @@ pub enum SuspendAction {
     PodShell { pod: String, namespace: Option<String>, container: Option<String> },
     DebugShell { pod: String, namespace: Option<String>, container: Option<String> },
     NodeShell { node: String },
+    NodeSsh { destination: String },
 }
 
 /// Deletes the preceding word from a string buffer, matching Unix readline / k9s / vim `<Ctrl+w>`.
@@ -1769,6 +1770,35 @@ impl App {
                         _ => {}
                     }
                 }
+                Modal::NodeSsh { node_name, mut destination_input } => {
+                    match key.code {
+                        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            delete_prev_word(&mut destination_input);
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input });
+                        }
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                            destination_input.push(c);
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input });
+                        }
+                        KeyCode::Backspace => {
+                            destination_input.pop();
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input });
+                        }
+                        KeyCode::Enter => {
+                            self.modal = None;
+                            let trimmed = destination_input.trim();
+                            if !trimmed.is_empty() {
+                                self.requires_terminal_suspend = Some(SuspendAction::NodeSsh {
+                                    destination: trimmed.to_string(),
+                                });
+                            }
+                        }
+                        KeyCode::Esc => {
+                            self.modal = None;
+                        }
+                        _ => {}
+                    }
+                }
                 Modal::PortForward { pod_name, namespace, container_port, mut local_port_input, kind } => {
                     match key.code {
                         KeyCode::Char(c) if c.is_ascii_digit() => {
@@ -3154,6 +3184,23 @@ impl App {
                             self.set_toast("Shell only available for Pods and Nodes".to_string(), Theme::status_warn());
                         }
                     }
+                    KeyCode::Char('S') | KeyCode::Char('h') => {
+                        if table_kind == ResourceKind::Nodes {
+                            if let Some(node_name) = sel_name {
+                                let destination = table.selected_item()
+                                    .and_then(|item| {
+                                        item.get("internalIp").and_then(|v| v.as_str())
+                                            .or_else(|| item.get("externalIp").and_then(|v| v.as_str()))
+                                    })
+                                    .unwrap_or(&node_name)
+                                    .to_string();
+                                self.modal = Some(Modal::NodeSsh {
+                                    node_name,
+                                    destination_input: destination,
+                                });
+                            }
+                        }
+                    }
                     KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                         if table_kind == ResourceKind::Events {
                             if let Some(item) = table.selected_item() {
@@ -4522,6 +4569,15 @@ impl App {
                         // Explicit node debug shell even if a pod is highlighted
                         self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: node_name.clone() });
                     }
+                    KeyCode::Char('h') | KeyCode::Char('H') => {
+                        let destination = inspector.details.as_ref()
+                            .and_then(|d| d.internal_ip.clone().or_else(|| d.external_ip.clone()))
+                            .unwrap_or_else(|| node_name.clone());
+                        self.modal = Some(Modal::NodeSsh {
+                            node_name: node_name.clone(),
+                            destination_input: destination,
+                        });
+                    }
                     KeyCode::Char('c') => {
                         let target_unsched = !is_unsched;
                         let action_type = if target_unsched { "cordon" } else { "uncordon" };
@@ -5655,6 +5711,10 @@ impl App {
                 Modal::Scale { ref mut input, .. } => {
                     let cleaned = text.replace("\r\n", "").replace('\n', "");
                     input.push_str(&cleaned);
+                }
+                Modal::NodeSsh { ref mut destination_input, .. } => {
+                    let cleaned = text.replace("\r\n", "").replace('\n', "");
+                    destination_input.push_str(&cleaned);
                 }
                 Modal::PortForward { ref mut local_port_input, .. } => {
                     let cleaned = text.replace("\r\n", "").replace('\n', "");
@@ -7685,6 +7745,12 @@ impl App {
                     description: "Filter pod table to pods on this node".to_string(),
                 },
                 QuickActionItem {
+                    id: QuickActionId::NodeSsh,
+                    key_hint: "S".to_string(),
+                    title: "🔑 SSH into Node (Host OS)".to_string(),
+                    description: "Direct SSH connection to host OS (works when kubelet is down)".to_string(),
+                },
+                QuickActionItem {
                     id: QuickActionId::OpenShell,
                     key_hint: "s".to_string(),
                     title: "🐚 Privileged Node Shell".to_string(),
@@ -8058,6 +8124,29 @@ impl App {
                             let target_ns = namespace.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
                             self.prompt_pod_shell(resource_name, target_ns).await;
                         }
+                    }
+                    QuickActionId::NodeSsh => {
+                        let destination = match &self.active_view {
+                            ActiveView::Table(t) if t.kind == ResourceKind::Nodes => {
+                                t.selected_item()
+                                    .and_then(|item| {
+                                        item.get("internalIp").and_then(|v| v.as_str())
+                                            .or_else(|| item.get("externalIp").and_then(|v| v.as_str()))
+                                    })
+                                    .unwrap_or(&resource_name)
+                                    .to_string()
+                            }
+                            ActiveView::NodeInspector(inspector) => {
+                                inspector.details.as_ref()
+                                    .and_then(|d| d.internal_ip.clone().or_else(|| d.external_ip.clone()))
+                                    .unwrap_or_else(|| resource_name.clone())
+                            }
+                            _ => resource_name.clone(),
+                        };
+                        self.modal = Some(Modal::NodeSsh {
+                            node_name: resource_name,
+                            destination_input: destination,
+                        });
                     }
                     QuickActionId::PortForward => {
                         let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
@@ -9281,6 +9370,7 @@ impl App {
                     ("<y>", "YAML"),
                     ("<x>", "Actions"),
                     ("<s>", "Shell"),
+                    ("<S>", "SSH"),
                     ("<?>", "Help"),
                 ][..]),
                 _ => Some(&[
