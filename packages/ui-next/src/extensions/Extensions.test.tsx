@@ -10,6 +10,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   validateExtension: vi.fn(),
   readExtension: vi.fn(),
   inspectExtensionResource: vi.fn(),
+  saveTextFile: vi.fn(),
 }));
 import {
   listExtensionCatalog,
@@ -18,6 +19,7 @@ import {
   configureExtensions,
   validateExtension,
   readExtension,
+  saveTextFile,
 } from "@srelens/core";
 import { ExtensionManager, ExtensionResults } from "./Extensions";
 const plugin = {
@@ -217,6 +219,80 @@ it("applies a manifest check only to the review that asked for it", async () => 
   await act(async () => { finishSigned({ errors: [] }); });
   expect(screen.getByRole("list", { name: "Manifest problems" })).toBeTruthy();
   expect(screen.queryByText("Install and grant permissions")).toBeNull();
+});
+/** A signed catalog update that added an event grant, with the version it replaced. */
+const updated = () => ({
+  ...plugin,
+  manifest: { ...plugin.manifest, version: "0.2.0", permissions: ["k8s.listCustomResource", "k8s.listEvents"] },
+  grants: ["k8s.listCustomResource", "k8s.listEvents"],
+  revision: 4,
+  settings: { team: "platform" },
+  source: "catalog",
+  installedAt: 1_700_000_000,
+  signatureProof: { manifest: "{}", signature: [1] },
+  history: [
+    { manifest: { ...plugin.manifest, version: "0.1.0" }, grants: ["k8s.listCustomResource"], revision: 2, source: "local", installedAt: 1_690_000_000 },
+  ],
+});
+async function openDetails(app: ReturnType<typeof updated>) {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 5, plugins: [app] } as any);
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("button", { name: "Details for GitOps" }));
+  return screen.getByRole("region", { name: "GitOps details" });
+}
+it("inspects an installed app's source, grants and manifest, and exports or resets its settings", async () => {
+  vi.mocked(saveTextFile).mockResolvedValue("/tmp/settings.json");
+  const details = await openDetails(updated());
+  expect(details.textContent).toContain("Signed by srelens");
+  expect(details.textContent).toContain("from the Catalog");
+  expect(details.textContent).toContain("revision 4");
+  const grants = within(details).getByRole("list", { name: "Granted capabilities" });
+  expect(within(grants).getByText("k8s.listEvents").closest("li")!.textContent).toContain("Read-only");
+  const manifest = within(details).getByRole("textbox", { name: "GitOps manifest" });
+  expect(manifest.getAttribute("contenteditable")).toBe("false");
+  expect(manifest.textContent).toContain('"version": "0.2.0"');
+
+  fireEvent.click(within(details).getByRole("button", { name: "Export settings" }));
+  await waitFor(() =>
+    expect(saveTextFile).toHaveBeenCalledWith(
+      "org.test.gitops-settings.json",
+      `${JSON.stringify({ team: "platform" }, null, 2)}\n`,
+    ),
+  );
+  fireEvent.click(within(details).getByRole("button", { name: "Reset settings" }));
+  expect(configureExtensions).not.toHaveBeenCalled();
+  fireEvent.click(within(details).getByRole("button", { name: "Reset to defaults" }));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "settings", id: "org.test.gitops", settings: {} }),
+  );
+});
+it("reviews the permissions of a rollback whose grants differ", async () => {
+  const details = await openDetails(updated());
+  const versions = within(details).getByRole("list", { name: "Previous versions" });
+  fireEvent.click(within(versions).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(review.textContent).toContain("k8s.listCustomResource");
+  expect(configureExtensions).not.toHaveBeenCalled();
+  fireEvent.click(within(review).getByRole("button", { name: "Roll back and grant permissions" }));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({
+      action: "rollback", id: "org.test.gitops", revision: 2, grants: ["k8s.listCustomResource"],
+    }),
+  );
+});
+it("only confirms a rollback whose grants are unchanged", async () => {
+  const app = updated();
+  app.history[0].manifest = { ...app.history[0].manifest, permissions: app.grants };
+  const details = await openDetails(app);
+  fireEvent.click(within(details).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(within(review).queryByRole("button", { name: "Roll back and grant permissions" })).toBeNull();
+  fireEvent.click(within(review).getByRole("button", { name: "Roll back" }));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({
+      action: "rollback", id: "org.test.gitops", revision: 2, grants: app.grants,
+    }),
+  );
 });
 it("persists settings, disable and remove through the backend", async () => {
   vi.mocked(listExtensions).mockResolvedValue({

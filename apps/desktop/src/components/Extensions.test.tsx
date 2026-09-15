@@ -21,6 +21,9 @@ const plugin = {
   revision: 1,
   grants: manifest.permissions,
   settings: {},
+  source: "catalog",
+  installedAt: 1,
+  history: [],
 } as InstalledExtension;
 beforeEach(() => {
   vi.clearAllMocks();

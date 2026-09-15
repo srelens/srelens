@@ -1,3 +1,4 @@
+import { ExtensionDetails } from "./ExtensionDetails";
 import { ExtensionRequirements } from "./ExtensionRequirements";
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useState } from "react";
@@ -30,6 +31,8 @@ export function ExtensionManager() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState<InstalledExtension | null>(null);
+  /** The ID of the app whose details are open. */
+  const [details, setDetails] = useState<string | null>(null);
   const [review, setReview] = useState<{
     source: string;
     signature?: number[];
@@ -232,6 +235,14 @@ export function ExtensionManager() {
             </label>
             <Button
               variant="secondary"
+              aria-label={`Details for ${plugin.manifest.name}`}
+              aria-expanded={details === plugin.manifest.id}
+              onClick={() => setDetails(details === plugin.manifest.id ? null : plugin.manifest.id)}
+            >
+              Details
+            </Button>
+            <Button
+              variant="secondary"
               disabled={busy}
               onClick={() =>
                 setSettings({
@@ -257,6 +268,9 @@ export function ExtensionManager() {
             <p className="extension-error">
               Disabled: {plugin.quarantined}. Remove it or reinstall it from the Catalog.
             </p>
+          )}
+          {details === plugin.manifest.id && (
+            <ExtensionDetails plugin={plugin} busy={busy} change={change} onError={setError} />
           )}
         </section>
       ))}

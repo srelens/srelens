@@ -295,6 +295,35 @@
   color: inherit;
   font-family: var(--font-mono);
 }
+.extension-details {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px 14px;
+  border-top: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-details h3 {
+  margin: 6px 0 0;
+  font-size: var(--text-body, 0.8125rem);
+  font-weight: 600;
+}
+.extension-details .extension-message { padding: 0; }
+.extension-grants,
+.extension-versions {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.extension-grants li,
+.extension-versions li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+.extension-grants code { font-family: var(--font-mono); }
+.extension-grants span { color: var(--ink-muted, var(--fl-color-text-muted)); }
 .extension-problem-code {
   color: var(--ink-muted, var(--fl-color-text-muted));
   font-size: var(--text-caption, 0.75rem);

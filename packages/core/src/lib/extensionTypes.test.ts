@@ -27,7 +27,18 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     enabled: "required",
     revision: "required",
     settings: "required",
+    source: "required",
+    installedAt: "required",
+    history: "required",
   } satisfies Presence<InstalledExtension>,
+  PreviousVersion: {
+    signatureProof: "optional",
+    manifest: "required",
+    grants: "required",
+    revision: "required",
+    source: "required",
+    installedAt: "required",
+  } satisfies Presence<InstalledExtension["history"][number]>,
   SignatureProof: {
     manifest: "required",
     signature: "required",
@@ -120,6 +131,11 @@ describe("extension TypeScript types match the Rust contract", () => {
       .filter(([, definition]) => definition.properties)
       .map(([name]) => name);
     expect(Object.keys(tables).sort()).toEqual(["Inventory", ...structs].sort());
+  });
+
+  it("has the Rust install sources", () => {
+    const sources = { local: true, catalog: true } satisfies Record<InstalledExtension["source"], true>;
+    expect(Object.keys(sources).sort()).toEqual([...(schema.definitions.Source.enum ?? [])].sort());
   });
 
   it("has the Rust manifest kinds", () => {

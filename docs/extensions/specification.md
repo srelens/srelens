@@ -237,3 +237,8 @@ receive without an update.
 - **#533:**
   - A rejected manifest reports every problem found, each with a stable `code`, the `path` of the value at fault and a `message` (see [Validation errors](#validation-errors)), instead of only the first problem as text.
   - `extensions.validate` returns those problems without installing, and the install review in Settings → Apps lists them before offering to install.
+- **#534:**
+  - Each installed app records its `source` (`local` or `catalog`), `installedAt`, and in `history` the last three versions it replaced.
+  - `extensions.configure` gains `rollback`, which restores a kept version with explicit grants, keeps settings and assigns a new revision.
+  - Settings → Apps shows an app's manifest, grants with their annotations, source and install time; it exports settings as JSON, resets them to defaults, and rolls back.
+  - The capability catalog carries a `sensitive` flag.
