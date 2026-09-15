@@ -286,7 +286,15 @@
 .extension-problems { color: var(--sev, var(--fl-color-danger)); }
 .extension-problems p { margin: 0; }
 .extension-problems ul { display: grid; gap: 4px; margin: 6px 0 0; padding-left: 18px; }
-.extension-problems code { color: inherit; font-family: var(--font-mono); overflow-wrap: anywhere; }
+/* A path is machine text: one line that scrolls, so a long one does not bury its neighbours. */
+.extension-problem-path {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: nowrap;
+  color: inherit;
+  font-family: var(--font-mono);
+}
 .extension-problem-code {
   color: var(--ink-muted, var(--fl-color-text-muted));
   font-size: var(--text-caption, 0.75rem);

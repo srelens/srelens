@@ -37,6 +37,8 @@ export function ExtensionManager() {
     permissions: string[];
     /** Undefined while the host is still checking the manifest. */
     errors?: ExtensionValidationError[];
+    /** Why the check itself failed, as opposed to the problems it found. */
+    checkError?: string;
   } | null>(null);
   const [settings, setSettings] = useState<{ id: string; text: string } | null>(
     null,
@@ -77,8 +79,10 @@ export function ExtensionManager() {
       const { errors } = await validateExtension(manifest, permissions, signature);
       setReview((current) => (current?.source === manifest ? { ...current, errors } : current));
     } catch (e) {
-      setReview(null);
-      setError(e instanceof Error ? e.message : String(e));
+      // The check did not run, which says nothing about the manifest: keep the review
+      // open with the reason and a retry, and do not offer to install.
+      const checkError = e instanceof Error ? e.message : String(e);
+      setReview((current) => (current?.source === manifest ? { ...current, checkError } : current));
     }
   }
   if (!isTauri())
@@ -120,7 +124,13 @@ export function ExtensionManager() {
               {review.permissions.join(", ") || "no permissions"}. Installing an existing ID
               replaces its manifest and refreshes its open pages.
             </p>
-            {!review.errors ? (
+            {review.checkError ? (
+              <ErrorNotice
+                title="Could not check the manifest"
+                message={review.checkError}
+                retry={() => void reviewManifest(review.source, review.signature)}
+              />
+            ) : !review.errors ? (
               <p role="status" className="extension-message">Checking the manifest…</p>
             ) : review.errors.length > 0 ? (
               <div className="extension-problems">
@@ -130,7 +140,7 @@ export function ExtensionManager() {
                 <ul aria-label="Manifest problems">
                   {review.errors.map((problem, index) => (
                     <li key={`${index}:${problem.code}:${problem.path}`}>
-                      <code>{problem.path || "manifest"}</code> {problem.message}{" "}
+                      <code className="extension-problem-path">{problem.path || "manifest"}</code> {problem.message}{" "}
                       <span className="extension-problem-code">{problem.code}</span>
                     </li>
                   ))}

@@ -175,6 +175,25 @@ it("lists every manifest problem with its path and does not offer to install", a
   expect(screen.queryByText("Install and grant permissions")).toBeNull();
   expect(configureExtensions).not.toHaveBeenCalled();
 });
+it("says the manifest check failed, offers a retry and does not offer to install", async () => {
+  vi.mocked(validateExtension).mockRejectedValueOnce(new Error("bridge timed out"));
+  render(<ExtensionManager />);
+  const source = JSON.stringify(plugin.manifest);
+  fireEvent.change(
+    await screen.findByLabelText("Local app manifest (JSON)"),
+    { target: { value: source } },
+  );
+  fireEvent.click(screen.getByText("Review manifest"));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("bridge timed out");
+  expect(within(alert).getByText("Could not check the manifest")).toBeTruthy();
+  expect(screen.queryByText("Install and grant permissions")).toBeNull();
+  fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+  await screen.findByText("Install and grant permissions");
+  expect(validateExtension).toHaveBeenCalledTimes(2);
+  expect(validateExtension).toHaveBeenLastCalledWith(source, plugin.manifest.permissions, undefined);
+  expect(configureExtensions).not.toHaveBeenCalled();
+});
 it("persists settings, disable and remove through the backend", async () => {
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
