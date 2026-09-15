@@ -63,9 +63,18 @@ impl ResolvedContext {
     /// Always absolute, so [`resolve_context`] never takes it for a context name, even when
     /// the kubeconfig was added by a relative path. Never persisted: settings keep
     /// `stable_id`, which must not change for relative paths.
+    ///
+    /// Unlike `stable_id`, it names exactly one context: `#` and `%` in the path are
+    /// percent-encoded, so the first `#` is always the delimiter. A path `a` with context
+    /// `b#c` and a path `a#b` with context `c` share a stable ID but not a pinned one.
     pub fn pinned_id(&self) -> String {
         let source = std::path::absolute(&self.source).unwrap_or_else(|_| self.source.clone());
-        format!("{}#{}", source.display(), self.original_name)
+        let source = source
+            .display()
+            .to_string()
+            .replace('%', "%25")
+            .replace('#', "%23");
+        format!("{source}#{}", self.original_name)
     }
 }
 
@@ -323,12 +332,18 @@ pub fn resolve_context(paths: &[PathBuf], name: &str) -> Option<ResolvedContext>
     find_context(&resolve_contexts(paths), name)
 }
 
-fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedContext> {
-    if let Some(pinned) = all
-        .iter()
-        .find(|context| context.stable_id() == name || context.pinned_id() == name)
-    {
+/// [`resolve_context`] over an already resolved listing.
+///
+/// A stable ID that more than one listed context carries (see
+/// [`ResolvedContext::pinned_id`]) names no single context, so it resolves to nothing rather
+/// than to whichever comes first.
+pub fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedContext> {
+    if let Some(pinned) = all.iter().find(|context| context.pinned_id() == name) {
         return Some(pinned.clone());
+    }
+    let mut by_stable_id = all.iter().filter(|context| context.stable_id() == name);
+    if let Some(found) = by_stable_id.next() {
+        return by_stable_id.next().is_none().then(|| found.clone());
     }
     // A context can be named anything, including another context's ID. A name shaped like a
     // pinned ID (an absolute kubeconfig path, `#`, a context name) is taken as one, so once
@@ -737,6 +752,28 @@ mod tests {
             "https://prod:6443"
         );
         assert!(find_context(&with_impostor[..1], &pinned).is_none());
+    }
+
+    #[test]
+    fn contexts_that_share_a_stable_id_have_distinct_pinned_ids_and_resolve_to_neither() {
+        // `a` + `b#c` and `a#b` + `c` both read `/kube/a#b#c`.
+        let named = |name: &str| {
+            format!(
+                "clusters:\n  - name: c\n    cluster: {{ server: https://{} }}\ncontexts:\n  - name: '{name}'\n    context: {{ cluster: c, user: u }}\n",
+                name.replace('#', "-")
+            )
+        };
+        let both = resolve_from(&[cfg("/kube/a", &named("b#c")), cfg("/kube/a#b", &named("c"))]);
+        assert_eq!(both[0].stable_id(), both[1].stable_id());
+        assert_ne!(both[0].pinned_id(), both[1].pinned_id());
+        for context in &both {
+            assert_eq!(
+                find_context(&both, &context.pinned_id()).unwrap().server,
+                context.server
+            );
+        }
+        // The shared stable ID names no single context, so it reaches none.
+        assert!(find_context(&both, &both[0].stable_id()).is_none());
     }
 
     #[test]

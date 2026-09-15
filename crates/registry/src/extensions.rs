@@ -77,7 +77,21 @@ async fn request_context(
     context: &str,
 ) -> Result<srelens_kube::context_resolve::ResolvedContext, String> {
     let paths = cache.paths().await;
-    if let Some(resolved) = srelens_kube::context_resolve::resolve_context(&paths, context) {
+    let all = srelens_kube::context_resolve::resolve_contexts(&paths);
+    if let Some(resolved) = srelens_kube::context_resolve::find_context(&all, context) {
+        // A stable ID is what the app's cluster list holds. One that another context also
+        // carries (`a` + `b#c` and `a#b` + `c`) does not say which cluster was chosen, so
+        // neither context may use the app under it.
+        let id = resolved.stable_id();
+        if let Some(other) = all
+            .iter()
+            .find(|c| c.pinned_id() != resolved.pinned_id() && c.stable_id() == id)
+        {
+            return Err(format!(
+                "the context ID \"{id}\" is shared by another context, \"{}\"; rename one of them",
+                other.display_name
+            ));
+        }
         return Ok(resolved);
     }
     let unreadable = srelens_kube::context_resolve::unreadable_kubeconfigs(&paths);
@@ -1518,6 +1532,43 @@ mod tests {
             Some("default".to_owned())
         );
         assert_eq!(reached(&[impostor]), None);
+    }
+    /// A file path and a context name can both contain `#`, so two contexts can share one
+    /// stable ID: `a` + `b#c` and `a#b` + `c`. Neither may use an app limited to that ID,
+    /// because the ID does not say which cluster was chosen.
+    #[tokio::test]
+    async fn contexts_that_share_a_stable_id_are_refused_rather_than_both_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "a", &["b#c"]);
+        let second = kubeconfig(dir.path(), "a#b", &["c"]);
+        let shared = format!("{}#b#c", first.display());
+        let (reg, _cache) = setup_with(&path, vec![first, second]);
+        let revision = install(&path, fake_core());
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd","contexts":[shared]}),
+        )
+        .unwrap();
+        for context in ["b#c", "c"] {
+            let error = reg
+                .invoke(
+                    "extensions.read",
+                    json!({"id":"org.example.argocd","revision":revision,
+                        "capability":"applications","context":context,"namespace":""}),
+                )
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                !error.contains(NOT_ENABLED_FOR_CLUSTER),
+                "{context}: {error}"
+            );
+            assert!(
+                error.contains("shared by another context"),
+                "{context}: {error}"
+            );
+        }
     }
     /// A limited app is refused on a context the host cannot resolve, but with why: whether
     /// the app is enabled there is unknown, which is not the same as not enabled.

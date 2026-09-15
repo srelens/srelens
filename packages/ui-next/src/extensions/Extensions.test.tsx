@@ -597,6 +597,24 @@ it("lists the clusters again when the kubeconfig files change, without waiting f
   expect(await screen.findByRole("tab", { name: "GitOps apps" })).toBeTruthy();
   saveKubeconfigFiles([]);
 });
+it("lists with the kubeconfig files in use when saving them failed", async () => {
+  const { ExtensionResourceSlot } = await import("./Extensions");
+  const { KUBECONFIG_FILES_CHANGED } = await import("@srelens/core");
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [] });
+  render(<ExtensionResourceSlot context="edge" kind="Namespace" namespace={null} name="argo" />);
+  await waitFor(() => expect(listContexts).toHaveBeenCalledTimes(1));
+  // Storage refused the save, so nothing is stored; the app still uses the new file.
+  act(() => {
+    window.dispatchEvent(new CustomEvent(KUBECONFIG_FILES_CHANGED, { detail: ["/kube/edge.yaml"] }));
+  });
+  await waitFor(() => expect(listContexts).toHaveBeenLastCalledWith(["/kube/edge.yaml"]));
+  // And keeps using it on the next refresh too.
+  act(() => {
+    fireEvent.focus(window);
+  });
+  await waitFor(() => expect(listContexts).toHaveBeenCalledTimes(3));
+  expect(listContexts).toHaveBeenLastCalledWith(["/kube/edge.yaml"]);
+});
 it("does not attach a custom kind contribution to a built-in with the same name", async () => {
   const { ExtensionResourceSlot } = await import("./Extensions");
   const installed = structuredClone(plugin);

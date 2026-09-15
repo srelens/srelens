@@ -24,6 +24,8 @@ const listeners = new Set<() => void>();
 let stop: (() => void) | undefined;
 /** The latest listing started. Refreshes can overlap (a focus during a Retry), and an older one answering last must not replace a newer answer. */
 let generation = 0;
+/** The kubeconfig files in use, once a change has been published; storage may not hold them (a refused save). */
+let files: string[] | undefined;
 
 const key = ({ ids, error }: ContextIds) => JSON.stringify([ids ? [...ids] : null, error ?? null]);
 
@@ -32,7 +34,7 @@ export async function refreshContextIds() {
   const started = ++generation;
   let outcome: Awaited<ReturnType<typeof listContexts>> | undefined;
   try {
-    outcome = await listContexts(loadKubeconfigFiles());
+    outcome = await listContexts(files ?? loadKubeconfigFiles());
   } catch (e) {
     outcome = { error: String(e) };
   }
@@ -54,12 +56,17 @@ function subscribe(listener: () => void) {
     // Kubeconfig files can change while the window keeps focus (Settings → Contexts), and
     // that can add a context or rename one, so list again then as well as on focus.
     const refresh = () => void refreshContextIds();
+    const onFilesChanged = (event: Event) => {
+      const detail = (event as CustomEvent<string[]>).detail;
+      if (Array.isArray(detail)) files = detail;
+      refresh();
+    };
     window.addEventListener("focus", refresh);
-    window.addEventListener(KUBECONFIG_FILES_CHANGED, refresh);
+    window.addEventListener(KUBECONFIG_FILES_CHANGED, onFilesChanged);
     void refreshContextIds();
     stop = () => {
       window.removeEventListener("focus", refresh);
-      window.removeEventListener(KUBECONFIG_FILES_CHANGED, refresh);
+      window.removeEventListener(KUBECONFIG_FILES_CHANGED, onFilesChanged);
     };
   }
   return () => {
@@ -68,6 +75,7 @@ function subscribe(listener: () => void) {
       stop?.();
       stop = undefined;
       state = {};
+      files = undefined;
     }
   };
 }
