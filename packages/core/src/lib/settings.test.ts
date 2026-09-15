@@ -11,6 +11,7 @@ import {
   contextDisplayName,
   loadContextProfiles,
   saveContextProfiles,
+  KUBECONFIG_FILES_CHANGED,
   loadKubeconfigFiles,
   saveKubeconfigFiles,
   loadContextOrder,
@@ -106,6 +107,19 @@ describe("settings persistence", () => {
   it("persists and deduplicates additional kubeconfig files", () => {
     saveKubeconfigFiles(["/tmp/a", "/tmp/b", "/tmp/a"]);
     expect(loadKubeconfigFiles()).toEqual(["/tmp/a", "/tmp/b"]);
+  });
+
+  it("tells listeners when the additional kubeconfig files are saved", () => {
+    const heard: string[][] = [];
+    const listener = () => heard.push(loadKubeconfigFiles());
+    window.addEventListener(KUBECONFIG_FILES_CHANGED, listener);
+    try {
+      saveKubeconfigFiles(["/tmp/edge.yaml"]);
+    } finally {
+      window.removeEventListener(KUBECONFIG_FILES_CHANGED, listener);
+    }
+    // Listeners read the files already saved.
+    expect(heard).toEqual([["/tmp/edge.yaml"]]);
   });
 
   it("persists hidden columns per view independently", () => {

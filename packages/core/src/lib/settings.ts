@@ -179,12 +179,16 @@ export function loadKubeconfigFiles(): string[] {
   }
 }
 
+/** Dispatched on `window` after the additional kubeconfig files are saved, for stores that list contexts on their own. */
+export const KUBECONFIG_FILES_CHANGED = "srelens:kubeconfig-files-changed";
+
 export function saveKubeconfigFiles(paths: string[]): void {
   try {
     settingsStorage.setItem(KUBECONFIG_FILES_KEY, JSON.stringify([...new Set(paths)]));
   } catch {
     // ignore unavailable/quota-exceeded storage
   }
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(KUBECONFIG_FILES_CHANGED));
 }
 
 const HIDDEN_COLUMNS_KEY = "srelens.hiddenColumns";

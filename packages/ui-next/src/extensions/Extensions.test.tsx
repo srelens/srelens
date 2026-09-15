@@ -579,6 +579,24 @@ it("ignores a slower, older cluster listing that finishes after a newer one", as
   await act(async () => finishOlder({ contexts: [] }));
   expect(screen.getByRole("tab", { name: "GitOps apps" })).toBeTruthy();
 });
+it("lists the clusters again when the kubeconfig files change, without waiting for focus", async () => {
+  const { ExtensionResourceSlot } = await import("./Extensions");
+  const { saveKubeconfigFiles } = await import("@srelens/core");
+  const installed = structuredClone(plugin);
+  installed.manifest.contributions.detailTabs = [
+    { id: "detail", title: "GitOps apps", capability: "list", forKinds: ["/Namespace"] },
+  ];
+  installed.contexts = ["/kube/edge.yaml#edge"];
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [installed] });
+  vi.mocked(readExtension).mockResolvedValue({ items: [] });
+  render(<ExtensionResourceSlot context="edge" kind="Namespace" namespace={null} name="argo" />);
+  await waitFor(() => expect(listContexts).toHaveBeenCalledTimes(1));
+  // Settings → Contexts adds the kubeconfig that declares `edge`.
+  vi.mocked(listContexts).mockResolvedValue({ contexts: [{ name: "edge", stableId: "/kube/edge.yaml#edge" }] } as any);
+  act(() => saveKubeconfigFiles(["/kube/edge.yaml"]));
+  expect(await screen.findByRole("tab", { name: "GitOps apps" })).toBeTruthy();
+  saveKubeconfigFiles([]);
+});
 it("does not attach a custom kind contribution to a built-in with the same name", async () => {
   const { ExtensionResourceSlot } = await import("./Extensions");
   const installed = structuredClone(plugin);

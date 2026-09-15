@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { listContexts, loadKubeconfigFiles } from "@srelens/core";
+import { KUBECONFIG_FILES_CHANGED, listContexts, loadKubeconfigFiles } from "@srelens/core";
 
 /**
  * The stable ID of each kubeconfig context, by display name, for per-cluster app scope.
@@ -51,10 +51,16 @@ export async function refreshContextIds() {
 function subscribe(listener: () => void) {
   listeners.add(listener);
   if (listeners.size === 1) {
-    const onFocus = () => void refreshContextIds();
-    window.addEventListener("focus", onFocus);
+    // Kubeconfig files can change while the window keeps focus (Settings → Contexts), and
+    // that can add a context or rename one, so list again then as well as on focus.
+    const refresh = () => void refreshContextIds();
+    window.addEventListener("focus", refresh);
+    window.addEventListener(KUBECONFIG_FILES_CHANGED, refresh);
     void refreshContextIds();
-    stop = () => window.removeEventListener("focus", onFocus);
+    stop = () => {
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener(KUBECONFIG_FILES_CHANGED, refresh);
+    };
   }
   return () => {
     listeners.delete(listener);
