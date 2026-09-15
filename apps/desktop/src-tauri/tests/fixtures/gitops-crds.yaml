@@ -1,0 +1,61 @@
+# Minimal Flux and Argo CD CRDs for the live-cluster e2e suite (#536).
+#
+# Each one serves the group, version, kind, plural and scope upstream serves:
+# Flux's kustomize-controller (kustomize.toolkit.fluxcd.io/v1) and Argo CD
+# (argoproj.io/v1alpha1). Those are what the example apps bind and what
+# `k8s.gitOpsAction` allowlists, so they must match. The schemas do not copy
+# upstream's: no controller runs here, and reads and conditional patches need
+# only a served API that keeps the fields the actions write (`spec.suspend`,
+# annotations, Argo CD's top-level `operation`).
+#
+# Pinned in the tree and applied by the suite itself, never fetched at test
+# time. The label is how teardown deletes exactly these and nothing else, and
+# how the suite recognises a cluster whose real Flux or Argo CD CRDs it must
+# not replace.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kustomizations.kustomize.toolkit.fluxcd.io
+  labels:
+    srelens-e2e-fixture: gitops
+spec:
+  group: kustomize.toolkit.fluxcd.io
+  names:
+    kind: Kustomization
+    listKind: KustomizationList
+    plural: kustomizations
+    singular: kustomization
+    shortNames: [ks]
+  scope: Namespaced
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: applications.argoproj.io
+  labels:
+    srelens-e2e-fixture: gitops
+spec:
+  group: argoproj.io
+  names:
+    kind: Application
+    listKind: ApplicationList
+    plural: applications
+    singular: application
+    shortNames: [app, apps]
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true

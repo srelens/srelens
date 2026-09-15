@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "extensions": [
+    {
+      "id": "org.srelens.argocd",
+      "name": "Argo CD",
+      "description": "Native Argo CD resource views for srelens.",
+      "repository": "https://github.com/srelens/extension-argocd",
+      "license": "MIT",
+      "release": {
+        "version": "0.2.0",
+        "manifestUrl": "https://github.com/srelens/extension-argocd/releases/download/v0.2.0/manifest.json",
+        "sha256": "22e3578a76715a2611b557ab74c3a4002cd55ac1d1ff759668799a61076890db",
+        "srelensApiVersion": "^0.1",
+        "prerelease": true
+      },
+      "testedHost": {
+        "repository": "https://github.com/srelens/srelens",
+        "revision": "29ef2ea1ce3327fd67e9d21980878653e04fe422"
+      }
+    },
+    {
+      "id": "org.srelens.flux",
+      "name": "Flux",
+      "description": "Native Flux resource views for srelens.",
+      "repository": "https://github.com/srelens/extension-flux",
+      "license": "MIT",
+      "release": {
+        "version": "0.3.0",
+        "manifestUrl": "https://github.com/srelens/extension-flux/releases/download/v0.3.0/manifest.json",
+        "sha256": "777c3afa8b036ffc2976dc3803f712f366f82549434c8d51219054567b7c2085",
+        "srelensApiVersion": "^0.1",
+        "prerelease": true
+      },
+      "testedHost": {
+        "repository": "https://github.com/srelens/srelens",
+        "revision": "29ef2ea1ce3327fd67e9d21980878653e04fe422"
+      }
+    }
+  ]
+}

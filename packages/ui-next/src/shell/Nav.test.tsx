@@ -10,7 +10,8 @@ import { loadExpanded, resetView, setLink } from "../lib/workspace";
 // The CRD list is the one thing here that talks to a cluster. Mocked at the
 // module boundary — partially, so `RESOURCE_LABELS` and the rest of core stay
 // real and the tree is labelled the way the app labels it.
-const { listCrds } = vi.hoisted(() => ({ listCrds: vi.fn() }));
+const { listCrds, extensionState } = vi.hoisted(() => ({ listCrds: vi.fn(), extensionState: { data: undefined as any } }));
+vi.mock("../extensions/Extensions", () => ({ useExtensions: () => extensionState }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   listCrds,
@@ -42,6 +43,7 @@ beforeEach(() => {
   localStorage.clear();
   resetView();
   vi.clearAllMocks();
+  extensionState.data = undefined;
   listCrds.mockResolvedValue({ crds: [] });
 });
 
@@ -223,4 +225,27 @@ describe("Nav", () => {
     expect(screen.queryByRole("treeitem", { name: "Pods" })).toBeNull();
     expect(screen.getByRole("treeitem", { name: "Workloads" }).getAttribute("aria-expanded")).toBe("false");
   });
+});
+
+it("groups app pages under their display name", async () => {
+  extensionState.data = { plugins: [
+    { enabled: true, manifest: { id: "org.srelens.flux", name: "Flux", contributions: { pages: [
+      { id: "kustomizations", title: "Kustomizations" },
+      { id: "repositories", title: "Git repositories", group: "Sources" },
+    ] } } },
+  ] };
+  render(<Nav contexts={[PROD]} />);
+  await userEvent.click(await screen.findByRole("treeitem", { name: "Apps" }));
+  const apps = screen.getByRole("treeitem", {name:"Apps"});
+  expect(screen.getByRole("treeitem",{name:"Cluster"}).compareDocumentPosition(apps) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(apps.compareDocumentPosition(screen.getByRole("treeitem",{name:"Workloads"})) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const fluxNode = await screen.findByRole("treeitem", { name: "Flux" });
+  expect(fluxNode.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("org.srelens.flux");
+  await userEvent.click(fluxNode);
+  await userEvent.click(await screen.findByRole("treeitem", { name: "Kustomizations" }));
+  expect(tabFor("/extensions/prod-eu/org.srelens.flux/kustomizations/")?.sub).toBe("prod-eu");
+  expect(screen.queryByText("org.srelens.flux")).toBeNull();
+  await userEvent.click(screen.getByRole("treeitem", { name: "Sources" }));
+  await userEvent.click(screen.getByRole("treeitem", { name: "Git repositories" }));
+  expect(tabFor("/extensions/prod-eu/org.srelens.flux/repositories/")?.sub).toBe("prod-eu");
 });

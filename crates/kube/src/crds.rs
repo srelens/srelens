@@ -3,11 +3,11 @@
 
 use std::sync::Arc;
 
-use srelens_capability::{Annotations, Capability, CapabilityError};
 use kube::api::{Api, DynamicObject, ListParams};
 use kube::core::{ApiResource, GroupVersionKind};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
@@ -67,7 +67,11 @@ fn chosen_version(spec: &serde_json::Value) -> Option<&serde_json::Value> {
     versions
         .iter()
         .find(|v| v["storage"].as_bool().unwrap_or(false))
-        .or_else(|| versions.iter().find(|v| v["served"].as_bool().unwrap_or(false)))
+        .or_else(|| {
+            versions
+                .iter()
+                .find(|v| v["served"].as_bool().unwrap_or(false))
+        })
         .or_else(|| versions.first())
 }
 
@@ -111,6 +115,9 @@ fn printer_columns(spec: &serde_json::Value) -> Vec<PrinterColumn> {
     let Some(version) = chosen_version(spec) else {
         return Vec::new();
     };
+    version_printer_columns(version)
+}
+fn version_printer_columns(version: &serde_json::Value) -> Vec<PrinterColumn> {
     let Some(columns) = version["additionalPrinterColumns"].as_array() else {
         return Vec::new();
     };
@@ -150,8 +157,13 @@ fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
     while !rest.is_empty() {
         let (segment, remainder) = match rest.strip_prefix('[') {
             Some(open) => {
-                let Some(close) = open.find(']') else { return String::new() };
-                (Segment::bracket(&open[..close]), open[close + 1..].trim_start_matches('.'))
+                let Some(close) = open.find(']') else {
+                    return String::new();
+                };
+                (
+                    Segment::bracket(&open[..close]),
+                    open[close + 1..].trim_start_matches('.'),
+                )
             }
             None => {
                 // Scan to the next *unescaped* separator. `\.` keeps a literal dot
@@ -177,7 +189,9 @@ fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
                 (Segment::Key(key), rest[end..].trim_start_matches('.'))
             }
         };
-        let Some(next) = segment.apply(current) else { return String::new() };
+        let Some(next) = segment.apply(current) else {
+            return String::new();
+        };
         current = next;
         rest = remainder;
     }
@@ -194,7 +208,10 @@ enum Segment {
     Key(String),
     Index(usize),
     /// `[?(@.field=="literal")]` — the first array element that matches.
-    Filter { field: String, literal: String },
+    Filter {
+        field: String,
+        literal: String,
+    },
 }
 
 impl Segment {
@@ -204,7 +221,11 @@ impl Segment {
         if let Some(expression) = trimmed.strip_prefix("?(").and_then(|e| e.strip_suffix(')')) {
             if let Some((left, right)) = expression.split_once("==") {
                 return Segment::Filter {
-                    field: left.trim().trim_start_matches('@').trim_start_matches('.').to_string(),
+                    field: left
+                        .trim()
+                        .trim_start_matches('@')
+                        .trim_start_matches('.')
+                        .to_string(),
                     literal: unquote(right.trim()).to_string(),
                 };
             }
@@ -271,7 +292,9 @@ fn render_column(object: &serde_json::Value, column: &PrinterColumn) -> String {
         return raw;
     }
     match raw.parse::<k8s_openapi::jiff::Timestamp>() {
-        Ok(ts) => crate::humanize_age(Some(&k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(ts))),
+        Ok(ts) => crate::humanize_age(Some(&k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+            ts,
+        ))),
         Err(_) => raw,
     }
 }
@@ -285,15 +308,19 @@ pub fn list_crds_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: ListCrdsIn| {
             let cache = cache.clone();
             async move {
-                let client = cache.get(&input.context).await.map_err(CapabilityError::Handler)?;
+                let client = cache
+                    .get(&input.context)
+                    .await
+                    .map_err(CapabilityError::Handler)?;
                 let gvk =
                     GroupVersionKind::gvk("apiextensions.k8s.io", "v1", "CustomResourceDefinition");
                 let ar = ApiResource::from_gvk(&gvk);
                 let api: Api<DynamicObject> = Api::all_with(client, &ar);
-                let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("list CRDs timed out".into()))?
-                    .map_err(handler_err)?;
+                let list =
+                    tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+                        .await
+                        .map_err(|_| CapabilityError::Handler("list CRDs timed out".into()))?
+                        .map_err(handler_err)?;
 
                 let mut crds: Vec<CrdDescriptor> = list
                     .items
@@ -301,11 +328,21 @@ pub fn list_crds_capability(cache: Arc<ClientCache>) -> Capability {
                     .filter_map(|o| {
                         let spec = &o.data["spec"];
                         let group = spec["group"].as_str().unwrap_or_default().to_string();
-                        let kind = spec["names"]["kind"].as_str().unwrap_or_default().to_string();
-                        let plural = spec["names"]["plural"].as_str().unwrap_or_default().to_string();
-                        let namespaced = spec["scope"].as_str().unwrap_or("Namespaced") == "Namespaced";
+                        let kind = spec["names"]["kind"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        let plural = spec["names"]["plural"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        let namespaced =
+                            spec["scope"].as_str().unwrap_or("Namespaced") == "Namespaced";
                         let version = pick_version(spec);
-                        if group.is_empty() || kind.is_empty() || plural.is_empty() || version.is_empty()
+                        if group.is_empty()
+                            || kind.is_empty()
+                            || plural.is_empty()
+                            || version.is_empty()
                         {
                             return None;
                         }
@@ -332,6 +369,8 @@ pub fn list_crds_capability(cache: Arc<ClientCache>) -> Capability {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ListCustomIn {
+    #[serde(default, rename = "useCrdColumns")]
+    pub use_crd_columns: bool,
     pub context: String,
     pub group: String,
     pub version: String,
@@ -367,11 +406,20 @@ pub struct CustomRow {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ListCustomOut {
+    #[serde(rename = "printerColumns", skip_serializing_if = "Option::is_none")]
+    pub printer_columns: Option<Vec<PrinterColumn>>,
+    #[serde(rename = "columnsError", skip_serializing_if = "Option::is_none")]
+    pub columns_error: Option<String>,
     pub items: Vec<CustomRow>,
 }
 
 /// Build a dynamic ApiResource for an arbitrary CRD GVK + plural.
-pub(crate) fn custom_api_resource(group: &str, version: &str, kind: &str, plural: &str) -> ApiResource {
+pub(crate) fn custom_api_resource(
+    group: &str,
+    version: &str,
+    kind: &str,
+    plural: &str,
+) -> ApiResource {
     let api_version = if group.is_empty() {
         version.to_string()
     } else {
@@ -386,6 +434,39 @@ pub(crate) fn custom_api_resource(group: &str, version: &str, kind: &str, plural
     }
 }
 
+async fn discover_columns(
+    client: kube::Client,
+    group: &str,
+    plural: &str,
+    version: &str,
+) -> Result<Vec<PrinterColumn>, String> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+        "apiextensions.k8s.io",
+        "v1",
+        "CustomResourceDefinition",
+    ));
+    let api: Api<DynamicObject> = Api::all_with(client, &ar);
+    let crd = tokio::time::timeout(request_timeout(), api.get(&format!("{plural}.{group}")))
+        .await
+        .map_err(|_| "CRD column discovery timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    columns_for_named_version(&crd.data["spec"], version)
+}
+fn columns_for_named_version(
+    spec: &serde_json::Value,
+    version: &str,
+) -> Result<Vec<PrinterColumn>, String> {
+    let definition = spec["versions"]
+        .as_array()
+        .and_then(|versions| {
+            versions
+                .iter()
+                .find(|v| v["name"] == version && v["served"] == true)
+        })
+        .ok_or_else(|| format!("CRD has no served version {version}"))?;
+    Ok(version_printer_columns(definition))
+}
+
 /// `k8s.listCustomResource` — list instances of a CRD by its GVK + plural.
 pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ListCustomIn, ListCustomOut, _, _>(
@@ -395,18 +476,35 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: ListCustomIn| {
             let cache = cache.clone();
             async move {
-                let client = cache.get(&input.context).await.map_err(CapabilityError::Handler)?;
-                let ar = custom_api_resource(&input.group, &input.version, &input.kind, &input.plural);
-                let api: Api<DynamicObject> = if input.namespaced && !input.namespace.is_empty() {
-                    Api::namespaced_with(client, &input.namespace, &ar)
-                } else {
-                    Api::all_with(client, &ar)
-                };
-                let list = tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+                let client = cache
+                    .get(&input.context)
                     .await
-                    .map_err(|_| CapabilityError::Handler("list custom resource timed out".into()))?
-                    .map_err(handler_err)?;
-                let columns = input.printer_columns;
+                    .map_err(CapabilityError::Handler)?;
+                let ar =
+                    custom_api_resource(&input.group, &input.version, &input.kind, &input.plural);
+                let api: Api<DynamicObject> = if input.namespaced && !input.namespace.is_empty() {
+                    Api::namespaced_with(client.clone(), &input.namespace, &ar)
+                } else {
+                    Api::all_with(client.clone(), &ar)
+                };
+                let list =
+                    tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+                        .await
+                        .map_err(|_| {
+                            CapabilityError::Handler("list custom resource timed out".into())
+                        })?
+                        .map_err(handler_err)?;
+                let (columns, columns_error) = if input.use_crd_columns {
+                    match discover_columns(client, &input.group, &input.plural, &input.version)
+                        .await
+                    {
+                        Ok(columns) => (columns, None),
+                        Err(error) => (input.printer_columns, Some(error)),
+                    }
+                } else {
+                    (input.printer_columns, None)
+                };
+                let printer_columns = input.use_crd_columns.then(|| columns.clone());
                 let items = list
                     .items
                     .into_iter()
@@ -423,14 +521,20 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                         CustomRow {
                             name: o.metadata.name.clone().unwrap_or_default(),
                             namespace: o.metadata.namespace.clone().unwrap_or_default(),
-                            created: crate::creation_rfc3339(o.metadata.creation_timestamp.as_ref()),
+                            created: crate::creation_rfc3339(
+                                o.metadata.creation_timestamp.as_ref(),
+                            ),
                             age: crate::humanize_age(o.metadata.creation_timestamp.as_ref()),
                             columns: values,
                             sort_keys,
                         }
                     })
                     .collect();
-                Ok(ListCustomOut { items })
+                Ok(ListCustomOut {
+                    items,
+                    printer_columns,
+                    columns_error,
+                })
             }
         },
     )
@@ -445,7 +549,58 @@ mod tests {
     fn capabilities_have_ids() {
         let cache = ClientCache::new(PathBuf::from("/x"));
         assert_eq!(list_crds_capability(cache.clone()).id, "k8s.listCRDs");
-        assert_eq!(list_custom_resource_capability(cache).id, "k8s.listCustomResource");
+        assert_eq!(
+            list_custom_resource_capability(cache).id,
+            "k8s.listCustomResource"
+        );
+    }
+
+    #[tokio::test]
+    async fn capabilities_reject_invalid_and_missing_contexts() {
+        let cache = ClientCache::new(PathBuf::from("/x"));
+
+        // 1. list_crds_capability
+        let list_crds = list_crds_capability(cache.clone());
+        let err = (list_crds.handler)(serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::InvalidInput(_)
+        ));
+
+        let err = (list_crds.handler)(serde_json::json!({ "context": "missing-cluster" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::Handler(_)
+        ));
+
+        // 2. list_custom_resource_capability
+        let list_custom = list_custom_resource_capability(cache);
+        let err = (list_custom.handler)(serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::InvalidInput(_)
+        ));
+
+        let err = (list_custom.handler)(serde_json::json!({
+            "context": "missing-cluster",
+            "group": "example.com",
+            "version": "v1",
+            "plural": "widgets",
+            "kind": "Widget",
+            "namespaced": true
+        }))
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            srelens_capability::CapabilityError::Handler(_)
+        ));
     }
 
     #[test]
@@ -524,11 +679,17 @@ mod tests {
     #[test]
     fn resolves_filter_expressions_by_field_equality() {
         assert_eq!(
-            resolve_json_path(&fluxish(), ".status.conditions[?(@.type==\"Ready\")].status"),
+            resolve_json_path(
+                &fluxish(),
+                ".status.conditions[?(@.type==\"Ready\")].status"
+            ),
             "True"
         );
         assert_eq!(
-            resolve_json_path(&fluxish(), ".status.conditions[?(@.type==\"Ready\")].message"),
+            resolve_json_path(
+                &fluxish(),
+                ".status.conditions[?(@.type==\"Ready\")].message"
+            ),
             "Release reconciliation succeeded"
         );
     }
@@ -536,7 +697,10 @@ mod tests {
     #[test]
     fn filter_expressions_accept_single_quotes_and_spacing() {
         assert_eq!(
-            resolve_json_path(&fluxish(), ".status.conditions[?(@.type == 'Stalled')].status"),
+            resolve_json_path(
+                &fluxish(),
+                ".status.conditions[?(@.type == 'Stalled')].status"
+            ),
             "False"
         );
     }
@@ -544,7 +708,10 @@ mod tests {
     #[test]
     fn a_filter_matching_nothing_renders_empty() {
         assert_eq!(
-            resolve_json_path(&fluxish(), ".status.conditions[?(@.type==\"Missing\")].status"),
+            resolve_json_path(
+                &fluxish(),
+                ".status.conditions[?(@.type==\"Missing\")].status"
+            ),
             ""
         );
     }
@@ -578,6 +745,32 @@ mod tests {
         })
     }
 
+    #[test]
+    fn app_columns_use_the_requested_served_version_and_standard_filters() {
+        let spec = serde_json::json!({"versions":[
+            {"name":"v1","served":true,"additionalPrinterColumns":[{"name":"Source","jsonPath":".spec.sourceRef.name","type":"string"},{"name":"Age","jsonPath":".metadata.creationTimestamp","type":"date"},{"name":"Hidden","jsonPath":".status.secret","priority":1}]},
+            {"name":"v2","served":true,"storage":true,"additionalPrinterColumns":[{"name":"Revision","jsonPath":".status.revision","type":"string"}]},
+            {"name":"v3","served":true},
+            {"name":"v4","served":false}
+        ]});
+        let columns = columns_for_named_version(&spec, "v1").unwrap();
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name, "Source");
+        assert_eq!(
+            render_column(
+                &serde_json::json!({"spec":{"sourceRef":{"name":"platform"}}}),
+                &columns[0]
+            ),
+            "platform"
+        );
+        assert_eq!(
+            columns_for_named_version(&spec, "v2").unwrap()[0].name,
+            "Revision"
+        );
+        assert!(columns_for_named_version(&spec, "v3").unwrap().is_empty());
+        assert!(columns_for_named_version(&spec, "v4").is_err());
+        assert!(columns_for_named_version(&spec, "missing").is_err());
+    }
     #[test]
     fn takes_printer_columns_from_the_chosen_version() {
         let cols = printer_columns(&spec_with_columns());
@@ -689,8 +882,7 @@ mod tests {
                 {"type": "Ready", "status": "True", "message": "Release reconciliation succeeded"},
             ]}
         });
-        let rendered: Vec<String> =
-            columns.iter().map(|c| render_column(&release, c)).collect();
+        let rendered: Vec<String> = columns.iter().map(|c| render_column(&release, c)).collect();
         assert_eq!(rendered, vec!["True", "Release reconciliation succeeded"]);
     }
 
@@ -707,7 +899,10 @@ mod tests {
         .expect("dynamic object");
         let whole = whole_object(&object);
         assert_eq!(resolve_json_path(&whole, ".kind"), "Cluster");
-        assert_eq!(resolve_json_path(&whole, ".apiVersion"), "db.example.com/v1");
+        assert_eq!(
+            resolve_json_path(&whole, ".apiVersion"),
+            "db.example.com/v1"
+        );
         // The other two sources still resolve.
         assert_eq!(resolve_json_path(&whole, ".metadata.name"), "c1");
         assert_eq!(resolve_json_path(&whole, ".spec.version"), "4.1.2");

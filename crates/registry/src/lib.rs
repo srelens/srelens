@@ -14,6 +14,11 @@ use srelens_kube::client_cache::ClientCache;
 mod catalog;
 pub use catalog::{catalog_of, CatalogEntry};
 mod settings;
+mod extensions;
+/// The extension readers' fuzz entry points, for the targets in `fuzz/`. Not an API.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use extensions::fuzzing;
 pub use settings::default_settings_path;
 
 // Test-only: every consumer of this module — `render_catalog` (regenerated via
@@ -375,6 +380,18 @@ pub fn build_registry_with_paths_and_settings(
         cache.clone(),
     ));
     reg.register(srelens_kube::nodes::list_nodes_capability(cache.clone()));
+    reg.register(srelens_kube::node_ssh::node_service_status_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::node_ssh::node_journal_logs_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::node_ssh::node_runtime_diagnostics_capability(
+        cache.clone(),
+    ));
+    reg.register(srelens_kube::node_ssh::node_service_restart_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::manifest::get_manifest_capability(
         cache.clone(),
     ));
@@ -393,6 +410,8 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::schema::open_api_schema_capability(
         cache.clone(),
     ));
+    reg.register(srelens_kube::gitops::resource_capability(cache.clone()));
+    reg.register(srelens_kube::gitops::action_capability(cache.clone()));
     reg.register(srelens_kube::crds::list_crds_capability(cache.clone()));
     reg.register(srelens_kube::crds::list_custom_resource_capability(
         cache.clone(),
@@ -433,6 +452,8 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::manifest::list_resource_capability(cache));
 
     if let Some(path) = settings_path {
+        let core = Arc::new(reg.clone());
+        extensions::register(&mut reg, path.with_extension("extensions.json"), core);
         settings::register(&mut reg, path);
     }
 
@@ -561,6 +582,7 @@ mod tests {
         let reg = build_registry_with_paths(cache, vec![]);
         assert!(!reg.ids().contains(&"settings.get"));
         assert!(!reg.ids().contains(&"settings.set"));
+        for id in ["extensions.catalog", "extensions.catalogManifest", "extensions.list", "extensions.configure", "extensions.validate", "extensions.read"] { assert!(reg.get(id).is_none()); }
     }
 
     #[test]

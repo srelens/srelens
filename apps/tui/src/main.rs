@@ -1,12 +1,12 @@
 #![allow(dead_code, unused_imports)]
 
-use std::io::{self, stdout};
+use std::io::{self, stdout, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
-    cursor::MoveTo,
+    cursor::{MoveTo, Show},
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     },
@@ -246,8 +246,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while app.is_running {
         terminal.draw(|f| app.render(f))?;
 
-        if let Some(event) = events.recv().await {
-            match event {
+        if let Some(first_event) = events.recv().await {
+            let mut current_event = Some(first_event);
+            let mut batch_count = 0;
+
+            while let Some(event) = current_event {
+                match event {
                 AppEvent::Key(key) => {
                     app.handle_key_event(key).await;
                 }
@@ -434,8 +438,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::HelmDetailResult { context, namespace, name, revision, result } => {
                     app.handle_helm_detail_result(&context, &namespace, &name, revision, result);
                 }
+                AppEvent::ArgoApplicationsResult { context, is_remote_hub, hub_context, result } => {
+                    app.handle_argo_applications_result(&context, is_remote_hub, hub_context, result);
+                }
+                AppEvent::ArgoDetailResult { context, namespace, name, result } => {
+                    app.handle_argo_detail_result(&context, &namespace, &name, result);
+                }
+                AppEvent::ArgoActionResult { action, result } => {
+                    app.handle_argo_action_result(&action, result);
+                }
             }
+
+            if !app.is_running {
+                break;
+            }
+
+            batch_count += 1;
+            if batch_count >= 256 {
+                break;
+            }
+
+            current_event = events.try_recv().ok();
         }
+    }
 
         // Handle external tool suspend actions ($EDITOR, Pod shell, etc.)
         if let Some(action) = app.requires_terminal_suspend.take() {
@@ -444,18 +469,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(Duration::from_millis(20)).await;
             while events.try_recv().is_ok() {}
 
-            // Temporarily restore terminal for external interactive session in alternate screen
+            // Temporarily restore terminal for external interactive session on primary screen
             disable_raw_mode()?;
             execute!(
                 terminal.backend_mut(),
-                Clear(ClearType::All),
-                MoveTo(0, 0),
-                ResetColor,
+                LeaveAlternateScreen,
                 DisableMouseCapture,
                 DisableBracketedPaste
             )?;
-            terminal.show_cursor()?;
+            execute!(std::io::stdout(), Show)?;
             let _ = terminal.flush();
+            let _ = std::io::stdout().flush();
 
             // 2. Run external action
             match action {
@@ -594,6 +618,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 SuspendAction::NodeShell { node } => {
                     if let Err(e) = views::ExecRunner::run_node_shell(&app.active_context, &node) {
+                        app.set_toast(e, theme::Theme::status_error());
+                    }
+                }
+                SuspendAction::NodeSsh { destination } => {
+                    if let Err(e) = views::ExecRunner::run_node_ssh(&destination) {
                         app.set_toast(e, theme::Theme::status_error());
                     }
                 }

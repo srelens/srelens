@@ -121,6 +121,7 @@ mod age_tests {
 
 pub mod access;
 pub mod actions;
+pub mod argo;
 pub mod auth_resolver;
 pub mod client_cache;
 pub mod cluster;
@@ -175,3 +176,5 @@ pub mod workloads;
 pub mod lineage;
 pub mod node_inspector;
 pub mod gpu_info;
+pub mod node_ssh;
+pub mod gitops;

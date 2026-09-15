@@ -23,12 +23,37 @@ vi.mock("@srelens/core/lib/notify", () => ({ notify }));
 
 import { McpConfirmDialog } from "./McpConfirmDialog";
 
+// jsdom is a plain browser, i.e. web mode: `isTauri()` looks for
+// `window.__TAURI_INTERNALS__` and finds nothing. The consent flow below is
+// desktop-only, so the suite runs it under a Tauri marker and clears the
+// marker for the web cases at the end.
+const TAURI_MARKER = "__TAURI_INTERNALS__";
+function enterTauri() {
+  (window as unknown as Record<string, unknown>)[TAURI_MARKER] = {};
+}
+function leaveTauri() {
+  delete (window as unknown as Record<string, unknown>)[TAURI_MARKER];
+}
+
 describe("McpConfirmDialog", () => {
   beforeEach(() => {
+    enterTauri();
+    for (const k of Object.keys(handlers)) delete handlers[k];
     respondToConfirm.mockReset();
     notify.success.mockReset();
     notify.error.mockReset();
     notify.info.mockReset();
+  });
+
+  it("does not subscribe to Tauri events on the web (#512)", () => {
+    // On the web, AppGate renders classic App after sign-in, and App mounts
+    // this dialog unconditionally. `listen()` from @tauri-apps/api reaches
+    // for `window.__TAURI_INTERNALS__.transformCallback` and throws in a
+    // browser -- two unguarded calls, two uncaught rejections per page load.
+    leaveTauri();
+    const { container } = render(<McpConfirmDialog />);
+    expect(container.textContent).toBe("");
+    expect(Object.keys(handlers)).toEqual([]);
   });
 
   it("renders nothing until a request arrives", () => {

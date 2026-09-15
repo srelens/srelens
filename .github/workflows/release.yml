@@ -8,7 +8,8 @@ name: Release
 #                 binary. A manual run can override that with `force`.
 # main branch  -> the version is derived AUTOMATICALLY from Conventional Commits
 #                 since the last stable tag (feat -> minor, fix/perf -> patch,
-#                 BREAKING CHANGE or `!` -> major). The version files are bumped +
+#                 BREAKING CHANGE or `!` -> major, or minor while still on 0.x).
+#                 The version files are bumped +
 #                 committed back to main with [skip ci], then a stable
 #                 `srelens-v<version>` release is built. No manual bump needed; if
 #                 there are no releasable commits the release is skipped.
@@ -109,9 +110,14 @@ jobs:
           # the entire release (desktop, docker, AUR) silently skips. The
           # documented path is still a plain merge commit; this is the
           # backstop for the wrong button.
+          CUR=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
           if echo "$SUBJECTS" | grep -qiE '(^|[[:space:]])BREAKING[ -]CHANGE' \
              || echo "$SUBJECTS" | grep -qE '^(\* )?[a-z]+(\([^)]*\))?!:'; then
-            BUMP=major
+            # Semver treats 0.x as unstable, so a breaking change there is a
+            # minor bump. Without this the first `!` subject on a 0.x line
+            # silently cuts 1.0.0 (#613): going 1.0 is a decision, not a side
+            # effect of a commit subject.
+            if [ "${CUR%%.*}" = "0" ]; then BUMP=minor; else BUMP=major; fi
           elif echo "$SUBJECTS" | grep -qE '^(\* )?feat(\([^)]*\))?:'; then
             BUMP=minor
           elif echo "$SUBJECTS" | grep -qE '^(\* )?(fix|perf)(\([^)]*\))?:'; then
@@ -125,7 +131,6 @@ jobs:
             echo "No releasable (feat/fix/perf/breaking) commits — skipping release."
             exit 0
           fi
-          CUR=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
           NEW=$(node -e 'const p=process.argv[1].split(".").map(Number);const k=process.argv[2];if(k==="major"){p[0]++;p[1]=0;p[2]=0}else if(k==="minor"){p[1]++;p[2]=0}else{p[2]++}process.stdout.write(p.join("."))' "$CUR" "$BUMP")
           echo "Releasing $CUR -> $NEW"
           node -e '
@@ -226,7 +231,7 @@ jobs:
       # package.json. One source of truth: a second one here is how local
       # ended up on pnpm 11 while CI ran 9, which silently dropped the CVE
       # overrides from the lockfile on every local install.
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -496,7 +501,7 @@ jobs:
       # package.json. One source of truth: a second one here is how local
       # ended up on pnpm 11 while CI ran 9, which silently dropped the CVE
       # overrides from the lockfile on every local install.
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

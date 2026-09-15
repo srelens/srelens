@@ -40,6 +40,8 @@ pub enum ActiveView {
     PortForwards(PortForwardViewState),
     Helm(HelmViewState),
     HelmDetail(HelmDetailViewState),
+    Argo(argo_view::ArgoViewState),
+    ArgoDetail(argo_detail_view::ArgoDetailViewState),
     Overview(OverviewViewState),
     Toolbox(ToolboxViewState),
     Assistant,
@@ -100,6 +102,8 @@ pub struct App {
     pub node_metrics_tick_counter: usize,
     pub helm_tick_counter: usize,
     pub helm_refreshing: bool,
+    pub argo_tick_counter: usize,
+    pub argo_refreshing: bool,
     pub node_metrics_history: HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
     pub pod_metrics_history: HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
     pub cluster_overview_data: Option<crate::views::overview_view::ClusterOverviewData>,
@@ -117,6 +121,7 @@ pub enum SuspendAction {
     PodShell { pod: String, namespace: Option<String>, container: Option<String> },
     DebugShell { pod: String, namespace: Option<String>, container: Option<String> },
     NodeShell { node: String },
+    NodeSsh { destination: String },
 }
 
 /// Deletes the preceding word from a string buffer, matching Unix readline / k9s / vim `<Ctrl+w>`.
@@ -137,6 +142,37 @@ pub fn delete_prev_word(s: &mut String) {
         } else {
             break;
         }
+    }
+}
+
+pub fn open_browser_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(&["/c", "start", url])
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err("Unsupported operating system for opening browser".to_string())
     }
 }
 
@@ -267,6 +303,8 @@ impl App {
             node_metrics_tick_counter: 0,
             helm_tick_counter: 0,
             helm_refreshing: false,
+            argo_tick_counter: 0,
+            argo_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -287,6 +325,26 @@ impl App {
         app.refresh_cluster_overview();
         app.refresh_crds();
         app.restart_active_watch().await;
+
+        // Pre-warm ArgoCD Hub connection in the background if configured
+        if let Some(ref hub_kc) = app.tui_config.resolved_argo_hub_kubeconfig() {
+            let cache_init = app.client_cache.clone();
+            let path_clone = hub_kc.clone();
+            let hub_ctx_init = app.tui_config.resolved_argo_hub_context();
+            tokio::spawn(async move {
+                cache_init.ensure_paths(vec![path_clone]).await;
+                if let Some(ctx) = hub_ctx_init {
+                    let _ = cache_init.get(&ctx).await;
+                }
+            });
+        } else if let Some(ref hub_ctx) = app.tui_config.resolved_argo_hub_context() {
+            let cache_init = app.client_cache.clone();
+            let ctx_clone = hub_ctx.clone();
+            tokio::spawn(async move {
+                let _ = cache_init.get(&ctx_clone).await;
+            });
+        }
+
         Ok(app)
     }
 
@@ -364,6 +422,16 @@ impl App {
             }
         } else {
             self.helm_tick_counter = 0;
+        }
+
+        // Periodically refresh ArgoCD applications every ~4 seconds (40 ticks at 100ms)
+        if matches!(self.active_view, ActiveView::Argo(_)) {
+            self.argo_tick_counter = self.argo_tick_counter.saturating_add(1);
+            if self.argo_tick_counter % 40 == 1 && !self.argo_refreshing {
+                self.refresh_argo_applications();
+            }
+        } else {
+            self.argo_tick_counter = 0;
         }
     }
 
@@ -1222,6 +1290,8 @@ impl App {
             return;
         }
 
+        self.stop_active_log_stream();
+        self.logs_manager.shutdown_all();
         self.watch_manager.shutdown_all();
         self.active_watch_channels.clear();
         self.active_watch_pool.clear();
@@ -1274,6 +1344,13 @@ impl App {
             helm.releases.clear();
             helm.is_loading = true;
         }
+        if let ActiveView::Argo(argo) = &mut self.active_view {
+            self.argo_refreshing = false;
+            argo.applications.clear();
+            argo.all_applications.clear();
+            argo.is_loading = true;
+            self.refresh_argo_applications();
+        }
         self.set_toast(format!("Switched to context '{}'", self.active_context), Theme::status_ok());
         self.refresh_cluster_info();
         self.refresh_cluster_overview();
@@ -1282,6 +1359,14 @@ impl App {
     }
 
     pub async fn switch_namespace(&mut self, new_namespace: String) {
+        self.stop_active_log_stream();
+        if matches!(self.active_view, ActiveView::Logs(_)) {
+            if let Some(prev) = self.nav_stack.pop() {
+                self.active_view = prev;
+            } else {
+                self.active_view = ActiveView::Table(crate::views::ResourceTableState::new(crate::app::ResourceKind::Pods));
+            }
+        }
         if !new_namespace.is_empty() {
             self.last_active_namespace = new_namespace.clone();
         }
@@ -1347,6 +1432,18 @@ impl App {
             let name = detail.release_name.clone();
             let ns = detail.namespace.clone();
             self.reload_helm_detail(&name, &ns);
+            return;
+        }
+
+        if matches!(self.active_view, ActiveView::Argo(_)) {
+            self.refresh_argo_applications();
+            return;
+        }
+
+        if let ActiveView::ArgoDetail(detail) = &self.active_view {
+            let name = detail.app_name.clone();
+            let ns = detail.app_namespace.clone();
+            self.reload_argo_detail(&name, &ns);
             return;
         }
 
@@ -1576,15 +1673,26 @@ impl App {
                         }
                         KeyCode::Char('5') => {
                             self.modal = None;
-                            self.switch_view_to_kind(ResourceKind::Assistant).await;
+                            self.switch_view_to_kind(ResourceKind::ArgoApplications).await;
                         }
                         KeyCode::Char('6') => {
                             self.modal = None;
-                            self.switch_view_to_kind(ResourceKind::Settings).await;
+                            self.switch_view_to_kind(ResourceKind::Assistant).await;
                         }
                         KeyCode::Char('7') => {
                             self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Settings).await;
+                        }
+                        KeyCode::Char('8') => {
+                            self.modal = None;
                             self.switch_view_to_kind(ResourceKind::TuiConfig).await;
+                        }
+                        KeyCode::Char('9') => {
+                            self.set_toast("Already viewing feature banner (:banner)".to_string(), Theme::status_ok());
+                        }
+                        KeyCode::Char('0') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::Nodes).await;
                         }
                         _ => {}
                     }
@@ -1660,6 +1768,200 @@ impl App {
                                 self.execute_scale_workload(workload_name, count).await;
                             }
                         }
+                        KeyCode::Esc => {
+                            self.modal = None;
+                        }
+                        _ => {}
+                    }
+                }
+                Modal::NodeSsh {
+                    node_name,
+                    mut destination_input,
+                    mut cursor_pos,
+                } => {
+                    let char_count = destination_input.chars().count();
+                    cursor_pos = cursor_pos.min(char_count);
+
+                    match key.code {
+                        // 1. Skip word left: Option+Left, Ctrl+Left, or Alt+b / Alt+B
+                        KeyCode::Left
+                            if key.modifiers.contains(KeyModifiers::ALT)
+                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            let chars: Vec<char> = destination_input.chars().collect();
+                            let mut pos = cursor_pos.min(chars.len());
+                            while pos > 0 && chars[pos - 1].is_whitespace() {
+                                pos -= 1;
+                            }
+                            while pos > 0 && !chars[pos - 1].is_whitespace() {
+                                pos -= 1;
+                            }
+                            cursor_pos = pos;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::Char('b') | KeyCode::Char('B')
+                            if key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            let chars: Vec<char> = destination_input.chars().collect();
+                            let mut pos = cursor_pos.min(chars.len());
+                            while pos > 0 && chars[pos - 1].is_whitespace() {
+                                pos -= 1;
+                            }
+                            while pos > 0 && !chars[pos - 1].is_whitespace() {
+                                pos -= 1;
+                            }
+                            cursor_pos = pos;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 2. Skip word right: Option+Right, Ctrl+Right, or Alt+f / Alt+F
+                        KeyCode::Right
+                            if key.modifiers.contains(KeyModifiers::ALT)
+                                || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            let chars: Vec<char> = destination_input.chars().collect();
+                            let len = chars.len();
+                            let mut pos = cursor_pos.min(len);
+                            while pos < len && !chars[pos].is_whitespace() {
+                                pos += 1;
+                            }
+                            while pos < len && chars[pos].is_whitespace() {
+                                pos += 1;
+                            }
+                            cursor_pos = pos;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::Char('f') | KeyCode::Char('F')
+                            if key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            let chars: Vec<char> = destination_input.chars().collect();
+                            let len = chars.len();
+                            let mut pos = cursor_pos.min(len);
+                            while pos < len && !chars[pos].is_whitespace() {
+                                pos += 1;
+                            }
+                            while pos < len && chars[pos].is_whitespace() {
+                                pos += 1;
+                            }
+                            cursor_pos = pos;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 3. Start of Text: Ctrl+A, Cmd+A, Cmd+Left, Home
+                        KeyCode::Char('a') | KeyCode::Char('A')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                || key.modifiers.contains(KeyModifiers::SUPER) =>
+                        {
+                            cursor_pos = 0;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::Left if key.modifiers.contains(KeyModifiers::SUPER) => {
+                            cursor_pos = 0;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::Home => {
+                            cursor_pos = 0;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 4. End of Text: Ctrl+E, Cmd+E, Cmd+Right, End
+                        KeyCode::Char('e') | KeyCode::Char('E')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                || key.modifiers.contains(KeyModifiers::SUPER) =>
+                        {
+                            cursor_pos = destination_input.chars().count();
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::Right if key.modifiers.contains(KeyModifiers::SUPER) => {
+                            cursor_pos = destination_input.chars().count();
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::End => {
+                            cursor_pos = destination_input.chars().count();
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 5. Single character Left / Right
+                        KeyCode::Left => {
+                            cursor_pos = cursor_pos.saturating_sub(1);
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+                        KeyCode::Right => {
+                            let len = destination_input.chars().count();
+                            if cursor_pos < len {
+                                cursor_pos += 1;
+                            }
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 6. Delete word backwards (Ctrl+W, Option+Backspace, etc.)
+                        _ if is_word_delete_key(&key) => {
+                            let chars: Vec<char> = destination_input.chars().collect();
+                            let pos = cursor_pos.min(chars.len());
+                            if pos > 0 {
+                                let mut i = pos;
+                                while i > 0 && chars[i - 1].is_whitespace() {
+                                    i -= 1;
+                                }
+                                while i > 0 && !chars[i - 1].is_whitespace() {
+                                    i -= 1;
+                                }
+                                let mut new_chars = chars[..i].to_vec();
+                                new_chars.extend_from_slice(&chars[pos..]);
+                                destination_input = new_chars.into_iter().collect();
+                                cursor_pos = i;
+                            }
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 7. Backspace
+                        KeyCode::Backspace => {
+                            let mut chars: Vec<char> = destination_input.chars().collect();
+                            let pos = cursor_pos.min(chars.len());
+                            if pos > 0 {
+                                chars.remove(pos - 1);
+                                destination_input = chars.into_iter().collect();
+                                cursor_pos = pos - 1;
+                            }
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 8. Delete
+                        KeyCode::Delete => {
+                            let mut chars: Vec<char> = destination_input.chars().collect();
+                            let pos = cursor_pos.min(chars.len());
+                            if pos < chars.len() {
+                                chars.remove(pos);
+                                destination_input = chars.into_iter().collect();
+                            }
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 9. Typed characters
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
+                            let mut chars: Vec<char> = destination_input.chars().collect();
+                            let pos = cursor_pos.min(chars.len());
+                            chars.insert(pos, c);
+                            destination_input = chars.into_iter().collect();
+                            cursor_pos = pos + 1;
+                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                        }
+
+                        // 10. Submit
+                        KeyCode::Enter => {
+                            self.modal = None;
+                            let trimmed = destination_input.trim();
+                            if !trimmed.is_empty() {
+                                self.requires_terminal_suspend = Some(SuspendAction::NodeSsh {
+                                    destination: trimmed.to_string(),
+                                });
+                            }
+                        }
+
+                        // 11. Dismiss
                         KeyCode::Esc => {
                             self.modal = None;
                         }
@@ -2497,6 +2799,8 @@ impl App {
                     ActiveView::Top(top) => self.filter_buffer = top.filter.clone(),
                     ActiveView::Helm(helm) => self.filter_buffer = helm.filter_query.clone(),
                     ActiveView::HelmDetail(detail) => self.filter_buffer = detail.search_query.clone(),
+                    ActiveView::Argo(argo) => self.filter_buffer = argo.filter_query.clone(),
+                    ActiveView::ArgoDetail(detail) => self.filter_buffer = detail.search_query.clone(),
                     _ => {}
                 }
             }
@@ -2525,7 +2829,10 @@ impl App {
                 self.show_help = true;
             }
             // Toggle All Namespaces vs Active Namespace (or Summarise in Overview)
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('a')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !matches!(self.active_view, ActiveView::Assistant) =>
+            {
                 if matches!(self.active_view, ActiveView::Overview(_)) {
                     self.handle_view_key_event(key).await;
                     return;
@@ -2598,9 +2905,7 @@ impl App {
                 if !self.filter_buffer.is_empty() || has_table_filter {
                     self.clear_current_filter();
                 } else if let Some(prev_view) = self.nav_stack.pop() {
-                    if let Some(ch) = self.active_log_channel.take() {
-                        self.logs_manager.stop(&ch);
-                    }
+                    self.stop_active_log_stream();
                     self.active_view = prev_view;
                     self.restart_active_watch().await;
                 } else if matches!(self.active_view, ActiveView::Top(_)) {
@@ -2646,6 +2951,10 @@ impl App {
                     return;
                 }
                 if let ActiveView::HelmDetail(ref mut detail) = self.active_view {
+                    detail.next_tab();
+                    return;
+                }
+                if let ActiveView::ArgoDetail(ref mut detail) = self.active_view {
                     detail.next_tab();
                     return;
                 }
@@ -3044,6 +3353,25 @@ impl App {
                             self.set_toast("Shell only available for Pods and Nodes".to_string(), Theme::status_warn());
                         }
                     }
+                    KeyCode::Char('S') | KeyCode::Char('h') => {
+                        if table_kind == ResourceKind::Nodes {
+                            if let Some(node_name) = sel_name {
+                                let destination = table.selected_item()
+                                    .and_then(|item| {
+                                        item.get("internalIp").and_then(|v| v.as_str())
+                                            .or_else(|| item.get("externalIp").and_then(|v| v.as_str()))
+                                    })
+                                    .unwrap_or(&node_name)
+                                    .to_string();
+                                let cursor_pos = destination.chars().count();
+                                self.modal = Some(Modal::NodeSsh {
+                                    node_name,
+                                    destination_input: destination,
+                                    cursor_pos,
+                                });
+                            }
+                        }
+                    }
                     KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
                         if table_kind == ResourceKind::Events {
                             if let Some(item) = table.selected_item() {
@@ -3344,6 +3672,20 @@ impl App {
             }
             ActiveView::Logs(logs) => {
                 match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        if !logs.search_query.is_empty() {
+                            logs.clear_search();
+                            self.filter_buffer.clear();
+                        } else {
+                            self.stop_active_log_stream();
+                            if let Some(prev) = self.nav_stack.pop() {
+                                self.active_view = prev;
+                            } else {
+                                self.switch_view_to_kind(ResourceKind::Pods).await;
+                            }
+                            self.restart_active_watch().await;
+                        }
+                    }
                     KeyCode::Char('j') | KeyCode::Down => logs.scroll_down(1),
                     KeyCode::Char('k') | KeyCode::Up => logs.scroll_up(1),
                     KeyCode::Char('g') | KeyCode::Home => logs.scroll_top(),
@@ -3540,6 +3882,135 @@ impl App {
                     _ => {}
                 }
             }
+            ActiveView::Argo(argo) => {
+                let sel_app = argo.selected_application().cloned();
+                let hub_ctx = argo.hub_context_name.clone();
+                let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+
+                match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => argo.select_next(),
+                    KeyCode::Char('k') | KeyCode::Up => argo.select_prev(),
+                    KeyCode::Enter => {
+                        if let Some(app) = sel_app {
+                            self.open_argo_detail(app, hub_ctx);
+                        }
+                    }
+                    KeyCode::Char('x') => {
+                        if let Some(app) = sel_app {
+                            self.open_action_palette("Application".to_string(), app.name.clone(), Some(app.namespace.clone()));
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        if let Some(app) = sel_app {
+                            let payload = serde_json::json!({
+                                "ctx": query_ctx,
+                                "ns": app.namespace,
+                                "name": app.name,
+                                "prune": false,
+                                "dry_run": false,
+                            });
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Sync ArgoCD Application [{}]", app.name),
+                                message: format!("Trigger sync for '{}/{}'? (Prune: false)", app.namespace, app.name),
+                                action_name: format!("argo_sync:{}", payload),
+                                is_destructive: false,
+                            });
+                        }
+                    }
+                    KeyCode::Char('S') => {
+                        if let Some(app) = sel_app {
+                            let payload = serde_json::json!({
+                                "ctx": query_ctx,
+                                "ns": app.namespace,
+                                "name": app.name,
+                                "prune": true,
+                                "dry_run": false,
+                            });
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Sync ArgoCD Application with Prune [{}]", app.name),
+                                message: format!("Trigger sync with PRUNE for '{}/{}'?", app.namespace, app.name),
+                                action_name: format!("argo_sync:{}", payload),
+                                is_destructive: true,
+                            });
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        if let Some(app) = sel_app {
+                            let enable = !app.auto_sync_enabled;
+                            let label = if enable { "Enable Auto-Sync" } else { "Pause Auto-Sync (Incident Lever)" };
+                            let payload = serde_json::json!({
+                                "ctx": query_ctx,
+                                "ns": app.namespace,
+                                "name": app.name,
+                                "enable": enable,
+                            });
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("{} [{}]", label, app.name),
+                                message: format!("{} for '{}/{}'?", label, app.namespace, app.name),
+                                action_name: format!("argo_toggle_auto:{}", payload),
+                                is_destructive: !enable,
+                            });
+                        }
+                    }
+                    KeyCode::Char('R') => {
+                        if let Some(app) = sel_app {
+                            self.set_toast(format!("Triggering hard refresh for '{}'...", app.name), Theme::status_ok());
+                            self.trigger_argo_hard_refresh(&app.name, &app.namespace);
+                        }
+                    }
+                    KeyCode::Char('g') => {
+                        if let Some(app) = sel_app {
+                            if !app.repo_url.is_empty() {
+                                match open_browser_url(&app.repo_url) {
+                                    Ok(_) => self.set_toast(format!("Opened Git repo: {}", app.repo_url), Theme::status_ok()),
+                                    Err(err) => self.set_toast(format!("Could not open browser: {}", err), Theme::status_error()),
+                                }
+                            } else {
+                                self.set_toast("Application has no repoURL configured".to_string(), Theme::status_warn());
+                            }
+                        }
+                    }
+                    KeyCode::Char('a') => {
+                        if argo.is_remote_hub {
+                            argo.toggle_show_all();
+                            let msg = if argo.show_all_hub_apps {
+                                "Showing all Hub cluster applications"
+                            } else {
+                                "Showing spoke cluster filtered applications"
+                            };
+                            self.set_toast(msg.to_string(), Theme::status_ok());
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        self.refresh_argo_applications_ext(true);
+                        self.set_toast("Refreshing ArgoCD applications...".to_string(), Theme::status_ok());
+                    }
+                    KeyCode::Char('c') => {
+                        let mut cfg = TuiConfigViewState::new();
+                        cfg.available_contexts = self.contexts.iter().map(|c| c.name.clone()).collect();
+                        cfg.selected_field = 4;
+                        let old_view = std::mem::replace(&mut self.active_view, ActiveView::TuiConfig(cfg));
+                        self.nav_stack.push(old_view);
+                    }
+                    KeyCode::Char('y') => {
+                        if let Some(app) = sel_app {
+                            let link = crate::deep_link::DeepLink::Resource {
+                                context: query_ctx.clone(),
+                                namespace: Some(app.namespace.clone()),
+                                kind: "Application".to_string(),
+                                name: app.name.clone(),
+                            };
+                            let url = link.to_url();
+                            let url_clone = url.clone();
+                            tokio::spawn(async move {
+                                let _ = copy_to_clipboard(&url_clone);
+                            });
+                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                        }
+                    }
+                    _ => {}
+                }
+            }
             ActiveView::Toolbox(tb) => {
                 let sel_tool = tb.tools.get(tb.selected_idx).cloned();
                 match key.code {
@@ -3601,7 +4072,9 @@ impl App {
                     self.switch_view_to_kind(ResourceKind::Settings).await;
                     return;
                 }
-                if key.code == KeyCode::Char('e') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if (key.code == KeyCode::Char('o') || key.code == KeyCode::Char('O'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
                     let prov = self.ai_settings.default_provider;
                     let prov_name = crate::ai_config::provider_display_name(prov);
                     let model = self.ai_settings.get_model(prov);
@@ -3616,7 +4089,9 @@ impl App {
                     self.set_toast("✓ Conversation cleared".to_string(), Theme::status_ok());
                     return;
                 }
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C'))
+                    && (key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER))
+                {
                     if let Some(selected) = ai.get_selected_text() {
                         let _ = copy_to_clipboard(&selected);
                         self.set_toast("✓ Copied selection to clipboard".to_string(), Theme::status_ok());
@@ -3659,16 +4134,56 @@ impl App {
                         ai.history_down();
                     }
 
-                    // Cursor Navigation inside Input
-                    KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Cursor Navigation inside Input:
+                    // 1. Skip word left: Option+Left, Ctrl+Left, or Alt+b / Alt+B (standard macOS/Unix terminal)
+                    KeyCode::Left
+                        if key.modifiers.contains(KeyModifiers::ALT)
+                            || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
                         ai.move_cursor_word_left();
                     }
-                    KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char('b') | KeyCode::Char('B')
+                        if key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        ai.move_cursor_word_left();
+                    }
+
+                    // 2. Skip word right: Option+Right, Ctrl+Right, or Alt+f / Alt+F (standard macOS/Unix terminal)
+                    KeyCode::Right
+                        if key.modifiers.contains(KeyModifiers::ALT)
+                            || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
                         ai.move_cursor_word_right();
                     }
+                    KeyCode::Char('f') | KeyCode::Char('F')
+                        if key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        ai.move_cursor_word_right();
+                    }
+
+                    // 3. Start of Text: Ctrl+A or Cmd+Left
+                    KeyCode::Char('a') | KeyCode::Char('A')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        ai.move_cursor_home();
+                    }
+                    KeyCode::Left if key.modifiers.contains(KeyModifiers::SUPER) => {
+                        ai.move_cursor_home();
+                    }
+
+                    // 4. End of Text: Ctrl+E or Cmd+Right
+                    KeyCode::Char('e') | KeyCode::Char('E')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        ai.move_cursor_end();
+                    }
+                    KeyCode::Right if key.modifiers.contains(KeyModifiers::SUPER) => {
+                        ai.move_cursor_end();
+                    }
+
+                    // 5. Single character Left / Right
                     KeyCode::Left => ai.move_cursor_left(),
                     KeyCode::Right => ai.move_cursor_right(),
-                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.move_cursor_home(),
 
                     // Viewport Scrolling & Cursor Home/End
                     KeyCode::Home => {
@@ -3699,7 +4214,10 @@ impl App {
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::ALT) => {
                         ai.clear_input();
                     }
-                    KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char('v') | KeyCode::Char('V')
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            || key.modifiers.contains(KeyModifiers::SUPER) =>
+                    {
                         if let Some(clip) = get_clipboard_text() {
                             let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
                             ai.insert_str(&cleaned);
@@ -3711,7 +4229,11 @@ impl App {
                     KeyCode::Delete => {
                         ai.delete();
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                    KeyCode::Char(c)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT)
+                            && !key.modifiers.contains(KeyModifiers::SUPER) =>
+                    {
                         ai.insert_char(c);
                     }
                     KeyCode::Enter => {
@@ -3952,6 +4474,74 @@ impl App {
                 }
             }
             ActiveView::TuiConfig(cfg_state) => {
+                if cfg_state.is_editing {
+                    match key.code {
+                        KeyCode::Esc => {
+                            cfg_state.cancel_editing();
+                        }
+                        KeyCode::Enter => {
+                            match cfg_state.finish_editing(&mut self.tui_config) {
+                                Ok(()) => self.set_toast("Saved ArgoCD Hub setting".to_string(), Theme::status_ok()),
+                                Err(err) => self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error()),
+                            }
+                        }
+                        KeyCode::Left => {
+                            cfg_state.move_cursor_left();
+                        }
+                        KeyCode::Right => {
+                            cfg_state.move_cursor_right();
+                        }
+                        KeyCode::Home => {
+                            cfg_state.move_cursor_home();
+                        }
+                        KeyCode::End => {
+                            cfg_state.move_cursor_end();
+                        }
+                        _ if is_word_delete_key(&key) => {
+                            cfg_state.delete_word_back();
+                        }
+                        KeyCode::Backspace => {
+                            cfg_state.backspace();
+                        }
+                        KeyCode::Delete => {
+                            cfg_state.delete();
+                        }
+                        KeyCode::Char('v') | KeyCode::Char('V')
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                || key.modifiers.contains(KeyModifiers::SUPER) =>
+                        {
+                            if let Some(clip) = get_clipboard_text() {
+                                let cleaned = clip.replace("\r\n", "").replace('\n', "");
+                                cfg_state.insert_str(&cleaned);
+                            }
+                        }
+                        KeyCode::Char('a') | KeyCode::Char('A')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            cfg_state.move_cursor_home();
+                        }
+                        KeyCode::Char('e') | KeyCode::Char('E')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            cfg_state.move_cursor_end();
+                        }
+                        KeyCode::Char('u') | KeyCode::Char('U')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            cfg_state.clear_input();
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT)
+                                && !key.modifiers.contains(KeyModifiers::SUPER) =>
+                        {
+                            cfg_state.insert_char(c);
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
                         if let Some(prev) = self.nav_stack.pop() {
@@ -3972,9 +4562,29 @@ impl App {
                             self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
                         }
                     }
-                    KeyCode::Enter | KeyCode::Char(' ') => {
+                    KeyCode::Enter => {
+                        if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
+                            cfg_state.start_editing(&self.tui_config);
+                        } else if let Err(err) = cfg_state.cycle_current(&mut self.tui_config) {
+                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                        }
+                    }
+                    KeyCode::Char(' ') => {
                         if let Err(err) = cfg_state.cycle_current(&mut self.tui_config) {
                             self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                        }
+                    }
+                    KeyCode::Char('e') | KeyCode::Char('E') => {
+                        if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
+                            cfg_state.start_editing(&self.tui_config);
+                        }
+                    }
+                    KeyCode::Char('c') | KeyCode::Char('C') => {
+                        if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
+                            match cfg_state.clear_current(&mut self.tui_config) {
+                                Ok(()) => self.set_toast("Cleared ArgoCD Hub setting".to_string(), Theme::status_ok()),
+                                Err(err) => self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error()),
+                            }
                         }
                     }
                     KeyCode::Char('[') | KeyCode::Char('{') => {
@@ -4149,6 +4759,17 @@ impl App {
                     KeyCode::Char('S') => {
                         // Explicit node debug shell even if a pod is highlighted
                         self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: node_name.clone() });
+                    }
+                    KeyCode::Char('h') | KeyCode::Char('H') => {
+                        let destination = inspector.details.as_ref()
+                            .and_then(|d| d.internal_ip.clone().or_else(|| d.external_ip.clone()))
+                            .unwrap_or_else(|| node_name.clone());
+                        let cursor_pos = destination.chars().count();
+                        self.modal = Some(Modal::NodeSsh {
+                            node_name: node_name.clone(),
+                            destination_input: destination,
+                            cursor_pos,
+                        });
                     }
                     KeyCode::Char('c') => {
                         let target_unsched = !is_unsched;
@@ -4595,6 +5216,160 @@ impl App {
                                 let _ = copy_to_clipboard(&txt);
                             });
                             self.set_toast("Copied tab content to clipboard".to_string(), Theme::status_ok());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            ActiveView::ArgoDetail(detail) => {
+                let hub_ctx = detail.hub_context.clone();
+                let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+                let app_opt = detail.application.clone();
+
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        if let Some(prev) = self.nav_stack.pop() {
+                            self.active_view = prev;
+                        } else {
+                            self.switch_view_to_kind(ResourceKind::ArgoApplications).await;
+                        }
+                    }
+                    KeyCode::Tab => detail.next_tab(),
+                    KeyCode::BackTab => detail.prev_tab(),
+                    KeyCode::Right | KeyCode::Char('l') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        detail.next_tab();
+                    }
+                    KeyCode::Left | KeyCode::Char('h') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        detail.prev_tab();
+                    }
+                    KeyCode::Char('1') => detail.set_tab(argo_detail_view::ArgoDetailTab::Overview),
+                    KeyCode::Char('2') => detail.set_tab(argo_detail_view::ArgoDetailTab::ManagedResources),
+                    KeyCode::Char('3') => detail.set_tab(argo_detail_view::ArgoDetailTab::Drift),
+                    KeyCode::Char('4') => detail.set_tab(argo_detail_view::ArgoDetailTab::RevisionHistory),
+                    KeyCode::Up | KeyCode::Char('k') => detail.select_prev(),
+                    KeyCode::Down | KeyCode::Char('j') => detail.select_next(),
+                    KeyCode::Char('s') => {
+                        if let Some(ref app) = app_opt {
+                            let payload = serde_json::json!({
+                                "ctx": query_ctx,
+                                "ns": app.namespace,
+                                "name": app.name,
+                                "prune": false,
+                                "dry_run": false,
+                            });
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Sync ArgoCD Application [{}]", app.name),
+                                message: format!("Trigger sync for '{}/{}'? (Prune: false)", app.namespace, app.name),
+                                action_name: format!("argo_sync:{}", payload),
+                                is_destructive: false,
+                            });
+                        }
+                    }
+                    KeyCode::Char('S') => {
+                        if let Some(ref app) = app_opt {
+                            let payload = serde_json::json!({
+                                "ctx": query_ctx,
+                                "ns": app.namespace,
+                                "name": app.name,
+                                "prune": true,
+                                "dry_run": false,
+                            });
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Sync ArgoCD Application with Prune [{}]", app.name),
+                                message: format!("Trigger sync with PRUNE for '{}/{}'?", app.namespace, app.name),
+                                action_name: format!("argo_sync:{}", payload),
+                                is_destructive: true,
+                            });
+                        }
+                    }
+                    KeyCode::Char('p') => {
+                        if let Some(ref app) = app_opt {
+                            let enable = !app.auto_sync_enabled;
+                            let label = if enable { "Enable Auto-Sync" } else { "Pause Auto-Sync (Incident Lever)" };
+                            let payload = serde_json::json!({
+                                "ctx": query_ctx,
+                                "ns": app.namespace,
+                                "name": app.name,
+                                "enable": enable,
+                            });
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("{} [{}]", label, app.name),
+                                message: format!("{} for '{}/{}'?", label, app.namespace, app.name),
+                                action_name: format!("argo_toggle_auto:{}", payload),
+                                is_destructive: !enable,
+                            });
+                        }
+                    }
+                    KeyCode::Char('R') => {
+                        if let Some(ref app) = app_opt {
+                            self.set_toast(format!("Triggering hard refresh for '{}'...", app.name), Theme::status_ok());
+                            self.trigger_argo_hard_refresh(&app.name, &app.namespace);
+                        }
+                    }
+                    KeyCode::Char('g') => {
+                        if let Some(ref app) = app_opt {
+                            if !app.repo_url.is_empty() {
+                                match open_browser_url(&app.repo_url) {
+                                    Ok(_) => self.set_toast(format!("Opened Git repo: {}", app.repo_url), Theme::status_ok()),
+                                    Err(err) => self.set_toast(format!("Could not open browser: {}", err), Theme::status_error()),
+                                }
+                            } else {
+                                self.set_toast("Application has no repoURL configured".to_string(), Theme::status_warn());
+                            }
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        let name = detail.app_name.clone();
+                        let ns = detail.app_namespace.clone();
+                        self.reload_argo_detail(&name, &ns);
+                        self.set_toast("Refreshing application details...".to_string(), Theme::status_ok());
+                    }
+                    KeyCode::Char('c') => {
+                        let link = crate::deep_link::DeepLink::Resource {
+                            context: query_ctx.clone(),
+                            namespace: Some(detail.app_namespace.clone()),
+                            kind: "Application".to_string(),
+                            name: detail.app_name.clone(),
+                        };
+                        let url = link.to_url();
+                        let url_clone = url.clone();
+                        tokio::spawn(async move {
+                            let _ = copy_to_clipboard(&url_clone);
+                        });
+                        self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                    }
+                    KeyCode::Enter | KeyCode::Char('d') => {
+                        if let Some(res) = detail.selected_resource() {
+                            let name = res.name.clone();
+                            let kind = res.kind.clone();
+                            let ns = if res.namespace.is_empty() { None } else { Some(res.namespace.clone()) };
+                            self.open_describe_view(name, kind, ns).await;
+                        }
+                    }
+                    KeyCode::Char('y') | KeyCode::Char('v') => {
+                        if let Some(res) = detail.selected_resource() {
+                            let name = res.name.clone();
+                            let kind = res.kind.clone();
+                            let ns = if res.namespace.is_empty() { None } else { Some(res.namespace.clone()) };
+                            self.open_yaml_view(name, kind, ns).await;
+                        }
+                    }
+                    KeyCode::Char('x') => {
+                        let action_target = if let Some(res) = detail.selected_resource() {
+                            let ns = if res.namespace.is_empty() {
+                                Some(detail.app_namespace.clone())
+                            } else {
+                                Some(res.namespace.clone())
+                            };
+                            Some((res.kind.clone(), res.name.clone(), ns))
+                        } else if let Some(ref app) = app_opt {
+                            Some(("Application".to_string(), app.name.clone(), Some(app.namespace.clone())))
+                        } else {
+                            Some(("Application".to_string(), detail.app_name.clone(), Some(detail.app_namespace.clone())))
+                        };
+
+                        if let Some((kind, name, ns)) = action_target {
+                            self.open_action_palette(kind, name, ns);
                         }
                     }
                     _ => {}
@@ -5063,6 +5838,16 @@ impl App {
             ActiveView::HelmDetail(detail) => {
                 detail.set_search_query(&filter);
             }
+            ActiveView::Argo(argo) => {
+                argo.filter_query = filter;
+                let count = argo.filtered_indices().len();
+                if argo.selected_idx >= count {
+                    argo.selected_idx = count.saturating_sub(1);
+                }
+            }
+            ActiveView::ArgoDetail(detail) => {
+                detail.search_query = filter;
+            }
             _ => {}
         }
     }
@@ -5093,6 +5878,12 @@ impl App {
             ActiveView::HelmDetail(detail) => {
                 detail.clear_search();
             }
+            ActiveView::Argo(argo) => {
+                argo.filter_query.clear();
+            }
+            ActiveView::ArgoDetail(detail) => {
+                detail.search_query.clear();
+            }
             _ => {}
         }
     }
@@ -5121,11 +5912,29 @@ impl App {
                 return;
             }
         }
+        if let ActiveView::TuiConfig(ref mut cfg) = self.active_view {
+            if cfg.is_editing {
+                let cleaned = text.replace("\r\n", "").replace('\n', "");
+                cfg.insert_str(&cleaned);
+                return;
+            }
+        }
         if let Some(ref mut modal) = self.modal {
             match modal {
                 Modal::Scale { ref mut input, .. } => {
                     let cleaned = text.replace("\r\n", "").replace('\n', "");
                     input.push_str(&cleaned);
+                }
+                Modal::NodeSsh { ref mut destination_input, ref mut cursor_pos, .. } => {
+                    let cleaned = text.replace("\r\n", "").replace('\n', "");
+                    let pos = (*cursor_pos).min(destination_input.chars().count());
+                    let mut chars: Vec<char> = destination_input.chars().collect();
+                    let added_len = cleaned.chars().count();
+                    for (i, c) in cleaned.chars().enumerate() {
+                        chars.insert(pos + i, c);
+                    }
+                    *destination_input = chars.into_iter().collect();
+                    *cursor_pos = pos + added_len;
                 }
                 Modal::PortForward { ref mut local_port_input, .. } => {
                     let cleaned = text.replace("\r\n", "").replace('\n', "");
@@ -5222,18 +6031,38 @@ impl App {
             return;
         }
 
-        if let Some(target) = resolve_command_with_crds(cmd, &self.crds) {
-            self.execute_command_target(target).await;
+        let (cmd_base, arg_opt) = if let Some(pos) = trimmed.find(char::is_whitespace) {
+            (&trimmed[..pos], Some(trimmed[pos..].trim()))
         } else {
-            // Check if there is an unambiguous top suggestion
-            let suggestions = command_suggestions_with_crds(cmd, &self.crds);
+            (trimmed, None)
+        };
+
+        let resolved = resolve_command_with_crds(cmd_base, &self.crds).or_else(|| {
+            let suggestions = command_suggestions_with_crds(cmd_base, &self.crds);
             if let Some((top, score)) = suggestions.first() {
                 if *score >= 80 {
-                    self.execute_command_target(top.target.clone()).await;
-                    return;
+                    return Some(top.target.clone());
                 }
             }
-            self.set_toast(format!("Unknown command: '{}' (type :help or ?)", cmd), Theme::status_warn());
+            None
+        });
+
+        if let Some(target) = resolved {
+            if let Some(arg) = arg_opt {
+                if !arg.is_empty() {
+                    self.active_namespace = arg.to_string();
+                }
+            }
+            self.execute_command_target(target).await;
+            if let Some(arg) = arg_opt {
+                if !arg.is_empty() {
+                    if let ActiveView::Argo(ref mut argo) = self.active_view {
+                        argo.filter_query = arg.to_string();
+                    }
+                }
+            }
+        } else {
+            self.set_toast(format!("Unknown command: '{}' (type :help or ?)", trimmed), Theme::status_warn());
         }
     }
 
@@ -5395,6 +6224,7 @@ impl App {
     }
 
     pub async fn switch_view_to_crd(&mut self, mut crd: CrdMeta) {
+        self.stop_active_log_stream();
         if crd.printer_columns.is_empty() {
             if let Some(discovered) = self.crds.iter().find(|c| c.crd_name == crd.crd_name || (c.group == crd.group && c.kind == crd.kind)) {
                 crd.printer_columns = discovered.printer_columns.clone();
@@ -5491,11 +6321,16 @@ impl App {
     }
 
     pub async fn switch_view_to_kind(&mut self, kind: ResourceKind) {
+        self.stop_active_log_stream();
         let new_view = match kind {
             ResourceKind::PortForwards => ActiveView::PortForwards(PortForwardViewState::new()),
             ResourceKind::HelmReleases => {
                 self.refresh_helm_releases();
                 ActiveView::Helm(HelmViewState::new())
+            }
+            ResourceKind::ArgoApplications => {
+                self.refresh_argo_applications();
+                ActiveView::Argo(argo_view::ArgoViewState::new())
             }
             ResourceKind::Overview => {
                 let mut initial_data = self.cluster_overview_data.clone().unwrap_or_default();
@@ -5516,7 +6351,11 @@ impl App {
             ResourceKind::Toolbox => ActiveView::Toolbox(ToolboxViewState::new()),
             ResourceKind::Assistant => ActiveView::Assistant,
             ResourceKind::Settings => ActiveView::Settings(SettingsViewState::new()),
-            ResourceKind::TuiConfig => ActiveView::TuiConfig(TuiConfigViewState::new()),
+            ResourceKind::TuiConfig => {
+                let mut cfg = TuiConfigViewState::new();
+                cfg.available_contexts = self.contexts.iter().map(|c| c.name.clone()).collect();
+                ActiveView::TuiConfig(cfg)
+            }
             ResourceKind::Topology => {
                 let namespaces = if self.active_namespace.is_empty() {
                     vec![]
@@ -5704,10 +6543,14 @@ impl App {
         }
     }
 
-    pub async fn open_logs_view(&mut self, pod_name: String, namespace: Option<String>, container: Option<String>) {
+    pub fn stop_active_log_stream(&mut self) {
         if let Some(prev_ch) = self.active_log_channel.take() {
             self.logs_manager.stop(&prev_ch);
         }
+    }
+
+    pub async fn open_logs_view(&mut self, pod_name: String, namespace: Option<String>, container: Option<String>) {
+        self.stop_active_log_stream();
 
         let channel = format!("logs:{}:{}", pod_name, uuid::Uuid::new_v4());
         self.active_log_channel = Some(channel.clone());
@@ -5753,9 +6596,7 @@ impl App {
         namespace: Option<String>,
         pod_names: Vec<String>,
     ) {
-        if let Some(prev_ch) = self.active_log_channel.take() {
-            self.logs_manager.stop(&prev_ch);
-        }
+        self.stop_active_log_stream();
 
         let channel = format!("logs:multi:{}:{}", target_name, uuid::Uuid::new_v4());
         self.active_log_channel = Some(channel.clone());
@@ -6075,6 +6916,15 @@ impl App {
                             return y;
                         }
                     }
+                } else if k.eq_ignore_ascii_case("application") || k.eq_ignore_ascii_case("applications") {
+                    let ar = srelens_kube::argo::argo_application_resource();
+                    let api: kube::Api<kube::core::DynamicObject> = kube::Api::namespaced_with(client, ns.as_deref().unwrap_or("argocd"), &ar);
+                    if let Ok(mut obj) = api.get(&n).await {
+                        obj.metadata.managed_fields = None;
+                        if let Ok(y) = serde_yaml::to_string(&obj) {
+                            return y;
+                        }
+                    }
                 }
             }
 
@@ -6164,8 +7014,15 @@ impl App {
 
             // 2. Pure Rust native describe fallback
             if let Ok(client) = cache.get(&ctx).await {
-                if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
-                    let ar = kube::core::ApiResource::from_gvk(&gvk);
+                let maybe_ar = if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
+                    Some((kube::core::ApiResource::from_gvk(&gvk), namespaced))
+                } else if k.eq_ignore_ascii_case("application") || k.eq_ignore_ascii_case("applications") {
+                    Some((srelens_kube::argo::argo_application_resource(), true))
+                } else {
+                    None
+                };
+
+                if let Some((ar, namespaced)) = maybe_ar {
                     let api: kube::Api<kube::core::DynamicObject> = if namespaced {
                         kube::Api::namespaced_with(client.clone(), ns.as_deref().unwrap_or("default"), &ar)
                     } else {
@@ -6587,6 +7444,266 @@ impl App {
         }
     }
 
+    pub fn refresh_argo_applications(&mut self) {
+        self.refresh_argo_applications_ext(false);
+    }
+
+    pub fn refresh_argo_applications_ext(&mut self, force_refresh: bool) {
+        if self.argo_refreshing {
+            return;
+        }
+        self.argo_refreshing = true;
+        if force_refresh {
+            srelens_kube::argo::invalidate_argo_applications_cache();
+            srelens_kube::argo::invalidate_argo_cluster_mapping_cache();
+        }
+        if let ActiveView::Argo(argo) = &mut self.active_view {
+            if argo.applications.is_empty() {
+                argo.is_loading = true;
+            }
+            argo.error = None;
+        }
+        let current_context = self.active_context.clone();
+        let current_cluster_name = self.cluster_name.clone();
+        // Do not restrict cluster-level ArgoCD application listings by Pod active_namespace,
+        // which causes applications to vanish whenever viewing non-default namespaces
+        // or switching to contexts with a default namespace configured in kubeconfig.
+        let target_ns: Option<String> = None;
+
+        let hub_context = self.tui_config.resolved_argo_hub_context();
+        let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
+
+        let current_server_url = self
+            .contexts
+            .iter()
+            .find(|c| c.name == current_context)
+            .map(|c| c.server.clone());
+
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let hub_ctx_clone = hub_context.clone();
+
+        tokio::spawn(async move {
+            if let Some(ref path) = hub_kubeconfig {
+                cache.ensure_paths(vec![path.clone()]).await;
+            }
+
+            let res = srelens_kube::argo::fetch_argo_applications_cached(
+                &cache,
+                &current_context,
+                Some(&current_cluster_name),
+                current_server_url.as_deref(),
+                hub_ctx_clone.as_deref(),
+                target_ns.as_deref(),
+                true,
+                force_refresh,
+            )
+            .await;
+
+            match res {
+                Ok(fetch_res) => {
+                    let is_remote = fetch_res.is_remote_hub;
+                    let _ = event_tx.send(crate::event::AppEvent::ArgoApplicationsResult {
+                        context: current_context,
+                        is_remote_hub: is_remote,
+                        hub_context: if is_remote { hub_ctx_clone } else { None },
+                        result: Ok(fetch_res),
+                    });
+                }
+                Err(e) => {
+                    let _ = event_tx.send(crate::event::AppEvent::ArgoApplicationsResult {
+                        context: current_context,
+                        is_remote_hub: false,
+                        hub_context: None,
+                        result: Err(e),
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn handle_argo_applications_result(
+        &mut self,
+        context: &str,
+        _is_remote_hub: bool,
+        hub_context: Option<String>,
+        result: Result<srelens_kube::argo::ArgoApplicationsFetchResult, String>,
+    ) {
+        self.argo_refreshing = false;
+        if let ActiveView::Argo(argo) = &mut self.active_view {
+            if self.active_context == context {
+                match result {
+                    Ok(fetch_res) => {
+                        let effective_hub = if fetch_res.is_remote_hub { hub_context } else { None };
+                        argo.set_applications(fetch_res.filtered_apps, fetch_res.all_apps, fetch_res.is_remote_hub, effective_hub);
+                    }
+                    Err(err) => argo.set_error(err),
+                }
+            } else {
+                // Received result for an older context from before context switch;
+                // trigger a fresh query for the now-active context.
+                self.refresh_argo_applications();
+            }
+        }
+    }
+
+    pub fn open_argo_detail(&mut self, app: srelens_kube::argo::ArgoApplication, hub_context: Option<String>) {
+        let hub_ctx = hub_context.clone();
+        let hub_kubeconfig = if hub_ctx.is_some() {
+            self.tui_config.resolved_argo_hub_kubeconfig()
+        } else {
+            None
+        };
+
+        let mut detail_state = argo_detail_view::ArgoDetailViewState::new(
+            app.name.clone(),
+            app.namespace.clone(),
+            hub_ctx.clone(),
+        );
+        detail_state.set_application(app.clone());
+
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+        let app_name = app.name.clone();
+        let app_ns = app.namespace.clone();
+
+        tokio::spawn(async move {
+            if let Some(ref path) = hub_kubeconfig {
+                cache.ensure_paths(vec![path.clone()]).await;
+            }
+            let res = srelens_kube::argo::fetch_argo_application_detail(
+                &cache,
+                &query_ctx,
+                &app_name,
+                &app_ns,
+            )
+            .await;
+            let _ = event_tx.send(crate::event::AppEvent::ArgoDetailResult {
+                context: query_ctx,
+                namespace: app_ns,
+                name: app_name,
+                result: res,
+            });
+        });
+
+        let old_view = std::mem::replace(&mut self.active_view, ActiveView::ArgoDetail(detail_state));
+        self.nav_stack.push(old_view);
+    }
+
+    pub fn reload_argo_detail(&mut self, name: &str, namespace: &str) {
+        let hub_ctx = if let ActiveView::ArgoDetail(detail) = &mut self.active_view {
+            detail.is_loading = true;
+            detail.error = None;
+            detail.hub_context.clone()
+        } else {
+            None
+        };
+        let hub_kubeconfig = if hub_ctx.is_some() {
+            self.tui_config.resolved_argo_hub_kubeconfig()
+        } else {
+            None
+        };
+        let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let name_c = name.to_string();
+        let ns_c = namespace.to_string();
+
+        tokio::spawn(async move {
+            if let Some(ref path) = hub_kubeconfig {
+                cache.ensure_paths(vec![path.clone()]).await;
+            }
+            let res = srelens_kube::argo::fetch_argo_application_detail(
+                &cache,
+                &query_ctx,
+                &name_c,
+                &ns_c,
+            )
+            .await;
+            let _ = event_tx.send(crate::event::AppEvent::ArgoDetailResult {
+                context: query_ctx,
+                namespace: ns_c,
+                name: name_c,
+                result: res,
+            });
+        });
+    }
+
+    pub fn handle_argo_detail_result(
+        &mut self,
+        context: &str,
+        namespace: &str,
+        name: &str,
+        result: Result<srelens_kube::argo::ArgoApplication, String>,
+    ) {
+        if let ActiveView::ArgoDetail(detail) = &mut self.active_view {
+            let expected_ctx = detail.hub_context.as_deref().unwrap_or(&self.active_context);
+            if expected_ctx == context && detail.app_namespace == namespace && detail.app_name == name {
+                match result {
+                    Ok(app) => detail.set_application(app),
+                    Err(err) => detail.set_error(err),
+                }
+            }
+        }
+    }
+
+    pub fn trigger_argo_hard_refresh(&mut self, name: &str, namespace: &str) {
+        let hub_ctx = match &self.active_view {
+            ActiveView::Argo(argo) => argo.hub_context_name.clone(),
+            ActiveView::ArgoDetail(detail) => detail.hub_context.clone(),
+            _ => None,
+        };
+        let hub_kubeconfig = if hub_ctx.is_some() {
+            self.tui_config.resolved_argo_hub_kubeconfig()
+        } else {
+            None
+        };
+        let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let name_c = name.to_string();
+        let ns_c = namespace.to_string();
+
+        tokio::spawn(async move {
+            if let Some(ref path) = hub_kubeconfig {
+                cache.ensure_paths(vec![path.clone()]).await;
+            }
+            let res = srelens_kube::argo::trigger_argo_hard_refresh(
+                &cache,
+                &query_ctx,
+                &name_c,
+                &ns_c,
+            )
+            .await;
+            let action = format!("Hard Refresh '{}'", name_c);
+            let _ = event_tx.send(crate::event::AppEvent::ArgoActionResult {
+                action,
+                result: res.map(|_| format!("Hard refresh initiated for '{}'", name_c)),
+            });
+        });
+    }
+
+    pub fn handle_argo_action_result(&mut self, action: &str, result: Result<String, String>) {
+        match result {
+            Ok(msg) => {
+                self.set_toast(format!("✓ {}", msg), Theme::status_ok());
+                match &self.active_view {
+                    ActiveView::Argo(_) => self.refresh_argo_applications_ext(true),
+                    ActiveView::ArgoDetail(d) => {
+                        let name = d.app_name.clone();
+                        let ns = d.app_namespace.clone();
+                        self.reload_argo_detail(&name, &ns);
+                    }
+                    _ => {}
+                }
+            }
+            Err(err) => {
+                self.set_toast(format!("⚠ {} failed: {}", action, err), Theme::status_error());
+            }
+        }
+    }
+
     pub fn open_action_palette(&mut self, kind: String, name: String, namespace: Option<String>) {
         use crate::ui::dialogs::{QuickActionId, QuickActionItem};
 
@@ -6868,6 +7985,12 @@ impl App {
                     description: "Filter pod table to pods on this node".to_string(),
                 },
                 QuickActionItem {
+                    id: QuickActionId::NodeSsh,
+                    key_hint: "S".to_string(),
+                    title: "🔑 SSH into Node (Host OS)".to_string(),
+                    description: "Direct SSH connection to host OS (works when kubelet is down)".to_string(),
+                },
+                QuickActionItem {
                     id: QuickActionId::OpenShell,
                     key_hint: "s".to_string(),
                     title: "🐚 Privileged Node Shell".to_string(),
@@ -6878,6 +8001,68 @@ impl App {
                     key_hint: "d".to_string(),
                     title: "📄 Describe Node".to_string(),
                     description: "Inspect node capacity, taints & conditions".to_string(),
+                },
+            ],
+            "application" | "applications" | "argocd" => vec![
+                QuickActionItem {
+                    id: QuickActionId::AskAi,
+                    key_hint: "ai".to_string(),
+                    title: "🤖 Ask AI Assistant about this Application".to_string(),
+                    description: "Analyze sync status, health, drift and recommended fixes".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::PlaybookArgoProgressing,
+                    key_hint: "/argo".to_string(),
+                    title: "⚡ AI Diagnose Progressing / Stuck Sync / Degraded".to_string(),
+                    description: "Diagnose why application is stuck progressing, failing sync or degraded".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ArgoDetails,
+                    key_hint: "Enter".to_string(),
+                    title: "🔍 View Application Details".to_string(),
+                    description: "Inspect managed resources, manifest drift & history".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ArgoSync,
+                    key_hint: "s".to_string(),
+                    title: "🔄 Trigger Sync".to_string(),
+                    description: "Trigger ArgoCD application synchronization".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ArgoRefresh,
+                    key_hint: "R".to_string(),
+                    title: "⚡ Hard Refresh".to_string(),
+                    description: "Force controller to re-evaluate Git & cluster state".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ArgoOpenGit,
+                    key_hint: "g".to_string(),
+                    title: "🌐 Open Git Repository".to_string(),
+                    description: "Open target Git repository and revision in browser".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::RelationshipTree,
+                    key_hint: "t".to_string(),
+                    title: "🌳 Resource Relationship Tree".to_string(),
+                    description: "Trace managed cluster resources generated by this application".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Describe,
+                    key_hint: "d".to_string(),
+                    title: "📄 Describe Application".to_string(),
+                    description: "Inspect formatted Application CR describe details and conditions".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::ViewYaml,
+                    key_hint: "y".to_string(),
+                    title: "📝 View Application YAML".to_string(),
+                    description: "Inspect live Kubernetes Application YAML manifest".to_string(),
+                },
+                QuickActionItem {
+                    id: QuickActionId::Delete,
+                    key_hint: "del".to_string(),
+                    title: "🗑️  Delete Application".to_string(),
+                    description: "Delete ArgoCD application from the cluster".to_string(),
                 },
             ],
             _ => vec![
@@ -6958,15 +8143,194 @@ impl App {
                 use crate::ui::dialogs::QuickActionId;
                 match chosen.id {
                     QuickActionId::AskAi => {
-                        let prompt = format!(
-                            "Investigate {} '{}' in namespace '{}': what is its current health status, are there any errors, crash loops or restarts, and what are the recommended fixes?",
-                            resource_kind,
-                            resource_name,
-                            namespace.as_deref().unwrap_or("default")
-                        );
+                        let prompt = if resource_kind.eq_ignore_ascii_case("application") || resource_kind.eq_ignore_ascii_case("applications") {
+                            let app_opt = if let ActiveView::Argo(ref argo) = self.active_view {
+                                argo.applications.iter().find(|a| a.name == resource_name).cloned()
+                            } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                                detail.application.clone()
+                            } else {
+                                None
+                            };
+
+                            if let Some(app) = app_opt {
+                                let dest = if !app.destination_name.is_empty() {
+                                    &app.destination_name
+                                } else if !app.destination_server.is_empty() {
+                                    &app.destination_server
+                                } else {
+                                    "-"
+                                };
+                                let dest_ns = if app.destination_namespace.is_empty() {
+                                    "(cluster-scoped)"
+                                } else {
+                                    &app.destination_namespace
+                                };
+                                let mut details = vec![
+                                    format!("Destination: {} / {}", dest, dest_ns),
+                                    format!("Sync: {}", if app.sync_status.is_empty() { "Unknown" } else { &app.sync_status }),
+                                    format!("Health: {}", if app.health_status.is_empty() { "Unknown" } else { &app.health_status }),
+                                ];
+                                if !app.health_message.is_empty() {
+                                    details.push(format!("Health Message: {}", app.health_message));
+                                }
+                                if !app.operation_message.is_empty() {
+                                    details.push(format!("Operation Message: {}", app.operation_message));
+                                }
+                                let unhealthy: Vec<String> = app.resources.iter()
+                                    .filter(|r| r.health != "Healthy" && !r.health.is_empty())
+                                    .map(|r| if r.message.is_empty() {
+                                        format!("{}/{} [{}]", r.kind, r.name, r.health)
+                                    } else {
+                                        format!("{}/{} [{} - {}]", r.kind, r.name, r.health, r.message)
+                                    })
+                                    .collect();
+                                if !unhealthy.is_empty() {
+                                    details.push(format!("Stuck/Unhealthy Resources: {}", unhealthy.join("; ")));
+                                }
+
+                                format!(
+                                    "Investigate ArgoCD Application '{}' in namespace '{}' ({}): what is causing its current status, why are resources stuck or degraded, and what are the recommended steps to resolve it?",
+                                    resource_name,
+                                    namespace.as_deref().unwrap_or("argocd"),
+                                    details.join(", ")
+                                )
+                            } else {
+                                format!(
+                                    "Investigate ArgoCD Application '{}' in namespace '{}': what is its current sync and health status, are there any errors, and what are the recommended fixes?",
+                                    resource_name,
+                                    namespace.as_deref().unwrap_or("argocd")
+                                )
+                            }
+                        } else {
+                            format!(
+                                "Investigate {} '{}' in namespace '{}': what is its current health status, are there any errors, crash loops or restarts, and what are the recommended fixes?",
+                                resource_kind,
+                                resource_name,
+                                namespace.as_deref().unwrap_or("default")
+                            )
+                        };
                         self.assistant_state.input = prompt;
                         let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
                         self.nav_stack.push(old);
+                    }
+                    QuickActionId::PlaybookArgoProgressing => {
+                        let app_opt = if let ActiveView::Argo(ref argo) = self.active_view {
+                            argo.applications.iter().find(|a| a.name == resource_name).cloned()
+                        } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                            detail.application.clone()
+                        } else {
+                            None
+                        };
+
+                        let prompt = if let Some(app) = app_opt {
+                            let dest = if !app.destination_name.is_empty() {
+                                &app.destination_name
+                            } else if !app.destination_server.is_empty() {
+                                &app.destination_server
+                            } else {
+                                "-"
+                            };
+                            let dest_ns = if app.destination_namespace.is_empty() {
+                                "(cluster-scoped)"
+                            } else {
+                                &app.destination_namespace
+                            };
+                            let mut details = vec![
+                                format!("Destination: {} / {}", dest, dest_ns),
+                                format!("Sync: {}", if app.sync_status.is_empty() { "Unknown" } else { &app.sync_status }),
+                                format!("Health: {}", if app.health_status.is_empty() { "Unknown" } else { &app.health_status }),
+                            ];
+                            if !app.health_message.is_empty() {
+                                details.push(format!("Health Message: {}", app.health_message));
+                            }
+                            if !app.operation_message.is_empty() {
+                                details.push(format!("Operation Message: {}", app.operation_message));
+                            }
+                            let unhealthy: Vec<String> = app.resources.iter()
+                                .filter(|r| r.health != "Healthy" && !r.health.is_empty())
+                                .map(|r| if r.message.is_empty() {
+                                    format!("{}/{} [{}]", r.kind, r.name, r.health)
+                                } else {
+                                    format!("{}/{} [{} - {}]", r.kind, r.name, r.health, r.message)
+                                })
+                                .collect();
+                            if !unhealthy.is_empty() {
+                                details.push(format!("Stuck/Unhealthy Resources: {}", unhealthy.join("; ")));
+                            }
+
+                            format!(
+                                "/argo {} (Context: {})",
+                                resource_name,
+                                details.join(", ")
+                            )
+                        } else {
+                            format!("/argo {}", resource_name)
+                        };
+
+                        self.assistant_state.input = prompt;
+                        self.assistant_state.update_slash_suggestions();
+                        let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
+                        self.nav_stack.push(old);
+                    }
+                    QuickActionId::ArgoDetails => {
+                        let (app_opt, hub_ctx) = if let ActiveView::Argo(ref argo) = self.active_view {
+                            (argo.applications.iter().find(|a| a.name == resource_name).cloned(), argo.hub_context_name.clone())
+                        } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                            (detail.application.clone(), detail.hub_context.clone())
+                        } else {
+                            (None, None)
+                        };
+                        if let Some(app) = app_opt {
+                            self.open_argo_detail(app, hub_ctx);
+                        }
+                    }
+                    QuickActionId::ArgoSync => {
+                        let hub_ctx = if let ActiveView::Argo(ref argo) = self.active_view {
+                            argo.hub_context_name.clone()
+                        } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                            detail.hub_context.clone()
+                        } else {
+                            None
+                        };
+                        let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+                        let ns = namespace.unwrap_or_else(|| "argocd".to_string());
+                        let payload = serde_json::json!({
+                            "ctx": query_ctx,
+                            "ns": ns,
+                            "name": resource_name,
+                            "prune": false,
+                            "dry_run": false,
+                        });
+                        self.modal = Some(Modal::Confirm {
+                            title: format!("Sync ArgoCD Application [{}]", resource_name),
+                            message: format!("Trigger sync for '{}/{}'? (Prune: false)", ns, resource_name),
+                            action_name: format!("argo_sync:{}", payload),
+                            is_destructive: false,
+                        });
+                    }
+                    QuickActionId::ArgoRefresh => {
+                        let ns = namespace.unwrap_or_else(|| "argocd".to_string());
+                        self.set_toast(format!("Triggering hard refresh for '{}'...", resource_name), Theme::status_ok());
+                        self.trigger_argo_hard_refresh(&resource_name, &ns);
+                    }
+                    QuickActionId::ArgoOpenGit => {
+                        let app_opt = if let ActiveView::Argo(ref argo) = self.active_view {
+                            argo.applications.iter().find(|a| a.name == resource_name).cloned()
+                        } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                            detail.application.clone()
+                        } else {
+                            None
+                        };
+                        if let Some(app) = app_opt {
+                            if !app.repo_url.is_empty() {
+                                match open_browser_url(&app.repo_url) {
+                                    Ok(_) => self.set_toast(format!("Opened Git repo: {}", app.repo_url), Theme::status_ok()),
+                                    Err(err) => self.set_toast(format!("Could not open browser: {}", err), Theme::status_error()),
+                                }
+                            } else {
+                                self.set_toast("Application has no repoURL configured".to_string(), Theme::status_warn());
+                            }
+                        }
                     }
                     QuickActionId::PlaybookCrashLoop => {
                         self.assistant_state.input = format!("/crashloop {}", resource_name);
@@ -7017,6 +8381,31 @@ impl App {
                             let target_ns = namespace.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
                             self.prompt_pod_shell(resource_name, target_ns).await;
                         }
+                    }
+                    QuickActionId::NodeSsh => {
+                        let destination = match &self.active_view {
+                            ActiveView::Table(t) if t.kind == ResourceKind::Nodes => {
+                                t.selected_item()
+                                    .and_then(|item| {
+                                        item.get("internalIp").and_then(|v| v.as_str())
+                                            .or_else(|| item.get("externalIp").and_then(|v| v.as_str()))
+                                    })
+                                    .unwrap_or(&resource_name)
+                                    .to_string()
+                            }
+                            ActiveView::NodeInspector(inspector) => {
+                                inspector.details.as_ref()
+                                    .and_then(|d| d.internal_ip.clone().or_else(|| d.external_ip.clone()))
+                                    .unwrap_or_else(|| resource_name.clone())
+                            }
+                            _ => resource_name.clone(),
+                        };
+                        let cursor_pos = destination.chars().count();
+                        self.modal = Some(Modal::NodeSsh {
+                            node_name: resource_name,
+                            destination_input: destination,
+                            cursor_pos,
+                        });
                     }
                     QuickActionId::PortForward => {
                         let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
@@ -7155,6 +8544,8 @@ impl App {
                                 kind: crd.kind.clone(),
                                 plural: crd.plural.clone(),
                             }, crd.namespaced))
+                        } else if kind.eq_ignore_ascii_case("application") || kind.eq_ignore_ascii_case("applications") {
+                            Some((srelens_kube::argo::argo_application_resource(), true))
                         } else {
                             None
                         };
@@ -7178,6 +8569,17 @@ impl App {
                                         });
                                         let filter = self.filter_buffer.clone();
                                         table.apply_filter(&filter);
+                                    }
+                                    if let ActiveView::Argo(_) = &self.active_view {
+                                        self.refresh_argo_applications_ext(true);
+                                    }
+                                    if let ActiveView::ArgoDetail(_) = &self.active_view {
+                                        if let Some(prev) = self.nav_stack.pop() {
+                                            self.active_view = prev;
+                                        } else {
+                                            self.switch_view_to_kind(ResourceKind::ArgoApplications).await;
+                                        }
+                                        self.refresh_argo_applications_ext(true);
                                     }
                                 }
                                 Err(err) => {
@@ -7386,6 +8788,126 @@ impl App {
                 });
                 self.set_toast(format!("Uninstalling release '{}'...", name), Theme::status_warn());
             }
+        } else if let Some(payload) = action_name.strip_prefix("argo_sync:") {
+            let parsed: Option<(String, String, String, bool, bool)> =
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
+                    let ctx = v.get("ctx").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let ns = v.get("ns").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let name = v.get("name").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let prune = v.get("prune").and_then(|b| b.as_bool()).unwrap_or(false);
+                    let dry_run = v.get("dry_run").and_then(|b| b.as_bool()).unwrap_or(false);
+                    if !name.is_empty() {
+                        Some((ctx, ns, name, prune, dry_run))
+                    } else {
+                        None
+                    }
+                } else {
+                    let parts: Vec<&str> = action_name.splitn(6, ':').collect();
+                    if parts.len() >= 6 {
+                        Some((
+                            parts[1].to_string(),
+                            parts[2].to_string(),
+                            parts[3].to_string(),
+                            parts[4] == "true",
+                            parts[5] == "true",
+                        ))
+                    } else {
+                        None
+                    }
+                };
+
+            if let Some((ctx, ns, name, prune, dry_run)) = parsed {
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+                let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
+                let app_name = name.clone();
+
+                tokio::spawn(async move {
+                    if let Some(ref path) = hub_kubeconfig {
+                        cache.ensure_paths(vec![path.clone()]).await;
+                    }
+                    let res = srelens_kube::argo::trigger_argo_sync(
+                        &cache,
+                        &ctx,
+                        &app_name,
+                        &ns,
+                        prune,
+                        dry_run,
+                    ).await;
+                    let action = format!("Sync '{}'", app_name);
+                    let _ = event_tx.send(crate::event::AppEvent::ArgoActionResult {
+                        action,
+                        result: res.map(|_| format!("Sync initiated for '{}' (prune={})", app_name, prune)),
+                    });
+                });
+                self.set_toast(format!("Triggering sync for '{}'...", name), Theme::status_warn());
+            }
+        } else if let Some(payload) = action_name.strip_prefix("argo_toggle_auto:") {
+            let parsed: Option<(String, String, String, bool)> =
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
+                    let ctx = v.get("ctx").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let ns = v.get("ns").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let name = v.get("name").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let enable = v.get("enable").and_then(|b| b.as_bool()).unwrap_or(false);
+                    if !name.is_empty() {
+                        Some((ctx, ns, name, enable))
+                    } else {
+                        None
+                    }
+                } else {
+                    let parts: Vec<&str> = action_name.splitn(5, ':').collect();
+                    if parts.len() >= 5 {
+                        Some((
+                            parts[1].to_string(),
+                            parts[2].to_string(),
+                            parts[3].to_string(),
+                            parts[4] == "true",
+                        ))
+                    } else {
+                        None
+                    }
+                };
+
+            if let Some((ctx, ns, name, enable)) = parsed {
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+                let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
+                let app_name = name.clone();
+
+                tokio::spawn(async move {
+                    if let Some(ref path) = hub_kubeconfig {
+                        cache.ensure_paths(vec![path.clone()]).await;
+                    }
+                    let res = srelens_kube::argo::toggle_argo_auto_sync(
+                        &cache,
+                        &ctx,
+                        &app_name,
+                        &ns,
+                        enable,
+                    ).await;
+                    let action = if enable {
+                        format!("Enable Auto-Sync for '{}'", app_name)
+                    } else {
+                        format!("Pause Auto-Sync for '{}'", app_name)
+                    };
+                    let _ = event_tx.send(crate::event::AppEvent::ArgoActionResult {
+                        action,
+                        result: res.map(|en| {
+                            if en {
+                                format!("Auto-sync enabled for '{}'", app_name)
+                            } else {
+                                format!("Auto-sync suspended / paused for '{}'", app_name)
+                            }
+                        }),
+                    });
+                });
+                let toast_msg = if enable {
+                    format!("Enabling auto-sync for '{}'...", name)
+                } else {
+                    format!("Pausing auto-sync for '{}'...", name)
+                };
+                self.set_toast(toast_msg, Theme::status_warn());
+            }
         }
     }
 
@@ -7591,6 +9113,20 @@ impl App {
     }
 
     pub fn handle_stream_event(&mut self, channel: String, payload: serde_json::Value) {
+        if channel.starts_with("logs:") {
+            if let ActiveView::Logs(logs) = &mut self.active_view {
+                if logs.channel == channel {
+                    let source = payload.get("source").and_then(|v| v.as_str()).map(String::from);
+                    if let Some(line) = payload.get("line").and_then(|v| v.as_str()) {
+                        logs.push_entry(source, line.to_string());
+                    } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
+                        logs.push_entry(source, format!("--- log status: {} ---", status));
+                    }
+                }
+            }
+            return;
+        }
+
         if channel.starts_with("forward:") {
             self.sync_port_forwards();
             if channel.starts_with("forward:closed:") {
@@ -7684,17 +9220,6 @@ impl App {
                 }
             }
         }
-
-        if let ActiveView::Logs(logs) = &mut self.active_view {
-            if logs.channel == channel {
-                let source = payload.get("source").and_then(|v| v.as_str()).map(String::from);
-                if let Some(line) = payload.get("line").and_then(|v| v.as_str()) {
-                    logs.push_entry(source, line.to_string());
-                } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
-                    logs.push_entry(source, format!("--- log status: {} ---", status));
-                }
-            }
-        }
     }
 
     pub fn render(&mut self, f: &mut Frame) {
@@ -7723,6 +9248,13 @@ impl App {
                 HelmDetailTab::Revisions => "Helm: Revisions History",
                 HelmDetailTab::Manifest => "Helm: Rendered Manifest",
                 HelmDetailTab::Notes => "Helm: Release Notes",
+            },
+            ActiveView::Argo(_) => "ArgoCD Applications",
+            ActiveView::ArgoDetail(detail) => match detail.active_tab {
+                argo_detail_view::ArgoDetailTab::Overview => "ArgoCD: Overview",
+                argo_detail_view::ArgoDetailTab::ManagedResources => "ArgoCD: Managed Resources",
+                argo_detail_view::ArgoDetailTab::Drift => "ArgoCD: Drift / Out-of-Sync",
+                argo_detail_view::ArgoDetailTab::RevisionHistory => "ArgoCD: Revision History",
             },
             ActiveView::Overview(_) => "Overview",
             ActiveView::Toolbox(_) => "Toolbox",
@@ -7805,6 +9337,8 @@ impl App {
             ActiveView::PortForwards(pf) => render_port_forward_view(f, chunks[1], pf),
             ActiveView::Helm(helm) => render_helm_view(f, chunks[1], helm),
             ActiveView::HelmDetail(detail) => render_helm_detail_view(f, chunks[1], detail),
+            ActiveView::Argo(argo) => argo_view::render_argo_view(f, chunks[1], argo),
+            ActiveView::ArgoDetail(detail) => argo_detail_view::render_argo_detail_view(f, chunks[1], detail),
             ActiveView::Overview(ov) => render_overview_view(f, chunks[1], ov),
             ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
             ActiveView::Assistant => render_assistant_view(f, chunks[1], &self.assistant_state, &self.ai_settings),
@@ -7824,8 +9358,10 @@ impl App {
             ActiveView::Yaml(yaml) => (yaml.search_matches.len(), yaml.lines.len(), true),
             ActiveView::Logs(logs) => (logs.search_matches.len(), logs.lines.len(), true),
             ActiveView::Helm(helm) => (helm.filtered_indices().len(), helm.releases.len(), false),
+            ActiveView::Argo(argo) => (argo.filtered_indices().len(), argo.applications.len(), false),
             ActiveView::Top(top) => (top.visible_count(), if top.active_tab == top_view::TopTab::Pods { top.pods.len() } else { top.nodes.len() }, false),
             ActiveView::HelmDetail(detail) => (detail.search_matches.len(), detail.total_lines_for_active_tab(), true),
+            ActiveView::ArgoDetail(_) => (0, 0, false),
             _ => (0, 0, false),
         };
 
@@ -8134,6 +9670,7 @@ impl App {
                     ("<y>", "YAML"),
                     ("<x>", "Actions"),
                     ("<s>", "Shell"),
+                    ("<S>", "SSH"),
                     ("<?>", "Help"),
                 ][..]),
                 _ => Some(&[
@@ -8192,6 +9729,31 @@ impl App {
                 ("<:>", "Cmd"),
                 ("</>", "Search"),
                 ("<n/N>", "Next/Prev"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::Argo(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("</>", "Filter"),
+                ("<Enter>", "Details"),
+                ("<x>", "Actions / AI"),
+                ("<s>", "Sync"),
+                ("<p>", "Auto-Sync"),
+                ("<R>", "Hard Refresh"),
+                ("<g>", "Git"),
+                ("<r>", "Reload"),
+                ("<Esc>", "Back"),
+                ("<?>", "Help"),
+            ][..]),
+            ActiveView::ArgoDetail(_) => Some(&[
+                ("<:>", "Cmd"),
+                ("<1-4>", "Tabs"),
+                ("<x>", "Actions / AI"),
+                ("<s>", "Sync"),
+                ("<p>", "Auto-Sync"),
+                ("<R>", "Hard Refresh"),
+                ("<g>", "Git"),
+                ("<r>", "Reload"),
                 ("<Esc>", "Back"),
                 ("<?>", "Help"),
             ][..]),

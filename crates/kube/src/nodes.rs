@@ -77,6 +77,10 @@ pub struct NodeSummary {
     /// not a guessed or placeholder value.
     #[serde(rename = "instanceType")]
     pub instance_type: String,
+    #[serde(rename = "internalIp", skip_serializing_if = "Option::is_none")]
+    pub internal_ip: Option<String>,
+    #[serde(rename = "externalIp", skip_serializing_if = "Option::is_none")]
+    pub external_ip: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -168,6 +172,14 @@ pub fn summarise(node: Node) -> NodeSummary {
         })
         .cloned()
         .unwrap_or_default();
+    let addresses = node.status.as_ref().and_then(|s| s.addresses.as_ref());
+    let internal_ip = addresses.and_then(|addrs| {
+        addrs.iter().find(|a| a.type_ == "InternalIP").map(|a| a.address.clone())
+    });
+    let external_ip = addresses.and_then(|addrs| {
+        addrs.iter().find(|a| a.type_ == "ExternalIP").map(|a| a.address.clone())
+    });
+
     NodeSummary {
         name,
         status,
@@ -183,6 +195,8 @@ pub fn summarise(node: Node) -> NodeSummary {
         allocatable_memory_mib,
         allocatable_pods,
         instance_type,
+        internal_ip,
+        external_ip,
     }
 }
 
@@ -516,5 +530,33 @@ mod tests {
             s.taint_details[2].time_added.as_deref(),
             Some("2026-09-02T08:15:00Z")
         );
+    }
+
+    #[test]
+    fn extracts_node_internal_and_external_ips() {
+        use k8s_openapi::api::core::v1::{NodeAddress, NodeStatus};
+        let node = Node {
+            metadata: kube::core::ObjectMeta {
+                name: Some("worker-1".into()),
+                ..Default::default()
+            },
+            status: Some(NodeStatus {
+                addresses: Some(vec![
+                    NodeAddress {
+                        type_: "InternalIP".into(),
+                        address: "10.0.1.20".into(),
+                    },
+                    NodeAddress {
+                        type_: "ExternalIP".into(),
+                        address: "198.51.100.5".into(),
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let s = summarise(node);
+        assert_eq!(s.internal_ip.as_deref(), Some("10.0.1.20"));
+        assert_eq!(s.external_ip.as_deref(), Some("198.51.100.5"));
     }
 }

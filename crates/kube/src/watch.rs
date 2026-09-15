@@ -19,6 +19,7 @@ use k8s_openapi::api::networking::v1::{Ingress, NetworkPolicy};
 use k8s_openapi::api::rbac::v1::{ClusterRole, ClusterRoleBinding, Role, RoleBinding};
 use k8s_openapi::api::storage::v1::StorageClass;
 use kube::runtime::watcher::{Config, Event};
+use kube::runtime::WatchStreamExt;
 use kube::Api;
 use serde::de::DeserializeOwned;
 
@@ -146,12 +147,14 @@ where
     G: FnMut(WatchStatus),
 {
     let mut state: BTreeMap<String, T> = BTreeMap::new();
-    let mut stream = kube::runtime::watcher(api, Config::default()).boxed();
+    let mut stream = kube::runtime::watcher(api, Config::default())
+        .default_backoff()
+        .boxed();
     let mut reconnecting = false;
     while let Some(item) = stream.next().await {
         match item {
             Ok(event) => {
-                if reconnecting {
+                if reconnecting && !matches!(event, Event::Init | Event::InitApply(_)) {
                     reconnecting = false;
                     on_status(WatchStatus::Live);
                 }
@@ -173,8 +176,9 @@ where
                     // error so the caller can emit it to the UI.
                     return Err(msg);
                 }
-                // Transient: the watcher backs off and re-lists internally. Flag
-                // the UI once per outage, then keep consuming.
+                // The raw watcher retries immediately; default_backoff above
+                // delays retries so a dead cluster cannot flood the UI queue.
+                // Init/InitApply only build a partial list; recovery waits for InitDone.
                 if !reconnecting {
                     reconnecting = true;
                     on_status(WatchStatus::Reconnecting);
@@ -913,13 +917,15 @@ where
     };
 
     let config = Config::default().fields(&format!("metadata.name={name}"));
-    let mut stream = kube::runtime::watcher(api, config).boxed();
+    let mut stream = kube::runtime::watcher(api, config)
+        .default_backoff()
+        .boxed();
     let mut reconnecting = false;
 
     while let Some(item) = stream.next().await {
         match item {
             Ok(event) => {
-                if reconnecting {
+                if reconnecting && !matches!(event, Event::Init | Event::InitApply(_)) {
                     reconnecting = false;
                     on_status(WatchStatus::Live);
                 }
@@ -1029,13 +1035,15 @@ where
     };
 
     let mut state: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    let mut stream = kube::runtime::watcher(api, Config::default()).boxed();
+    let mut stream = kube::runtime::watcher(api, Config::default())
+        .default_backoff()
+        .boxed();
     let mut reconnecting = false;
 
     while let Some(item) = stream.next().await {
         match item {
             Ok(event) => {
-                if reconnecting {
+                if reconnecting && !matches!(event, Event::Init | Event::InitApply(_)) {
                     reconnecting = false;
                     on_status(WatchStatus::Live);
                 }
@@ -1068,6 +1076,184 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unavailable_cluster_backs_off_without_reporting_live() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let requests = attempts.clone();
+        let service = tower::service_fn(move |_: http::Request<kube::client::Body>| {
+            requests.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err::<http::Response<kube::client::Body>, _>(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "cluster was deleted or Docker stopped",
+                ))
+            }
+        });
+        let api: Api<Namespace> = Api::all(kube::Client::new(service, "default"));
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let received = statuses.clone();
+        let task = tokio::spawn(async move {
+            watch_typed(
+                api,
+                |ns: Namespace| ns.metadata.name.unwrap(),
+                |name: &String| name.clone(),
+                |_| panic!("an unavailable cluster cannot supply a snapshot"),
+                move |status| received.lock().unwrap().push(status),
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let count = attempts.load(Ordering::SeqCst);
+        // Even with backoff, a synthetic Init precedes each retry. Wait for a
+        // second attempt so this also catches false Live/Reconnecting churn.
+        let retried = tokio::time::timeout(Duration::from_secs(5), async {
+            while attempts.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        task.abort();
+        let _ = task.await;
+        assert!(count > 0, "the watch must attempt to connect");
+        assert!(
+            count <= 2,
+            "watch retried {count} times in 200ms without backoff"
+        );
+        assert!(retried.is_ok(), "transient errors must still be retried");
+        assert_eq!(*statuses.lock().unwrap(), vec![WatchStatus::Reconnecting]);
+    }
+
+    #[tokio::test]
+    async fn watch_recovers_after_outage_and_still_stops_on_forbidden() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let service = tower::service_fn(move |_: http::Request<kube::client::Body>| {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "offline",
+                    ));
+                }
+                let (status, body) = if attempt == 1 {
+                    (
+                        200,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "NamespaceList",
+                            "metadata": {"resourceVersion": "1"}, "items": []
+                        }),
+                    )
+                } else {
+                    (
+                        403,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                            "reason": "Forbidden", "message": "forbidden", "code": 403
+                        }),
+                    )
+                };
+                Ok(http::Response::builder()
+                    .status(status)
+                    .body(kube::client::Body::from(body.to_string().into_bytes()))
+                    .unwrap())
+            }
+        });
+        let api: Api<Namespace> = Api::all(kube::Client::new(service, "default"));
+        let events = Mutex::new(Vec::new());
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            watch_typed(
+                api,
+                |ns: Namespace| ns.metadata.name.unwrap(),
+                |name: &String| name.clone(),
+                |rows| {
+                    assert!(rows.is_empty());
+                    events.lock().unwrap().push("snapshot");
+                },
+                |status| events.lock().unwrap().push(status.as_str()),
+            ),
+        )
+        .await
+        .expect("watch should recover and then stop on RBAC denial");
+        assert!(result.unwrap_err().contains("forbidden"));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["reconnecting", "live", "snapshot"]
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_relist_does_not_report_recovery_before_the_last_page() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "offline",
+                    ));
+                }
+                let (status, body) = if attempt == 1 {
+                    (
+                        200,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "NamespaceList",
+                            "metadata": {"resourceVersion": "1", "continue": "next-page"},
+                            "items": [{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "first-page"}}]
+                        }),
+                    )
+                } else {
+                    assert!(request
+                        .uri()
+                        .query()
+                        .unwrap()
+                        .contains("continue=next-page"));
+                    (
+                        403,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                            "reason": "Forbidden", "message": "forbidden", "code": 403
+                        }),
+                    )
+                };
+                Ok(http::Response::builder()
+                    .status(status)
+                    .body(kube::client::Body::from(body.to_string().into_bytes()))
+                    .unwrap())
+            }
+        });
+        let api: Api<Namespace> = Api::all(kube::Client::new(service, "default"));
+        let statuses = Mutex::new(Vec::new());
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            watch_typed(
+                api,
+                |ns: Namespace| ns.metadata.name.unwrap(),
+                |name: &String| name.clone(),
+                |_| panic!("an incomplete relist must not emit a snapshot"),
+                |status| statuses.lock().unwrap().push(status),
+            ),
+        )
+        .await
+        .expect("the failed second page should stop the watch");
+        assert!(result.unwrap_err().contains("forbidden"));
+        assert_eq!(*statuses.lock().unwrap(), vec![WatchStatus::Reconnecting]);
+    }
 
     #[test]
     fn custom_resource_keys_and_values_reduce_consistently() {

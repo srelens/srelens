@@ -1,0 +1,27 @@
+[package]
+name = "srelens-plugin-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+srelens-capability = { path = "../capability" }
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: without it serde_json reads about a third of doubles back one step
+# off, so a manifest argument changed each time a manifest was stored and read, and a
+# signed app's stored manifest stopped matching its signature proof.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_path_to_error = "0.1"
+schemars = "0.8"
+semver = "1"
+
+[features]
+# Exposes `srelens_plugin_host::fuzzing` to the fuzz targets in `fuzz/` and to
+# srelens-registry's property tests. Test support, not an API.
+fuzzing = []
+
+[dev-dependencies]
+srelens-registry = { path = "../registry" }
+srelens-mcp = { path = "../mcp" }
+tokio = { version = "1", features = ["macros", "rt", "io-std"] }
+proptest = { version = "1", default-features = false, features = ["std"] }

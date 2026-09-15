@@ -29,6 +29,7 @@ pub async fn app_with(context: &str, namespace: &str) -> (App, UnboundedReceiver
     )
     .await
     .expect("App::new never needs a cluster");
+    srelens_tui::theme::Theme::set_theme_by_index(0);
     (app, rx)
 }
 

@@ -117,6 +117,7 @@ export const Icons = {
   network: Network,
   storage: HardDrive,
   access: ShieldCheck,
+  apps: LayoutGrid,
   crds: Puzzle,
   investigate: Compass,
 

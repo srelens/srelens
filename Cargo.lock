@@ -4817,6 +4817,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "proptest"
+version = "1.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
+dependencies = [
+ "bitflags 2.13.0",
+ "num-traits",
+ "rand 0.9.5",
+ "rand_chacha 0.9.0",
+ "rand_xorshift",
+ "regex-syntax",
+ "unarray",
+]
+
+[[package]]
 name = "ptr_meta"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5011,6 +5026,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_xorshift"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
+dependencies = [
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -6503,18 +6527,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "srelens-plugin-host"
+version = "0.13.0"
+dependencies = [
+ "proptest",
+ "schemars 0.8.22",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "srelens-capability",
+ "srelens-mcp",
+ "srelens-registry",
+ "tokio",
+]
+
+[[package]]
 name = "srelens-registry"
 version = "0.13.0"
 dependencies = [
  "dirs",
  "libc",
+ "proptest",
  "reqwest 0.13.4",
+ "ring",
+ "rustls",
  "schemars 0.8.22",
+ "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "srelens-capability",
  "srelens-kube",
  "srelens-mcp",
+ "srelens-plugin-host",
  "tempfile",
  "tokio",
 ]
@@ -7876,6 +7922,12 @@ dependencies = [
  "tempfile",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "unarray"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
 name = "unic-char-property"

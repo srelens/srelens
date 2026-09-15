@@ -1,0 +1,7 @@
+target
+corpus
+artifacts
+coverage
+# Copied from the workspace's Cargo.lock before a build (see docs/extensions/testing.md), so
+# the fuzzer builds the dependency versions the app ships rather than a second set that drifts.
+Cargo.lock

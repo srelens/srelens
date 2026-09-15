@@ -1,0 +1,376 @@
+# Threat model
+
+What the extension platform defends against, how, and what is left. [security.md](security.md)
+is the short version; this page is the reasoning behind it, with each mitigation tied to
+the code that enforces it. It covers the platform as it is on `dev` (extension API 0.1,
+declarative apps only) and feeds the pre-1.0 security review
+([#39](https://github.com/srelens/srelens/issues/39)).
+
+Tracking: [#579](https://github.com/srelens/srelens/issues/579), part of
+[#523](https://github.com/srelens/srelens/issues/523).
+
+## How to read this page
+
+Every mitigation carries a status:
+
+- **Shipped:** on `dev`, enforced by the code named beside it.
+- **Pending:** implemented in an open pull request, not on `dev`.
+- **Planned:** tracked by the linked issue, not enforced today.
+- **Gap:** a weakness with no issue yet.
+
+Each threat is tagged with its STRIDE classes: **S**poofing, **T**ampering,
+**R**epudiation, **I**nformation disclosure, **D**enial of service and **E**levation of
+privilege.
+
+Code paths are relative to the repository root and name the function or constant to look
+for. Line numbers are left out because they drift.
+
+## Scope
+
+In scope:
+
+- The desktop app, in both designs, managing apps through Settings → Apps.
+- Every MCP surface that carries `extensions.*`: the desktop's in-app loopback server and
+  native agent, and the headless `--mcp-stdio` and `--mcp-http` modes
+  (`apps/desktop/src-tauri/src/main.rs`). Each builds its registry with the desktop
+  settings path (`build_registry_with` in `crates/registry/src/lib.rs`).
+- The catalog, catalog downloads and signed official releases.
+- The inventory and the catalog cache on disk.
+- The multi-user web host, which refuses apps.
+
+Out of scope, and assumed:
+
+- **The user's account is not compromised.** Anything that can write the user's files can
+  already edit their kubeconfig. The inventory checks below limit what a tampered file can
+  do; they are not a defence against local malware.
+- **srelens itself is trusted:** its build, release and update chain, the Tauri shell and
+  the WebView code. The renderer runs only srelens code, which is what makes a
+  host-rendered review meaningful. The WebView calls capabilities without a backend
+  consent gate (`invoke_capability` in `apps/desktop/src-tauri/src/bridge.rs`), and the
+  Tauri CSP is `null` (`apps/desktop/src-tauri/tauri.conf.json`), so a renderer injection
+  would bypass every review. Both belong to [#39].
+- **Kubernetes enforces RBAC** for the credentials the user chose. srelens adds no
+  authorization of its own; it only avoids handing those credentials to apps.
+- **TLS and GitHub** authenticate `raw.githubusercontent.com`, `github.com` and
+  `release-assets.githubusercontent.com`.
+
+## Assets
+
+| Asset | Where it lives | Why it matters |
+|---|---|---|
+| Cluster credentials | Kubeconfig files, exec plugins and tokens, resolved by `ClientCache` (`crates/kube/src/client_cache.rs`) | Whoever holds them acts as the user on the cluster. |
+| Cluster state | The clusters | A write changes what runs. |
+| Cluster data | The clusters, read under RBAC | Includes Secrets, and whatever workloads carry in their specs. |
+| App inventory | `settings.extensions.json`, next to the desktop settings file | Which apps are installed and enabled, their grants, settings, signature proofs and kept versions. |
+| Catalog cache | `*.extensions.catalog.json`, next to the inventory | What **Review installation** offers, and whether an install is recorded as `catalog`. |
+| Trust anchors | `PUBLISHERS` and `srelens-apps.pub` in `crates/registry/src/extensions/` | Which apps are official. The private key is a GitHub Actions secret in the app repositories ([distribution.md](distribution.md#releasing-an-official-app)). |
+| Consent | Install and action reviews in the UI; the MCP consent gate | The user's decision is the only thing that grants an app access or starts a write. |
+| Host UI integrity | The WebView | The user trusts that a srelens dialog means what it says. |
+
+## Actors
+
+| Actor | Trust | Supplies |
+|---|---|---|
+| User | Trusted | Decisions in reviews and dialogs; pasted manifests. |
+| App author | Untrusted | A manifest, pasted locally or listed in the catalog. |
+| srelens publisher | Trusted; its key may be stolen | Signed official releases. |
+| Catalog maintainers | Trusted to list apps, not to vouch for them | `catalog.json` on the `main` branch of [srelens/extensions](https://github.com/srelens/extensions). |
+| Network attacker | Untrusted | Anything on the wire: responses, DNS answers, redirects. |
+| MCP client or agent | Authenticated, but may act on injected instructions | Any tool call. |
+| Other web user | Untrusted with respect to you | Requests to the same web host. |
+
+## Trust boundaries
+
+1. **Manifest bytes to host.** Untrusted JSON becomes a `Manifest` only through
+   `Manifest::decode` and `Manifest::validate` (`crates/plugin-host/src/manifest.rs`), and
+   an installable app only through `validate_app` and `check_install`
+   (`crates/registry/src/extensions.rs`).
+2. **App to host capability.** A binding reaches a host capability only through the broker
+   (`PluginHost::register` in `crates/plugin-host/src/lib.rs`), with fixed arguments and
+   the host's own schema and annotations.
+3. **Host to cluster.** Every call runs with the user's credentials for the context it
+   names, under that context's RBAC.
+4. **Network to host.** Catalog, manifest and signature bytes arrive only through
+   `download` in `crates/registry/src/extensions/catalog.rs`.
+5. **Disk to host.** The inventory and the catalog cache are parsed and checked again on
+   every load (`read` in `crates/registry/src/extensions.rs`, `load_with` in
+   `crates/registry/src/extensions/catalog.rs`).
+6. **Caller to registry.** The WebView calls capabilities through `invoke_capability`
+   (`apps/desktop/src-tauri/src/bridge.rs`), MCP clients through the consent-gated
+   `handle_request` (`crates/mcp/src/stdio.rs`), and web users through
+   `invoke_capability` (`crates/server/src/api.rs`).
+
+## Entry points
+
+| Entry point | Untrusted input | Mutating | Code |
+|---|---|---|---|
+| `extensions.validate` | Manifest, grants, signature | No | `check_install` in `crates/registry/src/extensions.rs` |
+| `extensions.configure` | Manifest, grants, signature; app ID; settings JSON; rollback revision | Yes | `mutate` in `crates/registry/src/extensions.rs` |
+| `extensions.list` | None | No | `read` in `crates/registry/src/extensions.rs` |
+| `extensions.read` | App ID, revision, operation, context, namespace | No | `register` in `crates/registry/src/extensions.rs` |
+| `extensions.resource` | App ID, revision, operation, context, namespace, name | No | `resolve` in `crates/registry/src/extensions/resource.rs` |
+| `extensions.action` | As `extensions.resource`, plus action, UID and resourceVersion | Yes | `resolve` in `crates/registry/src/extensions/resource.rs`, `execute` in `crates/kube/src/gitops.rs` |
+| `extensions.catalog` | `catalog.json` from the network | No | `load_with` and `parse_catalog` in `crates/registry/src/extensions/catalog.rs` |
+| `extensions.catalogManifest` | App ID and SHA-256; manifest and signature from the network | No | `verify_release` in `crates/registry/src/extensions/catalog.rs` |
+| Inventory load | `settings.extensions.json` | — | `read` and `reverify` in `crates/registry/src/extensions.rs` |
+| Catalog cache load | `*.extensions.catalog.json` | — | `load_with` in `crates/registry/src/extensions/catalog.rs` |
+
+`k8s.gitOpsAction` (`action_capability` in `crates/kube/src/gitops.rs`) is not an
+`extensions.*` capability, but it is the write behind `extensions.action`, and any caller
+of the registry can reach it directly.
+
+## Threats and mitigations
+
+### Malicious app
+
+An author who wants an app to do more than show custom resources.
+
+| ID | Threat | STRIDE | Mitigation | Status |
+|---|---|---|---|---|
+| APP-1 | Read kubeconfig, tokens or local files | I | No app code is loaded or run. `ManifestKind` has one variant, `declarative` (`crates/plugin-host/src/manifest.rs`), and the broker (`crates/plugin-host/src/lib.rs`) only forwards JSON arguments to host handlers. A manifest has no field that names a file, URL or command, and unknown fields are refused (`deny_unknown_fields`). The host resolves credentials from the context name; the app never sees them. | Shipped |
+| APP-2 | Reach arbitrary network endpoints or run commands | I, E | As APP-1. Desktop bindings may target only `k8s.listCustomResource` and `k8s.listEvents` (`validate_app` in `crates/registry/src/extensions.rs`), and no binding may target another app's `plugin/` capability (`Manifest::validate`). | Shipped. Brokered network access planned in [#568] |
+| APP-3 | Read Secrets or other core resources through the reader | I | `validate_app` (`crates/registry/src/extensions.rs`) requires a fixed, non-empty `group`, `version`, `plural` and `kind` of letters, digits, `.` and `-`, so the core group (Secrets, ConfigMaps, Pods) cannot be bound. `k8s.listCustomResource` returns names, namespaces, ages and the declared printer columns (`list_custom_resource_capability` in `crates/kube/src/crds.rs`). | Shipped. See residual risk |
+| APP-4 | Widen a read by overriding bound arguments | T, E | The broker refuses any input not listed in the binding's `inputs` and any missing required one, and the schema it exposes sets `additionalProperties: false` (`PluginHost::register`). Fixed `arguments` are merged into every call, and inputs may not overlap them, so a caller cannot override one. `extensions.read` forwards only `context` and `namespace` and checks the namespace's syntax; `validate_app` refuses a binding that fixes either. | Shipped |
+| APP-5 | Write to the cluster, or dispatch an operation that needs consent | E | `validate_app` refuses a target that is not read-only or carries `requires_confirm`, `sensitive` or `destructive`. A manifest cannot supply annotations: the broker copies the host's and forces `requires_confirm` on anything not read-only, sensitive or destructive. The only writes are host-owned GitOps actions: `resolve` (`crates/registry/src/extensions/resource.rs`) takes the group, version, plural, kind and scope from the app's declared reader, and `supported_actions` (`crates/kube/src/gitops.rs`) allowlists kinds, versions and actions. | Shipped. Declared actions planned in [#549]; an opt-in for unsigned apps that write in [#558] |
+| APP-6 | Keep acting after being disabled, removed, updated or quarantined | E | `extensions.read`, `extensions.resource` and `extensions.action` read the inventory on every call, and require the app to be enabled, at the caller's revision, and to pass `validate_app` with its stored grants. `Registration::unregister` revokes the handlers older registry snapshots still hold. Calls already admitted may finish. | Shipped |
+| APP-7 | Use a permission it was not granted | E | `permissions` must name exactly the bound targets (`EXTENSION_PERMISSION_MISMATCH` in `Manifest::validate`), and each one must be among the grants the caller supplied (`validate_app`, `PluginHost::register`). | Shipped |
+| APP-8 | Escalate through an update or rollback | E | An update is a new `extensions.configure` install, which is mutating and carries its own grants; nothing updates automatically. A rollback verifies the kept version's signature again and runs `validate_app` with the grants given now (`Configure::Rollback` in `crates/registry/src/extensions.rs`). The review shows the full permission list again, not what changed. | Shipped. Permission diff planned in [#554]; update checks and downgrade protection in [#563] |
+| APP-9 | Pose as an official app | S | IDs under `org.srelens.` install only with the srelens signature (`check_install` in `crates/registry/src/extensions.rs`, `reserved` in `crates/registry/src/extensions/signing.rs`), so an unsigned install cannot take an official ID or replace a signed app. Bundled logos are chosen by ID (`packages/ui-next/src/extensions/ExtensionLogo.tsx`). Settings → Apps labels each app **Unsigned local**, **Signed by srelens** or **Signature not verified** (`packages/ui-next/src/extensions/Extensions.tsx`). | Shipped. See residual risk |
+| APP-10 | Spoof host UI or dialogs | S | Apps contribute data, never markup: pages, detail tabs and row actions render with host components, and the frontend renders no text as raw HTML. Names, titles and groups are 1–120 characters with no control characters (`label` in `crates/plugin-host/src/manifest.rs`). Install and action reviews are host-owned (`packages/ui-next/src/extensions/Extensions.tsx`, `packages/ui-next/src/extensions/ExtensionResourceDetails.tsx`). | Shipped. See residual risk |
+| APP-11 | Read clusters the user did not intend the app for | I | Every read names an explicit context and runs under that context's RBAC. Installation is app-wide, so an enabled app can read any cluster the user opens it on. An optional per-app cluster allow-list, enforced in `extensions.read`, `extensions.resource` and `extensions.action`, is in review. | Pending in [#597] ([#535]) |
+| APP-12 | Exhaust the host | D | What an app declares is bounded. A manifest is at most 256 KiB (`MAX_MANIFEST_BYTES` in `crates/plugin-host/src/manifest.rs`), with 1–32 capabilities, at most 64 contributions, 1–32 kinds per detail tab or row action, and 1–12 pages per dashboard. The inventory is at most 1 MiB and keeps at most three replaced versions per app. Single-resource inspection reads at most 10 pages of 500 events (`list_events` in `crates/kube/src/gitops.rs`). What an app's pages and dashboards read is not bounded; see residual risk. | Manifest and inventory limits shipped. Bounded app reads planned in [#609]; performance budgets in [#581] |
+
+Residual risk:
+
+- **The custom-resource reader is not limited to custom resources.** `validate_app`
+  refuses the core group, but nothing checks that the bound group belongs to a
+  CustomResourceDefinition. A manifest may bind a built-in group such as `apps` or
+  `batch`, and that binding exposes those objects in two ways:
+  - **Lists:** `k8s.listCustomResource` (`list_custom_resource_capability` in
+    `crates/kube/src/crds.rs`) renders the binding's `printerColumns` JSON paths. These
+    can surface any scalar field, such as a literal environment variable in a Deployment.
+  - **Whole objects:** `extensions.resource` resolves the same binding (`resolve` in
+    `crates/registry/src/extensions/resource.rs`) and calls `k8s.getCustomResource`. That
+    returns the complete object, with only `managedFields` removed (`inspect` in
+    `crates/kube/src/gitops.rs`), including every container's environment. The Manifest
+    tab shows all of it (`packages/ui-next/src/extensions/ExtensionResourceDetails.tsx`),
+    and an MCP client can request it without consent. No GitOps action is offered,
+    because `supported_actions` lists only Flux and Argo CD kinds.
+
+  RBAC still applies, but the install review shows only `k8s.listCustomResource`, not the
+  binding (see the next point). Planned in [#601], which refuses non-CRD groups at install
+  and load, and checks for a matching CRD in `extensions.read`, `extensions.resource` and
+  `extensions.action`.
+- **Grants are per host capability, and the install review does not show what they
+  cover.** Granting `k8s.listCustomResource` grants whatever the manifest binds. The
+  review (`ExtensionManager` in `packages/ui-next/src/extensions/Extensions.tsx`, which
+  the classic design reuses through `apps/desktop/src/components/Extensions.tsx`) shows
+  the app's name, a signature label, the requested capability IDs and any validation
+  problems. It never shows the manifest, or the groups, kinds and printer columns it
+  binds.
+  - **Pasted manifest:** the text stays visible in **Install a local manifest**, and
+    editing it cancels the review.
+  - **Catalog install:** the manifest is downloaded and installed without being shown
+    (`packages/ui-next/src/extensions/ExtensionCatalog.tsx`). The catalog lists only the
+    app's name, description, ID, versions and license. An unsigned catalog app is
+    labelled **Unsigned local manifest** in the review.
+  - **After install:** the full manifest can be read under Details
+    (`packages/ui-next/src/extensions/ExtensionDetails.tsx`).
+
+  [#554] adds a diff for updates, not a summary for first installs. Showing the bindings in the install review is planned
+  in [#608].
+- **App reads are unbounded.** An app page lists with `k8s.listCustomResource`
+  (`list_custom_resource_capability` in `crates/kube/src/crds.rs`), and a dashboard reads
+  events with `k8s.listEvents` (`list_events_capability` in `crates/kube/src/events.rs`).
+  - **Backend:** each sends one unpaginated list request (`ListParams::default()`). With no
+    namespace in the view it lists every namespace (`scoped_api` in
+    `crates/kube/src/lib.rs`). The whole response is held in memory, and `extensions.read`
+    returns it uncapped.
+  - **Rendering:** the page renders every row
+    (`packages/ui-next/src/extensions/ExtensionResults.tsx`). The dashboard filters events
+    by API group in the browser and renders every match
+    (`packages/ui-next/src/extensions/ExtensionWorkspace.tsx`).
+  - **Columns:** every row evaluates every declared printer column against the whole
+    object, and the number of `printerColumns` is limited only by the manifest's size.
+  - **Timeout:** `request_timeout` bounds how long a read waits, not the memory or
+    rendering cost of a large response that arrives in time.
+
+  A large cluster, a noisy namespace or a manifest with many columns can stall or exhaust
+  the desktop app. RBAC still limits what is listed. Planned in [#609].
+- **Unsigned apps choose their own names.** A local app outside the reserved namespace can
+  call itself "Argo CD". It gets an initials mark and the **Unsigned local** label, not the
+  bundled logo.
+- **Labels allow Unicode format characters.** `label` refuses control characters
+  (`char::is_control`, category Cc) but not format characters (category Cf) such as
+  right-to-left overrides and zero-width spaces, which can make a title display
+  differently from its text. Catalog `name` and `description` are only checked to be
+  non-empty (`parse_catalog`). Planned in [#603].
+- **An unsigned entry already under a reserved ID is not quarantined.** `check_install`
+  refuses one, but `reverify` and the `enable` action do not check the reserved
+  namespace. An inventory entry with an `org.srelens.` ID and no signature proof, such as
+  one installed before [#528] reserved the namespace, keeps loading enabled with the
+  bundled logo. It is still labelled **Unsigned local** and confined to declarative
+  readers. Planned in [#602].
+
+### Compromised publisher or key
+
+An attacker who holds the srelens app signing key, or controls a release repository.
+
+| ID | Threat | STRIDE | Mitigation | Status |
+|---|---|---|---|---|
+| PUB-1 | Forge an official release without the key | S, T | Official releases carry a detached Ed25519 signature over the exact manifest bytes, checked against a key compiled into the host (`PUBLISHERS` and `verify_key` in `crates/registry/src/extensions/signing.rs`). Catalog metadata cannot supply a key. Each official app ID is pinned to one repository, and its manifest must be that repository's `v<version>/manifest.json` release asset (`signature_url` in `crates/registry/src/extensions/catalog.rs`). The repository is compared case-insensitively, as GitHub resolves it ([#604]); the asset URL must match exactly. A catalog entry that names a reserved ID or a srelens repository must be signed. | Shipped |
+| PUB-2 | Alter a signed installation after install | T | The verified bytes and signature are stored as `signatureProof`. Every inventory load verifies them again and checks that they parse to the installed manifest (`reverify`, `verify_proof` in `crates/registry/src/extensions.rs`); an app that fails is quarantined on its own. | Shipped |
+| PUB-3 | Use a stolen key | S, E | A manifest signed with a stolen key installs as official on every host that trusts the key. It is still a declarative app, held to the rules above and to the user's permission review. A host release that removes the key quarantines every app it signed and leaves the rest working. | Quarantine shipped. Rotation planned in [#560]; revocation and a kill switch in [#561] |
+| PUB-4 | Reinstall an older, vulnerable signed release | T | A validly signed older manifest still installs through `extensions.configure`, and a rollback restores a kept one. Both need the user's review, and nothing warns about the older version. | Planned: revocation in [#561], downgrade protection in [#563] |
+| PUB-5 | Sign apps as an unknown publisher | S | A signature on an app ID with no trusted publisher is refused (`verify_for`). Third-party apps install unsigned and are labelled so. | Shipped. Publisher delegation planned in [#559] |
+
+Residual risk:
+
+- One key signs every official app, and replacing it requires a host release ([#560]).
+- The private key is protected by GitHub Actions secrets in the app repositories. Its
+  handling is outside this repository.
+
+### Vulnerable app
+
+An honest app with a flaw, or a host bug that an app's input can reach.
+
+| ID | Threat | STRIDE | Mitigation | Status |
+|---|---|---|---|---|
+| VULN-1 | A flawed app is hijacked to run code, open sockets or read files | E | Not possible in API 0.1: there is no app code to hijack, and the manifest type admits no executable kind. Executable apps are to ship only with an OS sandbox, and unsigned ones only behind an explicit setting. | Sandbox spike planned in [#571] (epic [#521]); untrusted-source policy in [#558] |
+| VULN-2 | A malformed or oversized manifest, catalog, signature or inventory crashes or exhausts the host | T, D | Parsers are Rust and `serde`. Downloads and the catalog cache are read only up to their limits, so an oversized one is refused before it fills memory: catalogs 1 MiB and downloaded signatures 64 bytes (`download` and `load_with` in `crates/registry/src/extensions/catalog.rs`, then `parse_catalog`). The inventory is checked against 1 MiB before it is parsed, but only after `read` (`crates/registry/src/extensions.rs`) has loaded the whole file into memory with `fs::read`. That limit bounds parsing and every inventory the host writes, not the memory spent loading an oversized, corrupt or tampered file. A manifest string is checked against 256 KiB before it is decoded (`Manifest::decode` in `crates/plugin-host/src/manifest.rs`). Caller-supplied capability inputs are not bounded before they are deserialized. The `signature` accepted by `extensions.validate` and `extensions.configure` is a byte array of any length (`ValidateIn` and `Configure` in `crates/registry/src/extensions.rs`), and the manifest string and `settings` object also arrive whole. Ed25519 refuses a signature that is not 64 bytes, but only after the array is allocated. What limits an input is the transport. The MCP HTTP handler takes a `Json` body, which axum caps at 2 MiB by default, and srelens does not change that (`rpc` in `crates/mcp/src/http.rs`). stdio reads each request as one line with no length limit (`serve` in `crates/mcp/src/stdio.rs`, fed from stdin by `run_mcp_stdio` in `apps/desktop/src-tauri/src/main.rs`), though a stdio client already started the process with the user's privileges. The desktop bridge sets no limit of its own (`invoke_capability` in `apps/desktop/src-tauri/src/bridge.rs`). Every problem found in a manifest is reported with a stable code and path (`crates/plugin-host/src/validation.rs`). | Limits on downloads and the catalog cache shipped; the inventory's limit applies only after the whole file is read. Limits on caller-supplied inputs, and reading at most 1 MiB of the inventory, planned in [#610]; fuzzing in [#580] |
+| VULN-3 | An app's settings leak a credential | I | Settings are free-form JSON, and nothing marks a value as secret. The declarative host never interpolates them into capability arguments, but it keeps them in plain text in two places. The inventory stores them, and `extensions.list` returns them. An `extensions.configure` call made over MCP is also copied into the MCP audit log (`audit.jsonl`, created with mode 0600 on Unix). The capability is not sensitive-annotated, so `redact` (`crates/mcp/src/audit.rs`) removes only values whose key contains `token`, `secret`, `password` or `key`, or is exactly `data`, `stringData`, `yaml` or `values`. A setting named `credential` or `certificate` is written verbatim, even when consent is denied, and stays in `audit.jsonl.1` after the log rotates. Settings saved from Settings → Apps are not audited and reach only the inventory. | Keychain-backed secret settings planned in [#543], which keeps secret values out of `settings`. Redacting `settings` in the audit log planned in [#605] |
+| VULN-4 | An app is slow on a large cluster | D | Each cluster request is bounded in time by `request_timeout` (`crates/kube/src/connect.rs`), 8 seconds by default and configurable from 1 to 120. That limits how long a read can wait, not how large a response that arrives in time can be. | Performance budgets planned in [#581]; bounded app reads in [#609] |
+
+### Malicious catalog or network position
+
+An attacker who can alter traffic, or who controls `catalog.json`.
+
+| ID | Threat | STRIDE | Mitigation | Status |
+|---|---|---|---|---|
+| NET-1 | Intercept or redirect a download | T, S | Every download is HTTPS with no credentials, fragment or custom port (`https_url`). Only the fixed `CATALOG_URL`, `github.com/<owner>/<repo>/releases/download/…` and `release-assets.githubusercontent.com` are fetched, and every redirect is checked against the same list, at most four of them (`allowed_download`, `download` in `crates/registry/src/extensions/catalog.rs`). Requests time out after 20 seconds, 10 to connect, and a body is read only to one byte past its limit. | Shipped |
+| NET-2 | Swap the manifest between listing and review | T | The catalog pins each release's SHA-256. The downloaded bytes must match it, and their ID, version and API range must equal the entry's (`verify_manifest`). Review names the release by ID and checksum, so a changed catalog needs a new review. | Shipped |
+| NET-3 | List a malicious or look-alike app from a compromised catalog | S, T | The catalog is not signed; its integrity rests on TLS and on control of the `srelens/extensions` repository. It cannot make an app official, because reserved IDs and srelens repositories need the pinned signature (PUB-1), whatever the case of the repository URL ([#604]). Every entry is validated (`parse_catalog`), and every manifest passes the same rules and permission review as a pasted one. | Signed catalog planned in [#559] |
+| NET-4 | Freeze or roll back the catalog | T, D | A failed refresh keeps the cached catalog, marks it stale and shows the error with the original time (`load_with`). A `schemaVersion` other than 1 is refused. Nothing detects an older catalog that is still well formed. | Planned: signed catalog in [#559], revocation in [#561] |
+| NET-5 | Alter the catalog cache on disk | T | A cached catalog is validated again on every load, and one that fails is fetched again. `source: catalog` only records that the installed bytes match a cached release; it grants nothing. | Shipped |
+
+Residual risk:
+
+- A compromised catalog can list an unsigned app with any name, description and
+  repository link, served from any GitHub release. It is labelled unsigned and still needs
+  the user's review.
+
+### MCP client abuse
+
+An agent that is connected and authenticated, but acting on bad instructions.
+
+| ID | Threat | STRIDE | Mitigation | Status |
+|---|---|---|---|---|
+| MCP-1 | Connect without authorization | S | `/mcp` always requires a bearer token, compared in constant time, and no production constructor serves without one (`router_with_auth` and `token_guard` in `crates/mcp/src/http.rs`, `crates/mcp/src/auth.rs`). The desktop's in-app server binds `127.0.0.1` only (`start_server` in `apps/desktop/src-tauri/src/mcp.rs`). Headless `--mcp-http` defaults to `127.0.0.1:8765` but binds whatever address it is given, unchanged (`run_mcp_http` in `apps/desktop/src-tauri/src/main.rs`, `serve_http`). Every route rejects a `Host` header other than `127.0.0.1`, `::1` or `localhost` (`host_guard`). That stops DNS rebinding from a browser, but it does not restrict where a request comes from, because any client can send `Host: localhost`. See [MCP.md](../MCP.md#security-model). | Token and in-app loopback bind shipped. Refusing non-loopback addresses for headless `--mcp-http` planned in [#607] |
+| MCP-2 | Install or enable an app, change its grants or settings, or roll it back | E | `extensions.configure` is mutating, so `handle_request` (`crates/mcp/src/stdio.rs`) asks the consent policy first (`consent_kind` in `crates/mcp/src/lib.rs`). In the desktop app that is a dialog (`PromptUser` in `apps/desktop/src-tauri/src/mcp_confirm.rs`). Headless, it needs both `--mcp-allow-destructive` and `"_confirm": true` (`FlagGated` in `crates/mcp/src/policy.rs`). With no policy, it is denied (`AlwaysDeny`). | Shipped |
+| MCP-3 | Start a GitOps write | E | `extensions.action` and `k8s.gitOpsAction` are mutating and gated the same way (`action_dispatch_uses_bound_api_and_mcp_cannot_bypass_confirmation` in `crates/registry/src/extensions/resource.rs`). The write fetches the resource again and refuses a changed UID or resourceVersion, a sync while an Argo CD operation is present, a Suspend of a suspended resource or a Resume of one that is not, reconciliation while suspended, and a resource being deleted. It then sends the UID and resourceVersion as PATCH preconditions (`guard_action`, `execute` in `crates/kube/src/gitops.rs`). A sync never enables pruning. | Shipped |
+| MCP-4 | Call a removed app through a stale tool list | E | Broker handlers check the flag `Registration::unregister` clears, and `extensions.*` read the inventory on every call. | Shipped |
+| MCP-5 | Deny having made a call | R | MCP tool calls are recorded, best-effort, in a local JSONL audit log with the consent decision, the outcome and redacted arguments (`JsonlAuditLog` and `redact` in `crates/mcp/src/audit.rs`, called from `handle_request` in `crates/mcp/src/stdio.rs`). Recording fails open by design, so that a lost log line never breaks a cluster operation. A failed rotation, write or permission change is swallowed, a failed open is only reported on stderr, and the call goes ahead either way. An executed call is recorded after it returns. Calls from the desktop UI go straight to the registry (`invoke_capability` in `apps/desktop/src-tauri/src/bridge.rs`) and are not audited. | Best-effort MCP audit shipped. UI-path audit planned in [#555] |
+
+Residual risk:
+
+- **Headless `--mcp-http` on a non-loopback address is reachable from the network.**
+  Nothing refuses `--mcp-http 0.0.0.0:8765`, and the startup message still calls the
+  listener loopback. The bearer token is then the only barrier. `/healthz` answers any
+  client that sends a loopback `Host` header, and the transport is plain HTTP, so anyone
+  who can observe the traffic can read the token and every tool result, including cluster
+  data, and replay the token. Gated tools still need the process flags and `_confirm`.
+  Planned in [#607].
+- With `--mcp-allow-destructive`, a headless agent that sends `_confirm` can install any
+  unsigned read-only app with the grants it asks for. [#558] covers apps that write or run
+  code, not read-only ones.
+- Read-only `extensions.*` calls are not gated. An agent can read through any enabled app,
+  read every app's settings through `extensions.list`, and make the host fetch the catalog
+  and release manifests from GitHub (`extensions.catalog` with `refresh`,
+  `extensions.catalogManifest`). The fetches are bounded as in NET-1, and the reads carry
+  the RBAC of the host's own readers.
+- `k8s.gitOpsAction` called directly is not scoped by any app. It still needs consent and
+  still names an allowlisted kind.
+- **The audit log is a record, not evidence.** If the log path is unwritable or the disk
+  is full, a call succeeds and leaves no record, so its caller can deny making it. A call
+  that brings the process down before it returns is never recorded. The log is an
+  ordinary file the user's account can edit or delete, and each rotation replaces the
+  previous `audit.jsonl.1`. [#555] extends auditing to UI calls; it does not make
+  recording fail closed or tamper-evident.
+
+### Web multi-user host
+
+Another user of a shared `srelens-server`.
+
+| ID | Threat | STRIDE | Mitigation | Status |
+|---|---|---|---|---|
+| WEB-1 | Read or change another user's apps, grants or settings | I, T | The inventory is one process-wide file, so the web host offers no apps. Web registries are built without a settings path, so `extensions.*` are never registered (`build_registry_with_paths` in `crates/registry/src/lib.rs`, used by `crates/server/src/bin/srelens-server.rs` and `--serve`), and all eight `extensions.*` IDs are refused before dispatch anyway (`WEB_DENIED_CAPABILITIES` in `crates/server/src/api.rs`). | Shipped. Per-user apps planned in [#515] (epic [#522]) |
+| WEB-2 | Start a GitOps write with no consent prompt | E | `k8s.gitOpsAction` is also in `WEB_DENIED_CAPABILITIES`: the web host has no consent prompt, and no app scopes the call. | Shipped |
+
+### Tampered local state
+
+Out of scope as an attacker (see [Scope](#scope)), but the host still checks what it reads.
+
+| ID | Threat | STRIDE | Mitigation | Status |
+|---|---|---|---|---|
+| LOCAL-1 | Edit the inventory to add, enable or widen an app | T, E | The inventory is parsed strictly: unknown fields, a `schemaVersion` other than 1, a file over 1 MiB and duplicate IDs are all fatal. An oversized file is still read whole into memory before it is refused (see VULN-2). Each app's manifest and signature proof are checked again, and a failing app is quarantined; the reason is recomputed on every load and never saved (`read`, `reverify`, `saved_form` in `crates/registry/src/extensions.rs`). A hand-added unsigned entry is still confined to declarative readers, because every call runs `validate_app`. | Shipped. The reserved-ID check for stored entries is planned in [#602] (see [Malicious app](#malicious-app)) |
+| LOCAL-2 | Corrupt or lose the inventory through concurrent writes or a crash | T | Saves are serialized by a cross-process lock (`write_lock` in `crates/registry/src/settings.rs`). Each writes a private temporary file beside the inventory, syncs it, and renames it over the inventory (`write`, `mutate` in `crates/registry/src/extensions.rs`), so a concurrent writer or a crashed process leaves the old file or the new one, never a torn one. The parent directory is never synced after the rename, and tempfile's `persist` does not sync it either: it is a plain rename on Unix, and a move without the write-through flag on Windows. After a power loss or kernel crash, the rename can be lost. The inventory then comes back as its previous version, or is missing after a first save, so an app that was just disabled or removed can reappear enabled. The catalog cache is saved the same way (`load_with` in `crates/registry/src/extensions/catalog.rs`). | Lock and atomic replace shipped. Durability across power loss is partial; syncing the directory is planned in [#611] |
+
+## Open work
+
+| Issue | Addresses |
+|---|---|
+| [#597] ([#535]) | APP-11: per-app cluster allow-list |
+| [#543] | VULN-3: secret settings |
+| [#549] | APP-5: declared actions in place of the built-in list |
+| [#554] | APP-8: permission diff on update |
+| [#555] | MCP-5: audit of calls from the UI |
+| [#558] | APP-5, VULN-1: opt-in for unsigned apps that write or run code |
+| [#559] | PUB-5, NET-3, NET-4: signed catalog and publisher delegation |
+| [#560] | PUB-3: key rotation |
+| [#561] | PUB-3, PUB-4, NET-4: revocation and a kill switch |
+| [#563] | APP-8, PUB-4: update checks and downgrade protection |
+| [#568] | APP-2: brokered network access |
+| [#571] ([#521]) | VULN-1: sandboxed executable apps |
+| [#580] | VULN-2: parser fuzzing |
+| [#581] | APP-12, VULN-4: performance budgets |
+| [#601] | APP-3: refuse built-in API groups in reader bindings |
+| [#602] | APP-9, LOCAL-1: quarantine stored unsigned apps under reserved IDs |
+| [#603] | APP-10: reject bidirectional and invisible characters in labels |
+| [#605] | VULN-3: redact extension settings in the MCP audit log |
+| [#607] | MCP-1: refuse non-loopback addresses for headless HTTP unless explicitly exposed |
+| [#608] | APP-3: show what an app binds in the install review |
+| [#609] | APP-12, VULN-4: paginate and cap app reader lists, limit printer columns and virtualize app tables |
+| [#610] | VULN-2: bound caller-supplied capability input sizes |
+| [#611] | LOCAL-2: sync the parent directory after replacing the inventory and catalog cache |
+| [#515] ([#522]) | WEB-1: per-user apps on the web host |
+| [#39] | Scope: CSP, update chain and the rest of the host |
+[#39]: https://github.com/srelens/srelens/issues/39
+[#515]: https://github.com/srelens/srelens/issues/515
+[#521]: https://github.com/srelens/srelens/issues/521
+[#522]: https://github.com/srelens/srelens/issues/522
+[#528]: https://github.com/srelens/srelens/issues/528
+[#535]: https://github.com/srelens/srelens/issues/535
+[#543]: https://github.com/srelens/srelens/issues/543
+[#549]: https://github.com/srelens/srelens/issues/549
+[#554]: https://github.com/srelens/srelens/issues/554
+[#555]: https://github.com/srelens/srelens/issues/555
+[#558]: https://github.com/srelens/srelens/issues/558
+[#559]: https://github.com/srelens/srelens/issues/559
+[#560]: https://github.com/srelens/srelens/issues/560
+[#561]: https://github.com/srelens/srelens/issues/561
+[#563]: https://github.com/srelens/srelens/issues/563
+[#568]: https://github.com/srelens/srelens/issues/568
+[#571]: https://github.com/srelens/srelens/issues/571
+[#580]: https://github.com/srelens/srelens/issues/580
+[#581]: https://github.com/srelens/srelens/issues/581
+[#601]: https://github.com/srelens/srelens/issues/601
+[#602]: https://github.com/srelens/srelens/issues/602
+[#603]: https://github.com/srelens/srelens/issues/603
+[#604]: https://github.com/srelens/srelens/issues/604
+[#605]: https://github.com/srelens/srelens/issues/605
+[#607]: https://github.com/srelens/srelens/issues/607
+[#608]: https://github.com/srelens/srelens/issues/608
+[#609]: https://github.com/srelens/srelens/issues/609
+[#610]: https://github.com/srelens/srelens/issues/610
+[#611]: https://github.com/srelens/srelens/issues/611
+[#597]: https://github.com/srelens/srelens/pull/597
