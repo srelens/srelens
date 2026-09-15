@@ -12,6 +12,8 @@ export interface ExtensionContribution {
   };
 }
 export interface ExtensionManifest {
+  /** Editor metadata naming the manifest's JSON Schema; the host ignores it. */
+  $schema?: string;
   id: string;
   name: string;
   version: string;

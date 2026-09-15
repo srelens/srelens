@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn verifies_exact_bytes_identity_and_api_before_review() {
         let mut entry = parse_catalog(&fixture()).unwrap().extensions.remove(0);
-        let raw = include_bytes!("../../../../examples/extensions/argocd.json");
+        let raw = include_bytes!("../../tests/fixtures/argocd-manifest.json");
         entry.release.sha256 = format!("{:x}", Sha256::digest(raw));
         assert!(verify_manifest(&entry, raw).is_ok());
         assert!(verify_manifest(&entry, b"{}")
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn official_releases_require_the_pinned_signature_and_repository() {
         let mut entry = parse_catalog(&fixture()).unwrap().extensions.remove(0);
-        let raw = include_bytes!("../../../../examples/extensions/argocd.json");
+        let raw = include_bytes!("../../tests/fixtures/argocd-manifest.json");
         let sig = include_bytes!("../../tests/fixtures/argocd-manifest.sig").to_vec();
         entry.release.sha256 = format!("{:x}", Sha256::digest(raw));
         assert!(verify_release(&entry, raw, Some(sig.clone())).is_ok());

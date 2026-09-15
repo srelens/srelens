@@ -39,10 +39,11 @@ handler's consent gate.
 
 | Suite | Covers |
 |---|---|
-| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent |
+| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, and that `schemas/extension-manifest.v0.1.json` equals the generated schema |
 | `cargo test -p srelens-registry` | Inventory lifecycle, quarantine, catalog parsing and caching, signing, app capabilities |
 | `cargo test -p srelens-kube --lib gitops` | Resource inspection, events, GitOps action allowlist, guards and conditional PATCH |
 | `cargo test -p srelens-server` | Web-host denials |
+| `packages/core/src/lib/extensionManifestSchema.test.ts` | Every example manifest validates against the committed schema and names it in `$schema` |
 | `packages/ui-next/src/extensions/*.test.tsx` | Settings → Apps, catalog, workspace, resource details |
 
 The extension capabilities are not yet covered by the live-cluster e2e suite
@@ -51,8 +52,8 @@ command is planned ([#577](https://github.com/srelens/srelens/issues/577)).
 
 ## On Windows
 
-- A checkout with `core.autocrlf=true` rewrites `examples/extensions/argocd.json` with
-  CRLF line endings, so the tests that verify its published signature fail locally.
-  Check that file out with LF endings to run them. CI runs on Linux.
+- The tests that verify the published Argo CD signature read
+  `crates/registry/tests/fixtures/argocd-manifest.json`, which `.gitattributes` keeps
+  byte-exact, so `core.autocrlf=true` does not break them.
 - The `srelens-kube` lib tests do not compile on Windows because of a Unix-only
   symlink test in `toolbox.rs` (see AGENTS.md).

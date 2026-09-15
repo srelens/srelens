@@ -35,6 +35,7 @@ The first `pnpm dev` compiles the full Rust dependency tree and takes a few minu
 | `pnpm tauri build` | Packaged, installable desktop binaries |
 | `pnpm tauri icon apps/desktop/src-tauri/icons/icon.svg` | Regenerate the full app icon set from the source SVG |
 | `UPDATE_CATALOG=1 cargo test -p srelens-registry` | Regenerate the committed capability catalog after adding a capability |
+| `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema` | Regenerate the committed extension manifest schema after changing a manifest field |
 
 Live-cluster suites are `#[ignore]`d and need an explicit run — see [Testing standards](#testing-standards).
 
@@ -126,6 +127,7 @@ Four invariants are enforced by tests rather than by review, so "everything is e
 | `every_capability_is_mcp_exposed` (`crates/registry`) | The registry and the MCP tool list match exactly. |
 | `assert_mutating_capabilities_are_gated` (`crates/mcp/src/completeness.rs`) | Every capability that is not `read_only` is `requires_confirm`. Note the predicate is *mutating*, not *destructive* — a non-destructive capability can still need consent. |
 | `capability_catalog_json_is_in_sync` (`crates/registry`) | The committed `packages/core/src/lib/capability-catalog.json` equals the live registry, so the frontend palette audit can cross-check without linking Rust. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-registry`. |
+| `committed_manifest_schema_matches_the_contract` (`crates/plugin-host/tests/schema.rs`) | The committed `schemas/extension-manifest.v0.1.json` equals `Manifest::schema()`, and Vitest validates every example manifest against it. Regenerate with `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema`. |
 | `full_capability_suite` (`apps/desktop/src-tauri/tests/e2e.rs`) | Every registered capability is actually exercised against a live kind cluster, or explicitly excluded with a reason. Runs in the `integration` CI job. |
 
 ### Long-lived streams

@@ -1,5 +1,4 @@
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json",
   "id": "org.srelens.argocd",
   "name": "Argo CD",
   "version": "0.1.0",

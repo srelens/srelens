@@ -28,6 +28,7 @@
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@vitest/coverage-v8": "^4.1.11",
+    "ajv": "8.20.0",
     "jsdom": "^24.0.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",

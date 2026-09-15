@@ -1,0 +1,297 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "Binding": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "inputs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arguments",
+        "inputs",
+        "name",
+        "target",
+        "title"
+      ],
+      "type": "object"
+    },
+    "Contributions": {
+      "additionalProperties": false,
+      "properties": {
+        "detailTabs": {
+          "items": {
+            "$ref": "#/definitions/DetailTab"
+          },
+          "type": "array"
+        },
+        "pages": {
+          "items": {
+            "$ref": "#/definitions/Page"
+          },
+          "type": "array"
+        },
+        "rowActions": {
+          "items": {
+            "$ref": "#/definitions/RowAction"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "detailTabs",
+        "pages",
+        "rowActions"
+      ],
+      "type": "object"
+    },
+    "Dashboard": {
+      "additionalProperties": false,
+      "properties": {
+        "events": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DashboardEvents"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pages": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "pages"
+      ],
+      "type": "object"
+    },
+    "DashboardEvents": {
+      "additionalProperties": false,
+      "properties": {
+        "apiGroups": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "capability": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "apiGroups",
+        "capability"
+      ],
+      "type": "object"
+    },
+    "DetailTab": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "forKinds": {
+          "description": "Qualified Kubernetes kinds, e.g. argoproj.io/Application.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "forKinds",
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "ManifestKind": {
+      "description": "Only data is executable in this first host. Code-bearing manifests must go through the future sandboxed runtime, never through a permissive fallback.",
+      "enum": [
+        "declarative"
+      ],
+      "type": "string"
+    },
+    "Page": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "dashboard": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Dashboard"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "group": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "statusColumns": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/StatusColumns"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "RowAction": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "forKinds",
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "StatusColumns": {
+      "additionalProperties": false,
+      "properties": {
+        "progressing": {
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ready": {
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "suspended": {
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "ready"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "$schema": {
+      "description": "Editor metadata: the JSON Schema the manifest is written against. The host ignores it; it is the one key allowed that is not part of the contract.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "capabilities": {
+      "items": {
+        "$ref": "#/definitions/Binding"
+      },
+      "type": "array"
+    },
+    "contributions": {
+      "$ref": "#/definitions/Contributions"
+    },
+    "id": {
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/definitions/ManifestKind"
+    },
+    "name": {
+      "type": "string"
+    },
+    "permissions": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "srelensApiVersion": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "capabilities",
+    "contributions",
+    "id",
+    "kind",
+    "name",
+    "permissions",
+    "srelensApiVersion",
+    "version"
+  ],
+  "title": "Manifest",
+  "type": "object"
+}
