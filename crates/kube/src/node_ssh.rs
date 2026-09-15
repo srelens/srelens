@@ -404,6 +404,15 @@ pub struct NodeJournalLogsOut {
     pub lines_returned: usize,
 }
 
+/// Quote `value` as one POSIX shell word. `ssh` hands the remote command to the
+/// target's login shell as a single string, so a caller-supplied argument has to
+/// survive that shell intact. Inside single quotes nothing is special — not `\`,
+/// `"`, `>` or `#` — and a literal `'` closes the quote, adds an escaped one and
+/// reopens. Escaping only `"` inside double quotes was not enough (#615).
+pub fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 pub fn build_journalctl_command(
     service: &str,
     lines: u32,
@@ -416,10 +425,10 @@ pub fn build_journalctl_command(
         lines.min(2000)
     );
     if let Some(s) = since.filter(|s| !s.trim().is_empty()) {
-        cmd.push_str(&format!(" --since \"{}\"", s.trim()));
+        cmd.push_str(&format!(" --since {}", shell_quote(s.trim())));
     }
     if let Some(g) = grep.filter(|g| !g.trim().is_empty()) {
-        cmd.push_str(&format!(" --grep \"{}\"", g.trim().replace('"', "\\\"")));
+        cmd.push_str(&format!(" --grep {}", shell_quote(g.trim())));
     }
     cmd
 }
@@ -748,8 +757,55 @@ mod tests {
         let cmd_filtered = build_journalctl_command("kubelet", 200, Some("10m ago"), Some("error"));
         assert_eq!(
             cmd_filtered,
-            "journalctl -u kubelet -n 200 --no-pager --since \"10m ago\" --grep \"error\""
+            "journalctl -u kubelet -n 200 --no-pager --since '10m ago' --grep 'error'"
         );
+    }
+
+    #[test]
+    fn journalctl_arguments_cannot_escape_their_quoting() {
+        // The payload from #615: `validate_grep` lets it through, and under the
+        // old `"`-escaping the backslash closed the quote and the rest became a
+        // redirection on the node.
+        let payload = r#"\" > /tmp/output #"#;
+        assert!(validate_grep(Some(payload)).is_ok());
+        assert_eq!(
+            build_journalctl_command("kubelet", 10, None, Some(payload)),
+            r#"journalctl -u kubelet -n 10 --no-pager --grep '\" > /tmp/output #'"#
+        );
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// Quoting is only right if a real shell agrees. Run the built command with
+    /// `journalctl` stubbed to print its arguments one per line: every argument
+    /// must come back verbatim, and a redirection that escaped would swallow
+    /// the output instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_posix_shell_reads_journalctl_arguments_back_verbatim() {
+        for grep in [r#"\" > /dev/null #"#, r#"it's "quoted" \ $HOME `id`"#] {
+            let cmd = build_journalctl_command("kubelet", 10, Some("10m ago"), Some(grep));
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("journalctl() {{ printf '%s\\n' \"$@\"; }}; {cmd}"))
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            assert_eq!(
+                stdout.lines().collect::<Vec<_>>(),
+                [
+                    "-u",
+                    "kubelet",
+                    "-n",
+                    "10",
+                    "--no-pager",
+                    "--since",
+                    "10m ago",
+                    "--grep",
+                    grep
+                ],
+                "{cmd}"
+            );
+        }
     }
 
     #[test]
