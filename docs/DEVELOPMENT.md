@@ -257,6 +257,8 @@ cargo test -p srelens-kube --test helm_lifecycle -- --ignored --nocapture --test
 
 The e2e suite prints `covered N/M capabilities` and fails if any registered capability is neither exercised nor explicitly excluded with a reason — so a new capability cannot land with no end-to-end case.
 
+For the extension and GitOps capabilities it applies minimal Flux and Argo CD CRDs from `apps/desktop/src-tauri/tests/fixtures/gitops-crds.yaml` and deletes them in teardown. Use a throwaway cluster: the suite refuses one that already has real Flux or Argo CD CRDs, rather than replace them.
+
 ### Accessibility check
 
 Automated tests catch labels and roles; they cannot tell you whether the app is
@@ -314,6 +316,8 @@ technology, and its version.
 - **integration (kind)** — spins up a kind cluster and helm, then runs the `#[ignore]`d live-cluster suites: the full capability e2e suite (which enforces capability coverage) and the helm lifecycle suite. Without this job a new capability could land with no end-to-end case.
 
 All three must be green.
+
+`.github/workflows/extension-catalog.yml` runs the `#[ignore]`d live extension catalog check daily, and on pull requests that change the catalog, signing or `crates/plugin-host` code: every release in the public catalog must download, match its checksum and publisher signature, and validate on this host. A re-uploaded release asset or a bad signature breaks installs without any commit here, so a schedule is what catches it.
 
 A separate Release workflow (`.github/workflows/release.yml`) publishes on pushes to `main` — Conventional-Commit-driven stable releases. Rolling `dev` pre-releases are **not** cut on every push: they come from a daily 18:00 UTC cron, or on demand via *Run workflow*. AUR publishing is split into `.github/workflows/aur-publish.yml` so it can also be run by hand.
 

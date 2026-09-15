@@ -1,0 +1,56 @@
+name: Extension catalog
+
+# The live catalog and release check (#536). `public_catalog_release_smoke` in
+# crates/registry/src/extensions/catalog.rs downloads the public catalog and
+# every release manifest it lists, then checks each one as installing it from
+# Settings -> Apps would: the catalog checksum, the pinned publisher signature
+# for official apps, and this host's manifest rules.
+#
+# Every other job skips it (`#[ignore]`) because what it tests changes without
+# a commit here. A re-uploaded release asset, a signature made with the wrong
+# key, or a catalog entry this host can no longer read breaks installs for
+# users while every pull request stays green. A daily run finds that first.
+on:
+  schedule:
+    # Daily, off the hour.
+    - cron: "41 5 * * *"
+  # Also on the code that decides what to trust, against the live assets that
+  # code will meet once it ships.
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - crates/registry/src/extensions/catalog.rs
+      - crates/registry/src/extensions/signing.rs
+      - crates/registry/src/extensions/srelens-apps.pub
+      - crates/plugin-host/**
+      - .github/workflows/extension-catalog.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-catalog:
+    name: live catalog and signatures
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Reads the repository and the public catalog; pushes nothing.
+          persist-credentials: false
+      # Pinned by SHA, so `toolchain` has to be explicit: this action reads the
+      # ref it was called by to decide which toolchain to install, and a SHA
+      # names no channel.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Live catalog, checksums and publisher signatures
+        shell: bash
+        run: |
+          cargo test -p srelens-registry --lib -- \
+            --ignored --exact --nocapture \
+            extensions::catalog::tests::public_catalog_release_smoke 2>&1 | tee smoke.log
+          # A renamed test matches no filter, and libtest reports zero tests
+          # run as success. Green must mean the check actually ran.
+          grep -q "test result: ok. 1 passed" smoke.log
