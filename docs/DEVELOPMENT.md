@@ -319,7 +319,7 @@ technology, and its version.
 
 All must be green.
 
-`.github/workflows/extension-catalog.yml` runs the `#[ignore]`d live extension catalog check daily, and on pull requests that change the extension module (`crates/registry/src/extensions.rs` and `extensions/`) or `crates/plugin-host`: every release in the public catalog must download, match its checksum and publisher signature, and validate on this host. A re-uploaded release asset or a bad signature breaks installs without any commit here, so a schedule is what catches it.
+`.github/workflows/extension-catalog.yml` runs the `#[ignore]`d live extension catalog check daily, and on pull requests that change anything its verdict depends on: the extension module (`crates/registry/src/extensions.rs` and `extensions/`), `crates/plugin-host`, the reader capabilities app bindings are checked against (`crates/kube/src/crds.rs` and `events.rs`, with `gitops.rs` beside them), their registration in `crates/registry/src/lib.rs`, and `crates/capability`, which derives their schemas: every release in the public catalog must download, match its checksum and publisher signature, and validate on this host. A re-uploaded release asset or a bad signature breaks installs without any commit here, so a schedule is what catches it.
 
 A separate Release workflow (`.github/workflows/release.yml`) publishes on pushes to `main` — Conventional-Commit-driven stable releases. Rolling `dev` pre-releases are **not** cut on every push: they come from a daily 18:00 UTC cron, or on demand via *Run workflow*. AUR publishing is split into `.github/workflows/aur-publish.yml` so it can also be run by hand.
 

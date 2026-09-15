@@ -14,18 +14,28 @@ on:
   schedule:
     # Daily, off the hour.
     - cron: "41 5 * * *"
-  # Also on the code that decides what to trust and what to accept, against the
-  # live assets that code will meet once it ships. That is the whole extension
-  # module, not just catalog and signing: the check passes every downloaded
-  # manifest through `validate_app` in extensions.rs, so a change to the host's
-  # rules can reject the published apps. plugin-host parses and validates the
-  # manifest itself.
+  # Also on pull requests that change anything the check's verdict depends on,
+  # so the live assets are checked against that code before it ships:
+  # - the extension module. Every downloaded manifest goes through
+  #   `validate_app` in extensions.rs.
+  # - plugin-host, which parses the manifest and checks each binding against
+  #   its target capability (`PluginHost::binding_problems`).
+  # - the reader capabilities those bindings target, whose input schemas and
+  #   annotations are what gets checked: k8s.listCustomResource in crds.rs and
+  #   k8s.listEvents in events.rs, registered in crates/registry/src/lib.rs,
+  #   with schemas derived by crates/capability. gitops.rs, the inspection and
+  #   actions behind the apps' resource views, sits beside them.
   pull_request:
     branches: [dev, main]
     paths:
       - crates/registry/src/extensions.rs
       - crates/registry/src/extensions/**
+      - crates/registry/src/lib.rs
       - crates/plugin-host/**
+      - crates/capability/**
+      - crates/kube/src/crds.rs
+      - crates/kube/src/events.rs
+      - crates/kube/src/gitops.rs
       - .github/workflows/extension-catalog.yml
   workflow_dispatch:
 
