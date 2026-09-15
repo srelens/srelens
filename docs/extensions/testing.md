@@ -46,7 +46,9 @@ handler's consent gate.
 | Suite | Covers |
 |---|---|
 | `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, and that `schemas/extension-manifest.v0.1.json` equals the generated schema |
+| `cargo test -p srelens-plugin-host --lib fuzzing` | Manifest decoding, validation and parsing on arbitrary bytes and on edits of the example manifests: no panic, a value or a coded problem, the 256 KiB limit to the byte, and an accepted manifest re-serializes to an equal one |
 | `cargo test -p srelens-registry` | Inventory lifecycle, quarantine, catalog parsing and caching, signing, app capabilities |
+| `cargo test -p srelens-registry --lib fuzzing` | The same properties for catalog parsing, publisher signature verification and the inventory reader with its legacy migration, starting from `crates/registry/tests/fixtures` |
 | `cargo test -p srelens-kube --lib gitops` | Resource inspection, events, GitOps action allowlist, guards and conditional PATCH |
 | `cargo test -p srelens-server` | Web-host denials |
 | `packages/core/src/lib/extensionManifestSchema.test.ts` | Every example manifest validates against the committed schema and names it in `$schema` |
@@ -56,6 +58,44 @@ handler's consent gate.
 The extension capabilities are not yet covered by the live-cluster e2e suite
 ([#536](https://github.com/srelens/srelens/issues/536)). An authoring CLI with a test
 command is planned ([#577](https://github.com/srelens/srelens/issues/577)).
+
+## Fuzzing
+
+The parsers that read extension input from outside the host have cargo-fuzz targets in
+`fuzz/`: `manifest`, `catalog`, `signed-manifest` and `inventory`. `signed-manifest` reads
+one byte giving the signature's length, the signature, then the manifest.
+
+Each target calls one function in its crate's `fuzzing` module, and the `fuzzing` property
+tests above call the same function, so a property is written once. `cargo test` runs a
+fixed set of generated cases, the same on every run, on stable and on every platform. The
+fuzzer keeps looking for new ones. When it finds a crash, add the input it saved to that
+module's tests as a regression test, then fix it.
+
+The **Fuzz** workflow (`.github/workflows/fuzz.yml`) runs every target for a minute on a
+pull request that touches the parsers, their fixtures or `Cargo.lock`, and for fifteen
+minutes each night. Crashing inputs are uploaded as the `fuzz-artifacts` artifact. It is
+not a required check.
+
+libFuzzer needs a nightly toolchain and does not build on Windows. On Linux or macOS:
+
+```sh
+rustup toolchain install nightly
+cargo install cargo-fuzz
+cp Cargo.lock fuzz/Cargo.lock   # build the dependency versions the app ships
+sh fuzz/seed.sh                 # start from the examples and fixtures
+cargo +nightly fuzz run manifest -- -dict=fuzz/extensions.dict -max_total_time=300
+```
+
+`+nightly` is needed because `rust-toolchain.toml` pins the repository to stable. A
+prebuilt cargo-fuzz (from `cargo binstall`, as CI gets it) is a static musl binary and
+builds for musl by default, which AddressSanitizer refuses; pass
+`--target x86_64-unknown-linux-gnu` to both `fuzz build` and `fuzz run`. To
+explore past the fixed cases without the fuzzer, on any platform, give the property tests a
+seed and a count:
+
+```sh
+PROPTEST_RNG_SEED=7 PROPTEST_CASES=10000 cargo test -p srelens-registry --lib fuzzing
+```
 
 ## On Windows
 

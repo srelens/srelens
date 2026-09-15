@@ -1,0 +1,98 @@
+name: Fuzz
+
+# The parsers that take extension input from outside the host -- manifests, the catalog,
+# publisher signatures and the stored inventory -- under cargo-fuzz (#580). `cargo test`
+# already holds the same properties over a fixed set of cases on every change, on stable
+# and on every platform. This keeps looking for inputs that break them, with coverage
+# guidance, which is what needs nightly and libFuzzer and so cannot live in the backend job.
+#
+# A pull request that touches the parsers, their seed files or the dependencies under them
+# gets a short run; a daily run goes longer. Neither is a required check: a path-filtered
+# workflow reports nothing on the pull requests it skips, and a required check that never
+# reports blocks the merge.
+on:
+  pull_request:
+    branches: [dev, main, feat/ui-next]
+    paths:
+      - crates/plugin-host/**
+      - crates/registry/Cargo.toml
+      - crates/registry/src/extensions.rs
+      - crates/registry/src/extensions/**
+      - crates/registry/tests/fixtures/**
+      - examples/extensions/**
+      - fuzz/**
+      # serde_json, semver, url and ring do the parsing; a bump changes what is fuzzed.
+      - Cargo.lock
+      - .github/workflows/fuzz.yml
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target
+        default: '900'
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      # A minute a target on a pull request, fifteen on the daily run.
+      SECONDS_PER_TARGET: ${{ github.event_name == 'pull_request' && '60' || inputs.seconds || '900' }}
+      # cargo-fuzz builds for the platform it was itself compiled for unless told otherwise.
+      # install-action gets it prebuilt through cargo-binstall, as a static musl binary, and
+      # AddressSanitizer refuses musl's statically linked libc: the first run on #606 failed
+      # before compiling anything. So both `fuzz build` and `fuzz run` name the runner's own.
+      FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Pinned by SHA, so `toolchain` has to be explicit, as in ci.yml. libFuzzer's
+      # sanitizer flags are nightly-only, and rust-toolchain.toml pins the repository to
+      # stable, so every cargo call below says `+nightly`.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: nightly
+      - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2
+        with:
+          tool: cargo-fuzz
+      # fuzz/ is its own workspace and commits no lockfile. Starting from the workspace's
+      # pins, it builds the dependency versions the app ships and resolves only libFuzzer.
+      - name: Seed the fuzz lockfile from the workspace
+        run: cp Cargo.lock fuzz/Cargo.lock
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+      - name: Build the targets
+        run: cargo +nightly fuzz build --target "$FUZZ_TARGET_TRIPLE"
+      - name: Seed the corpora from the examples and fixtures
+        run: sh fuzz/seed.sh
+      - name: Fuzz each target
+        # Every target runs even after one finds a crash, so one bug does not hide another.
+        run: |
+          status=0
+          for target in manifest catalog signed-manifest inventory; do
+            echo "::group::$target"
+            cargo +nightly fuzz run --target "$FUZZ_TARGET_TRIPLE" "$target" -- \
+              -dict=fuzz/extensions.dict \
+              -max_total_time="$SECONDS_PER_TARGET" \
+              -max_len=65536 \
+              -timeout=10 \
+              -rss_limit_mb=2048 || status=1
+            echo "::endgroup::"
+          done
+          exit "$status"
+      - name: Upload the crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

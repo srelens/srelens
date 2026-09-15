@@ -15,7 +15,9 @@ srelens-kube = { path = "../kube" }
 # other; confirmed via `cargo check -p srelens-registry -p srelens-mcp`.
 srelens-mcp = { path = "../mcp" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: the extension inventory is read, saved and read again; without it a
+# number in an app's settings or manifest moved a step on each save.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 schemars = "0.8"
 dirs = "6"
 # Blocking HTTP for toolbox downloads (run inside spawn_blocking). rustls with
@@ -32,5 +34,14 @@ sha2 = "0.10"
 ring = "0.17"
 semver = "1"
 
+[features]
+# Exposes `srelens_registry::fuzzing`, the extension readers' fuzz entry points,
+# to the targets in `fuzz/`. Test support, not an API.
+fuzzing = []
+
 [dev-dependencies]
+# The property tests start from valid documents and edit them with plugin-host's
+# test support.
+srelens-plugin-host = { path = "../plugin-host", features = ["fuzzing"] }
+proptest = { version = "1", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

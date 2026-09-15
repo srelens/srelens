@@ -8,13 +8,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 const CATALOG_URL: &str = "https://raw.githubusercontent.com/srelens/extensions/main/catalog.json";
-const MAX_CATALOG: usize = 1024 * 1024;
+pub(super) const MAX_CATALOG: usize = 1024 * 1024;
 const TTL: u64 = 24 * 60 * 60;
 // Catalog metadata is additive. Released hosts ignore fields they don't know, so the
 // catalog can gain publishers, categories or revocations without every installed
 // host rejecting it; a breaking change bumps `schemaVersion` instead.
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
-struct Catalog {
+pub(super) struct Catalog {
     #[serde(rename = "schemaVersion")]
     schema_version: u32,
     extensions: Vec<Entry>,
@@ -133,7 +133,7 @@ fn hex(value: &str, len: usize) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn parse_catalog(raw: &[u8]) -> Result<Catalog, String> {
+pub(super) fn parse_catalog(raw: &[u8]) -> Result<Catalog, String> {
     if raw.len() > MAX_CATALOG {
         return Err("Catalog exceeds 1 MiB".into());
     }

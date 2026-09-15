@@ -2,6 +2,9 @@
 //!
 //! No package code is loaded here. A trusted installer supplies explicit
 //! grants for native srelens manifests.
+#[cfg(any(test, feature = "fuzzing"))]
+#[doc(hidden)]
+pub mod fuzzing;
 mod manifest;
 mod validation;
 pub use manifest::*;

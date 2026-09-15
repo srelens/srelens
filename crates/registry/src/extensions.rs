@@ -2,6 +2,8 @@
 mod catalog;
 mod resource;
 mod signing;
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzzing;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
