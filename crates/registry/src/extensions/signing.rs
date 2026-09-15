@@ -32,12 +32,28 @@ pub(super) fn reserved(id: &str) -> bool {
     PUBLISHERS.iter().any(|p| id.starts_with(p.namespace))
 }
 
+/// A repository URL folded for comparison. GitHub resolves owner and repository names
+/// case-insensitively, and a URL's scheme and host are case-insensitive too, so
+/// `https://github.com/SRELENS/App` and `https://github.com/srelens/app` are one
+/// repository. Only ASCII case is folded and nothing else about the URL changes, so a
+/// lookalike owner such as `srelensx` stays a different repository. Every URL in
+/// `PUBLISHERS` is written in this form.
+fn folded(repository: &str) -> String {
+    repository.to_ascii_lowercase()
+}
+
 /// A catalog entry naming a trusted namespace or repository must carry a valid signature.
 pub(super) fn claims_official(id: &str, repository: &str) -> bool {
+    let repository = folded(repository);
     reserved(id)
         || PUBLISHERS
             .iter()
             .any(|p| repository.starts_with(p.repository_owner))
+}
+
+/// Whether two URLs name the same repository, compared as [`folded`] describes.
+pub(super) fn same_repository(left: &str, right: &str) -> bool {
+    folded(left) == folded(right)
 }
 
 fn publisher(id: &str) -> Option<(&'static Publisher, &'static str)> {
@@ -113,5 +129,43 @@ mod tests {
             "org.other.app",
             "https://github.com/srelensx/app"
         ));
+    }
+
+    #[test]
+    fn every_trusted_url_is_written_in_the_form_comparisons_fold_to() {
+        for publisher in PUBLISHERS {
+            assert_eq!(
+                publisher.repository_owner,
+                folded(publisher.repository_owner)
+            );
+            for (_, repository) in publisher.apps {
+                assert_eq!(*repository, folded(repository));
+            }
+        }
+    }
+
+    #[test]
+    fn a_trusted_repository_is_recognized_whatever_case_it_is_written_in() {
+        // GitHub resolves owners and repository names case-insensitively, so these name the
+        // srelens repositories and must carry the srelens signature like them.
+        for repository in [
+            "https://github.com/SRELENS/app",
+            "https://github.com/SreLens/extension-argocd",
+            "HTTPS://GitHub.COM/srelens/app",
+        ] {
+            assert!(claims_official("org.other.app", repository), "{repository}");
+        }
+        // A lookalike owner is an ordinary third party, in any case.
+        for repository in [
+            "https://github.com/srelensx/app",
+            "https://github.com/SRELENSX/app",
+            "https://github.com/srelens-apps/app",
+            "https://github.com/notsrelens/app",
+        ] {
+            assert!(
+                !claims_official("org.other.app", repository),
+                "{repository}"
+            );
+        }
     }
 }

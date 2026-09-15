@@ -326,7 +326,11 @@ fn signature_url(entry: &Entry) -> Result<Option<String>, String> {
         "{repository}/releases/download/v{}/manifest.json",
         entry.release.version
     );
-    if entry.repository != repository || entry.release.manifest_url != expected {
+    // The repository is compared case-insensitively, as GitHub resolves it; the release
+    // asset URL is the exact one the signature is published beside.
+    if !super::signing::same_repository(&entry.repository, repository)
+        || entry.release.manifest_url != expected
+    {
         return Err("Official app release does not match its trusted repository".into());
     }
     Ok(Some(format!("{expected}.sig")))
@@ -458,6 +462,28 @@ mod tests {
         // Lookalike prefixes are ordinary, unsigned third-party entries.
         entry.id = "org.srelensx.argocd".into();
         entry.repository = "https://github.com/srelensx/extension-argocd".into();
+        assert_eq!(signature_url(&entry).unwrap(), None);
+    }
+    #[test]
+    fn a_trusted_repository_in_another_case_still_requires_the_publisher_signature() {
+        let mut entry = parse_catalog(&fixture()).unwrap().extensions.remove(0);
+        let raw = include_bytes!("../../tests/fixtures/argocd-manifest.json");
+        let sig = include_bytes!("../../tests/fixtures/argocd-manifest.sig").to_vec();
+        entry.release.sha256 = format!("{:x}", Sha256::digest(raw));
+        // GitHub resolves this to the pinned srelens repository, so the release is official
+        // and its signature is required.
+        entry.repository = "https://github.com/SRELENS/Extension-ArgoCD".into();
+        assert_eq!(
+            signature_url(&entry).unwrap(),
+            Some(format!("{}.sig", entry.release.manifest_url))
+        );
+        assert!(verify_release(&entry, raw, None)
+            .unwrap_err()
+            .contains("missing"));
+        assert!(verify_release(&entry, raw, Some(sig)).is_ok());
+        // An owner that only looks like the trusted one stays an unsigned third party.
+        entry.id = "org.srelensx.argocd".into();
+        entry.repository = "https://github.com/SRELENSX/extension-argocd".into();
         assert_eq!(signature_url(&entry).unwrap(), None);
     }
     #[test]

@@ -249,3 +249,7 @@ that existing `^0.1` manifests receive without an update.
   - A manifest that still uses `rowActions` is rejected with `EXTENSION_UNKNOWN_FIELD`. There is no alias and API 0.1 is not bumped: a rename is breaking under [Compatibility rules](#compatibility-rules), and this one is an exception made because extensions had not gone live.
   - `rowActions` is reserved for declared mutations ([#549](https://github.com/srelens/srelens/issues/549)).
   - The official releases moved to `detailLinks` as Argo CD 0.2.0 and Flux 0.3.0, signed with a rotated srelens publisher key ([#560](https://github.com/srelens/srelens/issues/560)) that the host now pins. Signatures under the previous key no longer verify; nothing had been released under it, so no transition is kept.
+- **#604:** security fix, in catalog validation rather than the manifest contract.
+  - A catalog entry's `repository` is matched against the trusted-publisher table case-insensitively, as GitHub resolves owner and repository names. An entry whose repository is `https://github.com/SRELENS/…` must carry the srelens signature, exactly as the lowercase form must.
+  - A lookalike owner such as `srelensx` is a different repository, and its entries stay ordinary unsigned third-party apps.
+  - The release asset URL must still equal the pinned repository's `v<version>/manifest.json`, so an official entry writes it in the pinned form.
