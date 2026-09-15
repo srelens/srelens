@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use srelens_capability::{Annotations, Capability, CapabilityError};
 use k8s_openapi::api::core::v1::Event;
 use kube::api::ListParams;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
@@ -37,8 +37,17 @@ pub struct EventSummary {
     pub type_: String,
     pub reason: String,
     pub object: String,
+    #[serde(rename = "objectApiVersion")]
+    pub object_api_version: String,
+    pub source: String,
+    #[serde(rename = "firstAge")]
+    pub first_age: String,
+    /// Raw first occurrence, with creation time as the fallback.
+    #[serde(rename = "firstCreated")]
+    pub first_created: Option<String>,
+
     pub message: String,
-    /// `creationTimestamp` (RFC 3339), so the frontend can derive a LIVE age.
+    /// Last-occurrence timestamp (RFC 3339), for a LIVE last-seen age.
     /// `age` below is rendered once, when this summary is built, and only
     /// rebuilt when a watch event arrives — so it goes stale (#405).
     pub created: Option<String>,
@@ -82,6 +91,22 @@ pub(crate) fn summarise(ev: Event) -> EventSummary {
         type_: ev.type_.clone().unwrap_or_default(),
         reason: ev.reason.clone().unwrap_or_default(),
         object,
+        first_age: crate::humanize_age(
+            ev.first_timestamp
+                .as_ref()
+                .or(ev.metadata.creation_timestamp.as_ref()),
+        ),
+        first_created: crate::creation_rfc3339(
+            ev.first_timestamp
+                .as_ref()
+                .or(ev.metadata.creation_timestamp.as_ref()),
+        ),
+        object_api_version: ev.involved_object.api_version.clone().unwrap_or_default(),
+        source: ev
+            .reporting_component
+            .clone()
+            .or_else(|| ev.source.as_ref().and_then(|s| s.component.clone()))
+            .unwrap_or_default(),
         message: ev.message.clone().unwrap_or_default(),
         created,
         age,
@@ -132,6 +157,37 @@ pub fn list_events_capability(cache: Arc<ClientCache>) -> Capability {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn first_occurrence_timestamp_uses_first_seen_then_creation() {
+        let mut event: Event = serde_json::from_value(serde_json::json!({
+            "metadata":{"creationTimestamp":"2026-09-13T11:59:00Z"},
+            "involvedObject":{},
+            "firstTimestamp":"2026-09-13T12:00:00Z",
+            "lastTimestamp":"2026-09-13T12:00:10Z"
+        }))
+        .unwrap();
+        let value = serde_json::to_value(summarise(event.clone())).unwrap();
+        assert_eq!(value["firstCreated"], "2026-09-13T12:00:00Z");
+        assert_eq!(value["created"], "2026-09-13T12:00:10Z");
+        event.first_timestamp = None;
+        let value = serde_json::to_value(summarise(event.clone())).unwrap();
+        assert_eq!(value["firstCreated"], "2026-09-13T11:59:00Z");
+        event.metadata.creation_timestamp = None;
+        assert!(serde_json::to_value(summarise(event)).unwrap()["firstCreated"].is_null());
+    }
+
+    #[test]
+    fn extension_event_metadata_preserves_api_identity_and_source() {
+        let ev: Event = serde_json::from_value(serde_json::json!({
+            "metadata":{"name":"ready","namespace":"flux-system"},
+            "involvedObject":{"apiVersion":"source.toolkit.fluxcd.io/v1","kind":"GitRepository","name":"apps"},
+            "source":{"component":"source-controller"}
+        })).unwrap();
+        let value = serde_json::to_value(summarise(ev)).unwrap();
+        assert_eq!(value["objectApiVersion"], "source.toolkit.fluxcd.io/v1");
+        assert_eq!(value["source"], "source-controller");
+    }
 
     #[test]
     fn capability_has_expected_id() {

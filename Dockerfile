@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Stage 1: build the frontend bundle -------------------------------------
-FROM node:26-slim@sha256:c0753125a3789977aefe869cbebccf70e3cfd7ea84ca48547458f02e4f1d7146 AS frontend
+FROM node:26-slim@sha256:14bf3eac4bf209d906d3c41256597d3ab1f926b2e93a79e9bdfe1efd32454239 AS frontend
 WORKDIR /src
 # package.json alone, ahead of the lockfile: it names the pnpm version, and
 # copying it by itself keeps the pnpm install layer cached when only the
@@ -32,7 +32,7 @@ COPY apps/desktop apps/desktop
 RUN pnpm --filter @srelens/desktop build
 
 # ---- Stage 2: build the headless server binary ------------------------------
-FROM rust:1-slim-bookworm@sha256:1469a27c125cb5a3aebfa4f4e4665d935b02fb72cc093b2c974b3d740e43f157 AS backend
+FROM rust:1-slim-bookworm@sha256:ebd900bae66fd508b466cef82d64a83a5fb34682e4c8b2797a42908bddc95a57 AS backend
 WORKDIR /src
 # Only C toolchain + perl are needed (no GTK/webkit — this binary isn't Tauri).
 RUN apt-get update && apt-get install -y --no-install-recommends \

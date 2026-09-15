@@ -6,7 +6,7 @@ import { Badge, Button, Spinner, TextInput } from "../ui";
 import { cancelChat, listAgents, startChat, sendChat, type AgentEvent, type AgentInfo } from "@srelens/core";
 // Named the same as toolbox's ToolStatus, so taken from its own module.
 import type { ToolStatus } from "@srelens/core/lib/chat";
-import { respondToConfirm, type ConfirmRequest } from "@srelens/core";
+import { isTauri, respondToConfirm, type ConfirmRequest } from "@srelens/core";
 import { getPrompt, listPrompts, type PromptSummary } from "@srelens/core";
 import { listSkills, loadSkill, type SkillMeta } from "@srelens/core";
 import {
@@ -836,18 +836,30 @@ export const AssistantConversation = forwardRef<
   // showing it, so a subscription made on mount already covers "each time
   // this view becomes visible" — no visibility flag to gate on here.
   useEffect(() => {
-    const unlisten = listen<ConfirmRequest>("mcp://confirm-request", (event) => {
-      setPendingConfirms((q) => [...q, event.payload]);
-    });
+    // The consent subscriptions are desktop only: `listen()` from
+    // @tauri-apps/api throws in a browser, and the classic assistant tab is
+    // reachable on the web. Same defect and same guard as McpConfirmDialog
+    // (#512); there is no consent flow to subscribe to on the web, the server
+    // denies every capability that would need one. The cancel-on-unmount
+    // below is NOT desktop only -- an invisible turn burns quota on either
+    // host -- so the guard covers the subscriptions and nothing else.
+    const desktop = isTauri();
+    const unlisten = desktop
+      ? listen<ConfirmRequest>("mcp://confirm-request", (event) => {
+          setPendingConfirms((q) => [...q, event.payload]);
+        })
+      : null;
     // Answered anywhere (this card, the app-wide modal) or timed out — the
     // backend announces it and the inline card must go, or a stale approval
     // prompt would sit in the transcript forever.
-    const unlistenResolved = listen<{ id: string }>("mcp://confirm-resolved", (event) => {
-      setPendingConfirms((q) => q.filter((r) => r.id !== event.payload.id));
-    });
+    const unlistenResolved = desktop
+      ? listen<{ id: string }>("mcp://confirm-resolved", (event) => {
+          setPendingConfirms((q) => q.filter((r) => r.id !== event.payload.id));
+        })
+      : null;
     return () => {
-      void unlisten.then((f) => f());
-      void unlistenResolved.then((f) => f());
+      if (unlisten) void unlisten.then((f) => f());
+      if (unlistenResolved) void unlistenResolved.then((f) => f());
       // If the conversation unmounts mid-turn (drawer/tab closed, or the user
       // switched to another tab), the backend turn and its event subscription
       // would otherwise keep running invisibly — burning quota and invoking MCP

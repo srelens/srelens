@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { TopologyGraph } from "@srelens/core";
 
@@ -818,7 +818,9 @@ describe("Topology", () => {
     // On a few hundred nodes, a wheel tick that went through React state and
     // an SVG transform re-rendered the component and re-rasterised every
     // path. The view is now a CSS transform on the wrapper, written by hand.
-    render(<Topology />);
+    // Flush mounting effects before dispatching a native event: finding the
+    // canvas only guarantees the DOM commit, not the wheel listener effect.
+    await act(async () => { render(<Topology />); });
     const canvas = await screen.findByRole("group", { name: "Namespace topology" });
     const layer = canvas.parentElement as HTMLElement;
     const frame = layer.parentElement as HTMLElement;

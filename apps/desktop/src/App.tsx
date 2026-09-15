@@ -1,3 +1,4 @@
+import { ClassicAppPage } from "./components/Extensions";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -698,13 +699,21 @@ export function App() {
       openAssistant();
       return;
     }
-    const existing = tabs.find((t) => t.cluster === cluster && t.kind === kind && !t.crd);
+    const existing = tabs.find((t) => t.cluster === cluster && t.kind === kind && !t.crd && !t.app);
     if (existing) {
       setActiveTabId(existing.id);
       return;
     }
     const id = tabIdRef.current++;
     setTabs((ts) => [...ts, { id, cluster, clusterId: stableIdOf(cluster), kind, namespace: namespaceFor(cluster) }]);
+    setActiveTabId(id);
+  }
+
+  function openAppPage(cluster:string, appId:string, page:string, namespace="", resourceName?:string) {
+    const existing=tabs.find(t=>t.cluster===cluster && t.app?.id===appId && t.app.page===page && (t.namespace??"")===namespace && t.app.resourceName===resourceName);
+    if(existing){setActiveTabId(existing.id);return;}
+    const id=tabIdRef.current++;
+    setTabs(ts=>[...ts,{id,cluster,clusterId:stableIdOf(cluster),kind:"overview",namespace,app:{id:appId,page,resourceName}}]);
     setActiveTabId(id);
   }
 
@@ -813,7 +822,7 @@ export function App() {
     const focus = { name, namespace, nonce: ++focusNonce.current };
     // Filter the list to the resource's namespace so its row is present to focus.
     const ns = namespace ?? "";
-    const existing = tabs.find((t) => t.cluster === cluster && t.kind === kind && !t.crd);
+    const existing = tabs.find((t) => t.cluster === cluster && t.kind === kind && !t.crd && !t.app);
     if (existing) {
       setTabs((ts) =>
         ts.map((t) =>
@@ -1014,7 +1023,7 @@ export function App() {
     label: t.edit
       ? `edit: ${t.edit.kind}/${t.edit.name}`
       : t.cluster
-        ? `${t.crd ? t.crd.kind : RESOURCE_LABELS[t.kind]} · ${contextDisplayName(t.cluster, contextProfiles[t.cluster])}`
+        ? `${t.app ? (t.app.resourceName ?? t.app.page) : t.crd ? t.crd.kind : RESOURCE_LABELS[t.kind]} · ${contextDisplayName(t.cluster, contextProfiles[t.cluster])}`
         : RESOURCE_LABELS[t.kind],
   }));
 
@@ -1040,10 +1049,11 @@ export function App() {
         <Sidebar
           clusters={clusters}
           activeCluster={activeCluster}
-          activeKind={activeKind}
+          activeKind={activeTab?.app ? undefined : activeKind}
           activeCrd={activeCrd}
           onSelect={(c, k) => openView(c, k)}
           onSelectCrd={(c, crd) => openCrdView(c, crd)}
+          onOpenApp={openAppPage}
           contextProfiles={contextProfiles}
           width={sidebarWidth}
           onResize={setSidebarWidth}
@@ -1064,7 +1074,7 @@ export function App() {
             {activeTab && (
               <>
                 <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-                  {activeKind === "settings" ? (
+                  {activeTab.app && activeCluster ? <ClassicAppPage key={activeTab.id} context={activeCluster} id={activeTab.app.id} page={activeTab.app.page} namespace={activeTab.namespace} onNamespace={namespace=>setTabs(ts=>ts.map(t=>t.id===activeTab.id?{...t,namespace}:t))} resourceName={activeTab.app.resourceName} onOpenResource={(name,namespace)=>openAppPage(activeCluster,activeTab.app!.id,activeTab.app!.page,namespace,name)} onPage={(page,namespace)=>openAppPage(activeCluster,activeTab.app!.id,page,namespace)}/> : activeKind === "settings" ? (
                     <SettingsView
                       key={`${activeTab.id}:${settingsSectionNonce}`}
                       initialSection={settingsInitialSection}
@@ -1241,7 +1251,7 @@ export function App() {
       <StatusBar
         activeCluster={activeCluster}
         activeLabel={
-          activeTab ? (activeTab.crd ? activeTab.crd.kind : RESOURCE_LABELS[activeKind]) : undefined
+          activeTab ? (activeTab.app ? (activeTab.app.resourceName ?? activeTab.app.page) : activeTab.crd ? activeTab.crd.kind : RESOURCE_LABELS[activeKind]) : undefined
         }
         tabCount={tabs.length}
         // Every configured context, not just the active tab's: a shell for a

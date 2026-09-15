@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { afterEach, describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AssistantDrawer } from "./AssistantDrawer";
@@ -25,7 +25,18 @@ vi.mock("@tauri-apps/api/event", () => ({
 // This repo doesn't pull in @testing-library/jest-dom, so assert directly on
 // DOM presence (`getByText` throws if not found) instead of `toBeInTheDocument`.
 
+// jsdom is a plain browser, i.e. web mode: `isTauri()` looks for
+// `window.__TAURI_INTERNALS__` and finds nothing. The inline consent card the
+// drawer hosts is desktop only (#512) -- its `listen()` subscriptions are not
+// made on the web -- so this suite runs under a Tauri marker.
+const TAURI_MARKER = "__TAURI_INTERNALS__";
+afterEach(() => {
+  delete (window as unknown as Record<string, unknown>)[TAURI_MARKER];
+});
+
 beforeEach(() => {
+  (window as unknown as Record<string, unknown>)[TAURI_MARKER] = {};
+  for (const k of Object.keys(eventHandlers)) delete eventHandlers[k];
   vi.mocked(chat.listAgents).mockResolvedValue([
     {
       kind: "claude",

@@ -61,6 +61,9 @@ describe("gatedCapabilityIds", () => {
     const web = gatedCapabilityIds("web");
     const desktop = gatedCapabilityIds("desktop");
     expect(web).not.toContain("settings.set");
+    expect(web).not.toContain("extensions.action");
+    expect(HOST_ONLY_CAPABILITY_IDS).toContain("extensions.resource");
+    expect(desktop).toContain("extensions.action");
     expect(desktop).toContain("settings.set");
     expect(desktop.filter((id) => !HOST_ONLY_CAPABILITY_IDS.includes(id))).toEqual(web);
   });

@@ -211,6 +211,9 @@ importers:
       '@vitest/coverage-v8':
         specifier: ^4.1.11
         version: 4.1.11(vitest@4.1.11)
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
       jsdom:
         specifier: ^24.0.0
         version: 24.1.3(supports-color@7.2.0)

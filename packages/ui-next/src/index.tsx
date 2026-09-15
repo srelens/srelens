@@ -153,3 +153,4 @@ export function NextApp({
     </div>
   );
 }
+export { ExtensionManager, ExtensionResults, ExtensionResourceSlot } from "./extensions/Extensions";
