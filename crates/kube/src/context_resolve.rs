@@ -156,33 +156,62 @@ pub fn is_pinned_context(name: &str) -> bool {
     // printable `A`, or the other platform's form, stays a name.
     let escaped = |suffix: &str| suffix.starts_with("25") || suffix.starts_with("23");
     let text = |part: &str| !part.contains('#') && part.split('%').skip(1).all(escaped);
-    let path_part = |part: &str| {
-        !part.contains('#')
-            && part
-                .split('%')
-                .skip(1)
-                .all(|suffix| escaped(suffix) || unprintable_escape(suffix))
-    };
-    Path::new(source).is_absolute() && path_part(source) && text(context)
+    Path::new(source).is_absolute() && is_encoded_path(source) && text(context)
 }
 
-/// Whether `suffix` (the text after a `%`) starts with the escape `encode_path` writes for
-/// a unit it does not print: lowercase hex, and a value outside printable ASCII.
-fn unprintable_escape(suffix: &str) -> bool {
-    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+/// Whether `encoded` is exactly a form `encode_path` can emit. Checking individual escapes
+/// is not enough on Unix: `%c3%a9` consists of two non-printable byte escapes, but together
+/// those bytes are valid UTF-8, for which the encoder writes `é` instead.
+fn is_encoded_path(encoded: &str) -> bool {
+    if encoded.contains('#') {
+        return false;
+    }
     #[cfg(unix)]
     {
-        let Some(hex) = suffix.get(..2) else {
-            return false;
-        };
-        digits(hex) && !matches!(u8::from_str_radix(hex, 16), Ok(0x20..=0x7e))
+        use std::os::unix::ffi::OsStrExt;
+        let mut bytes = Vec::with_capacity(encoded.len());
+        let raw = encoded.as_bytes();
+        let mut index = 0;
+        while index < raw.len() {
+            if raw[index] == b'%' {
+                let Some(hex) = raw.get(index + 1..index + 3) else {
+                    return false;
+                };
+                let Ok(hex) = std::str::from_utf8(hex) else {
+                    return false;
+                };
+                let Ok(byte) = u8::from_str_radix(hex, 16) else {
+                    return false;
+                };
+                bytes.push(byte);
+                index += 3;
+            } else {
+                bytes.push(raw[index]);
+                index += 1;
+            }
+        }
+        encode_path(Path::new(std::ffi::OsStr::from_bytes(&bytes))) == encoded
     }
     #[cfg(windows)]
     {
-        let Some(hex) = suffix.strip_prefix('u').and_then(|rest| rest.get(..4)) else {
-            return false;
-        };
-        digits(hex) && !matches!(u16::from_str_radix(hex, 16), Ok(0x20..=0x7e))
+        use std::os::windows::ffi::OsStringExt;
+        let mut units = Vec::new();
+        let mut chars = encoded.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '%' {
+                units.extend(ch.encode_utf16(&mut [0; 2]).iter().copied());
+                continue;
+            }
+            let count = if chars.peek() == Some(&'u') { 5 } else { 2 };
+            let suffix: String = chars.by_ref().take(count).collect();
+            let hex = suffix.strip_prefix('u').unwrap_or(&suffix);
+            let Ok(unit) = u16::from_str_radix(hex, 16) else {
+                return false;
+            };
+            units.push(unit);
+        }
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&units));
+        encode_path(&path) == encoded
     }
 }
 
@@ -838,6 +867,8 @@ mod tests {
             // `A` is printable, so the encoder never writes `%41`; uppercase hex is never written.
             "srelens-context:/kube/team%41#prod",
             "srelens-context:/kube/team%C3%A9#prod",
+            // These lowercase escapes decode to valid UTF-8, so `encode_path` writes `é`.
+            "srelens-context:/kube/team%c3%a9#prod",
             // The other platform's escape form.
             #[cfg(unix)]
             "srelens-context:/kube/team%ud800#prod",
