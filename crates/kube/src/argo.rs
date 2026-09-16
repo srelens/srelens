@@ -504,13 +504,20 @@ pub fn matches_destination(
                 || current_cluster_name.is_some_and(|c| name_matches(c, app_dest_name)))
     };
 
-    // Server identity outranks names. The app's server is its own
-    // destination.server, or what Argo's cluster secrets register for its
-    // destination.name. When that and the current server are both known and
-    // differ, this is another cluster however alike the names read — context
-    // `prod` passes `name_matches` against destination `team-prod` — and
-    // listing it would let a sync land on the wrong spoke (#615). Only the
-    // explicit `match_by_name` opt-in can still match it.
+    // Server identity outranks names, `match_by_name` included. The app's
+    // server is its own destination.server, or what Argo's cluster secrets
+    // register for its destination.name. When that and the current server are
+    // both known and differ, this is another cluster however alike the names
+    // read — context `prod` passes `name_matches` against destination
+    // `team-prod` — and listing it would let a sync land on the wrong spoke
+    // (#615). The flag cannot override this: the only production caller
+    // (`apps/tui`, the applications fetch) hardcodes it to `true`, so an
+    // override would leave that wrong-spoke listing exactly as it was.
+    //
+    // The cost is that a cluster Argo registers under a different URL than the
+    // local kubeconfig no longer matches by name. Two known, differing servers
+    // are the one signal here that cannot be a coincidence, and acting on the
+    // wrong cluster is worse than not listing its apps.
     let app_server = if !app.destination_server.trim().is_empty() {
         Some(app.destination_server.as_str())
     } else if !app_dest_name.is_empty() {
@@ -523,7 +530,7 @@ pub fn matches_destination(
         app_server,
     ) {
         if normalize_server_url(current) != normalize_server_url(app_server) {
-            return name_fallback();
+            return false;
         }
     }
 
@@ -1155,7 +1162,11 @@ mod tests {
             None,
             true
         ));
-        assert!(matches_destination(
+        // ...but not once the servers are known to differ: this app targets
+        // api.prod.example.com and the reader is on other-url.com, so the
+        // matching name is a coincidence, and `match_by_name` does not override
+        // it (#615). This asserted a match until that change.
+        assert!(!matches_destination(
             &app,
             "prod-cluster",
             None,
@@ -1386,8 +1397,10 @@ mod tests {
             ));
         }
 
-        // `match_by_name` is the explicit opt-in to names over servers.
-        assert!(matches_destination(
+        // `match_by_name` does not override it. The only production caller
+        // hardcodes the flag to `true`, so an override would leave the
+        // wrong-spoke listing exactly as it was.
+        assert!(!matches_destination(
             &by_name,
             "prod",
             None,
