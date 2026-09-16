@@ -11,8 +11,8 @@ use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment, StatefulSet};
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, Event as CoreEvent, LimitRange, Namespace, Node, PersistentVolume, PersistentVolumeClaim, Pod,
-    ResourceQuota, Secret, Service, ServiceAccount,
+    ConfigMap, Event as CoreEvent, LimitRange, Namespace, Node, PersistentVolume,
+    PersistentVolumeClaim, Pod, ResourceQuota, Secret, Service, ServiceAccount,
 };
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::networking::v1::{Ingress, NetworkPolicy};
@@ -27,13 +27,17 @@ use crate::client_cache::ClientCache;
 use crate::configmaps::{summarise as summarise_configmap, ConfigMapSummary};
 use crate::cronjobs::{summarise as summarise_cronjob, CronJobSummary};
 use crate::daemonsets::{summarise as summarise_daemonset, DaemonSetSummary};
+use crate::deployments::{summarise as summarise_deployment, DeploymentSummary};
 use crate::endpointslices::{summarise as summarise_endpointslice, EndpointSliceSummary};
+use crate::events::{summarise as summarise_event, EventSummary};
 use crate::ingresses::{summarise as summarise_ingress, IngressSummary};
-use crate::nodes::{summarise as summarise_node, NodeSummary};
+use crate::jobs::{summarise as summarise_job, JobSummary};
 use crate::limitranges::{summarise as summarise_limitrange, LimitRangeSummary};
 use crate::networkpolicies::{summarise as summarise_networkpolicy, NetworkPolicySummary};
+use crate::nodes::{summarise as summarise_node, NodeSummary};
 use crate::persistentvolumes::{summarise as summarise_pv, PvSummary};
 use crate::pvcs::{summarise as summarise_pvc, PvcSummary};
+use crate::resourcequotas::{summarise as summarise_resourcequota, ResourceQuotaSummary};
 use crate::rolebindings::{
     summarise as summarise_rolebinding, summarise_cluster as summarise_clusterrolebinding,
     ClusterRoleBindingSummary, RoleBindingSummary,
@@ -42,15 +46,11 @@ use crate::roles::{
     summarise as summarise_role, summarise_cluster as summarise_clusterrole, ClusterRoleSummary,
     RoleSummary,
 };
-use crate::serviceaccounts::{summarise as summarise_serviceaccount, ServiceAccountSummary};
-use crate::storageclasses::{summarise as summarise_storageclass, StorageClassSummary};
-use crate::resourcequotas::{summarise as summarise_resourcequota, ResourceQuotaSummary};
 use crate::secrets::{summarise as summarise_secret, SecretSummary};
-use crate::deployments::{summarise as summarise_deployment, DeploymentSummary};
-use crate::events::{summarise as summarise_event, EventSummary};
-use crate::jobs::{summarise as summarise_job, JobSummary};
+use crate::serviceaccounts::{summarise as summarise_serviceaccount, ServiceAccountSummary};
 use crate::services::{summarise as summarise_service, ServiceSummary};
 use crate::statefulsets::{summarise as summarise_statefulset, StatefulSetSummary};
+use crate::storageclasses::{summarise as summarise_storageclass, StorageClassSummary};
 use crate::workloads::{summarise_pod, PodSummary};
 
 /// Normalised watch event over summaries (decoupled from kube-rs types so the
@@ -203,7 +203,14 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Pod> = crate::scoped_api(client, &namespace);
-    watch_typed(api, summarise_pod, |p: &PodSummary| p.name.clone(), on_update, on_status).await
+    watch_typed(
+        api,
+        summarise_pod,
+        |p: &PodSummary| p.name.clone(),
+        on_update,
+        on_status,
+    )
+    .await
 }
 
 /// Watch deployments in a namespace.
@@ -292,7 +299,14 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Job> = crate::scoped_api(client, &namespace);
-    watch_typed(api, summarise_job, |j: &JobSummary| j.name.clone(), on_update, on_status).await
+    watch_typed(
+        api,
+        summarise_job,
+        |j: &JobSummary| j.name.clone(),
+        on_update,
+        on_status,
+    )
+    .await
 }
 
 /// Watch CronJobs in a namespace.
@@ -987,7 +1001,10 @@ pub fn dynamic_object_to_value(item: &kube::api::DynamicObject) -> serde_json::V
                 obj.insert("name".to_string(), serde_json::Value::String(n.clone()));
             }
             if let Some(ns_name) = &item.metadata.namespace {
-                obj.insert("namespace".to_string(), serde_json::Value::String(ns_name.clone()));
+                obj.insert(
+                    "namespace".to_string(),
+                    serde_json::Value::String(ns_name.clone()),
+                );
             }
             if let Some(ts) = &item.metadata.creation_timestamp {
                 let age = crate::humanize_age(Some(ts));
@@ -1060,7 +1077,7 @@ where
             }
             Err(e) => {
                 let msg = e.to_string();
-                if is_permanent_watch_error(&msg) {
+                if is_permanent_custom_watch_error(&msg) {
                     return Err(msg);
                 }
                 if !reconnecting {
@@ -1071,6 +1088,16 @@ where
         }
     }
     Ok(())
+}
+
+/// A watcher error on a custom resource that will not self-heal (e.g. 404 CRD
+/// not installed/deleted, or RBAC forbidden) -- surface it so the UI does not hang.
+fn is_permanent_custom_watch_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    is_permanent_watch_error(msg)
+        || lower.contains("not found")
+        || lower.contains("could not find the requested resource")
+        || lower.contains("no matches for kind")
 }
 
 #[cfg(test)]
@@ -1304,16 +1331,31 @@ mod tests {
         // Reducer applies Init, InitApply, InitDone, Apply, Delete on Value state
         let mut state = BTreeMap::new();
         assert!(!reduce(&mut state, &dynamic_value_key, WatchEvent::Init));
-        assert!(!reduce(&mut state, &dynamic_value_key, WatchEvent::InitApply(val.clone())));
+        assert!(!reduce(
+            &mut state,
+            &dynamic_value_key,
+            WatchEvent::InitApply(val.clone())
+        ));
         assert!(reduce(&mut state, &dynamic_value_key, WatchEvent::InitDone));
         assert_eq!(state.len(), 1);
 
         let mut updated = val.clone();
         updated["status"]["conditions"][0]["status"] = json!("False");
-        assert!(reduce(&mut state, &dynamic_value_key, WatchEvent::Apply(updated)));
-        assert_eq!(state.get("prod/vault-backend").unwrap()["status"]["conditions"][0]["status"], "False");
+        assert!(reduce(
+            &mut state,
+            &dynamic_value_key,
+            WatchEvent::Apply(updated)
+        ));
+        assert_eq!(
+            state.get("prod/vault-backend").unwrap()["status"]["conditions"][0]["status"],
+            "False"
+        );
 
-        assert!(reduce(&mut state, &dynamic_value_key, WatchEvent::Delete("prod/vault-backend".into())));
+        assert!(reduce(
+            &mut state,
+            &dynamic_value_key,
+            WatchEvent::Delete("prod/vault-backend".into())
+        ));
         assert!(state.is_empty());
     }
 
@@ -1337,7 +1379,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(!err.is_empty(), "client failure must be surfaced as an error string");
+        assert!(
+            !err.is_empty(),
+            "client failure must be surfaced as an error string"
+        );
     }
 
     fn pod(name: &str, phase: &str) -> PodSummary {
@@ -1369,11 +1414,22 @@ mod tests {
     fn init_sequence_emits_only_on_init_done() {
         let mut state = BTreeMap::new();
         assert!(!reduce(&mut state, &key, WatchEvent::Init));
-        assert!(!reduce(&mut state, &key, WatchEvent::InitApply(pod("a", "Running"))));
-        assert!(!reduce(&mut state, &key, WatchEvent::InitApply(pod("b", "Pending"))));
+        assert!(!reduce(
+            &mut state,
+            &key,
+            WatchEvent::InitApply(pod("a", "Running"))
+        ));
+        assert!(!reduce(
+            &mut state,
+            &key,
+            WatchEvent::InitApply(pod("b", "Pending"))
+        ));
         assert!(reduce(&mut state, &key, WatchEvent::InitDone));
         let snap = snapshot(&state);
-        assert_eq!(snap.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(
+            snap.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 
     #[test]
@@ -1381,7 +1437,11 @@ mod tests {
         let mut state = BTreeMap::new();
         reduce(&mut state, &key, WatchEvent::InitApply(pod("a", "Pending")));
         reduce(&mut state, &key, WatchEvent::InitDone);
-        assert!(reduce(&mut state, &key, WatchEvent::Apply(pod("a", "Running"))));
+        assert!(reduce(
+            &mut state,
+            &key,
+            WatchEvent::Apply(pod("a", "Running"))
+        ));
         assert_eq!(snapshot(&state)[0].phase, "Running");
     }
 
@@ -1401,7 +1461,9 @@ mod tests {
     /// reconnect forever, and everything else must be treated as transient.
     #[test]
     fn only_forbidden_is_a_permanent_watch_error_for_object_watches() {
-        assert!(is_permanent_watch_error("Forbidden: User cannot watch pods"));
+        assert!(is_permanent_watch_error(
+            "Forbidden: User cannot watch pods"
+        ));
         assert!(is_permanent_watch_error("FORBIDDEN"));
         assert!(!is_permanent_watch_error("connection reset by peer"));
         assert!(!is_permanent_watch_error("401 Unauthorized"));
@@ -1424,7 +1486,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(!err.is_empty(), "the client failure must be surfaced as an error string");
+        assert!(
+            !err.is_empty(),
+            "the client failure must be surfaced as an error string"
+        );
     }
 
     #[tokio::test]
@@ -1448,7 +1513,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.contains("empty"), "expected an empty-name error, got: {err}");
+        assert!(
+            err.contains("empty"),
+            "expected an empty-name error, got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1501,7 +1569,10 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.contains("namespace"), "expected a namespace error, got: {err}");
+        assert!(
+            err.contains("namespace"),
+            "expected a namespace error, got: {err}"
+        );
     }
 
     /// `Event` is generic; `()` is the cheapest `K` that still lets us
@@ -1539,7 +1610,10 @@ mod tests {
             }
         }
 
-        assert_eq!(changes, 2, "expected one change per InitDone, first list and relist alike");
+        assert_eq!(
+            changes, 2,
+            "expected one change per InitDone, first list and relist alike"
+        );
     }
 
     #[test]
@@ -1567,5 +1641,19 @@ mod tests {
         ));
         // A benign message with a "14030" substring must not false-positive.
         assert!(!is_permanent_watch_error("read 14030 bytes"));
+    }
+
+    #[test]
+    fn custom_resource_watch_permanent_errors() {
+        assert!(is_permanent_custom_watch_error("watch is forbidden"));
+        assert!(is_permanent_custom_watch_error(
+            "the server could not find the requested resource"
+        ));
+        assert!(is_permanent_custom_watch_error("404 Not Found"));
+        assert!(is_permanent_custom_watch_error(
+            "no matches for kind VirtualMachine in version kubevirt.io/v1"
+        ));
+        assert!(!is_permanent_custom_watch_error("connection reset by peer"));
+        assert!(!is_permanent_custom_watch_error("401 Unauthorized"));
     }
 }

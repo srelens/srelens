@@ -11,40 +11,214 @@ use crate::tui_config::{CommandPopupDensity, TuiConfig};
 use crate::ui::command_popup_rect;
 
 pub const SAMPLE_SUGGESTIONS: &[(&str, &[&str], &str, &str, &str)] = &[
-    ("pods", &["po", "pod"], "Workload", "List, inspect, and tail Kubernetes pods across namespaces", ":pods [namespace]"),
-    ("deployments", &["deploy", "dp"], "Workload", "Manage, inspect, and scale deployment workloads", ":deployments [ns]"),
-    ("services", &["svc", "service"], "Network", "Service routing, cluster IPs, NodePorts and LoadBalancers", ":services [ns]"),
-    ("configmaps", &["cm"], "Config", "Key-value configuration maps and application data", ":configmaps [ns]"),
-    ("secrets", &["sec"], "Config", "Kubernetes secrets with masked base64 credentials", ":secrets [ns]"),
-    ("nodes", &["no", "node"], "Cluster", "Cluster worker and control-plane node hardware and health", ":nodes"),
-    ("events", &["ev", "event"], "Cluster", "Cluster-wide event stream, errors, warnings & scheduling", ":events [ns]"),
-    ("helm", &["releases"], "Helm", "Helm 3 release revisions, status, values and manifests", ":helm [ns]"),
-    ("argo", &["argocd", "apps"], "GitOps", "ArgoCD applications, sync status, drift & GitOps control", ":argo"),
-    ("workloads", &["wl"], "Workload", "Unified view of Pods, Deployments, STS & DS", ":workloads [ns]"),
-    ("statefulsets", &["sts"], "Workload", "Stateful set workloads and distributed replicas", ":statefulsets [ns]"),
-    ("daemonsets", &["ds"], "Workload", "Node-local daemonset agent workloads", ":daemonsets [ns]"),
-    ("jobs", &["job"], "Workload", "Batch job runs and execution completion status", ":jobs [ns]"),
-    ("cronjobs", &["cj"], "Workload", "Scheduled cron jobs and recurring execution history", ":cronjobs [ns]"),
-    ("ingresses", &["ing"], "Network", "HTTP/HTTPS ingress routing rules and TLS certs", ":ingresses [ns]"),
-    ("namespaces", &["ns"], "Cluster", "Cluster tenancy namespaces switcher and viewer", ":namespaces"),
-    ("persistentvolumes", &["pv"], "Storage", "Cluster-wide persistent storage volumes", ":persistentvolumes"),
-    ("persistentvolumeclaims", &["pvc"], "Storage", "Persistent storage volume claims by namespace", ":persistentvolumeclaims [ns]"),
-    ("storageclasses", &["sc"], "Storage", "Storage provisioners, volume plugins & reclaim policies", ":storageclasses"),
-    ("serviceaccounts", &["sa"], "Auth / RBAC", "Service account identities and RBAC token bindings", ":serviceaccounts [ns]"),
-    ("roles", &["role"], "Auth / RBAC", "Namespace-scoped RBAC roles and resource permissions", ":roles [ns]"),
-    ("top", &["toppods"], "Hotspots", "Top Hotspots ranking (Pods & Nodes by CPU/Memory)", ":top"),
-    ("assistant", &["ai", "chat"], "AI Assistant", "SRElens AI Assistant Chat for troubleshooting", ":assistant"),
-    ("config", &["tui"], "Configuration", "Configure command popup dimensions, visible rows & text size", ":config"),
-    ("argo", &["applications", "argocd"], "GitOps", "ArgoCD applications, sync status & drift", ":argo [ns]"),
-    ("banner", &["features", "guide"], "Guide", "Startup feature banner and SRElens guide", ":banner"),
-    ("toolbox", &["tools"], "Diagnostic", "Toolbox diagnostics (kubectl, helm, krew plugins)", ":toolbox"),
-    ("overview", &["info"], "Overview", "Cluster overview, health summary and node/pod capacity", ":overview"),
-    ("quit", &["q", "exit"], "System", "Quit SRElens TUI session", ":quit"),
+    (
+        "pods",
+        &["po", "pod"],
+        "Workload",
+        "List, inspect, and tail Kubernetes pods across namespaces",
+        ":pods [namespace]",
+    ),
+    (
+        "deployments",
+        &["deploy", "dp"],
+        "Workload",
+        "Manage, inspect, and scale deployment workloads",
+        ":deployments [ns]",
+    ),
+    (
+        "services",
+        &["svc", "service"],
+        "Network",
+        "Service routing, cluster IPs, NodePorts and LoadBalancers",
+        ":services [ns]",
+    ),
+    (
+        "configmaps",
+        &["cm"],
+        "Config",
+        "Key-value configuration maps and application data",
+        ":configmaps [ns]",
+    ),
+    (
+        "secrets",
+        &["sec"],
+        "Config",
+        "Kubernetes secrets with masked base64 credentials",
+        ":secrets [ns]",
+    ),
+    (
+        "nodes",
+        &["no", "node"],
+        "Cluster",
+        "Cluster worker and control-plane node hardware and health",
+        ":nodes",
+    ),
+    (
+        "events",
+        &["ev", "event"],
+        "Cluster",
+        "Cluster-wide event stream, errors, warnings & scheduling",
+        ":events [ns]",
+    ),
+    (
+        "helm",
+        &["releases"],
+        "Helm",
+        "Helm 3 release revisions, status, values and manifests",
+        ":helm [ns]",
+    ),
+    (
+        "argo",
+        &["argocd", "apps"],
+        "GitOps",
+        "ArgoCD applications, sync status, drift & GitOps control",
+        ":argo",
+    ),
+    (
+        "workloads",
+        &["wl"],
+        "Workload",
+        "Unified view of Pods, Deployments, STS & DS",
+        ":workloads [ns]",
+    ),
+    (
+        "statefulsets",
+        &["sts"],
+        "Workload",
+        "Stateful set workloads and distributed replicas",
+        ":statefulsets [ns]",
+    ),
+    (
+        "daemonsets",
+        &["ds"],
+        "Workload",
+        "Node-local daemonset agent workloads",
+        ":daemonsets [ns]",
+    ),
+    (
+        "jobs",
+        &["job"],
+        "Workload",
+        "Batch job runs and execution completion status",
+        ":jobs [ns]",
+    ),
+    (
+        "cronjobs",
+        &["cj"],
+        "Workload",
+        "Scheduled cron jobs and recurring execution history",
+        ":cronjobs [ns]",
+    ),
+    (
+        "ingresses",
+        &["ing"],
+        "Network",
+        "HTTP/HTTPS ingress routing rules and TLS certs",
+        ":ingresses [ns]",
+    ),
+    (
+        "namespaces",
+        &["ns"],
+        "Cluster",
+        "Cluster tenancy namespaces switcher and viewer",
+        ":namespaces",
+    ),
+    (
+        "persistentvolumes",
+        &["pv"],
+        "Storage",
+        "Cluster-wide persistent storage volumes",
+        ":persistentvolumes",
+    ),
+    (
+        "persistentvolumeclaims",
+        &["pvc"],
+        "Storage",
+        "Persistent storage volume claims by namespace",
+        ":persistentvolumeclaims [ns]",
+    ),
+    (
+        "storageclasses",
+        &["sc"],
+        "Storage",
+        "Storage provisioners, volume plugins & reclaim policies",
+        ":storageclasses",
+    ),
+    (
+        "serviceaccounts",
+        &["sa"],
+        "Auth / RBAC",
+        "Service account identities and RBAC token bindings",
+        ":serviceaccounts [ns]",
+    ),
+    (
+        "roles",
+        &["role"],
+        "Auth / RBAC",
+        "Namespace-scoped RBAC roles and resource permissions",
+        ":roles [ns]",
+    ),
+    (
+        "top",
+        &["toppods"],
+        "Hotspots",
+        "Top Hotspots ranking (Pods & Nodes by CPU/Memory)",
+        ":top",
+    ),
+    (
+        "assistant",
+        &["ai", "chat"],
+        "AI Assistant",
+        "SRElens AI Assistant Chat for troubleshooting",
+        ":assistant",
+    ),
+    (
+        "config",
+        &["tui"],
+        "Configuration",
+        "Configure command popup dimensions, visible rows & text size",
+        ":config",
+    ),
+    (
+        "argo",
+        &["applications", "argocd"],
+        "GitOps",
+        "ArgoCD applications, sync status & drift",
+        ":argo [ns]",
+    ),
+    (
+        "banner",
+        &["features", "guide"],
+        "Guide",
+        "Startup feature banner and SRElens guide",
+        ":banner",
+    ),
+    (
+        "toolbox",
+        &["tools"],
+        "Diagnostic",
+        "Toolbox diagnostics (kubectl, helm, krew plugins)",
+        ":toolbox",
+    ),
+    (
+        "overview",
+        &["info"],
+        "Overview",
+        "Cluster overview, health summary and node/pod capacity",
+        ":overview",
+    ),
+    (
+        "quit",
+        &["q", "exit"],
+        "System",
+        "Quit SRElens TUI session",
+        ":quit",
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiConfigViewState {
-    pub selected_field: usize, // 0 = Width, 1 = Visible Rows, 2 = Text Size / Density, 3 = Startup Banner, 4 = Argo Hub Context, 5 = Argo Hub Kubeconfig
+    pub selected_field: usize, // 0 = Width, 1 = Visible Rows, 2 = Text Size / Density, 3 = Startup Banner, 4 = Startup Updates, 5 = Argo Hub Context, 6 = Argo Hub Kubeconfig
     pub is_editing: bool,
     pub edit_buffer: String,
     pub edit_cursor: usize,
@@ -72,7 +246,7 @@ impl TuiConfigViewState {
         if self.is_editing {
             return;
         }
-        self.selected_field = (self.selected_field + 1) % 6;
+        self.selected_field = (self.selected_field + 1) % 7;
     }
 
     pub fn select_prev_field(&mut self) {
@@ -80,7 +254,7 @@ impl TuiConfigViewState {
             return;
         }
         if self.selected_field == 0 {
-            self.selected_field = 5;
+            self.selected_field = 6;
         } else {
             self.selected_field -= 1;
         }
@@ -88,12 +262,12 @@ impl TuiConfigViewState {
 
     pub fn start_editing(&mut self, config: &TuiConfig) {
         match self.selected_field {
-            4 => {
+            5 => {
                 self.edit_buffer = config.argo_hub_context.clone().unwrap_or_default();
                 self.edit_cursor = self.edit_buffer.chars().count();
                 self.is_editing = true;
             }
-            5 => {
+            6 => {
                 self.edit_buffer = config
                     .argo_hub_kubeconfig
                     .as_ref()
@@ -115,10 +289,10 @@ impl TuiConfigViewState {
     pub fn finish_editing(&mut self, config: &mut TuiConfig) -> Result<(), String> {
         let val = self.edit_buffer.trim().to_string();
         match self.selected_field {
-            4 => {
+            5 => {
                 config.argo_hub_context = if val.is_empty() { None } else { Some(val) };
             }
-            5 => {
+            6 => {
                 config.argo_hub_kubeconfig = if val.is_empty() {
                     None
                 } else {
@@ -211,7 +385,8 @@ impl TuiConfigViewState {
         }
         let chars: Vec<char> = self.edit_buffer.chars().collect();
         let mut i = pos;
-        while i > 0 && (chars[i - 1].is_whitespace() || chars[i - 1] == '/' || chars[i - 1] == '-') {
+        while i > 0 && (chars[i - 1].is_whitespace() || chars[i - 1] == '/' || chars[i - 1] == '-')
+        {
             i -= 1;
         }
         while i > 0 && !chars[i - 1].is_whitespace() && chars[i - 1] != '/' && chars[i - 1] != '-' {
@@ -233,8 +408,8 @@ impl TuiConfigViewState {
             return Ok(());
         }
         match self.selected_field {
-            4 => config.argo_hub_context = None,
-            5 => config.argo_hub_kubeconfig = None,
+            5 => config.argo_hub_context = None,
+            6 => config.argo_hub_kubeconfig = None,
             _ => {}
         }
         config.save()
@@ -264,6 +439,9 @@ impl TuiConfigViewState {
                 config.show_feature_banner = !config.show_feature_banner;
             }
             4 => {
+                config.check_updates = !config.check_updates;
+            }
+            5 => {
                 let mut options: Vec<Option<String>> = vec![None];
                 for ctx in &self.available_contexts {
                     options.push(Some(ctx.clone()));
@@ -281,7 +459,7 @@ impl TuiConfigViewState {
                 };
                 config.argo_hub_context = options[next_idx].clone();
             }
-            5 => {
+            6 => {
                 if delta < 0 {
                     config.argo_hub_kubeconfig = None;
                 }
@@ -298,11 +476,19 @@ impl TuiConfigViewState {
         match self.selected_field {
             0 => {
                 let current = config.command_popup_max_width;
-                config.command_popup_max_width = if current >= 200 { 40 } else { (current + 20).min(200) };
+                config.command_popup_max_width = if current >= 200 {
+                    40
+                } else {
+                    (current + 20).min(200)
+                };
             }
             1 => {
                 let current = config.command_popup_max_visible;
-                config.command_popup_max_visible = if current >= 20 { 3 } else { (current + 3).min(20) };
+                config.command_popup_max_visible = if current >= 20 {
+                    3
+                } else {
+                    (current + 3).min(20)
+                };
             }
             2 => {
                 config.command_popup_density = config.command_popup_density.toggle();
@@ -311,9 +497,12 @@ impl TuiConfigViewState {
                 config.show_feature_banner = !config.show_feature_banner;
             }
             4 => {
-                self.start_editing(config);
+                config.check_updates = !config.check_updates;
             }
             5 => {
+                self.start_editing(config);
+            }
+            6 => {
                 self.start_editing(config);
             }
             _ => {}
@@ -388,8 +577,8 @@ pub fn render_tui_config_view(
         (v_chunks[0], v_chunks[1])
     };
 
-    // Setting cards: 6 cards total (0..=5)
-    let card_height = if controls_area.height >= 24 { 4 } else { 3 };
+    // Setting cards: 7 cards total (0..=6)
+    let card_height = if controls_area.height >= 26 { 4 } else { 3 };
     let control_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -397,8 +586,9 @@ pub fn render_tui_config_view(
             Constraint::Length(card_height), // 1: Visible Rows
             Constraint::Length(card_height), // 2: Text Size / Density
             Constraint::Length(card_height), // 3: Startup Feature Banner
-            Constraint::Length(card_height), // 4: ArgoCD Hub Context
-            Constraint::Length(card_height), // 5: ArgoCD Hub Kubeconfig Path
+            Constraint::Length(card_height), // 4: Startup Update Check
+            Constraint::Length(card_height), // 5: ArgoCD Hub Context
+            Constraint::Length(card_height), // 6: ArgoCD Hub Kubeconfig Path
             Constraint::Min(0),
         ])
         .split(controls_area);
@@ -422,7 +612,9 @@ pub fn render_tui_config_view(
         .title(Span::styled(
             width_title,
             if is_width_selected {
-                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Theme::fg())
             },
@@ -432,15 +624,22 @@ pub fn render_tui_config_view(
 
     let width_val = config.command_popup_max_width;
     let width_pct = (width_val.saturating_sub(40) as f32) / (160.0);
-    let slider_width = (width_inner.width.saturating_sub(4) as usize).min(24).max(10);
+    let slider_width = (width_inner.width.saturating_sub(4) as usize)
+        .min(24)
+        .max(10);
     let width_lines = vec![
         Line::from(vec![
             Span::styled("Width: ", Style::default().fg(Theme::dim())),
             Span::styled(
                 format!("{width_val:>3} cols "),
-                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(render_slider(width_pct, slider_width), Style::default().fg(Theme::accent())),
+            Span::styled(
+                render_slider(width_pct, slider_width),
+                Style::default().fg(Theme::accent()),
+            ),
             Span::styled(" [40..=200]", Style::default().fg(Theme::dim())),
         ]),
         Line::from(vec![
@@ -474,7 +673,9 @@ pub fn render_tui_config_view(
         .title(Span::styled(
             rows_title,
             if is_rows_selected {
-                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Theme::fg())
             },
@@ -484,15 +685,22 @@ pub fn render_tui_config_view(
 
     let rows_val = config.command_popup_max_visible;
     let rows_pct = (rows_val.saturating_sub(3) as f32) / (17.0);
-    let slider_rows = (rows_inner.width.saturating_sub(4) as usize).min(24).max(10);
+    let slider_rows = (rows_inner.width.saturating_sub(4) as usize)
+        .min(24)
+        .max(10);
     let rows_lines = vec![
         Line::from(vec![
             Span::styled("Rows:  ", Style::default().fg(Theme::dim())),
             Span::styled(
                 format!("{rows_val:>3} rows "),
-                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(render_slider(rows_pct, slider_rows), Style::default().fg(Theme::accent())),
+            Span::styled(
+                render_slider(rows_pct, slider_rows),
+                Style::default().fg(Theme::accent()),
+            ),
             Span::styled(" [3..=20]", Style::default().fg(Theme::dim())),
         ]),
         Line::from(vec![
@@ -526,7 +734,9 @@ pub fn render_tui_config_view(
         .title(Span::styled(
             density_title,
             if is_density_selected {
-                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Theme::fg())
             },
@@ -536,19 +746,28 @@ pub fn render_tui_config_view(
 
     let scale_val = config.command_popup_density.scale();
     let scale_pct = (scale_val - 1) as f32 / 3.0;
-    let slider_density = (density_inner.width.saturating_sub(4) as usize).min(24).max(10);
+    let slider_density = (density_inner.width.saturating_sub(4) as usize)
+        .min(24)
+        .max(10);
     let density_lines = vec![
         Line::from(vec![
             Span::styled("Scale: ", Style::default().fg(Theme::dim())),
             Span::styled(
                 format!("{scale_val} / 4  "),
-                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(render_slider(scale_pct, slider_density), Style::default().fg(Theme::accent())),
+            Span::styled(
+                render_slider(scale_pct, slider_density),
+                Style::default().fg(Theme::accent()),
+            ),
             Span::styled(" [1..=4] ", Style::default().fg(Theme::dim())),
             Span::styled(
                 format!("({})", config.command_popup_density.label()),
-                Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
@@ -584,7 +803,9 @@ pub fn render_tui_config_view(
         .title(Span::styled(
             banner_title,
             if is_banner_selected {
-                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Theme::fg())
             },
@@ -593,9 +814,19 @@ pub fn render_tui_config_view(
     f.render_widget(banner_block, control_chunks[3]);
 
     let (checkbox_str, status_str, status_style) = if config.show_feature_banner {
-        ("[● Show on startup]", "Enabled", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD))
+        (
+            "[● Show on startup]",
+            "Enabled",
+            Style::default()
+                .fg(Theme::cyan())
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
-        ("[○ Don't show]", "Disabled", Style::default().fg(Theme::dim()))
+        (
+            "[○ Don't show]",
+            "Disabled",
+            Style::default().fg(Theme::dim()),
+        )
     };
 
     let banner_lines = vec![
@@ -604,7 +835,9 @@ pub fn render_tui_config_view(
             Span::styled(
                 checkbox_str,
                 if config.show_feature_banner {
-                    Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Theme::dim())
                 },
@@ -612,7 +845,12 @@ pub fn render_tui_config_view(
             Span::styled("  Status: ", Style::default().fg(Theme::dim())),
             Span::styled(status_str, status_style),
             Span::styled("  Command: ", Style::default().fg(Theme::dim())),
-            Span::styled(":banner", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                ":banner",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" / ", Style::default().fg(Theme::dim())),
             Span::styled(":features", Style::default().fg(Theme::cyan())),
         ]),
@@ -628,8 +866,88 @@ pub fn render_tui_config_view(
     ];
     f.render_widget(Paragraph::new(banner_lines), banner_inner);
 
-    // Setting 4: ArgoCD Hub Context
-    let is_hub_ctx_selected = state.selected_field == 4;
+    // Setting 4: Startup Update Check
+    let is_update_selected = state.selected_field == 4;
+    let update_border_color = if is_update_selected {
+        Theme::cyan()
+    } else {
+        Theme::border()
+    };
+    let update_title = if is_update_selected {
+        " ▶ Startup Update Check "
+    } else {
+        "   Startup Update Check "
+    };
+    let update_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(update_border_color))
+        .title(Span::styled(
+            update_title,
+            if is_update_selected {
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::fg())
+            },
+        ));
+    let update_inner = update_block.inner(control_chunks[4]);
+    f.render_widget(update_block, control_chunks[4]);
+
+    let (update_checkbox_str, update_status_str, update_status_style) = if config.check_updates {
+        (
+            "[● Check on startup]",
+            "Enabled",
+            Style::default()
+                .fg(Theme::cyan())
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            "[○ Don't check]",
+            "Disabled",
+            Style::default().fg(Theme::dim()),
+        )
+    };
+
+    let update_lines = vec![
+        Line::from(vec![
+            Span::styled("Updates: ", Style::default().fg(Theme::dim())),
+            Span::styled(
+                update_checkbox_str,
+                if config.check_updates {
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Theme::dim())
+                },
+            ),
+            Span::styled("  Status: ", Style::default().fg(Theme::dim())),
+            Span::styled(update_status_str, update_status_style),
+            Span::styled("  Command: ", Style::default().fg(Theme::dim())),
+            Span::styled(
+                ":update",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Action: Toggle  |  Use ", Style::default().fg(Theme::dim())),
+            Span::styled("Space", Style::default().fg(Theme::yellow())),
+            Span::styled(" or ", Style::default().fg(Theme::dim())),
+            Span::styled("Enter", Style::default().fg(Theme::yellow())),
+            Span::styled(" or ", Style::default().fg(Theme::dim())),
+            Span::styled("←/→", Style::default().fg(Theme::yellow())),
+            Span::styled(" to toggle", Style::default().fg(Theme::dim())),
+        ]),
+    ];
+    f.render_widget(Paragraph::new(update_lines), update_inner);
+
+    // Setting 5: ArgoCD Hub Context
+    let is_hub_ctx_selected = state.selected_field == 5;
     let hub_ctx_border_color = if is_hub_ctx_selected {
         Theme::cyan()
     } else {
@@ -647,31 +965,30 @@ pub fn render_tui_config_view(
         .title(Span::styled(
             hub_ctx_title,
             if is_hub_ctx_selected {
-                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Theme::fg())
             },
         ));
-    let hub_ctx_inner = hub_ctx_block.inner(control_chunks[4]);
-    f.render_widget(hub_ctx_block, control_chunks[4]);
+    let hub_ctx_inner = hub_ctx_block.inner(control_chunks[5]);
+    f.render_widget(hub_ctx_block, control_chunks[5]);
 
     let (ctx_display, ctx_style) = match &config.argo_hub_context {
         Some(ctx) if !ctx.trim().is_empty() => (
             ctx.as_str(),
-            Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Theme::cyan())
+                .add_modifier(Modifier::BOLD),
         ),
-        _ => (
-            "(none - local cluster)",
-            Style::default().fg(Theme::dim()),
-        ),
+        _ => ("(none - local cluster)", Style::default().fg(Theme::dim())),
     };
 
-    let mut hub_ctx_lines = vec![
-        Line::from(vec![
-            Span::styled("Context: ", Style::default().fg(Theme::dim())),
-            Span::styled(ctx_display, ctx_style),
-        ]),
-    ];
+    let mut hub_ctx_lines = vec![Line::from(vec![
+        Span::styled("Context: ", Style::default().fg(Theme::dim())),
+        Span::styled(ctx_display, ctx_style),
+    ])];
     if hub_ctx_inner.height > 1 {
         hub_ctx_lines.push(Line::from(vec![
             Span::styled("Action: ", Style::default().fg(Theme::dim())),
@@ -685,8 +1002,8 @@ pub fn render_tui_config_view(
     }
     f.render_widget(Paragraph::new(hub_ctx_lines), hub_ctx_inner);
 
-    // Setting 5: ArgoCD Hub Kubeconfig Path
-    let is_hub_cfg_selected = state.selected_field == 5;
+    // Setting 6: ArgoCD Hub Kubeconfig Path
+    let is_hub_cfg_selected = state.selected_field == 6;
     let hub_cfg_border_color = if is_hub_cfg_selected {
         Theme::cyan()
     } else {
@@ -704,18 +1021,22 @@ pub fn render_tui_config_view(
         .title(Span::styled(
             hub_cfg_title,
             if is_hub_cfg_selected {
-                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Theme::fg())
             },
         ));
-    let hub_cfg_inner = hub_cfg_block.inner(control_chunks[5]);
-    f.render_widget(hub_cfg_block, control_chunks[5]);
+    let hub_cfg_inner = hub_cfg_block.inner(control_chunks[6]);
+    f.render_widget(hub_cfg_block, control_chunks[6]);
 
     let (cfg_display, cfg_style) = match &config.argo_hub_kubeconfig {
         Some(p) if !p.as_os_str().is_empty() => (
             p.display().to_string(),
-            Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Theme::cyan())
+                .add_modifier(Modifier::BOLD),
         ),
         _ => (
             "(default: in-cluster / $KUBECONFIG)".to_string(),
@@ -723,12 +1044,10 @@ pub fn render_tui_config_view(
         ),
     };
 
-    let mut hub_cfg_lines = vec![
-        Line::from(vec![
-            Span::styled("Path: ", Style::default().fg(Theme::dim())),
-            Span::styled(cfg_display, cfg_style),
-        ]),
-    ];
+    let mut hub_cfg_lines = vec![Line::from(vec![
+        Span::styled("Path: ", Style::default().fg(Theme::dim())),
+        Span::styled(cfg_display, cfg_style),
+    ])];
     if hub_cfg_inner.height > 1 {
         hub_cfg_lines.push(Line::from(vec![
             Span::styled("Action: ", Style::default().fg(Theme::dim())),
@@ -748,20 +1067,171 @@ pub fn render_tui_config_view(
             .border_style(Style::default().fg(Theme::border()))
             .title(Span::styled(
                 " Live Preview: Startup Feature Banner (:features, :banner) ",
-                Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
             ));
         let preview_inner = preview_block.inner(preview_area);
         f.render_widget(preview_block, preview_area);
 
-        crate::ui::render_feature_banner_modal(f, preview_inner, config.show_feature_banner);
-    } else if state.selected_field == 4 || state.selected_field == 5 {
+        crate::ui::render_feature_banner_modal(
+            f,
+            preview_inner,
+            config.show_feature_banner,
+            config.update_available.as_deref(),
+        );
+    } else if state.selected_field == 4 {
+        let preview_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(Theme::border_type())
+            .border_style(Style::default().fg(Theme::border()))
+            .title(Span::styled(
+                " Live Preview: Startup Update Check (:update) ",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let preview_inner = preview_block.inner(preview_area);
+        f.render_widget(preview_block, preview_area);
+
+        let status_span = if config.check_updates {
+            Span::styled(
+                "Enabled (Check GitHub releases on startup)",
+                Theme::status_ok().add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(
+                "Disabled (Offline / No network calls)",
+                Style::default()
+                    .fg(Theme::dim())
+                    .add_modifier(Modifier::BOLD),
+            )
+        };
+
+        let current_ver = env!("CARGO_PKG_VERSION");
+        let update_status_span = match &config.update_available {
+            Some(ver) => Span::styled(
+                format!("▲ Update Available: v{}", ver),
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            None => Span::styled(
+                format!("v{} (latest known)", current_ver),
+                Style::default().fg(Theme::dim()),
+            ),
+        };
+
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("Update Checking: ", Theme::header_label()),
+                status_span,
+            ]),
+            Line::from(vec![
+                Span::styled("Current Version: ", Theme::header_label()),
+                Span::styled(
+                    format!("v{}", current_ver),
+                    Style::default().fg(Theme::fg()),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Latest Status:   ", Theme::header_label()),
+                update_status_span,
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Header Indicator Preview (Top-Right):",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![
+                Span::styled(
+                    "  [Active ctx: minikube]   ",
+                    Style::default().fg(Theme::dim()),
+                ),
+                Span::styled(
+                    "▲ Update: v0.14.0",
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("   [12:34:56]", Style::default().fg(Theme::dim())),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "How Update Checking Works:",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::styled(
+                "• At startup, srelens queries GitHub Releases asynchronously.",
+                Style::default().fg(Theme::dim()),
+            )]),
+            Line::from(vec![Span::styled(
+                "• The check is non-blocking with a 5s timeout and fails silently if offline.",
+                Style::default().fg(Theme::dim()),
+            )]),
+            Line::from(vec![Span::styled(
+                "• If a newer release exists, a yellow badge appears in the top-right header.",
+                Style::default().fg(Theme::dim()),
+            )]),
+            Line::from(vec![
+                Span::styled("• Run ", Style::default().fg(Theme::dim())),
+                Span::styled(
+                    ":update",
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" or ", Style::default().fg(Theme::dim())),
+                Span::styled(
+                    ":self-update",
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " anytime to install the update in-place.",
+                    Style::default().fg(Theme::dim()),
+                ),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Quick Actions: ", Style::default().fg(Theme::dim())),
+                Span::styled(
+                    "<Space / Enter / ← / →>",
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " Toggle check on/off  |  ",
+                    Style::default().fg(Theme::dim()),
+                ),
+                Span::styled(
+                    ":update",
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" Check & update now", Style::default().fg(Theme::dim())),
+            ]),
+        ];
+
+        let p = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true });
+        f.render_widget(p, preview_inner);
+    } else if state.selected_field == 5 || state.selected_field == 6 {
         let preview_block = Block::default()
             .borders(Borders::ALL)
             .border_type(Theme::border_type())
             .border_style(Style::default().fg(Theme::border()))
             .title(Span::styled(
                 " Live Preview: ArgoCD GitOps Hub-and-Spoke Topology (:argo) ",
-                Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
             ));
         let preview_inner = preview_block.inner(preview_area);
         f.render_widget(preview_block, preview_area);
@@ -770,13 +1240,22 @@ pub fn render_tui_config_view(
         let resolved_hub_kc = config.resolved_argo_hub_kubeconfig();
         let is_remote = resolved_hub_ctx.is_some() || resolved_hub_kc.is_some();
         let topology_mode_span = if is_remote {
-            Span::styled("Hub-and-Spoke (Central Management Cluster)", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD))
+            Span::styled(
+                "Hub-and-Spoke (Central Management Cluster)",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
-            Span::styled("Local / In-Cluster (Single Cluster)", Theme::status_ok().add_modifier(Modifier::BOLD))
+            Span::styled(
+                "Local / In-Cluster (Single Cluster)",
+                Theme::status_ok().add_modifier(Modifier::BOLD),
+            )
         };
 
         let hub_context_str = resolved_hub_ctx.as_deref().unwrap_or("(active cluster)");
-        let hub_kubeconfig_str = resolved_hub_kc.as_ref()
+        let hub_kubeconfig_str = resolved_hub_kc
+            .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(default $KUBECONFIG)".to_string());
 
@@ -787,69 +1266,126 @@ pub fn render_tui_config_view(
             ]),
             Line::from(vec![
                 Span::styled("Hub Context:   ", Theme::header_label()),
-                Span::styled(hub_context_str, Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    hub_context_str,
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(vec![
                 Span::styled("Hub Kubeconfig:", Theme::header_label()),
-                Span::styled(format!(" {}", hub_kubeconfig_str), Style::default().fg(Theme::fg())),
+                Span::styled(
+                    format!(" {}", hub_kubeconfig_str),
+                    Style::default().fg(Theme::fg()),
+                ),
             ]),
             Line::from(""),
+            Line::from(vec![Span::styled(
+                "How ArgoCD Hub-and-Spoke Works:",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            )]),
             Line::from(vec![
-                Span::styled("How ArgoCD Hub-and-Spoke Works:", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
-            ]),
-            Line::from(vec![
-                Span::styled("• In multi-cluster setups, ArgoCD runs in a dedicated ", Style::default().fg(Theme::dim())),
+                Span::styled(
+                    "• In multi-cluster setups, ArgoCD runs in a dedicated ",
+                    Style::default().fg(Theme::dim()),
+                ),
                 Span::styled("Hub cluster.", Style::default().fg(Theme::fg())),
             ]),
-            Line::from(vec![
-                Span::styled("• Spoke clusters do not run ArgoCD, so querying them locally returns a 404.", Style::default().fg(Theme::dim())),
-            ]),
+            Line::from(vec![Span::styled(
+                "• Spoke clusters do not run ArgoCD, so querying them locally returns a 404.",
+                Style::default().fg(Theme::dim()),
+            )]),
             Line::from(vec![
                 Span::styled("• Setting ", Style::default().fg(Theme::dim())),
                 Span::styled("argo_hub_context", Style::default().fg(Theme::yellow())),
-                Span::styled(" routes requests to the Hub and filters for the current spoke.", Style::default().fg(Theme::dim())),
+                Span::styled(
+                    " routes requests to the Hub and filters for the current spoke.",
+                    Style::default().fg(Theme::dim()),
+                ),
             ]),
             Line::from(""),
-            Line::from(vec![
-                Span::styled(format!("Detected Contexts ({}):", state.available_contexts.len()), Theme::header_label()),
-            ]),
+            Line::from(vec![Span::styled(
+                format!("Detected Contexts ({}):", state.available_contexts.len()),
+                Theme::header_label(),
+            )]),
         ];
 
         if state.available_contexts.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled("  (No other contexts detected in kubeconfig)", Style::default().fg(Theme::dim())),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                "  (No other contexts detected in kubeconfig)",
+                Style::default().fg(Theme::dim()),
+            )]));
         } else {
             for ctx in state.available_contexts.iter().take(6) {
                 let is_current_hub = Some(ctx) == config.argo_hub_context.as_ref();
-                let marker = if is_current_hub { " ▶ [HUB] " } else { "   •     " };
+                let marker = if is_current_hub {
+                    " ▶ [HUB] "
+                } else {
+                    "   •     "
+                };
                 let style = if is_current_hub {
-                    Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Theme::fg())
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(marker, if is_current_hub { Style::default().fg(Theme::cyan()) } else { Style::default().fg(Theme::dim()) }),
+                    Span::styled(
+                        marker,
+                        if is_current_hub {
+                            Style::default().fg(Theme::cyan())
+                        } else {
+                            Style::default().fg(Theme::dim())
+                        },
+                    ),
                     Span::styled(ctx, style),
                 ]));
             }
             if state.available_contexts.len() > 6 {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  ... and {} more contexts", state.available_contexts.len() - 6), Style::default().fg(Theme::dim())),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    format!(
+                        "  ... and {} more contexts",
+                        state.available_contexts.len() - 6
+                    ),
+                    Style::default().fg(Theme::dim()),
+                )]));
             }
         }
 
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("Quick Actions: ", Style::default().fg(Theme::dim())),
-            Span::styled("<e>", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<e>",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Edit text  |  ", Style::default().fg(Theme::dim())),
-            Span::styled("<h/l>", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<h/l>",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Cycle contexts  |  ", Style::default().fg(Theme::dim())),
-            Span::styled("<c>", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<c>",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Clear  |  ", Style::default().fg(Theme::dim())),
-            Span::styled(":argo", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                ":argo",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Jump to ArgoCD", Style::default().fg(Theme::dim())),
         ]));
 
@@ -862,377 +1398,448 @@ pub fn render_tui_config_view(
             .border_style(Style::default().fg(Theme::border()))
             .title(Span::styled(
                 " Live Preview: Command Popup (:) ",
-                Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
             ));
         let preview_inner = preview_block.inner(preview_area);
         f.render_widget(preview_block, preview_area);
 
         if preview_inner.height >= 4 && preview_inner.width >= 20 {
-        // Simulated statusbar at bottom of preview area
-        let sim_bar_y = preview_inner.y + preview_inner.height.saturating_sub(1);
-        let sim_bar_area = Rect {
-            x: preview_inner.x,
-            y: sim_bar_y,
-            width: preview_inner.width,
-            height: 1,
-        };
-        let sim_cmd_line = Line::from(vec![
-            Span::styled(":", Theme::prompt()),
-            Span::styled("po", Style::default().fg(Theme::fg())),
-            Span::styled("█", Style::default().fg(Theme::cyan())),
-        ]);
-        f.render_widget(Paragraph::new(sim_cmd_line), sim_bar_area);
+            // Simulated statusbar at bottom of preview area
+            let sim_bar_y = preview_inner.y + preview_inner.height.saturating_sub(1);
+            let sim_bar_area = Rect {
+                x: preview_inner.x,
+                y: sim_bar_y,
+                width: preview_inner.width,
+                height: 1,
+            };
+            let sim_cmd_line = Line::from(vec![
+                Span::styled(":", Theme::prompt()),
+                Span::styled("po", Style::default().fg(Theme::fg())),
+                Span::styled("█", Style::default().fg(Theme::cyan())),
+            ]);
+            f.render_widget(Paragraph::new(sim_cmd_line), sim_bar_area);
 
-        // Compute popup area relative to sim_bar_area using command_popup_rect
-        let calc_popup = command_popup_rect(
-            sim_bar_area,
-            SAMPLE_SUGGESTIONS.len(),
-            config.command_popup_max_width,
-            config.command_popup_max_visible,
-            config.command_popup_density,
-        );
+            // Compute popup area relative to sim_bar_area using command_popup_rect
+            let calc_popup = command_popup_rect(
+                sim_bar_area,
+                SAMPLE_SUGGESTIONS.len(),
+                config.command_popup_max_width,
+                config.command_popup_max_visible,
+                config.command_popup_density,
+            );
 
-        // Clamp popup vertically so it stays within preview_inner
-        let max_avail_height = preview_inner.height.saturating_sub(1);
-        let popup_height = calc_popup.height.min(max_avail_height);
-        let popup_y = sim_bar_y.saturating_sub(popup_height).max(preview_inner.y);
-        let popup_width = calc_popup.width.min(preview_inner.width.saturating_sub(2));
+            // Clamp popup vertically so it stays within preview_inner
+            let max_avail_height = preview_inner.height.saturating_sub(1);
+            let popup_height = calc_popup.height.min(max_avail_height);
+            let popup_y = sim_bar_y.saturating_sub(popup_height).max(preview_inner.y);
+            let popup_width = calc_popup.width.min(preview_inner.width.saturating_sub(2));
 
-        let popup_area = Rect {
-            x: preview_inner.x + 1,
-            y: popup_y,
-            width: popup_width,
-            height: popup_height,
-        };
+            let popup_area = Rect {
+                x: preview_inner.x + 1,
+                y: popup_y,
+                width: popup_width,
+                height: popup_height,
+            };
 
-        f.render_widget(Clear, popup_area);
+            f.render_widget(Clear, popup_area);
 
-        let density = config.command_popup_density;
-        let inner_height = popup_area.height.saturating_sub(2);
-        let item_lines = density.item_height();
-        let max_fits = (inner_height / item_lines) as usize;
-        let visible_count = SAMPLE_SUGGESTIONS
-            .len()
-            .min(config.command_popup_max_visible)
-            .min(max_fits.max(1));
-        let visible_slice = &SAMPLE_SUGGESTIONS[0..visible_count];
-        let popup_inner_w = popup_area.width.saturating_sub(2) as usize;
+            let density = config.command_popup_density;
+            let inner_height = popup_area.height.saturating_sub(2);
+            let item_lines = density.item_height();
+            let max_fits = (inner_height / item_lines) as usize;
+            let visible_count = SAMPLE_SUGGESTIONS
+                .len()
+                .min(config.command_popup_max_visible)
+                .min(max_fits.max(1));
+            let visible_slice = &SAMPLE_SUGGESTIONS[0..visible_count];
+            let popup_inner_w = popup_area.width.saturating_sub(2) as usize;
 
-        let items: Vec<ListItem> = visible_slice
-            .iter()
-            .enumerate()
-            .map(|(i, (name, aliases, cat, desc, syntax))| {
-                let is_selected = i == 0;
-                let prefix = if is_selected { "▶ " } else { "  " };
+            let items: Vec<ListItem> = visible_slice
+                .iter()
+                .enumerate()
+                .map(|(i, (name, aliases, cat, desc, syntax))| {
+                    let is_selected = i == 0;
+                    let prefix = if is_selected { "▶ " } else { "  " };
 
-                match density {
-                    CommandPopupDensity::ExtraLarge => {
-                        let alias_str = if !aliases.is_empty() {
-                            format!(" ({})", aliases.join(", "))
-                        } else {
-                            String::new()
-                        };
-                        let cat_badge = format!("[{}]", cat);
-                        let name_text = format!("{}{}{}", prefix, name.to_uppercase(), alias_str);
-
-                        let name_len = name_text.chars().count();
-                        let badge_len = cat_badge.chars().count();
-                        let spacer_len = popup_inner_w.saturating_sub(name_len + badge_len + 1).max(2);
-                        let spacer = " ".repeat(spacer_len);
-
-                        let line1 = Line::from(vec![
-                            Span::styled(
-                                name_text,
-                                if is_selected {
-                                    Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
-                                } else {
-                                    Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
-                                },
-                            ),
-                            Span::raw(spacer),
-                            Span::styled(
-                                cat_badge,
-                                if is_selected {
-                                    Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)
-                                } else {
-                                    Style::default().fg(Theme::dim())
-                                },
-                            ),
-                        ]);
-
-                        let line2 = Line::from(vec![
-                            Span::raw("    "),
-                            Span::styled(
-                                *desc,
-                                if is_selected {
-                                    Style::default().fg(Theme::fg())
-                                } else {
-                                    Style::default().fg(Theme::dim())
-                                },
-                            ),
-                        ]);
-
-                        let mut line3_spans = vec![
-                            Span::raw("    "),
-                            Span::styled("Usage: ", Style::default().fg(Theme::dim())),
-                            Span::styled(
-                                if !syntax.is_empty() { *syntax } else { *name },
-                                if is_selected {
-                                    Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)
-                                } else {
-                                    Style::default().fg(Theme::yellow())
-                                },
-                            ),
-                        ];
-                        if !aliases.is_empty() {
-                            line3_spans.push(Span::styled("  |  Aliases: ", Style::default().fg(Theme::dim())));
-                            line3_spans.push(Span::styled(
-                                aliases.join(", "),
-                                if is_selected {
-                                    Style::default().fg(Theme::fg())
-                                } else {
-                                    Style::default().fg(Theme::dim())
-                                },
-                            ));
-                        }
-                        let line3 = Line::from(line3_spans);
-
-                        ListItem::new(vec![line1, line2, line3]).style(if is_selected {
-                            Theme::selected_row()
-                        } else {
-                            Style::default()
-                        })
-                    }
-                    CommandPopupDensity::Large => {
-                        let alias_str = if !aliases.is_empty() {
-                            format!(" ({})", aliases.join(", "))
-                        } else {
-                            String::new()
-                        };
-                        let cat_badge = format!("[{}]", cat);
-                        let name_text = format!("{}{}{}", prefix, name.to_uppercase(), alias_str);
-
-                        let name_len = name_text.chars().count();
-                        let badge_len = cat_badge.chars().count();
-                        let spacer_len = popup_inner_w.saturating_sub(name_len + badge_len + 1).max(2);
-                        let spacer = " ".repeat(spacer_len);
-
-                        let line1 = Line::from(vec![
-                            Span::styled(
-                                name_text,
-                                if is_selected {
-                                    Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
-                                } else {
-                                    Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
-                                },
-                            ),
-                            Span::raw(spacer),
-                            Span::styled(
-                                cat_badge,
-                                if is_selected {
-                                    Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)
-                                } else {
-                                    Style::default().fg(Theme::dim())
-                                },
-                            ),
-                        ]);
-
-                        let mut line2_spans = vec![
-                            Span::raw("    "),
-                            Span::styled(
-                                *desc,
-                                if is_selected {
-                                    Style::default().fg(Theme::fg())
-                                } else {
-                                    Style::default().fg(Theme::dim())
-                                },
-                            ),
-                        ];
-
-                        if !syntax.is_empty() && popup_inner_w >= 65 {
-                            line2_spans.push(Span::styled("  •  ", Style::default().fg(Theme::dim())));
-                            line2_spans.push(Span::styled(
-                                *syntax,
-                                if is_selected {
-                                    Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)
-                                } else {
-                                    Style::default().fg(Theme::yellow())
-                                },
-                            ));
-                        }
-
-                        let line2 = Line::from(line2_spans);
-
-                        ListItem::new(vec![line1, line2]).style(if is_selected {
-                            Theme::selected_row()
-                        } else {
-                            Style::default()
-                        })
-                    }
-                    CommandPopupDensity::Standard => {
-                        let alias_str = if !aliases.is_empty() {
-                            format!(" ({})", aliases.join(", "))
-                        } else {
-                            String::new()
-                        };
-                        let name_col = format!("{}{}{}", prefix, name, alias_str);
-                        let pad_width = if popup_inner_w >= 90 { 26 } else { 20 };
-                        let padded_name = format!("{:<pad_width$}", name_col, pad_width = pad_width);
-
-                        let mut spans = vec![
-                            Span::styled(
-                                padded_name,
-                                if is_selected {
-                                    Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
-                                } else {
-                                    Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)
-                                },
-                            ),
-                        ];
-
-                        if popup_inner_w >= 60 {
-                            spans.push(Span::styled(
-                                format!("[{}] ", cat),
-                                if is_selected {
-                                    Style::default().fg(Theme::accent())
-                                } else {
-                                    Style::default().fg(Theme::dim())
-                                },
-                            ));
-                        }
-
-                        spans.push(Span::styled(
-                            format!(" {}", desc),
-                            if is_selected {
-                                Style::default().fg(Theme::fg())
+                    match density {
+                        CommandPopupDensity::ExtraLarge => {
+                            let alias_str = if !aliases.is_empty() {
+                                format!(" ({})", aliases.join(", "))
                             } else {
-                                Style::default().fg(Theme::dim())
-                            },
-                        ));
+                                String::new()
+                            };
+                            let cat_badge = format!("[{}]", cat);
+                            let name_text =
+                                format!("{}{}{}", prefix, name.to_uppercase(), alias_str);
 
-                        if !syntax.is_empty() && popup_inner_w >= 85 {
-                            spans.push(Span::styled("  |  ", Style::default().fg(Theme::dim())));
-                            spans.push(Span::styled(
-                                *syntax,
-                                if is_selected {
-                                    Style::default().fg(Theme::yellow())
-                                } else {
-                                    Style::default().fg(Theme::dim())
-                                },
-                            ));
+                            let name_len = name_text.chars().count();
+                            let badge_len = cat_badge.chars().count();
+                            let spacer_len = popup_inner_w
+                                .saturating_sub(name_len + badge_len + 1)
+                                .max(2);
+                            let spacer = " ".repeat(spacer_len);
+
+                            let line1 = Line::from(vec![
+                                Span::styled(
+                                    name_text,
+                                    if is_selected {
+                                        Style::default()
+                                            .fg(Theme::cyan())
+                                            .add_modifier(Modifier::BOLD)
+                                    } else {
+                                        Style::default()
+                                            .fg(Theme::fg())
+                                            .add_modifier(Modifier::BOLD)
+                                    },
+                                ),
+                                Span::raw(spacer),
+                                Span::styled(
+                                    cat_badge,
+                                    if is_selected {
+                                        Style::default()
+                                            .fg(Theme::accent())
+                                            .add_modifier(Modifier::BOLD)
+                                    } else {
+                                        Style::default().fg(Theme::dim())
+                                    },
+                                ),
+                            ]);
+
+                            let line2 = Line::from(vec![
+                                Span::raw("    "),
+                                Span::styled(
+                                    *desc,
+                                    if is_selected {
+                                        Style::default().fg(Theme::fg())
+                                    } else {
+                                        Style::default().fg(Theme::dim())
+                                    },
+                                ),
+                            ]);
+
+                            let mut line3_spans = vec![
+                                Span::raw("    "),
+                                Span::styled("Usage: ", Style::default().fg(Theme::dim())),
+                                Span::styled(
+                                    if !syntax.is_empty() { *syntax } else { *name },
+                                    if is_selected {
+                                        Style::default()
+                                            .fg(Theme::yellow())
+                                            .add_modifier(Modifier::BOLD)
+                                    } else {
+                                        Style::default().fg(Theme::yellow())
+                                    },
+                                ),
+                            ];
+                            if !aliases.is_empty() {
+                                line3_spans.push(Span::styled(
+                                    "  |  Aliases: ",
+                                    Style::default().fg(Theme::dim()),
+                                ));
+                                line3_spans.push(Span::styled(
+                                    aliases.join(", "),
+                                    if is_selected {
+                                        Style::default().fg(Theme::fg())
+                                    } else {
+                                        Style::default().fg(Theme::dim())
+                                    },
+                                ));
+                            }
+                            let line3 = Line::from(line3_spans);
+
+                            ListItem::new(vec![line1, line2, line3]).style(if is_selected {
+                                Theme::selected_row()
+                            } else {
+                                Style::default()
+                            })
                         }
+                        CommandPopupDensity::Large => {
+                            let alias_str = if !aliases.is_empty() {
+                                format!(" ({})", aliases.join(", "))
+                            } else {
+                                String::new()
+                            };
+                            let cat_badge = format!("[{}]", cat);
+                            let name_text =
+                                format!("{}{}{}", prefix, name.to_uppercase(), alias_str);
 
-                        ListItem::new(Line::from(spans)).style(if is_selected {
-                            Theme::selected_row()
-                        } else {
-                            Style::default()
-                        })
-                    }
-                    CommandPopupDensity::Compact => {
-                        let alias_str = if !aliases.is_empty() {
-                            format!(" ({})", aliases.join(", "))
-                        } else {
-                            String::new()
-                        };
-                        let name_col = format!("{}{}{}", prefix, name, alias_str);
-                        let pad_width = if popup_inner_w >= 90 { 24 } else { 18 };
-                        let padded_name = format!("{:<pad_width$}", name_col, pad_width = pad_width);
+                            let name_len = name_text.chars().count();
+                            let badge_len = cat_badge.chars().count();
+                            let spacer_len = popup_inner_w
+                                .saturating_sub(name_len + badge_len + 1)
+                                .max(2);
+                            let spacer = " ".repeat(spacer_len);
 
-                        let mut spans = vec![
-                            Span::styled(
+                            let line1 = Line::from(vec![
+                                Span::styled(
+                                    name_text,
+                                    if is_selected {
+                                        Style::default()
+                                            .fg(Theme::cyan())
+                                            .add_modifier(Modifier::BOLD)
+                                    } else {
+                                        Style::default()
+                                            .fg(Theme::fg())
+                                            .add_modifier(Modifier::BOLD)
+                                    },
+                                ),
+                                Span::raw(spacer),
+                                Span::styled(
+                                    cat_badge,
+                                    if is_selected {
+                                        Style::default()
+                                            .fg(Theme::accent())
+                                            .add_modifier(Modifier::BOLD)
+                                    } else {
+                                        Style::default().fg(Theme::dim())
+                                    },
+                                ),
+                            ]);
+
+                            let mut line2_spans = vec![
+                                Span::raw("    "),
+                                Span::styled(
+                                    *desc,
+                                    if is_selected {
+                                        Style::default().fg(Theme::fg())
+                                    } else {
+                                        Style::default().fg(Theme::dim())
+                                    },
+                                ),
+                            ];
+
+                            if !syntax.is_empty() && popup_inner_w >= 65 {
+                                line2_spans
+                                    .push(Span::styled("  •  ", Style::default().fg(Theme::dim())));
+                                line2_spans.push(Span::styled(
+                                    *syntax,
+                                    if is_selected {
+                                        Style::default()
+                                            .fg(Theme::yellow())
+                                            .add_modifier(Modifier::BOLD)
+                                    } else {
+                                        Style::default().fg(Theme::yellow())
+                                    },
+                                ));
+                            }
+
+                            let line2 = Line::from(line2_spans);
+
+                            ListItem::new(vec![line1, line2]).style(if is_selected {
+                                Theme::selected_row()
+                            } else {
+                                Style::default()
+                            })
+                        }
+                        CommandPopupDensity::Standard => {
+                            let alias_str = if !aliases.is_empty() {
+                                format!(" ({})", aliases.join(", "))
+                            } else {
+                                String::new()
+                            };
+                            let name_col = format!("{}{}{}", prefix, name, alias_str);
+                            let pad_width = if popup_inner_w >= 90 { 26 } else { 20 };
+                            let padded_name =
+                                format!("{:<pad_width$}", name_col, pad_width = pad_width);
+
+                            let mut spans = vec![Span::styled(
                                 padded_name,
                                 if is_selected {
-                                    Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)
+                                    Style::default()
+                                        .fg(Theme::cyan())
+                                        .add_modifier(Modifier::BOLD)
                                 } else {
-                                    Style::default().fg(Theme::fg())
+                                    Style::default()
+                                        .fg(Theme::fg())
+                                        .add_modifier(Modifier::BOLD)
                                 },
-                            ),
-                            Span::styled(
+                            )];
+
+                            if popup_inner_w >= 60 {
+                                spans.push(Span::styled(
+                                    format!("[{}] ", cat),
+                                    if is_selected {
+                                        Style::default().fg(Theme::accent())
+                                    } else {
+                                        Style::default().fg(Theme::dim())
+                                    },
+                                ));
+                            }
+
+                            spans.push(Span::styled(
                                 format!(" {}", desc),
                                 if is_selected {
                                     Style::default().fg(Theme::fg())
                                 } else {
                                     Style::default().fg(Theme::dim())
                                 },
-                            ),
-                        ];
-
-                        if !syntax.is_empty() && popup_inner_w >= 95 {
-                            spans.push(Span::styled("  |  ", Style::default().fg(Theme::dim())));
-                            spans.push(Span::styled(
-                                *syntax,
-                                if is_selected {
-                                    Style::default().fg(Theme::yellow())
-                                } else {
-                                    Style::default().fg(Theme::dim())
-                                },
                             ));
+
+                            if !syntax.is_empty() && popup_inner_w >= 85 {
+                                spans
+                                    .push(Span::styled("  |  ", Style::default().fg(Theme::dim())));
+                                spans.push(Span::styled(
+                                    *syntax,
+                                    if is_selected {
+                                        Style::default().fg(Theme::yellow())
+                                    } else {
+                                        Style::default().fg(Theme::dim())
+                                    },
+                                ));
+                            }
+
+                            ListItem::new(Line::from(spans)).style(if is_selected {
+                                Theme::selected_row()
+                            } else {
+                                Style::default()
+                            })
                         }
+                        CommandPopupDensity::Compact => {
+                            let alias_str = if !aliases.is_empty() {
+                                format!(" ({})", aliases.join(", "))
+                            } else {
+                                String::new()
+                            };
+                            let name_col = format!("{}{}{}", prefix, name, alias_str);
+                            let pad_width = if popup_inner_w >= 90 { 24 } else { 18 };
+                            let padded_name =
+                                format!("{:<pad_width$}", name_col, pad_width = pad_width);
 
-                        ListItem::new(Line::from(spans)).style(if is_selected {
-                            Theme::selected_row()
-                        } else {
-                            Style::default()
-                        })
+                            let mut spans = vec![
+                                Span::styled(
+                                    padded_name,
+                                    if is_selected {
+                                        Style::default()
+                                            .fg(Theme::cyan())
+                                            .add_modifier(Modifier::BOLD)
+                                    } else {
+                                        Style::default().fg(Theme::fg())
+                                    },
+                                ),
+                                Span::styled(
+                                    format!(" {}", desc),
+                                    if is_selected {
+                                        Style::default().fg(Theme::fg())
+                                    } else {
+                                        Style::default().fg(Theme::dim())
+                                    },
+                                ),
+                            ];
+
+                            if !syntax.is_empty() && popup_inner_w >= 95 {
+                                spans
+                                    .push(Span::styled("  |  ", Style::default().fg(Theme::dim())));
+                                spans.push(Span::styled(
+                                    *syntax,
+                                    if is_selected {
+                                        Style::default().fg(Theme::yellow())
+                                    } else {
+                                        Style::default().fg(Theme::dim())
+                                    },
+                                ));
+                            }
+
+                            ListItem::new(Line::from(spans)).style(if is_selected {
+                                Theme::selected_row()
+                            } else {
+                                Style::default()
+                            })
+                        }
                     }
-                }
-            })
-            .collect();
+                })
+                .collect();
 
-        let title = if visible_count < config.command_popup_max_visible {
-            format!(
-                " Commands [1/{}] (window limited: {} of {}) ",
-                SAMPLE_SUGGESTIONS.len(),
-                visible_count,
-                config.command_popup_max_visible
-            )
-        } else if SAMPLE_SUGGESTIONS.len() > visible_count {
-            format!(
-                " Commands [1/{}] (Tab: complete, Enter: run) ",
-                SAMPLE_SUGGESTIONS.len()
-            )
-        } else {
-            " Commands (Tab to complete, Enter to run) ".to_string()
-        };
+            let title = if visible_count < config.command_popup_max_visible {
+                format!(
+                    " Commands [1/{}] (window limited: {} of {}) ",
+                    SAMPLE_SUGGESTIONS.len(),
+                    visible_count,
+                    config.command_popup_max_visible
+                )
+            } else if SAMPLE_SUGGESTIONS.len() > visible_count {
+                format!(
+                    " Commands [1/{}] (Tab: complete, Enter: run) ",
+                    SAMPLE_SUGGESTIONS.len()
+                )
+            } else {
+                " Commands (Tab to complete, Enter to run) ".to_string()
+            };
 
-        let list = List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(Theme::border_type())
-                .border_style(Style::default().fg(Theme::accent()))
-                .title(title),
-        );
-        f.render_widget(list, popup_area);
+            let list = List::new(items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(Theme::border_type())
+                    .border_style(Style::default().fg(Theme::accent()))
+                    .title(title),
+            );
+            f.render_widget(list, popup_area);
+        }
     }
-}
 
     // 4. Bottom Key Hints
     let hints_line = Line::from(vec![
-        Span::styled("<j/k or ↑/↓> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "<j/k or ↑/↓> ",
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Select  ", Style::default().fg(Theme::dim())),
-        Span::styled("<h/l, ←/→, -/+> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "<h/l, ←/→, -/+> ",
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Adjust/Cycle  ", Style::default().fg(Theme::dim())),
-        Span::styled("<e/Enter> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "<e/Enter> ",
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Edit  ", Style::default().fg(Theme::dim())),
-        Span::styled("<c> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "<c> ",
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Clear  ", Style::default().fg(Theme::dim())),
-        Span::styled("<Space> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "<Space> ",
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Toggle  ", Style::default().fg(Theme::dim())),
-        Span::styled("<r> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "<r> ",
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Reset Defaults  ", Style::default().fg(Theme::dim())),
-        Span::styled("<Esc or q> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "<Esc or q> ",
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Back", Style::default().fg(Theme::dim())),
     ]);
     f.render_widget(Paragraph::new(hints_line), chunks[2]);
 
-    // 5. Edit Modal Dialog (if currently editing field 4 or 5)
+    // 5. Edit Modal Dialog (if currently editing field 5 or 6)
     if state.is_editing {
         let modal_area = crate::ui::help::centered_rect(65, 35, area);
         f.render_widget(Clear, modal_area);
 
         let title = match state.selected_field {
-            4 => " Edit ArgoCD Hub Context ",
-            5 => " Edit ArgoCD Hub Kubeconfig Path ",
+            5 => " Edit ArgoCD Hub Context ",
+            6 => " Edit ArgoCD Hub Kubeconfig Path ",
             _ => " Edit Setting ",
         };
 
@@ -1242,7 +1849,9 @@ pub fn render_tui_config_view(
             .border_style(Style::default().fg(Theme::cyan()))
             .title(Span::styled(
                 title,
-                Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
             ));
         let inner = edit_block.inner(modal_area);
         f.render_widget(edit_block, modal_area);
@@ -1258,8 +1867,8 @@ pub fn render_tui_config_view(
             .split(inner);
 
         let prompt_text = match state.selected_field {
-            4 => "Enter context name pointing to the ArgoCD cluster (leave empty to clear):",
-            5 => "Enter absolute path to the kubeconfig for ArgoCD (leave empty to clear):",
+            5 => "Enter context name pointing to the ArgoCD cluster (leave empty to clear):",
+            6 => "Enter absolute path to the kubeconfig for ArgoCD (leave empty to clear):",
             _ => "Enter new value:",
         };
         let prompt_p = Paragraph::new(prompt_text).style(Style::default().fg(Theme::dim()));
@@ -1271,9 +1880,19 @@ pub fn render_tui_config_view(
         let after: String = chars[pos..].iter().collect();
 
         let input_line = Line::from(vec![
-            Span::styled(before, Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                before,
+                Style::default()
+                    .fg(Theme::fg())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(Theme::cyan())),
-            Span::styled(after, Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                after,
+                Style::default()
+                    .fg(Theme::fg())
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]);
         let input_block = Block::default()
             .borders(Borders::ALL)
@@ -1292,15 +1911,40 @@ pub fn render_tui_config_view(
         f.render_widget(input_p, v_chunks[1]);
 
         let hint_line = Line::from(vec![
-            Span::styled("<Enter> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<Enter> ",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Save  ", Style::default().fg(Theme::dim())),
-            Span::styled("<Esc> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<Esc> ",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Cancel  ", Style::default().fg(Theme::dim())),
-            Span::styled("<Ctrl+V/Cmd+V> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<Ctrl+V/Cmd+V> ",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Paste  ", Style::default().fg(Theme::dim())),
-            Span::styled("<←/→> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<←/→> ",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Move  ", Style::default().fg(Theme::dim())),
-            Span::styled("<Ctrl+U> ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<Ctrl+U> ",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("Clear", Style::default().fg(Theme::dim())),
         ]);
         f.render_widget(Paragraph::new(hint_line), v_chunks[2]);

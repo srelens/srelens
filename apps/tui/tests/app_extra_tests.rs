@@ -720,6 +720,7 @@ fn widget_crd() -> CrdMeta {
         namespaced: true,
         short_names: vec![],
         printer_columns: vec![],
+        created_at: None,
     }
 }
 
@@ -1449,7 +1450,8 @@ async fn cordoning_and_uncordoning_a_node_patches_it_and_reports_which_way_it_we
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", false, false));
     app.handle_key_event(common::ch('c')).await;
     common::type_str(&mut app, "confirm").await;
-    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter))
+        .await;
     assert_eq!(toast(&app), "Cordoning node 'gpu-1'...");
     assert_eq!(
         action_result(&mut rx, "cordon_node:gpu-1").await,
@@ -1459,7 +1461,8 @@ async fn cordoning_and_uncordoning_a_node_patches_it_and_reports_which_way_it_we
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", true, false));
     app.handle_key_event(common::ch('c')).await;
     common::type_str(&mut app, "confirm").await;
-    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter))
+        .await;
     assert_eq!(toast(&app), "Uncordoning node 'gpu-1'...");
     assert_eq!(
         action_result(&mut rx, "cordon_node:gpu-1").await,
@@ -1475,7 +1478,8 @@ async fn a_cordon_the_apiserver_rejects_is_reported_as_an_error() {
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", false, false));
     app.handle_key_event(common::ch('c')).await;
     common::type_str(&mut app, "confirm").await;
-    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter))
+        .await;
     let err = action_result(&mut rx, "cordon_node:gpu-1")
         .await
         .expect_err("a 409 fails the patch");
@@ -1852,7 +1856,8 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     }
 
     // Direct HelmDetail key handling: tabs, diff toggle, scrolling, copy, esc
-    let mut detail_state = srelens_tui::views::HelmDetailViewState::new("nginx".into(), "default".into());
+    let mut detail_state =
+        srelens_tui::views::HelmDetailViewState::new("nginx".into(), "default".into());
     detail_state.set_detail(srelens_kube::helm::HelmReleaseDetail {
         name: "nginx".into(),
         namespace: "default".into(),
@@ -1897,7 +1902,10 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     }
     app.handle_key_event(common::ch('m')).await;
     if let ActiveView::HelmDetail(ref d) = app.active_view {
-        assert_eq!(d.values_diff_mode, srelens_tui::views::ValuesDiffMode::CustomVsDefault);
+        assert_eq!(
+            d.values_diff_mode,
+            srelens_tui::views::ValuesDiffMode::CustomVsDefault
+        );
     }
     app.handle_key_event(common::ch('3')).await;
     if let ActiveView::HelmDetail(ref d) = app.active_view {
@@ -1912,8 +1920,10 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     app.handle_key_event(common::ch('j')).await;
     app.handle_key_event(common::ch('k')).await;
     app.handle_key_event(common::ch('g')).await;
-    app.handle_key_event(common::key(crossterm::event::KeyCode::PageDown)).await;
-    app.handle_key_event(common::key(crossterm::event::KeyCode::PageUp)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::PageDown))
+        .await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::PageUp))
+        .await;
     app.handle_key_event(common::ch('5')).await;
     if let ActiveView::HelmDetail(ref d) = app.active_view {
         assert_eq!(d.active_tab, srelens_tui::views::HelmDetailTab::Notes);
@@ -1926,8 +1936,10 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     assert!(toast(&app).contains("Copied"));
 
     // Tab and BackTab cycle tabs
-    app.handle_key_event(common::key(crossterm::event::KeyCode::Tab)).await;
-    app.handle_key_event(common::key(crossterm::event::KeyCode::BackTab)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Tab))
+        .await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::BackTab))
+        .await;
     app.handle_key_event(common::ch('l')).await;
     app.handle_key_event(common::ch('h')).await;
 
@@ -1937,8 +1949,12 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
     app.modal = None;
 
     // Esc returns to previous view
-    app.handle_key_event(common::key(crossterm::event::KeyCode::Esc)).await;
-    assert!(matches!(app.active_view, ActiveView::Table(_) | ActiveView::Helm(_)));
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Esc))
+        .await;
+    assert!(matches!(
+        app.active_view,
+        ActiveView::Table(_) | ActiveView::Helm(_)
+    ));
 }
 
 #[tokio::test]
@@ -2459,4 +2475,152 @@ async fn tab_in_the_assistant_completes_the_highlighted_slash_command() {
     app.handle_key_event(common::key(crossterm::event::KeyCode::Tab))
         .await;
     assert_eq!(app.assistant_state.input, "");
+}
+
+// ---------------------------------------------------------------------------
+// YAML Edit / Apply Lifecycle & Cache Invalidation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn yaml_error_reverts_editor_content_and_reports_error() {
+    let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
+    let original = "apiVersion: external-secrets.io/v1beta1\nkind: ClusterSecretStore\nmetadata:\n  name: vault\nspec:\n  provider: {}\n";
+    let mut yaml_view = srelens_tui::views::yaml_view::YamlViewState::new(
+        "vault".to_string(),
+        "ClusterSecretStore".to_string(),
+        None,
+        original.to_string(),
+    );
+    yaml_view.update_content("modified content that fails to apply\n".to_string());
+    app.active_view = ActiveView::Yaml(yaml_view);
+
+    app.handle_yaml_error("404 Not Found");
+
+    if let ActiveView::Yaml(yaml) = &app.active_view {
+        assert_eq!(
+            yaml.yaml_content, original,
+            "YAML view content must revert to original cluster state on error"
+        );
+    } else {
+        panic!("expected ActiveView::Yaml");
+    }
+    let toast = app.toast.expect("toast must be set on yaml error");
+    assert!(
+        toast.0.contains("Apply failed (reverted): 404 Not Found"),
+        "toast: {:?}",
+        toast.0
+    );
+}
+
+#[tokio::test]
+async fn yaml_applied_invalidates_cache_and_commits_content() {
+    let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
+    let initial = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n";
+    let mut yaml_view = srelens_tui::views::yaml_view::YamlViewState::new(
+        "cfg".to_string(),
+        "ConfigMap".to_string(),
+        Some("default".to_string()),
+        initial.to_string(),
+    );
+    let new_yaml = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\ndata:\n  k: v\n";
+    yaml_view.update_content(new_yaml.to_string());
+    app.active_view = ActiveView::Yaml(yaml_view);
+
+    let cache_key = (
+        FAKE_CONTEXT.to_string(),
+        "default".to_string(),
+        "ConfigMap".to_string(),
+    );
+    app.resource_cache
+        .insert(cache_key.clone(), vec![json!({"name": "cfg"})]);
+    assert!(app.resource_cache.contains_key(&cache_key));
+
+    app.handle_yaml_applied("yaml_applied", "Updated ConfigMap/cfg in cluster");
+
+    assert!(
+        !app.resource_cache.contains_key(&cache_key),
+        "cache must be invalidated for the updated resource"
+    );
+    if let ActiveView::Yaml(yaml) = &app.active_view {
+        assert_eq!(
+            yaml.original_yaml, new_yaml,
+            "original_yaml must be committed on successful apply"
+        );
+    } else {
+        panic!("expected ActiveView::Yaml");
+    }
+    let toast = app.toast.expect("toast must be set on yaml applied");
+    assert!(toast.0.contains("Updated ConfigMap/cfg in cluster"));
+}
+
+#[tokio::test]
+async fn yaml_applied_invalidates_cache_in_all_namespaces_view() {
+    let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "").await;
+    app.active_namespace = String::new(); // all namespaces
+
+    let crd = srelens_tui::commands::CrdMeta {
+        crd_name: "secretstores.external-secrets.io".to_string(),
+        group: "external-secrets.io".to_string(),
+        version: "v1".to_string(),
+        kind: "SecretStore".to_string(),
+        plural: "secretstores".to_string(),
+        singular: "secretstore".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    app.crds = vec![crd];
+
+    let initial = "apiVersion: external-secrets.io/v1\nkind: SecretStore\nmetadata:\n  name: store\n  namespace: cluster-autoscaler\n";
+    let mut yaml_view = srelens_tui::views::yaml_view::YamlViewState::new(
+        "store".to_string(),
+        "SecretStore".to_string(),
+        Some("cluster-autoscaler".to_string()),
+        initial.to_string(),
+    );
+    let new_yaml = "apiVersion: external-secrets.io/v1\nkind: SecretStore\nmetadata:\n  name: store\n  namespace: cluster-autoscaler\nspec:\n  provider: {}\n";
+    yaml_view.update_content(new_yaml.to_string());
+    app.active_view = ActiveView::Yaml(yaml_view);
+
+    let all_ns_key = (
+        FAKE_CONTEXT.to_string(),
+        "".to_string(),
+        "SecretStore".to_string(),
+    );
+    let target_ns_key = (
+        FAKE_CONTEXT.to_string(),
+        "cluster-autoscaler".to_string(),
+        "SecretStore".to_string(),
+    );
+    let crd_plural_key = (
+        FAKE_CONTEXT.to_string(),
+        "".to_string(),
+        "secretstores".to_string(),
+    );
+
+    app.resource_cache
+        .insert(all_ns_key.clone(), vec![json!({"name": "store"})]);
+    app.resource_cache
+        .insert(target_ns_key.clone(), vec![json!({"name": "store"})]);
+    app.resource_cache
+        .insert(crd_plural_key.clone(), vec![json!({"name": "store"})]);
+
+    app.handle_yaml_applied(
+        "yaml_applied:SecretStore:cluster-autoscaler",
+        "Updated SecretStore/store in cluster",
+    );
+
+    assert!(
+        !app.resource_cache.contains_key(&all_ns_key),
+        "all-namespaces cache key must be invalidated"
+    );
+    assert!(
+        !app.resource_cache.contains_key(&target_ns_key),
+        "target namespace cache key must be invalidated"
+    );
+    assert!(
+        !app.resource_cache.contains_key(&crd_plural_key),
+        "crd plural cache key must be invalidated"
+    );
 }

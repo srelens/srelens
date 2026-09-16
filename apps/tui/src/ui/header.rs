@@ -28,6 +28,7 @@ pub struct HeaderProps<'a> {
     pub active_view_name: &'a str,
     pub contexts: &'a [ContextChipInfo],
     pub context_chip_rects: Option<&'a std::cell::RefCell<Vec<(Rect, String)>>>,
+    pub update_available: Option<&'a str>,
 }
 
 pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
@@ -80,7 +81,13 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
 
         let brand_line = Line::from(brand_spans);
         let brand_w = (unicode_width::UnicodeWidthStr::width(brand_line.to_string().as_str()) as u16).max(9);
-        let stats_w = if header_style == crate::theme::HeaderStyle::FinoTime { 44 } else { 34 };
+        let base_stats_w = if header_style == crate::theme::HeaderStyle::FinoTime { 44 } else { 34 };
+        let update_extra = if props.update_available.is_some() {
+            if header_style == crate::theme::HeaderStyle::FinoTime { 24 } else { 20 }
+        } else {
+            0
+        };
+        let stats_w = base_stats_w + update_extra;
 
         // Row 0:
         let r0_chunks = Layout::default()
@@ -164,12 +171,13 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
         f.render_widget(Paragraph::new(hints_line).alignment(ratatui::layout::Alignment::Right), r1_chunks[1]);
     } else {
         // Fallback for compact single-row header
+        let stats_w = if props.update_available.is_some() { 34 + 20 } else { 34 };
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Length(11),
-                Constraint::Min(30),
-                Constraint::Length(34),
+                Constraint::Min(25),
+                Constraint::Length(stats_w),
             ])
             .split(inner);
 
@@ -214,32 +222,102 @@ fn render_stats(f: &mut Frame, area: Rect, props: &HeaderProps) {
     };
 
     let stats_line = match header_style {
-        crate::theme::HeaderStyle::FinoTime => Line::from(vec![
-            Span::styled("[ ", Style::default().fg(Theme::dim())),
-            Span::styled(format!("{} ", bullet), Style::default().fg(status_color)),
-            Span::styled(version_clean, Theme::header_label()),
-            Span::styled(" ]──[ ", Style::default().fg(Theme::dim())),
-            Span::styled("nodes: ", Theme::header_label()),
-            Span::styled(format!("{}", props.node_count), Theme::header_val()),
-            Span::styled(" ]──[ ", Style::default().fg(Theme::dim())),
-            Span::styled("pods: ", Theme::header_label()),
-            Span::styled(format!("{}", props.pod_count), Theme::header_val()),
-            Span::styled(" ]", Style::default().fg(Theme::dim())),
-        ]),
-        crate::theme::HeaderStyle::Minimal => Line::from(vec![
-            Span::styled(format!("{} ", bullet), Style::default().fg(status_color)),
-            Span::styled(format!("{} ", version_clean), Theme::header_label()),
-            Span::styled(format!("{} nodes  ", props.node_count), Theme::header_val()),
-            Span::styled(format!("{} pods", props.pod_count), Theme::header_val()),
-        ]),
-        crate::theme::HeaderStyle::Standard => Line::from(vec![
-            Span::styled(format!("{} ", bullet), Style::default().fg(status_color)),
-            Span::styled(format!("{} ", version_clean), Theme::header_label()),
-            Span::styled("Nodes: ", Theme::header_label()),
-            Span::styled(format!("{} ", props.node_count), Theme::header_val()),
-            Span::styled("Pods: ", Theme::header_label()),
-            Span::styled(format!("{}", props.pod_count), Theme::header_val()),
-        ]),
+        crate::theme::HeaderStyle::FinoTime => {
+            let mut spans = vec![
+                Span::styled("[ ", Style::default().fg(Theme::dim())),
+                Span::styled(format!("{} ", bullet), Style::default().fg(status_color)),
+                Span::styled(version_clean, Theme::header_label()),
+                Span::styled(" ]──[ ", Style::default().fg(Theme::dim())),
+                Span::styled("nodes: ", Theme::header_label()),
+                Span::styled(format!("{}", props.node_count), Theme::header_val()),
+                Span::styled(" ]──[ ", Style::default().fg(Theme::dim())),
+                Span::styled("pods: ", Theme::header_label()),
+                Span::styled(format!("{}", props.pod_count), Theme::header_val()),
+                Span::styled(" ]", Style::default().fg(Theme::dim())),
+            ];
+            if let Some(upd) = props.update_available {
+                let tag = if upd.starts_with('v') {
+                    upd.to_string()
+                } else {
+                    format!("v{}", upd)
+                };
+                spans.push(Span::styled("──[ ", Style::default().fg(Theme::dim())));
+                spans.push(Span::styled(
+                    "▲ ",
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!("Update: {}", tag),
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(" ]", Style::default().fg(Theme::dim())));
+            }
+            Line::from(spans)
+        }
+        crate::theme::HeaderStyle::Minimal => {
+            let mut spans = vec![
+                Span::styled(format!("{} ", bullet), Style::default().fg(status_color)),
+                Span::styled(format!("{} ", version_clean), Theme::header_label()),
+                Span::styled(format!("{} nodes  ", props.node_count), Theme::header_val()),
+                Span::styled(format!("{} pods", props.pod_count), Theme::header_val()),
+            ];
+            if let Some(upd) = props.update_available {
+                let tag = if upd.starts_with('v') {
+                    upd.to_string()
+                } else {
+                    format!("v{}", upd)
+                };
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    "▲ ",
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!("Update: {}", tag),
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            Line::from(spans)
+        }
+        crate::theme::HeaderStyle::Standard => {
+            let mut spans = vec![
+                Span::styled(format!("{} ", bullet), Style::default().fg(status_color)),
+                Span::styled(format!("{} ", version_clean), Theme::header_label()),
+                Span::styled("Nodes: ", Theme::header_label()),
+                Span::styled(format!("{} ", props.node_count), Theme::header_val()),
+                Span::styled("Pods: ", Theme::header_label()),
+                Span::styled(format!("{}", props.pod_count), Theme::header_val()),
+            ];
+            if let Some(upd) = props.update_available {
+                let tag = if upd.starts_with('v') {
+                    upd.to_string()
+                } else {
+                    format!("v{}", upd)
+                };
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    "▲ ",
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled(
+                    format!("Update: {}", tag),
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            Line::from(spans)
+        }
     };
     f.render_widget(Paragraph::new(stats_line).alignment(ratatui::layout::Alignment::Right), area);
 }
