@@ -116,21 +116,35 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
 /// Over-scrubbing is the safe direction: a hidden value that happens to be an
 /// ordinary word costs a few characters of an error text, where the
 /// alternative is a credential on disk.
+///
+/// The arguments are untrusted and can be large (2 MiB over HTTP, unbounded
+/// over stdio), and a denied call is scrubbed too, so this stays near-linear
+/// in the number of values: membership is a hash lookup, and each distinct
+/// hidden value is replaced once.
 pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
-    fn leaves(v: &Value, out: &mut Vec<String>) {
+    use std::collections::HashSet;
+
+    fn leaves(v: &Value, out: &mut HashSet<String>) {
         match v {
-            Value::String(s) => out.push(s.clone()),
-            Value::Number(n) => out.push(n.to_string()),
+            Value::String(s) => {
+                out.insert(s.clone());
+            }
+            Value::Number(n) => {
+                out.insert(n.to_string());
+            }
             Value::Object(m) => m.values().for_each(|v| leaves(v, out)),
             Value::Array(a) => a.iter().for_each(|v| leaves(v, out)),
             Value::Bool(_) | Value::Null => {}
         }
     }
-    let mut kept = Vec::new();
+    let mut kept = HashSet::new();
     leaves(redacted, &mut kept);
-    let mut hidden = Vec::new();
-    leaves(args, &mut hidden);
-    hidden.retain(|s| !s.is_empty() && !kept.contains(s));
+    let mut all = HashSet::new();
+    leaves(args, &mut all);
+    let mut hidden: Vec<String> = all
+        .into_iter()
+        .filter(|s| !s.is_empty() && !kept.contains(s))
+        .collect();
     hidden.sort_by_key(|s| std::cmp::Reverse(s.len()));
 
     let mut out = error.to_string();
@@ -691,6 +705,35 @@ mod tests {
             &redacted,
         );
         assert!(!out.contains("4711"), "the numeric value leaked: {out}");
+    }
+
+    /// PR #625 review. The arguments of a denied call are untrusted and, over
+    /// HTTP, up to 2 MiB; over stdio, unbounded. A `settings` map of very many
+    /// short values gives `redact_error` one hidden value per setting and one
+    /// `<redacted>` kept leaf per setting, and a linear membership scan per
+    /// hidden value made the scrub quadratic in the number of settings — a
+    /// denial that took billions of comparisons to record. Ten-character values
+    /// match `<redacted>`'s length, so a scan compares bytes, not just lengths.
+    #[test]
+    fn redact_error_stays_near_linear_in_the_number_of_hidden_values() {
+        let settings: serde_json::Map<String, Value> = (0..100_000)
+            .map(|i| (format!("k{i}"), json!(format!("v{i:09}"))))
+            .collect();
+        let args =
+            json!({ "action": "settings", "id": "org.example.argocd", "settings": settings });
+        let redacted = redact(&args, false);
+        let error =
+            "`extensions.configure` mutates the cluster and no consent mechanism is configured";
+
+        let started = std::time::Instant::now();
+        let out = redact_error(error, &args, &redacted);
+        let took = started.elapsed();
+
+        assert_eq!(out, error, "nothing hidden appears in this message");
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "scrubbing 100k hidden values took {took:?}; the scan is not linear"
+        );
     }
 
     /// The other `extensions.configure` actions carry no settings, and their
