@@ -1,5 +1,18 @@
 import { useSyncExternalStore } from "react";
-import { EXTENSIONS_CHANGED, isTauri, listExtensions, type ExtensionInventory } from "@srelens/core";
+import {
+  EXTENSIONS_CHANGED,
+  isTauri,
+  listExtensions,
+  type ExtensionInventory,
+  type InstalledExtension,
+} from "@srelens/core";
+
+/** What to call an installed app on screen. A quarantined app's stored name is one the
+ *  host no longer accepts, and it may hold characters that display as another app's name,
+ *  so such an app is named by its ID until it is reinstalled or removed. */
+export function extensionLabel(plugin: InstalledExtension): string {
+  return plugin.quarantined ? plugin.manifest.id : plugin.manifest.name;
+}
 
 type Snapshot = {
   status: "loading" | "ready" | "error";

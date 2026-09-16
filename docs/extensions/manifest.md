@@ -36,7 +36,7 @@ before publishing.
 |---|---|---|
 | `$schema` | No | The JSON Schema URL, for editors. The host ignores it. |
 | `id` | Yes | Reverse-domain identifier. See [Identifiers](specification.md#identifiers). |
-| `name` | Yes | Display name, 1–120 characters. |
+| `name` | Yes | Display name, 1–120 characters, with no control characters and no bidirectional or invisible format characters. See [Identifiers](specification.md#identifiers). |
 | `version` | Yes | The app's own SemVer version. |
 | `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.1`. See [Versioning](specification.md#versioning). |
 | `kind` | Yes | `declarative`. No other kind is accepted. |
@@ -53,7 +53,7 @@ Each entry in `capabilities` binds a local operation to a trusted host capabilit
 | Field | Meaning |
 |---|---|
 | `name` | Local operation name, unique within the manifest. Addressed as `plugin/<id>/<name>`. |
-| `title` | Display title. |
+| `title` | Display title, held to the same rules as `name`. |
 | `target` | The host capability ID. It cannot start with `plugin/`; apps cannot call other apps. |
 | `arguments` | Fixed arguments, merged into every call. Callers cannot override them. |
 | `inputs` | The argument names a caller may supply. They cannot overlap with `arguments`. |
@@ -77,7 +77,7 @@ contribution names a declared capability.
 | Field | Meaning |
 |---|---|
 | `id`, `title`, `capability` | Identity, navigation label, and the binding that lists the page's resources. |
-| `group` | Optional navigation group label. |
+| `group` | Optional navigation group label, held to the same rules as `name`. |
 | `statusColumns` | Optional `{ ready, suspended?, progressing? }`: zero-based indices into the binding's `printerColumns`, each below 64. |
 | `dashboard` | Optional `{ pages, events? }`. `pages` references 1–12 resource pages that have `statusColumns` and are not dashboards. `events` is `{ capability, apiGroups }`, where `capability` binds `k8s.listEvents` and `apiGroups` lists 1–32 dotted groups. |
 

@@ -91,7 +91,7 @@ it("says why an app was quarantined and does not offer to re-enable it", async (
   expect(
     (await screen.findByText(/App publisher signature is invalid/)).textContent,
   ).toContain("Remove it or reinstall it from the Catalog");
-  const toggle = screen.getByLabelText("Enable GitOps") as HTMLInputElement;
+  const toggle = screen.getByLabelText("Enable org.test.gitops") as HTMLInputElement;
   expect(toggle.checked).toBe(false);
   expect(toggle.disabled).toBe(true);
   expect(screen.getByText("Remove")).toBeTruthy();
@@ -196,6 +196,86 @@ it("lists every manifest problem with its path and does not offer to install", a
   expect(screen.queryByText("Install and grant permissions")).toBeNull();
   expect(configureExtensions).not.toHaveBeenCalled();
 });
+it("does not show a pasted manifest's name until the host has accepted it", async () => {
+  // A right-to-left override reorders the review line it is rendered into, so the name
+  // is untrusted text until the host, which refuses such names, has checked it.
+  const spoofed = {
+    ...plugin.manifest,
+    name: "‮Argo CD",
+    permissions: ["k8s.listCustomResource‮"],
+  };
+  const source = JSON.stringify(spoofed);
+  let finish!: (report: { errors: { code: string; path: string; message: string }[] }) => void;
+  vi.mocked(validateExtension).mockImplementationOnce(
+    () => new Promise((resolve) => { finish = resolve; }),
+  );
+  render(<ExtensionManager />);
+  fireEvent.change(
+    await screen.findByLabelText("Local app manifest (JSON)"),
+    { target: { value: source } },
+  );
+  fireEvent.click(screen.getByText("Review manifest"));
+  const review = await screen.findByLabelText("Review app permissions");
+  // While the check is still running.
+  expect(review.textContent).not.toContain("‮");
+  expect(review.textContent).toContain("This manifest");
+  await act(async () => {
+    finish({
+      errors: [
+        { code: "EXTENSION_INVALID_VALUE", path: "name", message: "Must be 1–120 characters" },
+      ],
+    });
+  });
+  // And once it comes back refusing the name.
+  await screen.findByRole("list", { name: "Manifest problems" });
+  expect(review.textContent).not.toContain("‮");
+  expect(review.textContent).toContain("This manifest");
+});
+it("shows the name of a manifest the host accepted", async () => {
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  render(<ExtensionManager />);
+  fireEvent.change(
+    await screen.findByLabelText("Local app manifest (JSON)"),
+    { target: { value: JSON.stringify(plugin.manifest) } },
+  );
+  fireEvent.click(screen.getByText("Review manifest"));
+  await screen.findByText("Install and grant permissions");
+  const review = screen.getByLabelText("Review app permissions");
+  expect(within(review).getByText("GitOps")).toBeTruthy();
+  expect(review.textContent).toContain("k8s.listCustomResource");
+});
+it("shows a quarantined app by ID, not by a name this host no longer accepts", async () => {
+  // An app installed before the rule keeps its stored name in the inventory. It is
+  // quarantined, and its name is not drawn.
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [
+      {
+        ...plugin,
+        enabled: false,
+        quarantined: "name: Must be 1–120 characters (EXTENSION_INVALID_VALUE)",
+        grants: ["k8s.listCustomResource"],
+        source: "local",
+        installedAt: 1,
+        history: [],
+        // A tag character (U+E0001) is above U+FFFF and must escape as a surrogate pair.
+        manifest: { ...plugin.manifest, name: "‮Argo CD\u{E0001}" },
+      },
+    ],
+  } as any);
+  render(<ExtensionManager />);
+  await screen.findByText(/Disabled:/);
+  expect(document.body.textContent).not.toContain("‮");
+  // Its stored manifest is shown with the character written as an escape, not drawn.
+  fireEvent.click(screen.getByLabelText(`Details for ${plugin.manifest.id}`));
+  const details = await screen.findByRole("region", { name: `${plugin.manifest.id} details` });
+  const manifest = within(details).getByRole("textbox", { name: `${plugin.manifest.id} manifest` });
+  await waitFor(() => expect(manifest.textContent).toContain(String.raw`\u202e`));
+  expect(manifest.textContent).toContain(String.raw`\udb40\udc01`);
+  expect(manifest.textContent).not.toContain(String.raw`\ue0001`);
+  expect(document.body.textContent).not.toContain("‮");
+});
 it("says the manifest check failed, offers a retry and does not offer to install", async () => {
   vi.mocked(validateExtension).mockRejectedValueOnce(new Error("bridge timed out"));
   render(<ExtensionManager />);
@@ -256,8 +336,10 @@ const updated = () => ({
 async function openDetails(app: ReturnType<typeof updated>) {
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 5, plugins: [app] } as any);
   render(<ExtensionManager />);
-  fireEvent.click(await screen.findByRole("button", { name: "Details for GitOps" }));
-  return screen.getByRole("region", { name: "GitOps details" });
+  // A quarantined app is shown by its ID: its stored name is one the host no longer accepts.
+  const label = app.quarantined ? app.manifest.id : "GitOps";
+  fireEvent.click(await screen.findByRole("button", { name: `Details for ${label}` }));
+  return screen.getByRole("region", { name: `${label} details` });
 }
 it("inspects an installed app's source, grants and manifest, and exports or resets its settings", async () => {
   vi.mocked(saveTextFile).mockResolvedValue("/tmp/settings.json");

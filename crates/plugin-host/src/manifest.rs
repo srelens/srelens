@@ -297,8 +297,51 @@ fn identifier(value: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-')
 }
+/// Unicode's format characters, general category Cf, as of Unicode 17.0: the soft hyphen,
+/// bidirectional marks, embeddings, overrides and isolates, zero-width spaces and joiners,
+/// invisible operators, the byte order mark, tags, and a few script-specific marks. Each
+/// changes how text displays without being seen itself. `char::is_control` covers only
+/// category Cc. Listed here rather than taken from a Unicode crate; the ranges are those
+/// of Unicode's `DerivedGeneralCategory.txt`.
+const FORMAT_CHARACTERS: &[(char, char)] = &[
+    ('\u{00AD}', '\u{00AD}'),
+    ('\u{0600}', '\u{0605}'),
+    ('\u{061C}', '\u{061C}'),
+    ('\u{06DD}', '\u{06DD}'),
+    ('\u{070F}', '\u{070F}'),
+    ('\u{0890}', '\u{0891}'),
+    ('\u{08E2}', '\u{08E2}'),
+    ('\u{180E}', '\u{180E}'),
+    ('\u{200B}', '\u{200F}'),
+    ('\u{202A}', '\u{202E}'),
+    ('\u{2060}', '\u{2064}'),
+    ('\u{2066}', '\u{206F}'),
+    ('\u{FEFF}', '\u{FEFF}'),
+    ('\u{FFF9}', '\u{FFFB}'),
+    ('\u{110BD}', '\u{110BD}'),
+    ('\u{110CD}', '\u{110CD}'),
+    ('\u{13430}', '\u{1343F}'),
+    ('\u{1BCA0}', '\u{1BCA3}'),
+    ('\u{1D173}', '\u{1D17A}'),
+    ('\u{E0001}', '\u{E0001}'),
+    ('\u{E0020}', '\u{E007F}'),
+];
+
+/// Whether `c` is a Unicode format character (category Cf), such as a right-to-left
+/// override or a zero-width space. Text shown as an app's identity refuses them, because
+/// they can make it display differently from what it holds.
+pub fn is_format_character(c: char) -> bool {
+    FORMAT_CHARACTERS
+        .iter()
+        .any(|&(first, last)| (first..=last).contains(&c))
+}
+
 fn label(value: &str) -> bool {
-    !value.trim().is_empty() && value.len() <= 120 && !value.chars().any(char::is_control)
+    !value.trim().is_empty()
+        && value.len() <= 120
+        && !value
+            .chars()
+            .any(|c| c.is_control() || is_format_character(c))
 }
 /// Records a problem for each value already seen, and returns the distinct values.
 fn unique<'a>(
@@ -463,7 +506,8 @@ impl Manifest {
 
     /// Checks the manifest's rules, reporting every violation with the path at fault.
     pub fn validate(&self) -> Result<(), ValidationErrors> {
-        const LABEL: &str = "Must be 1–120 characters with no control characters";
+        const LABEL: &str =
+            "Must be 1–120 characters with no control characters and no bidirectional or invisible format characters";
         const IDENTIFIER: &str = "Must be 1–64 letters, digits and -";
         let mut problems = ValidationErrors::default();
         if self.id.len() > 128 || !self.id.contains('.') || !self.id.split('.').all(identifier) {

@@ -100,13 +100,31 @@ pub struct ValidationError {
 }
 
 impl ValidationError {
+    /// A problem's path and message may quote the rejected manifest text (a kind, an input
+    /// name, a serde or SemVer error that repeats a value). Control and format characters in
+    /// either are written as `\u{…}` escapes here, in the one place every problem is built,
+    /// so a bidirectional override in a manifest cannot reorder or reshape the host's own
+    /// problem row wherever it is shown.
     pub fn new(code: ValidationCode, path: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code,
-            path: path.into(),
-            message: message.into(),
+            path: shown(&path.into()),
+            message: shown(&message.into()),
         }
     }
+}
+
+/// `text` with control and format characters written as `\u{…}` escapes.
+fn shown(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() || crate::manifest::is_format_character(c) {
+                format!("\\u{{{:x}}}", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 impl fmt::Display for ValidationError {

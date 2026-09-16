@@ -215,6 +215,129 @@ fn rule_violations_carry_their_codes() {
 }
 
 #[test]
+fn names_titles_and_groups_refuse_bidirectional_and_invisible_characters() {
+    let cases: [(fn(&mut Value), &str); 5] = [
+        // A right-to-left override displays this name as "Argo CD".
+        (|value| value["name"] = json!("\u{202E}DC ogrA"), "name"),
+        (
+            |value| value["contributions"]["pages"][0]["title"] = json!("Applications\u{200B}"),
+            "contributions.pages[0].title",
+        ),
+        (
+            |value| value["capabilities"][0]["title"] = json!("\u{2066}List applications\u{2069}"),
+            "capabilities[0].title",
+        ),
+        (
+            |value| value["contributions"]["pages"][0]["group"] = json!("Git\u{FEFF}Ops"),
+            "contributions.pages[0].group",
+        ),
+        (
+            |value| {
+                value["contributions"]["detailLinks"] = json!([{
+                    "id":"inspect", "title":"Inspect\u{2060}", "capability":"applications",
+                    "forKinds":["argoproj.io/Application"]
+                }]);
+            },
+            "contributions.detailLinks[0].title",
+        ),
+    ];
+    for (change, want_path) in cases {
+        let mut value = manifest();
+        change(&mut value);
+        assert_eq!(
+            problems(&errors(&value)),
+            expected(&[("EXTENSION_INVALID_VALUE", want_path)]),
+            "{value}"
+        );
+    }
+    // Every format character (Unicode general category Cf) is refused, not only the
+    // bidirectional and zero-width ones: the ends of each range, and the tags outside the BMP.
+    let characters = "\u{00AD}\u{0600}\u{0605}\u{061C}\u{06DD}\u{070F}\u{0890}\u{0891}\u{08E2}\
+        \u{180E}\u{200B}\u{200F}\u{202A}\u{202E}\u{2060}\u{2064}\u{2066}\u{206F}\u{FEFF}\
+        \u{FFF9}\u{FFFB}\u{110BD}\u{110CD}\u{13430}\u{1343F}\u{1BCA0}\u{1BCA3}\u{1D173}\
+        \u{1D17A}\u{E0001}\u{E0020}\u{E007F}";
+    assert_eq!(characters.chars().count(), 32);
+    for character in characters.chars() {
+        let mut value = manifest();
+        value["name"] = json!(format!("Git{character}Ops"));
+        assert_eq!(
+            problems(&errors(&value)),
+            expected(&[("EXTENSION_INVALID_VALUE", "name")]),
+            "U+{:04X}",
+            u32::from(character)
+        );
+    }
+}
+
+/// A problem message quotes the rejected value, and the problem list is rendered as the
+/// host's own text. A value carrying a bidirectional override or a control character must
+/// not reach the screen as-is, or it reorders or reshapes the row that reports it.
+#[test]
+fn problem_messages_never_echo_control_or_format_characters() {
+    let mut value = manifest();
+    value["contributions"]["detailLinks"] = json!([{
+        "id":"inspect", "title":"Inspect", "capability":"applications",
+        "forKinds":["\u{202E}apps/Deployment", "core\u{0008}Pod", "/Pod", "/Pod"]
+    }]);
+    // An input name repeated as a bound argument is quoted by a different rule.
+    value["capabilities"][0]["inputs"] = json!(["\u{202E}context"]);
+    value["capabilities"][0]["arguments"]["\u{202E}context"] = json!("x");
+    let found = errors(&value);
+    let messages: Vec<&str> = found.iter().map(|e| e.message.as_str()).collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("is a bound argument") && m.contains("\\u{202e}")),
+        "the input collision quotes an escape: {messages:?}"
+    );
+    assert!(
+        messages.iter().any(|m| m.contains("\\u{202e}")),
+        "the override is shown as an escape: {messages:?}"
+    );
+    assert!(
+        messages.iter().any(|m| m.contains("\\u{8}")),
+        "the control character is shown as an escape: {messages:?}"
+    );
+    for problem in &found {
+        for text in [problem.message.as_str(), problem.path.as_str()] {
+            assert!(
+                !text
+                    .chars()
+                    .any(|c| c.is_control() || srelens_plugin_host::is_format_character(c)),
+                "raw character in {text:?}"
+            );
+        }
+    }
+    // A manifest that is not JSON is reported through the same funnel.
+    let broken = srelens_plugin_host::Manifest::parse("{\"name\": \"\u{202E}").unwrap_err();
+    assert!(
+        !broken
+            .to_string()
+            .chars()
+            .any(srelens_plugin_host::is_format_character),
+        "{broken}"
+    );
+}
+
+#[test]
+fn names_and_titles_in_any_script_still_validate() {
+    let mut value = manifest();
+    value["name"] = json!("Übersicht — café");
+    value["capabilities"][0]["title"] = json!("アプリケーション一覧");
+    value["contributions"]["pages"][0]["title"] = json!("Приложения");
+    value["contributions"]["pages"][0]["group"] = json!("عمليات GitOps");
+    value["contributions"]["detailTabs"] = json!([{
+        "id":"details", "title":"अनुप्रयोग विवरण", "capability":"applications",
+        "forKinds":["argoproj.io/Application"]
+    }]);
+    value["contributions"]["detailLinks"] = json!([{
+        "id":"inspect", "title":"애플리케이션 검사 🔍", "capability":"applications",
+        "forKinds":["argoproj.io/Application"]
+    }]);
+    Manifest::parse(&value.to_string()).unwrap_or_else(|errors| panic!("{errors}"));
+}
+
+#[test]
 fn errors_use_the_camel_case_wire_shape_and_read_as_one_line_each() {
     let mut value = manifest();
     value["id"] = json!("Not a domain");

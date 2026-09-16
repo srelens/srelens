@@ -10,6 +10,7 @@ import {
 import { CodeEditor } from "@srelens/ui-kit";
 import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionControls } from "./ExtensionControls";
+import { extensionLabel } from "./inventoryStore";
 
 const facts = new Map(CAPABILITY_CATALOG.map((capability) => [capability.id, capability]));
 
@@ -80,7 +81,7 @@ export function ExtensionDetails({
   const changesGrants = added.length > 0 || dropped.length > 0;
 
   return (
-    <section className="extension-details" aria-label={`${manifest.name} details`}>
+    <section className="extension-details" aria-label={`${extensionLabel(plugin)} details`}>
       <p className="extension-message">
         {origin(plugin)} · version {manifest.version}, revision {plugin.revision} · installed{" "}
         {installedOn(plugin.installedAt)}
@@ -98,11 +99,18 @@ export function ExtensionDetails({
       </ul>
 
       <h3>Manifest</h3>
+      {/* A stored manifest can carry a format character this host now refuses (an app
+          installed before the rule is quarantined, not rewritten). JSON escapes control
+          characters but not those, so they are written as JSON escapes here rather than drawn:
+          one `\uXXXX` per UTF-16 unit, so a code point above U+FFFF (a tag character, say)
+          becomes its surrogate pair and the text still reads back as the same manifest. */}
       <CodeEditor
-        value={JSON.stringify(manifest, null, 2)}
+        value={JSON.stringify(manifest, null, 2).replace(/\p{Cf}/gu, (c) =>
+          c.split("").map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""),
+        )}
         readOnly
         language="none"
-        ariaLabel={`${manifest.name} manifest`}
+        ariaLabel={`${extensionLabel(plugin)} manifest`}
         minHeight={160}
         maxHeight={360}
       />
@@ -128,7 +136,7 @@ export function ExtensionDetails({
             if (e.key === "Escape" && !busy) setResetting(false);
           }}
         >
-          <p>Reset {manifest.name} to its default settings? Its saved settings are removed.</p>
+          <p>Reset {extensionLabel(plugin)} to its default settings? Its saved settings are removed.</p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={() => setResetting(false)}>
             Cancel
           </Button>
@@ -166,7 +174,7 @@ export function ExtensionDetails({
       {rollback && (
         <section className="extension-install extension-permission-review" aria-label="Review rollback">
           <p>
-            Roll {manifest.name} back to {rollback.manifest.version}?{" "}
+            Roll {extensionLabel(plugin)} back to {rollback.manifest.version}?{" "}
             {changesGrants ? (
               <>
                 It requests: {requested.join(", ") || "no permissions"}.
