@@ -4387,6 +4387,15 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
     assert!(app.modal.is_none());
     assert!(matches!(&app.active_view, ActiveView::Table(t) if t.kind == ResourceKind::Nodes));
 
+    // Re-open via :features and test 'b' jumps to BGP Peering view
+    common::type_str(&mut app, ":features").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    press(&mut app, ch('b')).await;
+    assert!(app.modal.is_none());
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
     std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
 }
 

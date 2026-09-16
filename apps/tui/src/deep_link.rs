@@ -50,6 +50,7 @@ impl DeepLink {
                         crate::commands::ResourceKind::Settings => "settings".to_string(),
                         crate::commands::ResourceKind::TuiConfig => "config".to_string(),
                         crate::commands::ResourceKind::ArgoApplications => "argo".to_string(),
+                        crate::commands::ResourceKind::BgpPeers => "bgp".to_string(),
                         other => other.to_string().to_lowercase(),
                     },
                     CommandTarget::CustomResource(crd) => crd.plural.to_lowercase(),

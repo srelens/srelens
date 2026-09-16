@@ -58,7 +58,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  : <command>", Theme::key_hint_key())),
-            Cell::from("Open command prompt (:pod, :deploy, :top, :toppods, :topnodes, :gpuinfo, :svc, :topo, :no, :ns, :helm, :pf, :ai, :config, :ctx, :q)"),
+            Cell::from("Open command prompt (:pod, :deploy, :top, :toppods, :topnodes, :gpuinfo, :svc, :topo, :no, :ns, :helm, :bgp, :pf, :ai, :config, :ctx, :q)"),
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  :top / :toppods / :topnodes", Theme::key_hint_key())),
@@ -191,6 +191,10 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         Row::new(vec![
             Cell::from(Span::styled("  :argo", Theme::key_hint_key())),
             Cell::from("ArgoCD GitOps application manager (sync status, drift & rollouts)"),
+        ]),
+        Row::new(vec![
+            Cell::from(Span::styled("  :bgp / :peers", Theme::key_hint_key())),
+            Cell::from("BGP Control Plane & Peering (Cilium v2/v2alpha1, MetalLB, Calico, VIPs & Pools)"),
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  :banner / :features", Theme::key_hint_key())),

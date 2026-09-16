@@ -1139,7 +1139,7 @@ pub fn render_feature_banner_modal(
 ) {
     let modal_width = (area.width.saturating_sub(4)).clamp(48, 96).min(area.width);
     let modal_height = (area.height.saturating_sub(2))
-        .clamp(18, 27)
+        .clamp(18, 28)
         .min(area.height);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
@@ -1165,7 +1165,7 @@ pub fn render_feature_banner_modal(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Top description & update alert
-            Constraint::Min(11),   // Features list
+            Constraint::Min(12),   // Features list
             Constraint::Length(3), // Checkbox and key hints
         ])
         .split(inner);
@@ -1239,7 +1239,7 @@ pub fn render_feature_banner_modal(
 
     header_lines.push(Line::from(vec![
         Span::styled(
-            "Key built-in features you should know (press [0-9, u] to jump directly, or type ':' for command prompt):",
+            "Key built-in features you should know (press [0-9, b, u] to jump directly, or type ':' for command prompt):",
             Style::default().fg(Theme::dim()),
         ),
     ]));
@@ -1252,7 +1252,7 @@ pub fn render_feature_banner_modal(
         "Check for new releases & update binary ('srelens-tui update')".to_string()
     };
 
-    let features: [(&str, &str, &str, String, &str); 11] = [
+    let features: [(&str, &str, &str, String, &str); 12] = [
         (
             "[1]",
             ":helm",
@@ -1322,6 +1322,13 @@ pub fn render_feature_banner_modal(
             "[Node SSH]",
             "Direct SSH to host OS for node recovery (<S> on node)".to_string(),
             ":nodes -> <S>",
+        ),
+        (
+            "[b]",
+            ":bgp",
+            "[BGP Peering]",
+            "BGP control plane, live peering topology & route VIPs".to_string(),
+            ":bgp",
         ),
         ("[u]", ":update", "[Self Update]", update_desc, ":update"),
     ];

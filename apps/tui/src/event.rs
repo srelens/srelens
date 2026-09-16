@@ -66,6 +66,10 @@ pub enum AppEvent {
         action: String,
         result: Result<String, String>,
     },
+    BgpResult {
+        context: String,
+        result: Result<srelens_kube::bgp::BgpClusterSummary, String>,
+    },
 }
 
 pub struct EventHandler {

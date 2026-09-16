@@ -981,14 +981,22 @@ async fn the_yaml_view_reports_the_kubectl_fallback_failing_when_nothing_can_ser
         "# Error: Unable to fetch live manifest for ConfigMap/cm-1 in namespace \n"
     );
 
-    // No namespace and no context at all still produces the error manifest.
+    // No namespace and no context at all still produces the error manifest (cluster-scoped for Node).
     app.active_context = String::new();
     app.kubeconfig_paths.clear();
     app.open_yaml_view("node-a".into(), "Node".into(), None)
         .await;
     assert_eq!(
         yaml_text(&app),
-        "# Error: Unable to fetch live manifest for Node/node-a in namespace default\n"
+        "# Error: Unable to fetch live manifest for Node/node-a\n"
+    );
+
+    // CiliumBGPNodeConfig is cluster-scoped and must not have namespace appended.
+    app.open_yaml_view("node-a".into(), "CiliumBGPNodeConfig".into(), None)
+        .await;
+    assert_eq!(
+        yaml_text(&app),
+        "# Error: Unable to fetch live manifest for CiliumBGPNodeConfig/node-a\n"
     );
 }
 

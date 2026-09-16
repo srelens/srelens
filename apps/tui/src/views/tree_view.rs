@@ -223,7 +223,7 @@ pub fn render_tree_view(f: &mut Frame, area: Rect, state: &TreeViewState) {
         let mut spans = Vec::new();
 
         // 1. Branch glyphs (prefix)
-        spans.push(Span::styled(node.prefix.as_str(), Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(node.prefix.as_str(), Style::default().fg(Color::White)));
 
         // 2. Kind tag
         let kind_style = match node.kind.to_lowercase().as_str() {

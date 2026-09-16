@@ -50,6 +50,7 @@ pub enum ActiveView {
     NodeInspector(node_inspector_view::NodeInspectorState),
     Topology(topology_view::TopologyViewState),
     GpuInfo(gpu_view::GpuViewState),
+    Bgp(bgp_view::BgpViewState),
     Top(top_view::TopViewState),
 }
 
@@ -2199,6 +2200,10 @@ impl App {
                             self.modal = None;
                             self.switch_view_to_kind(ResourceKind::Nodes).await;
                         }
+                        KeyCode::Char('b') | KeyCode::Char('B') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::BgpPeers).await;
+                        }
                         KeyCode::Char('u') | KeyCode::Char('U') => {
                             if let Some(ref ver) = self.tui_config.update_available {
                                 self.set_toast(
@@ -3720,6 +3725,7 @@ impl App {
                     ActiveView::ArgoDetail(detail) => {
                         self.filter_buffer = detail.search_query.clone()
                     }
+                    ActiveView::Bgp(bgp) => self.filter_buffer = bgp.search_query.clone(),
                     _ => {}
                 }
             }
@@ -3879,6 +3885,10 @@ impl App {
                 }
                 if let ActiveView::GpuInfo(ref mut gpu) = self.active_view {
                     gpu.toggle_pane();
+                    return;
+                }
+                if let ActiveView::Bgp(ref mut bgp) = self.active_view {
+                    bgp.next_tab();
                     return;
                 }
                 if let ActiveView::Topology(ref mut topo) = self.active_view {
@@ -6520,6 +6530,153 @@ impl App {
                 }
                 _ => {}
             },
+            ActiveView::Bgp(bgp) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    if let Some(prev) = self.nav_stack.pop() {
+                        self.active_view = prev;
+                    } else {
+                        self.switch_view_to_kind(ResourceKind::Nodes).await;
+                    }
+                }
+                KeyCode::Tab | KeyCode::Right => {
+                    bgp.next_tab();
+                }
+                KeyCode::BackTab | KeyCode::Left => {
+                    bgp.prev_tab();
+                }
+                KeyCode::Char('1') => {
+                    bgp.active_tab = bgp_view::BgpTab::Peers;
+                }
+                KeyCode::Char('2') => {
+                    bgp.active_tab = bgp_view::BgpTab::Services;
+                }
+                KeyCode::Char('3') => {
+                    bgp.active_tab = bgp_view::BgpTab::IpPools;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    bgp.select_prev();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    bgp.select_next();
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    bgp.select_first();
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    bgp.select_last();
+                }
+                KeyCode::Char('r') => {
+                    self.reload_bgp_view();
+                }
+                KeyCode::Enter => match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => {
+                        if let Some(peer) = bgp.selected_peer() {
+                            let n_name = peer.node_name.clone();
+                            self.open_node_inspector(n_name);
+                        }
+                    }
+                    bgp_view::BgpTab::Services => {
+                        if let Some(svc) = bgp.selected_service() {
+                            let s_name = svc.service_name.clone();
+                            let s_ns = svc.namespace.clone();
+                            self.open_describe_view(s_name, "Service".to_string(), Some(s_ns)).await;
+                        }
+                    }
+                    bgp_view::BgpTab::IpPools => {
+                        if let Some(pool) = bgp.selected_pool() {
+                            let p_name = pool.name.clone();
+                            self.open_describe_view(p_name, "CiliumLoadBalancerIPPool".to_string(), None).await;
+                        }
+                    }
+                },
+                KeyCode::Char('d') => match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => {
+                        if let Some(peer) = bgp.selected_peer() {
+                            let pol_name = if !peer.policy_name.is_empty()
+                                && peer.policy_name != "cilium-node-status"
+                                && peer.policy_name != "cilium-bgp-node-config"
+                            {
+                                peer.policy_name.clone()
+                            } else if !peer.node_name.is_empty() {
+                                peer.node_name.clone()
+                            } else {
+                                peer.policy_name.clone()
+                            };
+
+                            if !pol_name.is_empty() {
+                                let kind_str = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => "CiliumBGPNodeConfig".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => "CiliumBGPPeeringPolicy".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "BGPSession".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => "BGPPeer".to_string(),
+                                    _ => "CiliumBGPPeeringPolicy".to_string(),
+                                };
+                                self.open_describe_view(pol_name, kind_str, None).await;
+                            } else {
+                                let n_name = peer.node_name.clone();
+                                self.open_describe_view(n_name, "Node".to_string(), None).await;
+                            }
+                        }
+                    }
+                    bgp_view::BgpTab::Services => {
+                        if let Some(svc) = bgp.selected_service() {
+                            let s_name = svc.service_name.clone();
+                            let s_ns = svc.namespace.clone();
+                            self.open_describe_view(s_name, "Service".to_string(), Some(s_ns)).await;
+                        }
+                    }
+                    bgp_view::BgpTab::IpPools => {
+                        if let Some(pool) = bgp.selected_pool() {
+                            let p_name = pool.name.clone();
+                            self.open_describe_view(p_name, "CiliumLoadBalancerIPPool".to_string(), None).await;
+                        }
+                    }
+                },
+                KeyCode::Char('y') => match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => {
+                        if let Some(peer) = bgp.selected_peer() {
+                            let pol_name = if !peer.policy_name.is_empty()
+                                && peer.policy_name != "cilium-node-status"
+                                && peer.policy_name != "cilium-bgp-node-config"
+                            {
+                                peer.policy_name.clone()
+                            } else if !peer.node_name.is_empty() {
+                                peer.node_name.clone()
+                            } else {
+                                peer.policy_name.clone()
+                            };
+
+                            if !pol_name.is_empty() {
+                                let kind_str = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => "CiliumBGPNodeConfig".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => "CiliumBGPPeeringPolicy".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "BGPSession".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => "BGPPeer".to_string(),
+                                    _ => "CiliumBGPPeeringPolicy".to_string(),
+                                };
+                                self.open_yaml_view(pol_name, kind_str, None).await;
+                            } else {
+                                let n_name = peer.node_name.clone();
+                                self.open_yaml_view(n_name, "Node".to_string(), None).await;
+                            }
+                        }
+                    }
+                    bgp_view::BgpTab::Services => {
+                        if let Some(svc) = bgp.selected_service() {
+                            let s_name = svc.service_name.clone();
+                            let s_ns = svc.namespace.clone();
+                            self.open_yaml_view(s_name, "Service".to_string(), Some(s_ns)).await;
+                        }
+                    }
+                    bgp_view::BgpTab::IpPools => {
+                        if let Some(pool) = bgp.selected_pool() {
+                            let p_name = pool.name.clone();
+                            self.open_yaml_view(p_name, "CiliumLoadBalancerIPPool".to_string(), None).await;
+                        }
+                    }
+                },
+                _ => {}
+            },
             ActiveView::Top(top) => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     if let Some(prev) = self.nav_stack.pop() {
@@ -7524,6 +7681,10 @@ impl App {
             ActiveView::ArgoDetail(detail) => {
                 detail.search_query = filter;
             }
+            ActiveView::Bgp(bgp) => {
+                bgp.search_query = filter;
+                bgp.clamp_selection();
+            }
             _ => {}
         }
     }
@@ -7559,6 +7720,10 @@ impl App {
             }
             ActiveView::ArgoDetail(detail) => {
                 detail.search_query.clear();
+            }
+            ActiveView::Bgp(bgp) => {
+                bgp.search_query.clear();
+                bgp.clamp_selection();
             }
             _ => {}
         }
@@ -8245,6 +8410,25 @@ impl App {
 
                 ActiveView::GpuInfo(gpu_state)
             }
+            ResourceKind::BgpPeers => {
+                let bgp_state = bgp_view::BgpViewState::new();
+                let ctx = self.active_context.clone();
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+
+                tokio::spawn(async move {
+                    let res = match cache.get(&ctx).await {
+                        Ok(client) => srelens_kube::bgp::fetch_bgp_summary(&client).await,
+                        Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
+                    };
+                    let _ = event_tx.send(crate::event::AppEvent::BgpResult {
+                        context: ctx,
+                        result: res,
+                    });
+                });
+
+                ActiveView::Bgp(bgp_state)
+            }
             ResourceKind::TopPods => {
                 self.refresh_pod_metrics();
                 self.refresh_node_metrics();
@@ -8846,7 +9030,6 @@ impl App {
     pub async fn open_yaml_view(&mut self, name: String, kind: String, namespace: Option<String>) {
         let ctx = self.active_context.clone();
         let cache = self.client_cache.clone();
-        let ns = namespace.clone();
         let k = kind.clone();
         let n = name.clone();
         let kubeconfig_paths = self.kubeconfig_paths.clone();
@@ -8856,7 +9039,21 @@ impl App {
             .find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k))
             .cloned();
 
+        let is_cluster_scoped = match srelens_kube::manifest::gvk_for(&k) {
+            Some((_, namespaced)) => !namespaced,
+            None => {
+                if let Some(ref crd) = crd_opt {
+                    !crd.namespaced
+                } else {
+                    namespace.is_none()
+                }
+            }
+        };
+        let ns = if is_cluster_scoped { None } else { namespace.clone() };
+        let ns_task = ns.clone();
+
         let yaml_text = tokio::task::spawn(async move {
+            let ns = ns_task;
             if let Ok(client) = cache.get(&ctx).await {
                 if let Some(crd) = crd_opt {
                     let api_version = if crd.group.is_empty() {
@@ -8943,17 +9140,24 @@ impl App {
                 }
             }
 
-            format!(
-                "# Error: Unable to fetch live manifest for {}/{} in namespace {}\n",
-                k,
-                n,
-                ns.as_deref().unwrap_or("default")
-            )
+            if is_cluster_scoped || ns.is_none() {
+                format!(
+                    "# Error: Unable to fetch live manifest for {}/{}\n",
+                    k, n
+                )
+            } else {
+                format!(
+                    "# Error: Unable to fetch live manifest for {}/{} in namespace {}\n",
+                    k,
+                    n,
+                    ns.as_deref().unwrap_or("default")
+                )
+            }
         })
         .await
         .unwrap_or_default();
 
-        let yaml_state = YamlViewState::new(name, kind, namespace, yaml_text);
+        let yaml_state = YamlViewState::new(name, kind, ns, yaml_text);
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Yaml(yaml_state));
         self.nav_stack.push(old_view);
     }
@@ -8966,12 +9170,30 @@ impl App {
     ) {
         let ctx = self.active_context.clone();
         let cache = self.client_cache.clone();
-        let ns = namespace.clone();
         let k = kind.clone();
         let n = name.clone();
         let kubeconfig_paths = self.kubeconfig_paths.clone();
+        let crd_opt = self
+            .crds
+            .iter()
+            .find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k))
+            .cloned();
+
+        let is_cluster_scoped = match srelens_kube::manifest::gvk_for(&k) {
+            Some((_, namespaced)) => !namespaced,
+            None => {
+                if let Some(ref crd) = crd_opt {
+                    !crd.namespaced
+                } else {
+                    namespace.is_none()
+                }
+            }
+        };
+        let ns = if is_cluster_scoped { None } else { namespace.clone() };
+        let ns_task = ns.clone();
 
         let desc_text = tokio::task::spawn(async move {
+            let ns = ns_task;
             // 1. Try kubectl describe for exact 100% fidelity
             let mut cmd = tokio::process::Command::new("kubectl");
             cmd.arg("describe");
@@ -9005,8 +9227,21 @@ impl App {
 
             // 2. Pure Rust native describe fallback
             if let Ok(client) = cache.get(&ctx).await {
-                let maybe_ar = if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k)
-                {
+                let maybe_ar = if let Some(ref crd) = crd_opt {
+                    let api_version = if crd.group.is_empty() {
+                        crd.version.clone()
+                    } else {
+                        format!("{}/{}", crd.group, crd.version)
+                    };
+                    let ar = kube::core::ApiResource {
+                        group: crd.group.clone(),
+                        version: crd.version.clone(),
+                        api_version,
+                        kind: crd.kind.clone(),
+                        plural: crd.plural.clone(),
+                    };
+                    Some((ar, crd.namespaced))
+                } else if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
                     Some((kube::core::ApiResource::from_gvk(&gvk), namespaced))
                 } else if k.eq_ignore_ascii_case("application")
                     || k.eq_ignore_ascii_case("applications")
@@ -9148,17 +9383,24 @@ impl App {
                 }
             }
 
-            format!(
-                "Error: Unable to describe {}/{} in namespace {}\n",
-                k,
-                n,
-                ns.as_deref().unwrap_or("default")
-            )
+            if is_cluster_scoped || ns.is_none() {
+                format!(
+                    "Error: Unable to describe {}/{}\n",
+                    k, n
+                )
+            } else {
+                format!(
+                    "Error: Unable to describe {}/{} in namespace {}\n",
+                    k,
+                    n,
+                    ns.as_deref().unwrap_or("default")
+                )
+            }
         })
         .await
         .unwrap_or_default();
 
-        let desc_state = DescribeViewState::new(name, kind, namespace, desc_text);
+        let desc_state = DescribeViewState::new(name, kind, ns, desc_text);
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Describe(desc_state));
         self.nav_stack.push(old_view);
     }
@@ -9330,6 +9572,42 @@ impl App {
                 match result {
                     Ok(info) => gpu.set_info(info),
                     Err(err) => gpu.set_error(err),
+                }
+            }
+        }
+    }
+
+    pub fn reload_bgp_view(&mut self) {
+        if let ActiveView::Bgp(bgp) = &mut self.active_view {
+            bgp.is_loading = true;
+            bgp.error = None;
+            let ctx = self.active_context.clone();
+            let cache = self.client_cache.clone();
+            let event_tx = self.event_tx.clone();
+
+            tokio::spawn(async move {
+                let res = match cache.get(&ctx).await {
+                    Ok(client) => srelens_kube::bgp::fetch_bgp_summary(&client).await,
+                    Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
+                };
+                let _ = event_tx.send(crate::event::AppEvent::BgpResult {
+                    context: ctx,
+                    result: res,
+                });
+            });
+        }
+    }
+
+    pub fn handle_bgp_result(
+        &mut self,
+        context: &str,
+        result: Result<srelens_kube::bgp::BgpClusterSummary, String>,
+    ) {
+        if let ActiveView::Bgp(bgp) = &mut self.active_view {
+            if self.active_context == context {
+                match result {
+                    Ok(summary) => bgp.set_summary(summary),
+                    Err(err) => bgp.set_error(err),
                 }
             }
         }
@@ -11753,6 +12031,7 @@ impl App {
             ActiveView::NodeInspector(_) => "Node & GPU Hardware Inspector",
             ActiveView::Topology(_) => "Workload & Traffic Topology Flow",
             ActiveView::GpuInfo(_) => "GPU Info & VRAM Allocation",
+            ActiveView::Bgp(_) => "BGP Peering & Route Advertisements",
             ActiveView::Top(top) => match top.active_tab {
                 top_view::TopTab::Pods => "Top Pods Hotspots",
                 top_view::TopTab::Nodes => "Top Nodes Hotspots",
@@ -11842,6 +12121,7 @@ impl App {
             ActiveView::NodeInspector(ni) => render_node_inspector_view(f, chunks[1], ni),
             ActiveView::Topology(topo) => topology_view::render_topology_view(f, chunks[1], topo),
             ActiveView::GpuInfo(gpu) => gpu_view::render(f, chunks[1], gpu),
+            ActiveView::Bgp(bgp) => render_bgp_view(f, chunks[1], bgp),
             ActiveView::Top(top) => top_view::render_top_view(f, chunks[1], top),
         }
 
@@ -11857,6 +12137,19 @@ impl App {
                 argo.applications.len(),
                 false,
             ),
+            ActiveView::Bgp(bgp) => {
+                let count = match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => bgp.filtered_peers().len(),
+                    bgp_view::BgpTab::Services => bgp.filtered_services().len(),
+                    bgp_view::BgpTab::IpPools => bgp.filtered_pools().len(),
+                };
+                let total = match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => bgp.summary.as_ref().map(|s| s.peers.len()).unwrap_or(0),
+                    bgp_view::BgpTab::Services => bgp.summary.as_ref().map(|s| s.advertised_services.len()).unwrap_or(0),
+                    bgp_view::BgpTab::IpPools => bgp.summary.as_ref().map(|s| s.ip_pools.len()).unwrap_or(0),
+                };
+                (count, total, false)
+            }
             ActiveView::Top(top) => (
                 top.visible_count(),
                 if top.active_tab == top_view::TopTab::Pods {
@@ -12009,6 +12302,20 @@ impl App {
                     ("<Tab>", "Pane"),
                     ("<Enter>", "Inspect"),
                     ("<l>", "Logs"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<r>", "Refresh"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            ActiveView::Bgp(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<1-3/Tab>", "Tab"),
+                    ("<↑/↓/j/k>", "Select"),
+                    ("</>", "Filter"),
+                    ("<Enter>", "Inspect Node/Svc"),
                     ("<d>", "Describe"),
                     ("<y>", "YAML"),
                     ("<r>", "Refresh"),
