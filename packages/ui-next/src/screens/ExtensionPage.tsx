@@ -80,7 +80,7 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             This cluster is no longer in your kubeconfig files, so its apps cannot be opened here.
             Manage your kubeconfig files in Settings → Contexts.
           </p>
-        ) : plugin && page && !extensionEnabledFor(plugin, cluster?.stableId) ? (
+        ) : plugin && page && !extensionEnabledFor(plugin, cluster?.key) ? (
           <p className="extension-message">
             This app is not enabled for this cluster. Manage it in Settings → Apps.
           </p>

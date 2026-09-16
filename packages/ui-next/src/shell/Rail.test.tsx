@@ -22,7 +22,7 @@ if (!("ResizeObserver" in globalThis)) {
 
 const ctx = (name: string): ClusterContext => ({
   name,
-  stableId: name,
+  stableId: name, key: name,
   cluster: name,
   server: `https://${name}.example`,
   isCurrent: false,
@@ -138,7 +138,7 @@ describe("Rail", () => {
    * tells a relabel from an id written onto the tab.
    */
   it("leaves no tab labelled with the cluster it switched away from", async () => {
-    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage" };
+    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage", key: "id-stage" };
     const contexts = [ctx("prod-eu"), STAGING];
     setState(defaultState(contexts));
     openTab("/overview", { clusterName: "prod-eu" });
@@ -156,7 +156,7 @@ describe("Rail", () => {
   /** The menu's `Open` is the same gesture by another route, and had the same
    *  hole — fixing one and leaving the other is how the two disagree. */
   it("leaves no tab labelled with the previous cluster from the menu either", async () => {
-    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage" };
+    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage", key: "id-stage" };
     const contexts = [ctx("prod-eu"), STAGING];
     setState(defaultState(contexts));
     openTab("/overview", { clusterName: "prod-eu" });

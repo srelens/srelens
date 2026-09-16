@@ -81,6 +81,7 @@ pub enum Modal {
     },
     FeatureBanner {
         show_on_startup: bool,
+        update_available: Option<String>,
     },
 }
 
@@ -141,13 +142,68 @@ pub enum ContainerAction {
     Shell,
 }
 
+pub fn format_action_display(action_name: &str) -> String {
+    if let Some(payload_str) = action_name.strip_prefix("argo_sync:") {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload_str) {
+            if val.get("prune").and_then(|p| p.as_bool()).unwrap_or(false) {
+                return "Sync with Prune".to_string();
+            }
+        }
+        return "Sync Application".to_string();
+    }
+    if let Some(payload_str) = action_name.strip_prefix("argo_toggle_auto:") {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload_str) {
+            if val.get("enable").and_then(|e| e.as_bool()).unwrap_or(false) {
+                return "Enable Auto-Sync".to_string();
+            } else {
+                return "Pause Auto-Sync".to_string();
+            }
+        }
+        return "Toggle Auto-Sync".to_string();
+    }
+    if action_name.starts_with("helm-rollback:") {
+        return "Rollback Release".to_string();
+    }
+    if action_name.starts_with("helm-uninstall:") {
+        return "Uninstall Release".to_string();
+    }
+    if action_name.starts_with("stop-pf:") {
+        return "Stop Port Forward".to_string();
+    }
+    if action_name.starts_with("delete:") {
+        return "Delete".to_string();
+    }
+    if action_name.starts_with("restart:") {
+        return "Restart".to_string();
+    }
+    if action_name.starts_with("drain:") {
+        return "Drain Node".to_string();
+    }
+    if action_name.starts_with("cordon:") {
+        return "Cordon Node".to_string();
+    }
+    if action_name.starts_with("uncordon:") {
+        return "Uncordon Node".to_string();
+    }
+    action_name.to_string()
+}
+
 pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
     match modal {
-        Modal::Confirm { title, message, action_name, is_destructive } => {
+        Modal::Confirm {
+            title,
+            message,
+            action_name,
+            is_destructive,
+        } => {
             let modal_area = centered_rect(50, 30, area);
             f.render_widget(Clear, modal_area);
 
-            let border_color = if *is_destructive { Theme::RED } else { Theme::ACCENT };
+            let border_color = if *is_destructive {
+                Theme::RED
+            } else {
+                Theme::ACCENT
+            };
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(Theme::border_type())
@@ -159,10 +215,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(3),
-                    Constraint::Length(2),
-                ])
+                .constraints([Constraint::Min(3), Constraint::Length(2)])
                 .split(inner);
 
             let msg_widget = Paragraph::new(message.as_str())
@@ -170,27 +223,61 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 .alignment(Alignment::Center);
             f.render_widget(msg_widget, chunks[0]);
 
+            let display_action = format_action_display(action_name);
             let prompt_line = Line::from(vec![
                 Span::styled("Press ", Style::default().fg(Theme::DIM)),
-                Span::styled("[Enter/y]", Style::default().fg(if *is_destructive { Theme::RED } else { Theme::GREEN }).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" to {}", action_name), Style::default().fg(Theme::FG)),
+                Span::styled(
+                    "[Enter/y]",
+                    Style::default()
+                        .fg(if *is_destructive {
+                            Theme::RED
+                        } else {
+                            Theme::GREEN
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" to {}", display_action),
+                    Style::default().fg(Theme::FG),
+                ),
                 Span::styled("  |  ", Style::default().fg(Theme::DIM)),
-                Span::styled("[Esc/n]", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "[Esc/n]",
+                    Style::default()
+                        .fg(Theme::YELLOW)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" to Cancel", Style::default().fg(Theme::DIM)),
             ]);
             let prompt_widget = Paragraph::new(prompt_line).alignment(Alignment::Center);
             f.render_widget(prompt_widget, chunks[1]);
         }
-        Modal::InputConfirm { title, message, action_name: _, required_input, current_input, is_destructive } => {
+        Modal::InputConfirm {
+            title,
+            message,
+            action_name: _,
+            required_input,
+            current_input,
+            is_destructive,
+        } => {
             let modal_area = centered_rect(55, 34, area);
             f.render_widget(Clear, modal_area);
 
-            let border_color = if *is_destructive { Theme::red() } else { Theme::accent() };
+            let border_color = if *is_destructive {
+                Theme::red()
+            } else {
+                Theme::accent()
+            };
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(Theme::border_type())
                 .border_style(Style::default().fg(border_color))
-                .title(Span::styled(format!(" {} ", title), Style::default().fg(border_color).add_modifier(Modifier::BOLD)));
+                .title(Span::styled(
+                    format!(" {} ", title),
+                    Style::default()
+                        .fg(border_color)
+                        .add_modifier(Modifier::BOLD),
+                ));
 
             let inner = block.inner(modal_area);
             f.render_widget(block, modal_area);
@@ -213,27 +300,72 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let input_block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(Theme::border_type())
-                .border_style(Style::default().fg(if is_matched { Theme::green() } else { Theme::yellow() }))
+                .border_style(Style::default().fg(if is_matched {
+                    Theme::green()
+                } else {
+                    Theme::yellow()
+                }))
                 .title(format!(" Type \"{}\" to confirm ", required_input));
 
             let input_widget = Paragraph::new(format!("{}█", current_input))
-                .style(Style::default().fg(if is_matched { Theme::green() } else { Theme::fg() }).add_modifier(Modifier::BOLD))
+                .style(
+                    Style::default()
+                        .fg(if is_matched {
+                            Theme::green()
+                        } else {
+                            Theme::fg()
+                        })
+                        .add_modifier(Modifier::BOLD),
+                )
                 .alignment(Alignment::Center)
                 .block(input_block);
             f.render_widget(input_widget, chunks[1]);
 
             let prompt_line = Line::from(vec![
                 Span::styled("Press ", Style::default().fg(Theme::dim())),
-                Span::styled("[Enter]", Style::default().fg(if is_matched { Theme::green() } else { Theme::dim() }).add_modifier(if is_matched { Modifier::BOLD } else { Modifier::empty() })),
-                Span::styled(if is_matched { " Confirm" } else { " (type word to enable)" }, Style::default().fg(if is_matched { Theme::fg() } else { Theme::dim() })),
+                Span::styled(
+                    "[Enter]",
+                    Style::default()
+                        .fg(if is_matched {
+                            Theme::green()
+                        } else {
+                            Theme::dim()
+                        })
+                        .add_modifier(if is_matched {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled(
+                    if is_matched {
+                        " Confirm"
+                    } else {
+                        " (type word to enable)"
+                    },
+                    Style::default().fg(if is_matched {
+                        Theme::fg()
+                    } else {
+                        Theme::dim()
+                    }),
+                ),
                 Span::styled("  |  ", Style::default().fg(Theme::dim())),
-                Span::styled("[Esc]", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "[Esc]",
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" Cancel", Style::default().fg(Theme::dim())),
             ]);
             let prompt_widget = Paragraph::new(prompt_line).alignment(Alignment::Center);
             f.render_widget(prompt_widget, chunks[2]);
         }
-        Modal::Scale { workload_name, current_replicas, input } => {
+        Modal::Scale {
+            workload_name,
+            current_replicas,
+            input,
+        } => {
             let modal_area = centered_rect(45, 25, area);
             f.render_widget(Clear, modal_area);
 
@@ -275,10 +407,15 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 Span::styled(" Apply  ", Theme::key_hint_desc()),
                 Span::styled("[Esc]", Theme::key_hint_key()),
                 Span::styled(" Cancel", Theme::key_hint_desc()),
-            ])).alignment(Alignment::Center);
+            ]))
+            .alignment(Alignment::Center);
             f.render_widget(hints, chunks[2]);
         }
-        Modal::NodeSsh { node_name, destination_input, cursor_pos } => {
+        Modal::NodeSsh {
+            node_name,
+            destination_input,
+            cursor_pos,
+        } => {
             let modal_area = centered_rect(55, 30, area);
             f.render_widget(Clear, modal_area);
 
@@ -328,17 +465,27 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 Span::styled(" Connect  ", Theme::key_hint_desc()),
                 Span::styled("[Esc]", Theme::key_hint_key()),
                 Span::styled(" Cancel", Theme::key_hint_desc()),
-            ])).alignment(Alignment::Center);
+            ]))
+            .alignment(Alignment::Center);
             f.render_widget(hints, chunks[2]);
         }
-        Modal::PortForward { pod_name, namespace, container_port, local_port_input, kind } => {
+        Modal::PortForward {
+            pod_name,
+            namespace,
+            container_port,
+            local_port_input,
+            kind,
+        } => {
             let modal_area = centered_rect(50, 30, area);
             f.render_widget(Clear, modal_area);
 
             let title_str = if kind.is_empty() || kind == "Pod" {
                 format!(" Start Port Forward: {} ({}) ", pod_name, namespace)
             } else {
-                format!(" Start Port Forward: {}/{} ({}) ", kind, pod_name, namespace)
+                format!(
+                    " Start Port Forward: {}/{} ({}) ",
+                    kind, pod_name, namespace
+                )
             };
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -378,10 +525,17 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 Span::styled(" Forward  ", Theme::key_hint_desc()),
                 Span::styled("[Esc]", Theme::key_hint_key()),
                 Span::styled(" Cancel", Theme::key_hint_desc()),
-            ])).alignment(Alignment::Center);
+            ]))
+            .alignment(Alignment::Center);
             f.render_widget(hints, chunks[2]);
         }
-        Modal::ContainerPicker { pod_name, containers, selected_idx, action, .. } => {
+        Modal::ContainerPicker {
+            pod_name,
+            containers,
+            selected_idx,
+            action,
+            ..
+        } => {
             let modal_area = centered_rect(45, 40, area);
             f.render_widget(Clear, modal_area);
 
@@ -417,7 +571,12 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let list = List::new(items);
             f.render_widget(list, inner);
         }
-        Modal::ContextPicker { contexts, current_context, selected_idx, filter } => {
+        Modal::ContextPicker {
+            contexts,
+            current_context,
+            selected_idx,
+            filter,
+        } => {
             let modal_area = centered_rect(65, 60, area);
             f.render_widget(Clear, modal_area);
 
@@ -447,9 +606,13 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 .title(" Filter Contexts ");
             let search_para = Paragraph::new(Line::from(vec![
                 Span::styled(" / ", Style::default().fg(Theme::DIM)),
-                Span::styled(filter.as_str(), Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    filter.as_str(),
+                    Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("█", Style::default().fg(Theme::CYAN)),
-            ])).block(search_block);
+            ]))
+            .block(search_block);
             f.render_widget(search_para, chunks[0]);
 
             // 2. Filter contexts
@@ -462,7 +625,11 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                     } else {
                         c.name.to_lowercase().contains(&lower_filter)
                             || c.cluster.to_lowercase().contains(&lower_filter)
-                            || c.provider.as_deref().unwrap_or("").to_lowercase().contains(&lower_filter)
+                            || c.provider
+                                .as_deref()
+                                .unwrap_or("")
+                                .to_lowercase()
+                                .contains(&lower_filter)
                             || c.source_file.to_lowercase().contains(&lower_filter)
                     }
                 })
@@ -486,7 +653,13 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                     let is_sel = i == sel;
                     let color = Theme::context_color(&c.name, c.is_local);
 
-                    let prefix = if is_active { "★ " } else if is_sel { "▶ " } else { "  " };
+                    let prefix = if is_active {
+                        "★ "
+                    } else if is_sel {
+                        "▶ "
+                    } else {
+                        "  "
+                    };
 
                     let provider_badge = if let Some(p) = &c.provider {
                         format!("[{}] ", p)
@@ -505,10 +678,25 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                     };
 
                     let line1 = Line::from(vec![
-                        Span::styled(prefix, if is_sel { Theme::selected_row() } else { Style::default().fg(color) }),
+                        Span::styled(
+                            prefix,
+                            if is_sel {
+                                Theme::selected_row()
+                            } else {
+                                Style::default().fg(color)
+                            },
+                        ),
                         Span::styled(provider_badge, Style::default().fg(Theme::DIM)),
-                        Span::styled(c.name.clone(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                        Span::styled(active_badge, Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            c.name.clone(),
+                            Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            active_badge,
+                            Style::default()
+                                .fg(Theme::GREEN)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(ns_info, Style::default().fg(Theme::CYAN)),
                     ]);
 
@@ -519,7 +707,10 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
                     let line2 = Line::from(vec![
                         Span::raw("    "),
-                        Span::styled(format!("cluster: {}  •  file: {}", c.cluster, file_name), Style::default().fg(Theme::DIM)),
+                        Span::styled(
+                            format!("cluster: {}  •  file: {}", c.cluster, file_name),
+                            Style::default().fg(Theme::DIM),
+                        ),
                     ]);
 
                     let style = if is_sel {
@@ -537,15 +728,38 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
             // 3. Footer hint
             let footer = Paragraph::new(Line::from(vec![
-                Span::styled(format!(" Showing {}/{} contexts  •  ", filtered.len(), contexts.len()), Style::default().fg(Theme::DIM)),
-                Span::styled("Enter", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(
+                        " Showing {}/{} contexts  •  ",
+                        filtered.len(),
+                        contexts.len()
+                    ),
+                    Style::default().fg(Theme::DIM),
+                ),
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(Theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(": Switch  ", Style::default().fg(Theme::DIM)),
-                Span::styled("Esc", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(Theme::YELLOW)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(": Cancel", Style::default().fg(Theme::DIM)),
-            ])).alignment(Alignment::Center);
+            ]))
+            .alignment(Alignment::Center);
             f.render_widget(footer, chunks[2]);
         }
-        Modal::NamespacePicker { namespaces, current_namespace, selected_idx, filter } => {
+        Modal::NamespacePicker {
+            namespaces,
+            current_namespace,
+            selected_idx,
+            filter,
+        } => {
             let modal_area = centered_rect(50, 55, area);
             f.render_widget(Clear, modal_area);
 
@@ -560,10 +774,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(3),
-                    Constraint::Min(5),
-                ])
+                .constraints([Constraint::Length(3), Constraint::Min(5)])
                 .split(inner);
 
             let filter_block = Block::default()
@@ -571,8 +782,7 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::CYAN))
                 .title(" Filter ");
-            let filter_widget = Paragraph::new(format!("{}█", filter))
-                .block(filter_block);
+            let filter_widget = Paragraph::new(format!("{}█", filter)).block(filter_block);
             f.render_widget(filter_widget, chunks[0]);
 
             let all_ns: Vec<String> = namespaces
@@ -597,11 +807,19 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                     let i = start_idx + rel_i;
                     let is_active = name == current_namespace;
                     let is_sel = i == sel;
-                    let prefix = if is_active { "★ " } else if is_sel { "▶ " } else { "  " };
+                    let prefix = if is_active {
+                        "★ "
+                    } else if is_sel {
+                        "▶ "
+                    } else {
+                        "  "
+                    };
                     let style = if is_sel {
                         Theme::selected_row()
                     } else if is_active {
-                        Style::default().fg(Theme::GREEN).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Theme::GREEN)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Theme::FG)
                     };
@@ -623,7 +841,10 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let modal_area = centered_rect(65, 65, area);
             f.render_widget(Clear, modal_area);
 
-            let ns_str = namespace.as_deref().map(|n| format!(" ({})", n)).unwrap_or_default();
+            let ns_str = namespace
+                .as_deref()
+                .map(|n| format!(" ({})", n))
+                .unwrap_or_default();
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(Theme::border_type())
@@ -653,9 +874,13 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 .title(" Filter Actions ");
             let search_para = Paragraph::new(Line::from(vec![
                 Span::styled(" / ", Style::default().fg(Theme::DIM)),
-                Span::styled(filter.as_str(), Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    filter.as_str(),
+                    Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("█", Style::default().fg(Theme::CYAN)),
-            ])).block(search_block);
+            ]))
+            .block(search_block);
             f.render_widget(search_para, chunks[0]);
 
             // 2. Filtered actions
@@ -691,9 +916,24 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                     let prefix = if is_sel { "▶ " } else { "  " };
 
                     let line1 = Line::from(vec![
-                        Span::styled(prefix, if is_sel { Theme::selected_row() } else { Style::default().fg(Theme::ACCENT) }),
-                        Span::styled(format!("[{}] ", a.key_hint), Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
-                        Span::styled(a.title.clone(), Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            prefix,
+                            if is_sel {
+                                Theme::selected_row()
+                            } else {
+                                Style::default().fg(Theme::ACCENT)
+                            },
+                        ),
+                        Span::styled(
+                            format!("[{}] ", a.key_hint),
+                            Style::default()
+                                .fg(Theme::CYAN)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            a.title.clone(),
+                            Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+                        ),
                     ]);
 
                     let line2 = Line::from(vec![
@@ -716,21 +956,48 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
 
             // 3. Footer hint
             let footer = Paragraph::new(Line::from(vec![
-                Span::styled(format!(" Showing {}/{} actions  •  ", filtered.len(), actions.len()), Style::default().fg(Theme::DIM)),
-                Span::styled("Enter", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(" Showing {}/{} actions  •  ", filtered.len(), actions.len()),
+                    Style::default().fg(Theme::DIM),
+                ),
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(Theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(": Run Action  ", Style::default().fg(Theme::DIM)),
-                Span::styled("Esc", Style::default().fg(Theme::YELLOW).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Esc",
+                    Style::default()
+                        .fg(Theme::YELLOW)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(": Cancel", Style::default().fg(Theme::DIM)),
-            ])).alignment(Alignment::Center);
+            ]))
+            .alignment(Alignment::Center);
             f.render_widget(footer, chunks[2]);
         }
         Modal::MetricsTimeline(state) => {
             crate::views::metrics_panel_view::render_metrics_panel_modal(f, area, state);
         }
-        Modal::ReasonRail { tallies, selected_idx, active_filter } => {
-            crate::views::reason_rail::render_reason_rail_modal(f, area, tallies, *selected_idx, active_filter.as_deref());
+        Modal::ReasonRail {
+            tallies,
+            selected_idx,
+            active_filter,
+        } => {
+            crate::views::reason_rail::render_reason_rail_modal(
+                f,
+                area,
+                tallies,
+                *selected_idx,
+                active_filter.as_deref(),
+            );
         }
-        Modal::ThemePicker { selected_idx, initial_theme_idx: _ } => {
+        Modal::ThemePicker {
+            selected_idx,
+            initial_theme_idx: _,
+        } => {
             let modal_area = centered_rect(75, 75, area);
             f.render_widget(Clear, modal_area);
 
@@ -738,17 +1005,19 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 .borders(Borders::ALL)
                 .border_type(Theme::border_type())
                 .border_style(Style::default().fg(Theme::accent()))
-                .title(Span::styled(" Themes & Visual Styles (↑/↓ or j/k Preview • Enter Select • Esc Cancel) ", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)));
+                .title(Span::styled(
+                    " Themes & Visual Styles (↑/↓ or j/k Preview • Enter Select • Esc Cancel) ",
+                    Style::default()
+                        .fg(Theme::accent())
+                        .add_modifier(Modifier::BOLD),
+                ));
 
             let inner = block.inner(modal_area);
             f.render_widget(block, modal_area);
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(6),
-                    Constraint::Length(1),
-                ])
+                .constraints([Constraint::Min(6), Constraint::Length(1)])
                 .split(inner);
 
             let active_idx = Theme::active_index();
@@ -773,8 +1042,26 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                     };
 
                     let mut spans = vec![
-                        Span::styled(cursor, if is_sel { Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD) } else { Style::default().fg(Theme::dim()) }),
-                        Span::styled(format!("{:<20}", p.display_name), if is_sel { Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD) } else { Style::default().fg(Theme::fg()) }),
+                        Span::styled(
+                            cursor,
+                            if is_sel {
+                                Style::default()
+                                    .fg(Theme::cyan())
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Theme::dim())
+                            },
+                        ),
+                        Span::styled(
+                            format!("{:<20}", p.display_name),
+                            if is_sel {
+                                Style::default()
+                                    .fg(Theme::fg())
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Theme::fg())
+                            },
+                        ),
                         Span::raw(" "),
                         Span::styled("■ ", Style::default().fg(p.accent)),
                         Span::styled("■ ", Style::default().fg(p.cyan)),
@@ -785,14 +1072,25 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                     ];
 
                     if !visual_badge.is_empty() {
-                        spans.push(Span::styled(visual_badge, Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)));
+                        spans.push(Span::styled(
+                            visual_badge,
+                            Style::default()
+                                .fg(Theme::cyan())
+                                .add_modifier(Modifier::BOLD),
+                        ));
                     }
 
                     if is_current {
-                        spans.push(Span::styled("✔ ACTIVE ", Style::default().fg(p.green).add_modifier(Modifier::BOLD)));
+                        spans.push(Span::styled(
+                            "✔ ACTIVE ",
+                            Style::default().fg(p.green).add_modifier(Modifier::BOLD),
+                        ));
                     }
 
-                    spans.push(Span::styled(format!("— {}", p.description), Style::default().fg(Theme::dim())));
+                    spans.push(Span::styled(
+                        format!("— {}", p.description),
+                        Style::default().fg(Theme::dim()),
+                    ));
 
                     let row_style = if is_sel {
                         Theme::selected_row()
@@ -810,20 +1108,39 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
             let active_name = Theme::active_palette().display_name;
             let footer = Paragraph::new(Line::from(vec![
                 Span::styled("Live Previewing: ", Style::default().fg(Theme::dim())),
-                Span::styled(active_name, Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
-                Span::styled("  •  [Enter] Save  [Esc] Cancel", Style::default().fg(Theme::dim())),
-            ])).alignment(Alignment::Center);
+                Span::styled(
+                    active_name,
+                    Style::default()
+                        .fg(Theme::accent())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "  •  [Enter] Save  [Esc] Cancel",
+                    Style::default().fg(Theme::dim()),
+                ),
+            ]))
+            .alignment(Alignment::Center);
             f.render_widget(footer, chunks[1]);
         }
-        Modal::FeatureBanner { show_on_startup } => {
-            render_feature_banner_modal(f, area, *show_on_startup);
+        Modal::FeatureBanner {
+            show_on_startup,
+            update_available,
+        } => {
+            render_feature_banner_modal(f, area, *show_on_startup, update_available.as_deref());
         }
     }
 }
 
-pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: bool) {
-    let modal_width = (area.width.saturating_sub(4)).clamp(48, 94).min(area.width);
-    let modal_height = (area.height.saturating_sub(2)).clamp(16, 24).min(area.height);
+pub fn render_feature_banner_modal(
+    f: &mut Frame,
+    area: Rect,
+    show_on_startup: bool,
+    update_available: Option<&str>,
+) {
+    let modal_width = (area.width.saturating_sub(4)).clamp(48, 96).min(area.width);
+    let modal_height = (area.height.saturating_sub(2))
+        .clamp(18, 27)
+        .min(area.height);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
     let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
@@ -836,7 +1153,9 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
         .border_style(Style::default().fg(Theme::cyan()))
         .title(Span::styled(
             " ✨ Welcome to SRElens — Feature Highlights ✨ ",
-            Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Theme::cyan())
+                .add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(modal_area);
@@ -845,55 +1164,214 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Top description
-            Constraint::Min(10),  // Features list
+            Constraint::Length(3), // Top description & update alert
+            Constraint::Min(11),   // Features list
             Constraint::Length(3), // Checkbox and key hints
         ])
         .split(inner);
 
-    // 1. Header description
-    let header_lines = vec![
-        Line::from(vec![
+    // 1. Header description & update indicator
+    let mut header_lines = vec![Line::from(vec![Span::styled(
+        "Kubernetes control room with high-velocity SRE troubleshooting capabilities.",
+        Style::default()
+            .fg(Theme::fg())
+            .add_modifier(Modifier::BOLD),
+    )])];
+
+    if let Some(ver) = update_available {
+        header_lines.push(Line::from(vec![
             Span::styled(
-                "Kubernetes control room with high-velocity SRE troubleshooting capabilities.",
-                Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD),
+                "▲ UPDATE AVAILABLE: ",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
             ),
-        ]),
-        Line::from(vec![
             Span::styled(
-                "Key built-in features you should know (press [0-9] to jump directly, or type ':' for command prompt):",
+                format!("v{} is available! ", ver),
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("• Run '", Style::default().fg(Theme::dim())),
+            Span::styled(
+                "srelens-tui update",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "' in terminal (or press ",
                 Style::default().fg(Theme::dim()),
             ),
-        ]),
-    ];
+            Span::styled(
+                "u",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(")", Style::default().fg(Theme::dim())),
+        ]));
+    } else {
+        header_lines.push(Line::from(vec![
+            Span::styled(
+                format!(
+                    "Version v{} • Type ",
+                    env!("CARGO_PKG_VERSION")
+                ),
+                Style::default().fg(Theme::dim()),
+            ),
+            Span::styled(
+                ":update",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" or press ", Style::default().fg(Theme::dim())),
+            Span::styled(
+                "u",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to check for updates", Style::default().fg(Theme::dim())),
+        ]));
+    }
+
+    header_lines.push(Line::from(vec![
+        Span::styled(
+            "Key built-in features you should know (press [0-9, u] to jump directly, or type ':' for command prompt):",
+            Style::default().fg(Theme::dim()),
+        ),
+    ]));
     f.render_widget(Paragraph::new(header_lines), chunks[0]);
 
     // 2. Feature highlights
-    let features: &[(&str, &str, &str, &str, &str)] = &[
-        ("[1]", ":helm",        "[Helm 3]",        "Helm 3 release revisions, rollback status, values & manifests", ":helm [ns]"),
-        ("[2]", ":overview",    "[Cluster]",       "Cluster overview, health summary & node/pod capacity",          ":overview"),
-        ("[3]", ":gpuinfo",     "[Hardware]",      "GPU hardware inspector, specs & per-pod VRAM allocations",     ":gpuinfo"),
-        ("[4]", ":workloads",   "[Workload]",      "Unified workloads view (Pods, Deployments, STS, DS, Jobs)",     ":workloads [ns]"),
-        ("[5]", ":argo",        "[GitOps]",        "ArgoCD applications, sync status, drift & GitOps control",      ":argo [ns]"),
-        ("[6]", ":ai",          "[AI Assistant]",  "Interactive AI troubleshooting chat for automated RCA",         ":ai"),
-        ("[7]", ":ai-settings", "[AI Config]",     "Configure AI providers (Claude, OpenAI, Gemini), models & keys", ":ai-settings"),
-        ("[8]", ":config",      "[Lens Settings]", "Lens settings: popup width, visible rows, text scale & banner",  ":config"),
-        ("[9]", ":banner",      "[Guide]",         "Re-display this feature highlights banner & startup guide",     ":banner"),
-        ("[0]", ":nodes",       "[Node SSH]",      "Direct SSH to host OS for node recovery (<S> on node)",         ":nodes -> <S>"),
+    let update_desc = if let Some(ver) = update_available {
+        format!("▲ New version v{} available! Run 'srelens-tui update'", ver)
+    } else {
+        "Check for new releases & update binary ('srelens-tui update')".to_string()
+    };
+
+    let features: [(&str, &str, &str, String, &str); 11] = [
+        (
+            "[1]",
+            ":helm",
+            "[Helm 3]",
+            "Helm 3 release revisions, rollback status, values & manifests".to_string(),
+            ":helm [ns]",
+        ),
+        (
+            "[2]",
+            ":overview",
+            "[Cluster]",
+            "Cluster overview, health summary & node/pod capacity".to_string(),
+            ":overview",
+        ),
+        (
+            "[3]",
+            ":gpuinfo",
+            "[Hardware]",
+            "GPU hardware inspector, specs & per-pod VRAM allocations".to_string(),
+            ":gpuinfo",
+        ),
+        (
+            "[4]",
+            ":workloads",
+            "[Workload]",
+            "Unified workloads view (Pods, Deployments, STS, DS, Jobs)".to_string(),
+            ":workloads [ns]",
+        ),
+        (
+            "[5]",
+            ":argo",
+            "[GitOps]",
+            "ArgoCD applications, sync status, drift & GitOps control".to_string(),
+            ":argo [ns]",
+        ),
+        (
+            "[6]",
+            ":ai",
+            "[AI Assistant]",
+            "Interactive AI troubleshooting chat for automated RCA".to_string(),
+            ":ai",
+        ),
+        (
+            "[7]",
+            ":ai-settings",
+            "[AI Config]",
+            "Configure AI providers (Claude, OpenAI, Gemini), models & keys".to_string(),
+            ":ai-settings",
+        ),
+        (
+            "[8]",
+            ":config",
+            "[Lens Settings]",
+            "Lens settings: popup width, visible rows, text scale & banner".to_string(),
+            ":config",
+        ),
+        (
+            "[9]",
+            ":banner",
+            "[Guide]",
+            "Re-display this feature highlights banner & startup guide".to_string(),
+            ":banner",
+        ),
+        (
+            "[0]",
+            ":nodes",
+            "[Node SSH]",
+            "Direct SSH to host OS for node recovery (<S> on node)".to_string(),
+            ":nodes -> <S>",
+        ),
+        ("[u]", ":update", "[Self Update]", update_desc, ":update"),
     ];
 
     let inner_w = chunks[1].width as usize;
     let items: Vec<ListItem> = features
         .iter()
         .map(|(num, cmd, cat, desc, syntax)| {
+            let (num_style, cmd_style) = if *cmd == ":update" && update_available.is_some() {
+                (
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                )
+            };
             let mut spans = vec![
-                Span::styled(format!("{num} "), Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:<13}", cmd), Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:<15}", cat), Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:<desc_len$}", desc, desc_len = if inner_w >= 85 { 44 } else { 32 }), Style::default().fg(Theme::fg())),
+                Span::styled(format!("{num} "), num_style),
+                Span::styled(format!("{:<13}", cmd), cmd_style),
+                Span::styled(
+                    format!("{:<15}", cat),
+                    Style::default()
+                        .fg(Theme::accent())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "{:<desc_len$}",
+                        desc,
+                        desc_len = if inner_w >= 85 { 44 } else { 32 }
+                    ),
+                    Style::default().fg(Theme::fg()),
+                ),
             ];
             if inner_w >= 80 {
-                spans.push(Span::styled(format!("  ({})", syntax), Style::default().fg(Theme::dim())));
+                spans.push(Span::styled(
+                    format!("  ({})", syntax),
+                    Style::default().fg(Theme::dim()),
+                ));
             }
             ListItem::new(Line::from(spans))
         })
@@ -904,38 +1382,87 @@ pub fn render_feature_banner_modal(f: &mut Frame, area: Rect, show_on_startup: b
     // 3. Footer with Startup Checkbox & Key hints
     let checkbox_spans = if show_on_startup {
         vec![
-            Span::styled(" [●] ", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
-            Span::styled("Show this feature banner on startup", Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " [●] ",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Show this feature banner on startup",
+                Style::default()
+                    .fg(Theme::fg())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" (Press ", Style::default().fg(Theme::dim())),
-            Span::styled("t", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "t",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to toggle)", Style::default().fg(Theme::dim())),
         ]
     } else {
         vec![
             Span::styled(" [○] ", Style::default().fg(Theme::dim())),
-            Span::styled("Show this feature banner on startup", Style::default().fg(Theme::dim())),
+            Span::styled(
+                "Show this feature banner on startup",
+                Style::default().fg(Theme::dim()),
+            ),
             Span::styled(" (Currently ", Style::default().fg(Theme::dim())),
-            Span::styled("Disabled", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Disabled",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" • Press ", Style::default().fg(Theme::dim())),
-            Span::styled("t", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "t",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to enable)", Style::default().fg(Theme::dim())),
         ]
     };
 
     let footer_lines = vec![
-        Line::from(vec![
-            Span::styled("─".repeat(inner_w.min(90)), Style::default().fg(Theme::border())),
-        ]),
+        Line::from(vec![Span::styled(
+            "─".repeat(inner_w.min(90)),
+            Style::default().fg(Theme::border()),
+        )]),
         Line::from(checkbox_spans),
         Line::from(vec![
             Span::styled(" Press ", Style::default().fg(Theme::dim())),
-            Span::styled("Enter", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(", ", Style::default().fg(Theme::dim())),
-            Span::styled("Esc", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(", or ", Style::default().fg(Theme::dim())),
-            Span::styled("q", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "q",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to dismiss  |  Press ", Style::default().fg(Theme::dim())),
-            Span::styled("0-9", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "0-9, u",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to jump directly  |  ", Style::default().fg(Theme::dim())),
             Span::styled(":banner", Style::default().fg(Theme::accent())),
             Span::styled(" to reopen anytime", Style::default().fg(Theme::dim())),

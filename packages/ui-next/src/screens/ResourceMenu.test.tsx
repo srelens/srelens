@@ -514,7 +514,7 @@ describe("useRowMenu — the cluster the row was picked on", () => {
   const tickFor = (verb: string) => screen.getByRole("checkbox", { name: `Yes, still ${verb} on ${PINNED}.` });
   const REFUSAL = `This runs on ${PINNED}, not ${MOVED}. Confirm the cluster above, or cancel.`;
   it("dismisses a pending write when its captured cluster is paused", async () => {
-    const contexts = [PINNED, MOVED].map(name => ({ name, stableId: `id-${name}`, cluster: name, server: "", isCurrent: false, sourceFile: "", authKind: "token" }));
+    const contexts = [PINNED, MOVED].map(name => ({ name, stableId: `id-${name}`, key: `id-${name}`, cluster: name, server: "", isCurrent: false, sourceFile: "", authKind: "token" }));
     setContexts(contexts);
     store.setState(defaultState(contexts));
     await pickThenMove("Delete");

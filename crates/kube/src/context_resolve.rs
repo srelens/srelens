@@ -73,13 +73,70 @@ impl ResolvedContext {
     /// caller must refuse rather than dispatch under it.
     pub fn pinned_id(&self) -> Option<String> {
         let source = std::path::absolute(&self.source).ok()?;
-        let source = source
-            .display()
-            .to_string()
-            .replace('%', "%25")
-            .replace('#', "%23");
-        let original_name = self.original_name.replace('%', "%25").replace('#', "%23");
-        Some(format!("srelens-context:{source}#{original_name}"))
+        Some(format!(
+            "srelens-context:{}#{}",
+            encode_path(&source),
+            encode_part(&self.original_name)
+        ))
+    }
+
+    /// The identity an app's cluster list holds (`extensions.configure` `clusters`).
+    ///
+    /// Like [`stable_id`](Self::stable_id) it keeps the path as given, so it does not depend
+    /// on the working directory; unlike it, `#` and `%` are percent-encoded in each part, so
+    /// the first `#` is always the delimiter and no two contexts share a key. A path `a` with
+    /// context `b#c` and a path `a#b` with context `c` share a stable ID but not a key, so a
+    /// list naming one can never admit the other, whether or not both are ever listed.
+    pub fn key(&self) -> String {
+        format!(
+            "{}#{}",
+            encode_path(&self.source),
+            encode_part(&self.original_name)
+        )
+    }
+}
+
+/// One part of a pinned ID or key: `%` and `#` encoded, so `#` can delimit the parts.
+fn encode_part(part: &str) -> String {
+    part.replace('%', "%25").replace('#', "%23")
+}
+
+/// The path part of a pinned ID or key, from the path's native bytes rather than its
+/// `display()` form, which is lossy: two files that differ only in bytes that are not UTF-8
+/// display as the same replacement character. A path that is valid UTF-8 is encoded as text
+/// (`encode_part`); any other is encoded unit by unit, with every unit that is not printable
+/// ASCII written as `%xx` (Unix bytes) or `%uxxxx` (Windows code units). A literal `%` is
+/// always `%25`, so the two forms cannot collide.
+fn encode_path(path: &Path) -> String {
+    if let Some(text) = path.to_str() {
+        return encode_part(text);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str()
+            .as_bytes()
+            .iter()
+            .map(|&b| match b {
+                b'#' => "%23".to_string(),
+                b'%' => "%25".to_string(),
+                0x20..=0x7e => (b as char).to_string(),
+                _ => format!("%{b:02x}"),
+            })
+            .collect()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .map(|unit| match unit {
+                0x23 => "%23".to_string(),
+                0x25 => "%25".to_string(),
+                0x20..=0x7e => (unit as u8 as char).to_string(),
+                _ => format!("%u{unit:04x}"),
+            })
+            .collect()
     }
 }
 
@@ -92,15 +149,70 @@ pub fn is_pinned_context(name: &str) -> bool {
     else {
         return false;
     };
-    // The generator escapes only `%` and `#`. A raw delimiter or any other
-    // percent escape cannot occur inside either generated component.
-    let encoded = |part: &str| {
-        !part.contains('#')
-            && part.split('%').skip(1).all(|suffix| {
-                suffix.starts_with("25") || suffix.starts_with("23")
-            })
-    };
-    Path::new(source).is_absolute() && encoded(source) && encoded(context)
+    // Each part carries only the escapes its generator emits, and nothing else is
+    // reserved: `%23` and `%25` in both parts, and in the path part the escapes
+    // `encode_path` writes for a unit it does not print (lowercase hex; `%xx` for a byte on
+    // Unix, `%uxxxx` for a UTF-16 unit on Windows). A literal name such as `%41` for a
+    // printable `A`, or the other platform's form, stays a name.
+    let escaped = |suffix: &str| suffix.starts_with("25") || suffix.starts_with("23");
+    let text = |part: &str| !part.contains('#') && part.split('%').skip(1).all(escaped);
+    Path::new(source).is_absolute() && is_encoded_path(source) && text(context)
+}
+
+/// Whether `encoded` is exactly a form `encode_path` can emit. Checking individual escapes
+/// is not enough on Unix: `%c3%a9` consists of two non-printable byte escapes, but together
+/// those bytes are valid UTF-8, for which the encoder writes `é` instead.
+fn is_encoded_path(encoded: &str) -> bool {
+    if encoded.contains('#') {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let mut bytes = Vec::with_capacity(encoded.len());
+        let raw = encoded.as_bytes();
+        let mut index = 0;
+        while index < raw.len() {
+            if raw[index] == b'%' {
+                let Some(hex) = raw.get(index + 1..index + 3) else {
+                    return false;
+                };
+                let Ok(hex) = std::str::from_utf8(hex) else {
+                    return false;
+                };
+                let Ok(byte) = u8::from_str_radix(hex, 16) else {
+                    return false;
+                };
+                bytes.push(byte);
+                index += 3;
+            } else {
+                bytes.push(raw[index]);
+                index += 1;
+            }
+        }
+        encode_path(Path::new(std::ffi::OsStr::from_bytes(&bytes))) == encoded
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        let mut units = Vec::new();
+        let mut chars = encoded.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '%' {
+                units.extend(ch.encode_utf16(&mut [0; 2]).iter().copied());
+                continue;
+            }
+            let count = if chars.peek() == Some(&'u') { 5 } else { 2 };
+            let suffix: String = chars.by_ref().take(count).collect();
+            let hex = suffix.strip_prefix('u').unwrap_or(&suffix);
+            let Ok(unit) = u16::from_str_radix(hex, 16) else {
+                return false;
+            };
+            units.push(unit);
+        }
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&units));
+        encode_path(&path) == encoded
+    }
 }
 
 /// A parsed kubeconfig paired with the file it came from.
@@ -752,6 +864,16 @@ mod tests {
             "srelens-context:/kube/team%oops#prod",
             "srelens-context:/kube/team#prod%oops",
             "srelens-context:/kube/team#prod%2%253",
+            // `A` is printable, so the encoder never writes `%41`; uppercase hex is never written.
+            "srelens-context:/kube/team%41#prod",
+            "srelens-context:/kube/team%C3%A9#prod",
+            // These lowercase escapes decode to valid UTF-8, so `encode_path` writes `é`.
+            "srelens-context:/kube/team%c3%a9#prod",
+            // The other platform's escape form.
+            #[cfg(unix)]
+            "srelens-context:/kube/team%ud800#prod",
+            #[cfg(windows)]
+            "srelens-context:/kube/team%80#prod",
         ] {
             assert!(!is_pinned_context(name), "literal name: {name}");
             let yaml = PROD.replace("default", name);
@@ -823,6 +945,71 @@ mod tests {
         );
     }
 
+    /// The key an app's cluster list holds. Like the stable ID it keeps the path as given, but
+    /// `#` and `%` are encoded in each part, so the first `#` is always the delimiter and no two
+    /// contexts share a key, whether or not they are ever listed together.
+    /// Two files can differ only in bytes that are not UTF-8, which `Path::display` renders
+    /// as the same replacement character. The key encodes the native path bytes instead, so
+    /// such files still get distinct keys and pinned IDs.
+    #[cfg(unix)]
+    #[test]
+    fn paths_that_are_not_utf8_get_distinct_keys() {
+        use std::os::unix::ffi::OsStrExt;
+        let source = |bytes: &[u8]| SourceConfig {
+            source: PathBuf::from(std::ffi::OsStr::from_bytes(bytes)),
+            config: Kubeconfig::from_yaml(PROD).unwrap(),
+        };
+        let both = resolve_from(&[source(b"/kube/a\x80"), source(b"/kube/a\x81")]);
+        assert_eq!(both[0].stable_id(), both[1].stable_id(), "display is lossy");
+        assert_ne!(both[0].key(), both[1].key());
+        assert_ne!(both[0].pinned_id(), both[1].pinned_id());
+        assert_eq!(both[0].key(), "/kube/a%80#default");
+        // A valid path that literally reads the same as an escape stays distinct.
+        let literal = resolve_from(&[source(b"/kube/a%80")]).remove(0);
+        assert_eq!(literal.key(), "/kube/a%2580#default");
+        // The pinned ID is reserved with its byte escapes, so once its context is gone a
+        // context literally named after it never takes a request pinned to it.
+        let pinned = both[0].pinned_id().unwrap();
+        assert!(is_pinned_context(&pinned), "{pinned}");
+        let impostor = cfg("/kube/impostor.yaml", &PROD.replace("default", &pinned));
+        assert!(find_context(&resolve_from(&[impostor]), &pinned).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn paths_that_are_not_utf16_get_distinct_keys() {
+        use std::os::windows::ffi::OsStringExt;
+        let source = |units: &[u16]| SourceConfig {
+            source: PathBuf::from(std::ffi::OsString::from_wide(units)),
+            config: Kubeconfig::from_yaml(PROD).unwrap(),
+        };
+        let a: Vec<u16> = "C:\\kube\\a".encode_utf16().chain([0xD800]).collect();
+        let b: Vec<u16> = "C:\\kube\\a".encode_utf16().chain([0xD801]).collect();
+        let both = resolve_from(&[source(&a), source(&b)]);
+        assert_eq!(both[0].stable_id(), both[1].stable_id(), "display is lossy");
+        assert_ne!(both[0].key(), both[1].key());
+        assert_ne!(both[0].pinned_id(), both[1].pinned_id());
+        assert_eq!(both[0].key(), "C:\\kube\\a%ud800#default");
+        let pinned = both[0].pinned_id().unwrap();
+        assert!(is_pinned_context(&pinned), "{pinned}");
+        let impostor = cfg("C:\\kube\\impostor.yaml", &PROD.replace("default", &pinned));
+        assert!(find_context(&resolve_from(&[impostor]), &pinned).is_none());
+    }
+    #[test]
+    fn a_context_key_names_exactly_one_context() {
+        let plain = resolve_from(&[cfg("/kube/prod.yaml", PROD)]).remove(0);
+        assert_eq!(plain.key(), plain.stable_id());
+        let relative = resolve_from(&[cfg("kube/prod.yaml", PROD)]).remove(0);
+        assert_eq!(relative.key(), "kube/prod.yaml#default");
+
+        let named = |name: &str| PROD.replace("default", name);
+        let both = resolve_from(&[cfg("/kube/a", &named("b#c")), cfg("/kube/a#b", &named("c"))]);
+        assert_eq!(both[0].stable_id(), both[1].stable_id());
+        assert_eq!(both[0].key(), "/kube/a#b%23c");
+        assert_eq!(both[1].key(), "/kube/a%23b#c");
+        let percent = resolve_from(&[cfg("/kube/100%", &named("x%y"))]).remove(0);
+        assert_eq!(percent.key(), "/kube/100%25#x%25y");
+    }
     #[test]
     fn a_relative_kubeconfig_keeps_its_stable_id_and_pins_by_an_absolute_one() {
         // Settings persist the stable ID, so a relative kubeconfig path must stay in it.

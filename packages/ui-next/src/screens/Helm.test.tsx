@@ -59,7 +59,7 @@ const ROUTE = "/helm";
 
 const CTX: ClusterContext = {
   name: "prod-eu",
-  stableId: "prod",
+  stableId: "prod", key: "prod",
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,
@@ -1487,7 +1487,7 @@ describe("Helm — a dialog open across a cluster switch", () => {
    */
   const STAGE: ClusterContext = {
     name: "stage-eu",
-    stableId: "stage",
+    stableId: "stage", key: "stage",
     cluster: "stage",
     server: "https://stage",
     isCurrent: false,

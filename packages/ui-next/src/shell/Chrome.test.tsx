@@ -65,7 +65,7 @@ vi.mock("@srelens/core", async (orig) => ({
 }));
 
 const ctx = (id: string) => ({
-  name: id, stableId: id, cluster: id, server: "", isCurrent: false,
+  name: id, stableId: id, key: id, cluster: id, server: "", isCurrent: false,
   sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 

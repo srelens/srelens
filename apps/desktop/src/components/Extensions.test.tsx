@@ -91,8 +91,8 @@ it("opens native app pages from classic's connected-cluster navigation without a
 const listTwoClusters = () =>
   vi.mocked(listContexts).mockResolvedValue({
     contexts: [
-      { name: "cluster/a", stableId: "/kube/a.yaml#cluster/a" },
-      { name: "cluster/b", stableId: "/kube/b.yaml#cluster/b" },
+      { name: "cluster/a", stableId: "/kube/a.yaml#cluster/a", key: "/kube/a.yaml#cluster/a" },
+      { name: "cluster/b", stableId: "/kube/b.yaml#cluster/b", key: "/kube/b.yaml#cluster/b" },
     ],
   } as any);
 
@@ -189,27 +189,28 @@ it("says why the classic Apps navigation cannot show a limited app, and retries"
   expect(screen.queryByRole("alert")).toBeNull();
 });
 
-it("says a cluster shares its ID with another rather than that a limited app is not enabled", async () => {
+it("opens a limited app on the chosen one of two clusters sharing a stable ID, by key", async () => {
   vi.mocked(listContexts).mockResolvedValue({
     contexts: [
-      { name: "b#c", stableId: "/kube/a#b#c" },
-      { name: "c", stableId: "/kube/a#b#c" },
+      { name: "b#c", stableId: "/kube/a#b#c", key: "/kube/a#b%23c" },
+      { name: "c", stableId: "/kube/a#b#c", key: "/kube/a%23b#c" },
     ],
   } as any);
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
     nextRevision: 2,
-    plugins: [{ ...plugin, contexts: ["/kube/a#b#c"] }],
+    plugins: [{ ...plugin, contexts: ["/kube/a#b%23c"] }],
   });
   const { ClassicAppPage } = await import("./Extensions");
+  const { unmount } = render(<ClassicAppPage context="c" id={manifest.id} page={manifest.contributions.pages[0].id} onPage={vi.fn()} />);
+  expect(await screen.findByText(/not enabled for this cluster/)).toBeTruthy();
+  unmount();
   render(<ClassicAppPage context="b#c" id={manifest.id} page={manifest.contributions.pages[0].id} onPage={vi.fn()} />);
-  expect(await screen.findByText(/shares its ID with another context/)).toBeTruthy();
-  expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
+  await waitFor(() => expect(screen.queryByText(/not enabled for this cluster|Loading app/)).toBeNull());
 });
-
 it("says the cluster is gone rather than that a limited app is not enabled", async () => {
   vi.mocked(listContexts).mockResolvedValue({
-    contexts: [{ name: "cluster/b", stableId: "/kube/b.yaml#cluster/b" }],
+    contexts: [{ name: "cluster/b", stableId: "/kube/b.yaml#cluster/b", key: "/kube/b.yaml#cluster/b" }],
   } as any);
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,

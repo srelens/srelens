@@ -91,7 +91,16 @@ fn main() {
             .filter(|a| !a.starts_with("--"))
             .cloned()
             .unwrap_or_else(|| "127.0.0.1:8765".into());
-        run_mcp_http(&addr, allow_destructive, allow_sensitive_reads, master_password);
+        // The HTTP transport is loopback-only: a non-loopback address is
+        // refused unless the operator says, in so many words, that they want
+        // the server exposed. Plain HTTP, so the bearer token is then the
+        // only barrier (#607, docs/MCP.md "Security model").
+        let exposure = if args.iter().any(|a| a == "--mcp-expose-http") {
+            srelens_mcp::http::Exposure::Network
+        } else {
+            srelens_mcp::http::Exposure::Loopback
+        };
+        run_mcp_http(&addr, exposure, allow_destructive, allow_sensitive_reads, master_password);
         return;
     }
     drop(master_password);
@@ -141,11 +150,28 @@ const MCP_AUDIT_CAP_BYTES: u64 = 5 * 1024 * 1024;
 
 fn run_mcp_http(
     addr: &str,
+    exposure: srelens_mcp::http::Exposure,
     allow_destructive: bool,
     allow_sensitive_reads: bool,
     master_password: Option<String>,
 ) {
-    let addr: std::net::SocketAddr = addr.parse().expect("invalid --mcp-http address");
+    let addr: std::net::SocketAddr = addr.parse().unwrap_or_else(|_| {
+        eprintln!(
+            "srelens: invalid --mcp-http address {addr:?} (expected host:port, e.g. 127.0.0.1:8765)"
+        );
+        std::process::exit(2);
+    });
+    // Decided before the vault is opened or a token minted: a refused
+    // address should fail with nothing else done. The listener itself is
+    // bound below, in the runtime, and cannot be handed a different address.
+    if let Err(e) = srelens_mcp::http::check_bind_addr(addr, exposure) {
+        eprintln!(
+            "srelens: {e}. To serve on that address anyway, pass --mcp-expose-http: the server \
+             then speaks plain HTTP to anyone who can reach it, with the bearer token as the \
+             only barrier (see docs/MCP.md, \"Security model\")."
+        );
+        std::process::exit(2);
+    }
     let policy = Arc::new(srelens_mcp::policy::FlagGated::new(
         allow_destructive,
         allow_sensitive_reads,
@@ -245,11 +271,40 @@ fn run_mcp_http(
             .with_watcher(Arc::new(srelens_desktop_lib::mcp_watch::CacheWatcher::new(
                 cache,
             )));
+        // `bind` re-checks the address against `exposure` and refuses a
+        // non-loopback one — the check above only lets us fail before the
+        // vault is touched. A bind failure (port held by the GUI's own
+        // toggle, say) is an error exit, not a silent return.
+        let listener = match srelens_mcp::http::HttpListener::bind(addr, exposure).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("srelens: could not bind --mcp-http {addr}: {e}");
+                std::process::exit(1);
+            }
+        };
+        // The address actually bound, not the one asked for: a port of 0
+        // resolves only now, and the message must not call an exposed
+        // listener loopback.
+        let bound = listener.local_addr().unwrap_or(addr);
+        let reach = match listener.exposure() {
+            srelens_mcp::http::Exposure::Loopback => "loopback only".to_string(),
+            srelens_mcp::http::Exposure::Network => {
+                let on = if bound.ip().is_unspecified() {
+                    format!("every interface, port {}", bound.port())
+                } else {
+                    bound.to_string()
+                };
+                format!(
+                    "EXPOSED by --mcp-expose-http: plain HTTP on {on}, with the bearer token as \
+                     the only barrier"
+                )
+            }
+        };
         eprintln!(
-            "MCP HTTP listening on http://{addr}/mcp (loopback; gated tools need _confirm plus \
+            "MCP HTTP listening on http://{bound}/mcp ({reach}; gated tools need _confirm plus \
              --mcp-allow-destructive to mutate or --mcp-allow-sensitive-reads to read secrets)"
         );
-        if let Err(e) = srelens_mcp::http::serve_http(server, addr, token).await {
+        if let Err(e) = srelens_mcp::http::serve_http(server, listener, token).await {
             eprintln!("mcp http server error: {e}");
         }
     });

@@ -148,7 +148,7 @@ import { getView, resetView, setNamespaces } from "../lib/workspace";
 
 const CTX: ClusterContext = {
   name: "prod-eu",
-  stableId: "prod",
+  stableId: "prod", key: "prod",
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,
@@ -163,7 +163,7 @@ const CTX: ClusterContext = {
  */
 const STAGE: ClusterContext = {
   name: "stage-eu",
-  stableId: "stage",
+  stableId: "stage", key: "stage",
   cluster: "stage",
   server: "https://stage",
   isCurrent: false,

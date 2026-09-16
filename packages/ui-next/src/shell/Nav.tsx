@@ -74,7 +74,8 @@ export function Nav({ contexts }: NavProps) {
   const extensions = useExtensions();
   const activeCluster = useActiveCluster();
   const ctx = contexts.find((c) => c.stableId === activeCluster) ?? null;
-  const scopeId = ctx && contexts.filter((c) => c.stableId === ctx.stableId).length === 1 ? ctx.stableId : undefined;
+  // App routes carry the stable ID, so a shared one cannot be routed; app scope itself keys on `key` (#623).
+  const scopeId = ctx && contexts.filter((c) => c.stableId === ctx.stableId).length === 1 ? ctx.key : undefined;
   const view = useWorkspaceView();
   const [query, setQuery] = useState("");
   const mark = useMark(ctx?.stableId ?? "", ctx?.name ?? "");

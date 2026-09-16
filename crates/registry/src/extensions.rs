@@ -1,9 +1,9 @@
 //! Durable, native declarative extensions for desktop hosts.
 mod catalog;
-mod resource;
-mod signing;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
+mod resource;
+mod signing;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -21,7 +21,11 @@ use std::{
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Installed {
-    #[serde(default, rename = "signatureProof", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "signatureProof",
+        skip_serializing_if = "Option::is_none"
+    )]
     signature_proof: Option<SignatureProof>,
     /// Why this host refused to trust the stored entry when loading it. Recomputed
     /// on every read, reported to the UI, and never written to disk.
@@ -38,9 +42,11 @@ pub struct Installed {
     installed_at: u64,
     /// The versions this one replaced, newest first, at most [`KEPT_VERSIONS`].
     history: Vec<PreviousVersion>,
-    /// The stable IDs of the kubeconfig contexts the app is enabled for (`{file}#{name}`, as
-    /// `ResolvedContext::stable_id`); `None` is every cluster. A context's display name is
-    /// not identity: it changes when another kubeconfig declares the same name (#265).
+    /// The keys of the kubeconfig contexts the app is enabled for (`ResolvedContext::key`:
+    /// `{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports
+    /// under `key`); `None` is every cluster. A context's display name is not identity: it
+    /// changes when another kubeconfig declares the same name (#265). A stable ID is not
+    /// either: `a` + `b#c` and `a#b` + `c` share one (#623).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     contexts: Option<Vec<String>>,
 }
@@ -57,7 +63,7 @@ impl Installed {
             return Ok(());
         };
         match context {
-            Ok(resolved) if contexts.contains(&resolved.stable_id()) => Ok(()),
+            Ok(resolved) if contexts.contains(&resolved.key()) => Ok(()),
             Ok(_) => Err(CapabilityError::Handler(NOT_ENABLED_FOR_CLUSTER.into())),
             Err(reason) => Err(CapabilityError::Handler(format!(
                 "Could not check whether this app is enabled for this cluster: {reason}"
@@ -69,7 +75,7 @@ impl Installed {
 /// with, the same way a connection resolves it. When there is no such context, why: no
 /// kubeconfig declares it, or the files that could not be read.
 ///
-/// Scope is checked against its stable ID, and the request goes out under its pinned ID:
+/// Scope is checked against its key, and the request goes out under its pinned ID:
 /// capabilities resolve their context again, and by name a kubeconfig change in between could
 /// reach a cluster that took the name since.
 async fn request_context(
@@ -79,19 +85,6 @@ async fn request_context(
     let paths = cache.paths().await;
     let all = srelens_kube::context_resolve::resolve_contexts(&paths);
     if let Some(resolved) = srelens_kube::context_resolve::find_context(&all, context) {
-        // A stable ID is what the app's cluster list holds. One that another context also
-        // carries (`a` + `b#c` and `a#b` + `c`) does not say which cluster was chosen, so
-        // neither context may use the app under it.
-        let id = resolved.stable_id();
-        if let Some(other) = all.iter().find(|c| {
-            (c.source != resolved.source || c.original_name != resolved.original_name)
-                && c.stable_id() == id
-        }) {
-            return Err(format!(
-                "the context ID \"{id}\" is shared by another context, \"{}\"; rename one of them",
-                other.display_name
-            ));
-        }
         // The request goes on under the pinned ID; without one it cannot go on safely.
         if resolved.pinned_id().is_none() {
             return Err(format!(
@@ -910,8 +903,12 @@ pub fn register(
                     .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
                 let mut manifest = plugin.manifest.clone();
                 if input.use_crd_columns {
-                    if let Some(binding) = manifest.capabilities.iter_mut().find(|b| b.name == input.capability && b.target == "k8s.listCustomResource") {
-                        binding.arguments.insert("useCrdColumns".into(), json!(true));
+                    if let Some(binding) = manifest.capabilities.iter_mut().find(|b| {
+                        b.name == input.capability && b.target == "k8s.listCustomResource"
+                    }) {
+                        binding
+                            .arguments
+                            .insert("useCrdColumns".into(), json!(true));
                     }
                 }
                 let mut registry = Registry::new();
@@ -1131,11 +1128,19 @@ mod tests {
         let path = dir.path().join("apps.json");
         let source = include_str!("../tests/fixtures/argocd-manifest.json");
         let signature = include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec();
-        let install = |manifest: String, signature: Vec<u8>| serde_json::from_value::<Configure>(json!({
-            "action": "install", "manifest": manifest,
-            "signature": signature, "grants": ["k8s.listCustomResource"]
-        })).unwrap();
-        mutate(&path, fake_core(), install(source.into(), signature.clone())).unwrap();
+        let install = |manifest: String, signature: Vec<u8>| {
+            serde_json::from_value::<Configure>(json!({
+                "action": "install", "manifest": manifest,
+                "signature": signature, "grants": ["k8s.listCustomResource"]
+            }))
+            .unwrap()
+        };
+        mutate(
+            &path,
+            fake_core(),
+            install(source.into(), signature.clone()),
+        )
+        .unwrap();
         assert!(read(&path).unwrap().plugins[0].signature_proof.is_some());
         assert!(mutate(&path, fake_core(), install(format!("{source} "), signature)).is_err());
         let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -1546,44 +1551,40 @@ mod tests {
         assert_eq!(reached(&[impostor]), None);
     }
     /// A file path and a context name can both contain `#`, so two contexts can share one
-    /// stable ID: `a` + `b#c` and `a#b` + `c`. Neither may use an app limited to that ID,
-    /// because the ID does not say which cluster was chosen.
+    /// stable ID: `a` + `b#c` and `a#b` + `c`. The cluster list keys on the context key, which
+    /// encodes both parts, so the chosen cluster is the only one that gets the app, even
+    /// when the other is added after the chosen one is gone (they need never coexist).
     #[tokio::test]
-    async fn contexts_that_share_a_stable_id_are_refused_rather_than_both_allowed() {
+    async fn an_apps_cluster_list_keys_on_the_context_key_not_the_shared_stable_id() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("extensions.json");
         let first = kubeconfig(dir.path(), "a", &["b#c"]);
         let second = kubeconfig(dir.path(), "a#b", &["c"]);
-        let shared = format!("{}#b#c", first.display());
-        let (reg, _cache) = setup_with(&path, vec![first.clone(), second.clone()]);
+        let listed =
+            srelens_kube::context_resolve::resolve_contexts(&[first.clone(), second.clone()]);
+        assert_eq!(listed[0].stable_id(), listed[1].stable_id());
+        let (reg, cache) = setup_with(&path, vec![first.clone(), second.clone()]);
         let revision = install(&path, fake_core());
         configure(
             &path,
-            json!({"action":"clusters","id":"org.example.argocd","contexts":[shared]}),
+            json!({"action":"clusters","id":"org.example.argocd","contexts":[listed[0].key()]}),
         )
         .unwrap();
-        let all = srelens_kube::context_resolve::resolve_contexts(&[first.clone(), second.clone()]);
-        let first_pinned = all[0].pinned_id().unwrap();
-        let second_pinned = all[1].pinned_id().unwrap();
-        for context in [&first_pinned, &second_pinned] {
-            let error = reg
-                .invoke(
-                    "extensions.read",
-                    json!({"id":"org.example.argocd","revision":revision,
-                        "capability":"applications","context":context,"namespace":""}),
-                )
-                .await
-                .unwrap_err()
-                .to_string();
-            assert!(
-                !error.contains(NOT_ENABLED_FOR_CLUSTER),
-                "{context}: {error}"
-            );
-            assert!(
-                error.contains("shared by another context"),
-                "{context}: {error}"
-            );
-        }
+        let refused = |context: String| {
+            let reg = reg.clone();
+            let payload = json!({"id":"org.example.argocd","revision":revision,
+                "capability":"applications","context":context,"namespace":""});
+            async move {
+                reg.invoke("extensions.read", payload)
+                    .await
+                    .is_err_and(|error| error.to_string().contains(NOT_ENABLED_FOR_CLUSTER))
+            }
+        };
+        assert!(!refused(listed[0].pinned_id().unwrap()).await);
+        assert!(refused(listed[1].pinned_id().unwrap()).await);
+        // The chosen context is gone and the other is the sole holder of the stable ID.
+        cache.set_paths(vec![second]).await;
+        assert!(refused("c".to_owned()).await);
     }
     /// A limited app is refused on a context the host cannot resolve, but with why: whether
     /// the app is enabled there is unknown, which is not the same as not enabled.
@@ -1823,7 +1824,8 @@ mod tests {
             path,
             core,
             Configure::Install {
-                    signature: None,                manifest: manifest(),
+                signature: None,
+                manifest: manifest(),
                 grants: vec!["k8s.listCustomResource".into()],
             },
         )
@@ -1952,7 +1954,8 @@ mod tests {
                 &path,
                 core.clone(),
                 Configure::Install {
-                    signature: None,                    manifest: source.to_string(),
+                    signature: None,
+                    manifest: source.to_string(),
                     grants: vec!["k8s.listCustomResource".into()]
                 }
             )
@@ -1974,7 +1977,8 @@ mod tests {
                 &path,
                 core.clone(),
                 Configure::Install {
-                    signature: None,                    manifest: source.to_string(),
+                    signature: None,
+                    manifest: source.to_string(),
                     grants: vec!["k8s.listCustomResource".into()]
                 }
             )
@@ -2055,7 +2059,8 @@ mod tests {
                         path,
                         core,
                         Configure::Install {
-                    signature: None,                            manifest: source.to_string(),
+                            signature: None,
+                            manifest: source.to_string(),
                             grants: vec!["k8s.listCustomResource".into()],
                         },
                     )

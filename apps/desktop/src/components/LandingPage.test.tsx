@@ -11,8 +11,8 @@ vi.mock("@srelens/core/lib/clusters", () => ({
 import { LandingPage } from "./LandingPage";
 
 const contexts = [
-  { name: "kind-dev", stableId: "/k/kind-dev.yaml#kind-dev", cluster: "kind-dev", server: "https://127.0.0.1:6443", isCurrent: true },
-  { name: "production-eu", stableId: "/k/production-eu.yaml#production-eu", cluster: "prod-eu", server: "https://prod.example.com", isCurrent: false },
+  { name: "kind-dev", stableId: "/k/kind-dev.yaml#kind-dev", key: "/k/kind-dev.yaml#kind-dev", cluster: "kind-dev", server: "https://127.0.0.1:6443", isCurrent: true },
+  { name: "production-eu", stableId: "/k/production-eu.yaml#production-eu", key: "/k/production-eu.yaml#production-eu", cluster: "prod-eu", server: "https://prod.example.com", isCurrent: false },
 ];
 
 beforeEach(() => localStorage.clear());

@@ -14,6 +14,7 @@ pub const MIN_COMMAND_POPUP_TEXT_SCALE: u8 = 1;
 pub const MAX_COMMAND_POPUP_TEXT_SCALE: u8 = 4;
 
 pub const DEFAULT_SHOW_FEATURE_BANNER: bool = true;
+pub const DEFAULT_CHECK_UPDATES: bool = true;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommandPopupDensity {
@@ -146,8 +147,11 @@ pub struct TuiConfig {
     #[serde(alias = "commandPopupTextScale")]
     pub command_popup_density: CommandPopupDensity,
     pub show_feature_banner: bool,
+    pub check_updates: bool,
     pub argo_hub_context: Option<String>,
     pub argo_hub_kubeconfig: Option<PathBuf>,
+    #[serde(skip)]
+    pub update_available: Option<String>,
 }
 
 impl Default for TuiConfig {
@@ -157,8 +161,10 @@ impl Default for TuiConfig {
             command_popup_max_visible: DEFAULT_COMMAND_POPUP_MAX_VISIBLE,
             command_popup_density: CommandPopupDensity::default(),
             show_feature_banner: DEFAULT_SHOW_FEATURE_BANNER,
+            check_updates: DEFAULT_CHECK_UPDATES,
             argo_hub_context: None,
             argo_hub_kubeconfig: None,
+            update_available: None,
         }
     }
 }
