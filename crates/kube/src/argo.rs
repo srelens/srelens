@@ -876,6 +876,22 @@ pub async fn trigger_argo_sync(
     Ok(())
 }
 
+/// The `prune` and `selfHeal` an Application already declares under
+/// `spec.syncPolicy.automated`, each false when it declares none.
+pub fn existing_automated(app: &Value) -> (bool, bool) {
+    let automated = app
+        .get("spec")
+        .and_then(|spec| spec.get("syncPolicy"))
+        .and_then(|policy| policy.get("automated"));
+    let flag = |key: &str| {
+        automated
+            .and_then(|a| a.get(key))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    };
+    (flag("prune"), flag("selfHeal"))
+}
+
 pub async fn toggle_argo_auto_sync(
     cache: &Arc<ClientCache>,
     context: &str,
@@ -892,12 +908,21 @@ pub async fn toggle_argo_auto_sync(
     let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
 
     let patch = if enable {
+        // Enabling auto-sync must not also enable pruning and self-heal behind
+        // the operator's back: the confirmation says "Enable Auto-Sync" and
+        // nothing about deleting resources or reverting live changes (#615).
+        // Keep what the Application already declares; declare nothing new.
+        let current = api
+            .get(name)
+            .await
+            .map_err(|e| format!("Failed to read Application '{name}': {e}"))?;
+        let (prune, self_heal) = existing_automated(&current.data);
         serde_json::json!({
             "spec": {
                 "syncPolicy": {
                     "automated": {
-                        "prune": true,
-                        "selfHeal": true
+                        "prune": prune,
+                        "selfHeal": self_heal
                     }
                 }
             }
@@ -1389,6 +1414,34 @@ mod tests {
             Some(&ArgoClusterMapping::new()),
             false,
         ));
+    }
+
+    #[test]
+    fn enabling_auto_sync_keeps_the_policy_the_application_already_declares() {
+        // #615: enabling set prune and selfHeal true whatever the Application
+        // declared, so a toggle labelled "Enable Auto-Sync" also opted it into
+        // deleting resources and reverting live changes.
+        for (app, want) in [
+            (serde_json::json!({}), (false, false)),
+            (
+                serde_json::json!({"spec": {"syncPolicy": {"automated": null}}}),
+                (false, false),
+            ),
+            (
+                serde_json::json!({"spec": {"syncPolicy": {"automated": {}}}}),
+                (false, false),
+            ),
+            (
+                serde_json::json!({"spec": {"syncPolicy": {"automated": {"prune": true, "selfHeal": false}}}}),
+                (true, false),
+            ),
+            (
+                serde_json::json!({"spec": {"syncPolicy": {"automated": {"selfHeal": true}}}}),
+                (false, true),
+            ),
+        ] {
+            assert_eq!(existing_automated(&app), want, "{app}");
+        }
     }
 
     static CACHE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
