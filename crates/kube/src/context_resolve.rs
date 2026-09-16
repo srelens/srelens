@@ -149,15 +149,22 @@ pub fn is_pinned_context(name: &str) -> bool {
     else {
         return false;
     };
-    // The generator escapes only `%` and `#`. A raw delimiter or any other
-    // percent escape cannot occur inside either generated component.
-    let encoded = |part: &str| {
+    // Each part carries only the escapes its generator emits: `%23` and `%25` in both,
+    // and in the path part also `%xx` (a raw byte) or `%uxxxx` (a UTF-16 code unit) for a
+    // path that is not UTF-8 (see `encode_path`). Anything else is a literal name.
+    let hex =
+        |s: &str, n: usize| s.len() >= n && s.as_bytes()[..n].iter().all(u8::is_ascii_hexdigit);
+    let escaped = |suffix: &str| suffix.starts_with("25") || suffix.starts_with("23");
+    let text = |part: &str| !part.contains('#') && part.split('%').skip(1).all(escaped);
+    let path_part = |part: &str| {
         !part.contains('#')
             && part.split('%').skip(1).all(|suffix| {
-                suffix.starts_with("25") || suffix.starts_with("23")
+                escaped(suffix)
+                    || hex(suffix, 2)
+                    || (suffix.starts_with('u') && hex(&suffix[1..], 4))
             })
     };
-    Path::new(source).is_absolute() && encoded(source) && encoded(context)
+    Path::new(source).is_absolute() && path_part(source) && text(context)
 }
 
 /// A parsed kubeconfig paired with the file it came from.
@@ -902,6 +909,12 @@ mod tests {
         // A valid path that literally reads the same as an escape stays distinct.
         let literal = resolve_from(&[source(b"/kube/a%80")]).remove(0);
         assert_eq!(literal.key(), "/kube/a%2580#default");
+        // The pinned ID is reserved with its byte escapes, so once its context is gone a
+        // context literally named after it never takes a request pinned to it.
+        let pinned = both[0].pinned_id().unwrap();
+        assert!(is_pinned_context(&pinned), "{pinned}");
+        let impostor = cfg("/kube/impostor.yaml", &PROD.replace("default", &pinned));
+        assert!(find_context(&resolve_from(&[impostor]), &pinned).is_none());
     }
 
     #[cfg(windows)]
@@ -919,6 +932,10 @@ mod tests {
         assert_ne!(both[0].key(), both[1].key());
         assert_ne!(both[0].pinned_id(), both[1].pinned_id());
         assert_eq!(both[0].key(), "C:\\kube\\a%ud800#default");
+        let pinned = both[0].pinned_id().unwrap();
+        assert!(is_pinned_context(&pinned), "{pinned}");
+        let impostor = cfg("C:\\kube\\impostor.yaml", &PROD.replace("default", &pinned));
+        assert!(find_context(&resolve_from(&[impostor]), &pinned).is_none());
     }
     #[test]
     fn a_context_key_names_exactly_one_context() {
