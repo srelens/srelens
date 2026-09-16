@@ -71,6 +71,11 @@ export interface InstalledExtension {
   installedAt: number;
   /** The versions this one replaced, newest first; at most three. */
   history: ExtensionPreviousVersion[];
+  /**
+   * The stable IDs (`ClusterContext.stableId`) of the kubeconfig contexts the app is enabled
+   * for; absent means every cluster. A context's name is presentation only (#265).
+   */
+  contexts?: string[];
 }
 export interface ExtensionInventory {
   schemaVersion: number;
@@ -83,7 +88,18 @@ export type ExtensionChange =
   | { action: "remove"; id: string }
   /** Restores a kept version; `grants` are what the user reviewed and grants again. */
   | { action: "rollback"; id: string; revision: number; grants: string[] }
+  /** Limits the app to these stable context IDs, or with `null` allows every cluster. */
+  | { action: "clusters"; id: string; contexts: string[] | null }
   | { action: "settings"; id: string; settings: Record<string, unknown> };
+/**
+ * Whether an installed app may be used on a context, given that context's stable ID
+ * (`ClusterContext.stableId`). A limited app is not enabled on a context whose ID is not
+ * known yet; the host enforces the same scope on every read and action.
+ */
+export const extensionEnabledFor = (
+  plugin: Pick<InstalledExtension, "contexts">,
+  contextId: string | undefined,
+) => !plugin.contexts || (contextId !== undefined && plugin.contexts.includes(contextId));
 export const EXTENSIONS_CHANGED = "srelens:extensions-changed";
 export const listExtensions = () =>
   invokeCapability<ExtensionInventory>("extensions.list", {});
@@ -148,16 +164,23 @@ export function extensionRoute(
 ) {
   return `/extensions/${[context, id, page, namespace].map(encodeURIComponent).join("/")}`;
 }
+/** A cluster identity route; legacy `/extensions/` routes still carry display names. */
+export function extensionClusterRoute(clusterId: string, id: string, page: string, namespace = "") {
+  return extensionRoute(clusterId, id, page, namespace).replace("/extensions/", "/extension-clusters/");
+}
+export function extensionClusterResourceRoute(clusterId: string, id: string, page: string, namespace: string, name: string) {
+  return `${extensionClusterRoute(clusterId, id, page, namespace)}/${encodeURIComponent(name)}`;
+}
 export function parseExtensionRoute(route: string) {
   const pieces = route.split("/");
-  if ((pieces.length !== 6 && pieces.length !== 7) || pieces[1] !== "extensions") return null;
+  if ((pieces.length !== 6 && pieces.length !== 7) || !["extensions", "extension-clusters"].includes(pieces[1])) return null;
   try {
     const [context, id, page, namespace] = pieces
       .slice(2)
       .map(decodeURIComponent);
     const resourceName = pieces.length === 7 ? decodeURIComponent(pieces[6]) : undefined;
     if (pieces.length === 7 && !resourceName) return null;
-    return context && id && page ? { context, id, page, namespace, ...(resourceName ? { resourceName } : {}) } : null;
+    return context && id && page ? { context, id, page, namespace, ...(pieces[1] === "extension-clusters" ? { clusterId: context } : {}), ...(resourceName ? { resourceName } : {}) } : null;
   } catch {
     return null;
   }

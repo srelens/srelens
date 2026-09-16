@@ -38,6 +38,81 @@ pub struct Installed {
     installed_at: u64,
     /// The versions this one replaced, newest first, at most [`KEPT_VERSIONS`].
     history: Vec<PreviousVersion>,
+    /// The stable IDs of the kubeconfig contexts the app is enabled for (`{file}#{name}`, as
+    /// `ResolvedContext::stable_id`); `None` is every cluster. A context's display name is
+    /// not identity: it changes when another kubeconfig declares the same name (#265).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    contexts: Option<Vec<String>>,
+}
+/// What the broker answers when an app is used on a cluster it is not enabled for.
+const NOT_ENABLED_FOR_CLUSTER: &str = "App is not enabled for this cluster";
+impl Installed {
+    /// Refuses a limited app on a context outside its list. A context the host could not
+    /// resolve is refused too, but with why: whether the app is enabled there is unknown.
+    fn check_scope(
+        &self,
+        context: &Result<srelens_kube::context_resolve::ResolvedContext, String>,
+    ) -> Result<(), CapabilityError> {
+        let Some(contexts) = &self.contexts else {
+            return Ok(());
+        };
+        match context {
+            Ok(resolved) if contexts.contains(&resolved.stable_id()) => Ok(()),
+            Ok(_) => Err(CapabilityError::Handler(NOT_ENABLED_FOR_CLUSTER.into())),
+            Err(reason) => Err(CapabilityError::Handler(format!(
+                "Could not check whether this app is enabled for this cluster: {reason}"
+            ))),
+        }
+    }
+}
+/// The context a request names, resolved against the kubeconfig files the host connects
+/// with, the same way a connection resolves it. When there is no such context, why: no
+/// kubeconfig declares it, or the files that could not be read.
+///
+/// Scope is checked against its stable ID, and the request goes out under its pinned ID:
+/// capabilities resolve their context again, and by name a kubeconfig change in between could
+/// reach a cluster that took the name since.
+async fn request_context(
+    cache: &srelens_kube::client_cache::ClientCache,
+    context: &str,
+) -> Result<srelens_kube::context_resolve::ResolvedContext, String> {
+    let paths = cache.paths().await;
+    let all = srelens_kube::context_resolve::resolve_contexts(&paths);
+    if let Some(resolved) = srelens_kube::context_resolve::find_context(&all, context) {
+        // A stable ID is what the app's cluster list holds. One that another context also
+        // carries (`a` + `b#c` and `a#b` + `c`) does not say which cluster was chosen, so
+        // neither context may use the app under it.
+        let id = resolved.stable_id();
+        if let Some(other) = all.iter().find(|c| {
+            (c.source != resolved.source || c.original_name != resolved.original_name)
+                && c.stable_id() == id
+        }) {
+            return Err(format!(
+                "the context ID \"{id}\" is shared by another context, \"{}\"; rename one of them",
+                other.display_name
+            ));
+        }
+        // The request goes on under the pinned ID; without one it cannot go on safely.
+        if resolved.pinned_id().is_none() {
+            return Err(format!(
+                "the kubeconfig path of \"{context}\" cannot be made absolute"
+            ));
+        }
+        return Ok(resolved);
+    }
+    let unreadable = srelens_kube::context_resolve::unreadable_kubeconfigs(&paths);
+    Err(if unreadable.is_empty() {
+        format!("no kubeconfig declares the context \"{context}\"")
+    } else {
+        format!(
+            "the context \"{context}\" was not found, and these kubeconfig files could not be read: {}",
+            unreadable
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })
 }
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -117,6 +192,22 @@ enum Configure {
         revision: u64,
         grants: Vec<String>,
     },
+    /// Limits the app to these kubeconfig context names, or with `null` allows every cluster.
+    #[serde(rename = "clusters")]
+    Clusters {
+        id: String,
+        /// Required: leaving it out is refused rather than read as `null`, which would
+        /// quietly allow the app on every cluster.
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "context_names_or_null")]
+        contexts: Option<Vec<String>>,
+    },
+}
+/// The schema of the clusters action's `contexts`: a list of names or `null`, never absent.
+fn context_names_or_null(
+    generator: &mut schemars::gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    <Option<Vec<String>>>::json_schema(generator)
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -548,8 +639,9 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 .iter()
                 .position(|p| p.manifest.id == manifest.id)
                 .map(|i| state.plugins.remove(i));
-            // An update keeps the app's settings, and the version it replaces for rollback.
-            let (settings, history) = match previous {
+            // An update keeps the app's settings and clusters, and the version it replaces
+            // for rollback.
+            let (settings, history, contexts) = match previous {
                 Some(Installed {
                     signature_proof: replaced_proof,
                     manifest: replaced,
@@ -559,6 +651,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                     installed_at: replaced_at,
                     settings,
                     mut history,
+                    contexts,
                     ..
                 }) => {
                     history.insert(
@@ -573,9 +666,9 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                         },
                     );
                     history.truncate(KEPT_VERSIONS);
-                    (settings, history)
+                    (settings, history, contexts)
                 }
-                None => (Default::default(), Vec::new()),
+                None => (Default::default(), Vec::new(), None),
             };
             state.plugins.push(Installed {
                 signature_proof,
@@ -588,6 +681,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 source: origin,
                 installed_at: now(),
                 history,
+                contexts,
             });
             state
                 .plugins
@@ -639,6 +733,28 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             // A new revision, so views pinned to the rolled-away version refresh.
             app.revision = next;
         }
+        Configure::Clusters { id, contexts } => {
+            if let Some(contexts) = &contexts {
+                // An empty list would be a second way to disable the app.
+                if contexts.is_empty() || contexts.len() > 256 {
+                    return Err("Choose 1–256 clusters, or allow the app on every cluster".into());
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for context in contexts {
+                    if context.trim().is_empty() || !seen.insert(context.as_str()) {
+                        return Err(format!(
+                            "Cluster names must be non-empty and listed once: {context:?}"
+                        ));
+                    }
+                }
+            }
+            state
+                .plugins
+                .iter_mut()
+                .find(|p| p.manifest.id == id)
+                .ok_or("Extension is not installed")?
+                .contexts = contexts;
+        }
         Configure::Enable { id, enabled } => {
             let p = state
                 .plugins
@@ -689,9 +805,14 @@ struct ValidationReport {
     /// Empty when the manifest could be installed with these grants.
     errors: Vec<ValidationError>,
 }
-pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
+pub fn register(
+    reg: &mut Registry,
+    path: PathBuf,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+) {
     catalog::register(reg, path.with_extension("catalog.json"), core.clone());
-    resource::register(reg, path.clone(), core.clone());
+    resource::register(reg, path.clone(), core.clone(), cache.clone());
     let p = path.clone();
     reg.register(Capability::typed::<Empty, Inventory, _, _>(
         "extensions.list",
@@ -748,7 +869,9 @@ pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
         move |input: Read| {
             let p = path.clone();
             let c = core.clone();
+            let k = cache.clone();
             async move {
+                let resolved = request_context(&k, &input.context).await;
                 if input.context.trim().is_empty() {
                     return Err(CapabilityError::InvalidInput(
                         "An explicit cluster context is required".into(),
@@ -782,6 +905,7 @@ pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
                             "Extension was disabled, removed or updated; refresh the view".into(),
                         )
                     })?;
+                plugin.check_scope(&resolved)?;
                 validate_app(&plugin.manifest, &plugin.grants, c.clone())
                     .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
                 let mut manifest = plugin.manifest.clone();
@@ -794,7 +918,11 @@ pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
                 let _registration = PluginHost::new(c)
                     .register(&mut registry, manifest, &plugin.grants)
                     .map_err(CapabilityError::Handler)?;
-                let mut args = json!({"context":input.context});
+                let context = resolved
+                    .ok()
+                    .and_then(|context| context.pinned_id())
+                    .unwrap_or(input.context);
+                let mut args = json!({ "context": context });
                 if plugin
                     .manifest
                     .capabilities
@@ -978,13 +1106,24 @@ mod tests {
     }
 
     fn setup(path: &std::path::Path) -> Registry {
-        let core = crate::build_registry_with_paths(
-            srelens_kube::client_cache::ClientCache::new_many(vec![]),
-            vec![],
-        );
+        setup_with(path, vec![]).0
+    }
+    /// A registry whose client cache connects with `kubeconfigs`, returned so a test can
+    /// change the files it resolves contexts from.
+    fn setup_with(
+        path: &std::path::Path,
+        kubeconfigs: Vec<PathBuf>,
+    ) -> (Registry, Arc<srelens_kube::client_cache::ClientCache>) {
+        let cache = srelens_kube::client_cache::ClientCache::new_many(kubeconfigs.clone());
+        let core = crate::build_registry_with_paths(cache.clone(), kubeconfigs);
         let mut reg = Registry::new();
-        register(&mut reg, path.to_path_buf(), std::sync::Arc::new(core));
-        reg
+        register(
+            &mut reg,
+            path.to_path_buf(),
+            std::sync::Arc::new(core),
+            cache.clone(),
+        );
+        (reg, cache)
     }
     #[test]
     fn signed_install_rechecks_and_persists_proof_without_trusting_labels() {
@@ -1159,6 +1298,347 @@ mod tests {
             "the newest are kept"
         );
         assert!(fs::metadata(&path).unwrap().len() <= 1024 * 1024);
+    }
+    #[tokio::test]
+    async fn an_app_limited_to_some_clusters_is_refused_on_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let config = kubeconfig(dir.path(), "clusters.yaml", &["cluster/a", "cluster/b"]);
+        let (reg, _cache) = setup_with(&path, vec![config.clone()]);
+        let a = format!("{}#cluster/a", config.display());
+        let revision = install(&path, fake_core());
+        let limit = |contexts: Value| {
+            configure(
+                &path,
+                json!({"action":"clusters","id":"org.example.argocd","contexts":contexts}),
+            )
+        };
+        // An empty list would be a second way to disable the app; a blank or repeated name
+        // is a mistake.
+        assert!(limit(json!([])).is_err());
+        assert!(limit(json!([" "])).is_err());
+        assert!(limit(json!([&a, &a])).is_err());
+        let only_a = Some(vec![a.clone()]);
+        assert_eq!(limit(json!([&a])).unwrap().plugins[0].contexts, only_a);
+
+        let selected =
+            json!({"id":"org.example.argocd","revision":revision,"capability":"applications"});
+        let on = |context: &str, extra: Value| {
+            let mut payload = selected.clone();
+            payload["context"] = json!(context);
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            payload
+        };
+        let resource = on("cluster/b", json!({"namespace":"team","name":"app"}));
+        for (capability, payload) in [
+            ("extensions.read", on("cluster/b", json!({"namespace":""}))),
+            ("extensions.resource", resource.clone()),
+            (
+                "extensions.action",
+                json!({"resource":resource,"action":"suspend","uid":"u","resourceVersion":"1"}),
+            ),
+        ] {
+            let error = reg
+                .invoke(capability, payload)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("App is not enabled for this cluster"),
+                "{capability}: {error}"
+            );
+        }
+
+        // An update keeps the list, like settings; clearing it allows every cluster again.
+        let updated = configure(
+            &path,
+            json!({"action":"install","manifest":manifest_at("0.2.0"),"grants":["k8s.listCustomResource"]}),
+        )
+        .unwrap();
+        assert_eq!(updated.plugins[0].contexts, only_a);
+        assert_eq!(limit(Value::Null).unwrap().plugins[0].contexts, None);
+    }
+    #[test]
+    fn the_clusters_action_needs_an_explicit_list_or_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        install(&path, fake_core());
+        let only_a = Some(vec!["cluster/a".to_owned()]);
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd","contexts":["cluster/a"]}),
+        )
+        .unwrap();
+        // Leaving the list out must not quietly allow the app on every cluster.
+        assert!(configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd"})
+        )
+        .is_err());
+        assert_eq!(read(&path).unwrap().plugins[0].contexts, only_a);
+        // The input schema callers such as MCP clients see says the same.
+        let reg = setup(&path);
+        let input = &reg.get("extensions.configure").unwrap().input_schema;
+        let clusters = input["oneOf"]
+            .as_array()
+            .expect("a tagged union of actions")
+            .iter()
+            .find(|variant| variant["properties"]["action"]["enum"] == json!(["clusters"]))
+            .expect("a clusters action");
+        assert!(
+            clusters["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&json!("contexts"))),
+            "{clusters}"
+        );
+    }
+    /// A kubeconfig declaring each of `contexts` against an unreachable server, for tests
+    /// that resolve context names without a cluster.
+    pub(super) fn kubeconfig(dir: &Path, file: &str, contexts: &[&str]) -> PathBuf {
+        let path = dir.join(file);
+        let mut yaml = String::from(
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1\nusers:\n- name: u\n  user: {}\ncontexts:\n",
+        );
+        for context in contexts {
+            yaml.push_str(&format!(
+                "- name: {context}\n  context:\n    cluster: c\n    user: u\n"
+            ));
+        }
+        fs::write(&path, yaml).unwrap();
+        path
+    }
+    #[tokio::test]
+    async fn clusters_are_kept_by_stable_id_so_a_same_named_context_cannot_inherit_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let (reg, cache) = setup_with(&path, vec![first.clone()]);
+        let revision = install(&path, fake_core());
+        let first_default = format!("{}#default", first.display());
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd","contexts":[first_default]}),
+        )
+        .unwrap();
+        let refused = |context: &str| {
+            let reg = reg.clone();
+            let payload = json!({"id":"org.example.argocd","revision":revision,
+                "capability":"applications","context":context,"namespace":""});
+            async move {
+                reg.invoke("extensions.read", payload)
+                    .await
+                    .is_err_and(|error| error.to_string().contains(NOT_ENABLED_FOR_CLUSTER))
+            }
+        };
+        // The chosen context is allowed; the read then fails to reach the fixture server.
+        assert!(!refused("default").await);
+
+        // Another kubeconfig declaring `default` renames both to `first/default` and
+        // `second/default`: the app follows its own cluster, not the name.
+        let second = kubeconfig(dir.path(), "second.yaml", &["default"]);
+        cache.ensure_paths(vec![second.clone()]).await;
+        assert!(!refused("first/default").await);
+        assert!(refused("second/default").await);
+
+        // With the first kubeconfig gone, the remaining `default` is another cluster.
+        cache.set_paths(vec![second]).await;
+        assert!(refused("default").await);
+    }
+    /// Scope is checked against one resolution of the context name. The read goes out under
+    /// the stable ID that was checked, so a kubeconfig change in between cannot hand the name
+    /// to another cluster when the capability resolves it again.
+    #[tokio::test]
+    async fn a_read_goes_to_the_cluster_its_scope_was_checked_against() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let core = fake_core();
+        let revision = install(&path, core.clone());
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![first.clone()]),
+        );
+        let output = reg
+            .invoke(
+                "extensions.read",
+                json!({"id":"org.example.argocd","revision":revision,
+                    "capability":"applications","context":"default","namespace":""}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            output["context"],
+            format!("srelens-context:{}#default", first.display())
+        );
+    }
+    /// A context can be named anything, including another context's stable ID. A request the
+    /// broker sends under that ID reaches the context the ID names, and never the one that
+    /// happens to be called it, even once the named context is gone.
+    #[test]
+    fn a_context_named_like_a_stable_id_cannot_take_a_pinned_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let first_default = format!("srelens-context:{}#default", first.display());
+        let impostor = kubeconfig(dir.path(), "impostor.yaml", &[&first_default]);
+        let reached = |paths: &[PathBuf]| {
+            srelens_kube::context_resolve::resolve_context(paths, &first_default)
+                .map(|context| context.source)
+        };
+        // Alone, the ID reaches its context; with the impostor listed, the string means two
+        // things, so it reaches nothing rather than either.
+        assert_eq!(reached(&[first.clone()]), Some(first.clone()));
+        assert_eq!(reached(&[impostor.clone(), first]), None);
+        assert_eq!(reached(&[impostor]), None);
+    }
+    /// A kubeconfig can be given by a relative path, and its contexts' stable IDs keep that
+    /// path: they are persisted (context profiles, remembered namespaces, app clusters), so
+    /// they must not change. A checked request still goes on under an absolute ID, which a
+    /// context named after it cannot take.
+    #[tokio::test]
+    async fn a_relative_kubeconfig_keeps_its_stable_id_but_requests_pin_an_absolute_one() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let relative = PathBuf::from(dir.path().file_name().unwrap()).join("first.yaml");
+        let stable = format!("{}#default", relative.display());
+        let given = [relative.clone()];
+        let listed = srelens_kube::context_resolve::resolve_contexts(&given);
+        assert_eq!(listed[0].stable_id(), stable);
+
+        let path = dir.path().join("extensions.json");
+        let core = fake_core();
+        let revision = install(&path, core.clone());
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd","contexts":[&stable]}),
+        )
+        .unwrap();
+        let mut reg = Registry::new();
+        let cache = srelens_kube::client_cache::ClientCache::new_many(vec![relative.clone()]);
+        register(&mut reg, path, core, cache);
+        let output = reg
+            .invoke(
+                "extensions.read",
+                json!({"id":"org.example.argocd","revision":revision,
+                    "capability":"applications","context":"default","namespace":""}),
+            )
+            .await
+            .unwrap();
+        let pinned = output["context"].as_str().unwrap().to_owned();
+        assert!(
+            Path::new(pinned.strip_prefix("srelens-context:").unwrap()).is_absolute()
+                && pinned.ends_with("first.yaml#default"),
+            "{pinned}"
+        );
+
+        let impostor = kubeconfig(dir.path(), "impostor.yaml", &[&pinned]);
+        let reached = |paths: &[PathBuf]| {
+            srelens_kube::context_resolve::resolve_context(paths, &pinned)
+                .map(|context| context.original_name)
+        };
+        assert_eq!(reached(&[relative.clone()]), Some("default".to_owned()));
+        assert_eq!(reached(&[impostor.clone(), relative]), None);
+        assert_eq!(reached(&[impostor]), None);
+    }
+    /// A file path and a context name can both contain `#`, so two contexts can share one
+    /// stable ID: `a` + `b#c` and `a#b` + `c`. Neither may use an app limited to that ID,
+    /// because the ID does not say which cluster was chosen.
+    #[tokio::test]
+    async fn contexts_that_share_a_stable_id_are_refused_rather_than_both_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "a", &["b#c"]);
+        let second = kubeconfig(dir.path(), "a#b", &["c"]);
+        let shared = format!("{}#b#c", first.display());
+        let (reg, _cache) = setup_with(&path, vec![first.clone(), second.clone()]);
+        let revision = install(&path, fake_core());
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd","contexts":[shared]}),
+        )
+        .unwrap();
+        let all = srelens_kube::context_resolve::resolve_contexts(&[first.clone(), second.clone()]);
+        let first_pinned = all[0].pinned_id().unwrap();
+        let second_pinned = all[1].pinned_id().unwrap();
+        for context in [&first_pinned, &second_pinned] {
+            let error = reg
+                .invoke(
+                    "extensions.read",
+                    json!({"id":"org.example.argocd","revision":revision,
+                        "capability":"applications","context":context,"namespace":""}),
+                )
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                !error.contains(NOT_ENABLED_FOR_CLUSTER),
+                "{context}: {error}"
+            );
+            assert!(
+                error.contains("shared by another context"),
+                "{context}: {error}"
+            );
+        }
+    }
+    /// A limited app is refused on a context the host cannot resolve, but with why: whether
+    /// the app is enabled there is unknown, which is not the same as not enabled.
+    #[tokio::test]
+    async fn an_unresolvable_context_is_refused_with_the_reason_not_as_a_denial() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let (reg, _cache) = setup_with(&path, vec![first.clone()]);
+        let revision = install(&path, fake_core());
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd",
+                "contexts":[format!("{}#default", first.display())]}),
+        )
+        .unwrap();
+        let refusal = |context: &str| {
+            let reg = reg.clone();
+            let payload = json!({"id":"org.example.argocd","revision":revision,
+                "capability":"applications","context":context,"namespace":""});
+            async move {
+                reg.invoke("extensions.read", payload)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+            }
+        };
+        let missing = refusal("elsewhere").await;
+        assert!(!missing.contains(NOT_ENABLED_FOR_CLUSTER), "{missing}");
+        assert!(
+            missing.contains("no kubeconfig declares the context \"elsewhere\""),
+            "{missing}"
+        );
+
+        // The allowed context's kubeconfig can no longer be read: still refused, and says so.
+        fs::write(&first, "contexts: [").unwrap();
+        let unreadable = refusal("default").await;
+        assert!(
+            !unreadable.contains(NOT_ENABLED_FOR_CLUSTER),
+            "{unreadable}"
+        );
+        assert!(
+            unreadable.contains("could not be read") && unreadable.contains("first.yaml"),
+            "{unreadable}"
+        );
+
+        // Only the path: a parse error can quote the file's contents, credentials included.
+        fs::write(
+            &first,
+            "apiVersion: v1\nkind: Config\nusers: \"hunter2-token\"\n",
+        )
+        .unwrap();
+        let quoted = refusal("default").await;
+        assert!(quoted.contains("first.yaml"), "{quoted}");
+        assert!(!quoted.contains("hunter2-token"), "{quoted}");
     }
     #[test]
     fn history_keeps_the_three_versions_before_the_installed_one() {
@@ -1358,7 +1838,12 @@ mod tests {
         let core = fake_core();
         let revision = install(&path, core.clone());
         let mut reader = Registry::new();
-        register(&mut reader, path.clone(), core.clone());
+        register(
+            &mut reader,
+            path.clone(),
+            core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
         let args = json!({"id":"org.example.argocd","revision":revision,"capability":"applications","context":"staging","namespace":"argo"});
         let output = reader
             .invoke("extensions.read", args.clone())
@@ -1612,7 +2097,12 @@ mod tests {
         assert!(healthy.enabled && healthy.quarantined.is_none());
 
         let mut reg = Registry::new();
-        register(&mut reg, path.clone(), core.clone());
+        register(
+            &mut reg,
+            path.clone(),
+            core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
         let listed = reg.invoke("extensions.list", json!({})).await.unwrap();
         assert!(listed["plugins"]
             .as_array()

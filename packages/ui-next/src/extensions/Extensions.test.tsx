@@ -11,6 +11,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   readExtension: vi.fn(),
   inspectExtensionResource: vi.fn(),
   saveTextFile: vi.fn(),
+  listContexts: vi.fn(),
 }));
 import {
   listExtensionCatalog,
@@ -20,8 +21,25 @@ import {
   validateExtension,
   readExtension,
   saveTextFile,
+  listContexts,
 } from "@srelens/core";
 import { ExtensionManager, ExtensionResults } from "./Extensions";
+
+// jsdom has no ResizeObserver, and the cluster picker's popover watches its trigger with
+// one while cmdk scrolls the highlighted row into view. The same stubs the kit's
+// Radix-backed suites carry, kept here so the requirement stays visible.
+if (!("ResizeObserver" in globalThis)) {
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+const elementProto = window.HTMLElement.prototype as unknown as Record<string, unknown>;
+elementProto.scrollIntoView ??= () => {};
+elementProto.hasPointerCapture ??= () => false;
+elementProto.setPointerCapture ??= () => {};
+elementProto.releasePointerCapture ??= () => {};
 const plugin = {
   manifest: {
     id: "org.test.gitops",
@@ -50,6 +68,7 @@ beforeEach(() => {
   } as any);
   vi.mocked(configureExtensions).mockResolvedValue({} as any);
   vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  vi.mocked(listContexts).mockResolvedValue({ contexts: [] });
 });
 it("shows backend errors and retries instead of claiming no apps", async () => {
   vi.mocked(listExtensions).mockRejectedValueOnce(new Error("disk unreadable"));
@@ -288,6 +307,127 @@ it("closes the reset confirmation with Escape without resetting", async () => {
   expect(within(details).queryByRole("alertdialog", { name: "Reset settings" })).toBeNull();
   expect(configureExtensions).not.toHaveBeenCalled();
 });
+it("limits an app to chosen clusters from its details, by stable context ID", async () => {
+  // The name is presentation only; the saved list keys on each context's stable ID (#265).
+  vi.mocked(listContexts).mockResolvedValue({
+    contexts: [
+      { name: "cluster/a", stableId: "/kube/a.yaml#cluster/a" },
+      { name: "cluster/b", stableId: "/kube/b.yaml#cluster/b" },
+    ],
+  } as any);
+  // Opening the picker makes the manifest editor measure text ranges, and jsdom has no
+  // layout to measure. Stub them for this test only.
+  const measuring = {
+    getClientRects: Range.prototype.getClientRects,
+    getBoundingClientRect: Range.prototype.getBoundingClientRect,
+  };
+  Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
+  Range.prototype.getBoundingClientRect = () =>
+    ({ x: 0, y: 0, width: 0, height: 0, top: 0, right: 0, bottom: 0, left: 0, toJSON: () => ({}) }) as DOMRect;
+  try {
+    const details = await openDetails(updated());
+    const clusters = within(details).getByRole("group", { name: "Clusters" });
+    expect((within(clusters).getByLabelText("All clusters") as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(within(clusters).getByLabelText("Only these clusters"));
+    await waitFor(() => expect(listContexts).toHaveBeenCalled());
+    // Contexts come from the kubeconfig and can number in the hundreds, so they are searched.
+    fireEvent.click(within(clusters).getByRole("combobox", { name: "Add a cluster" }));
+    fireEvent.click(await screen.findByRole("option", { name: "cluster/b" }));
+    expect(within(clusters).getByRole("button", { name: "Remove cluster/b" })).toBeTruthy();
+    fireEvent.click(within(clusters).getByRole("button", { name: "Save clusters" }));
+    await waitFor(() =>
+      expect(configureExtensions).toHaveBeenCalledWith({
+        action: "clusters",
+        id: "org.test.gitops",
+        contexts: ["/kube/b.yaml#cluster/b"],
+      }),
+    );
+  } finally {
+    Object.assign(Range.prototype, measuring);
+  }
+});
+it("allows every cluster again, and keeps listing a chosen cluster the kubeconfig no longer has", async () => {
+  vi.mocked(listContexts).mockResolvedValue({
+    contexts: [{ name: "cluster/a", stableId: "/kube/a.yaml#cluster/a" }],
+  } as any);
+  const app = { ...updated(), contexts: ["/kube/a.yaml#cluster/a", "/kube/gone.yaml#retired"] };
+  const details = await openDetails(app);
+  const clusters = within(details).getByRole("group", { name: "Clusters" });
+  expect((within(clusters).getByLabelText("Only these clusters") as HTMLInputElement).checked).toBe(true);
+  // A listed context shows its name; one the kubeconfig no longer has shows its ID, so it can be removed.
+  expect(await within(clusters).findByRole("button", { name: "Remove cluster/a" })).toBeTruthy();
+  fireEvent.click(within(clusters).getByRole("button", { name: "Remove /kube/gone.yaml#retired" }));
+  expect(within(clusters).queryByRole("button", { name: "Remove /kube/gone.yaml#retired" })).toBeNull();
+  fireEvent.click(within(clusters).getByLabelText("All clusters"));
+  fireEvent.click(within(clusters).getByRole("button", { name: "Save clusters" }));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "clusters", id: "org.test.gitops", contexts: null }),
+  );
+});
+it("offers a cluster added while the app details stay open", async () => {
+  const { saveKubeconfigFiles, settingsStorage } = await import("@srelens/core");
+  vi.mocked(listContexts)
+    .mockResolvedValueOnce({ contexts: [{ name: "cluster/a", stableId: "/kube/a.yaml#cluster/a" }] } as any)
+    .mockResolvedValue({
+      contexts: [
+        { name: "cluster/a", stableId: "/kube/a.yaml#cluster/a" },
+        { name: "edge", stableId: "/kube/edge.yaml#edge" },
+      ],
+    } as any);
+  const app = { ...updated(), contexts: ["/kube/a.yaml#cluster/a"] };
+  const details = await openDetails(app);
+  const clusters = within(details).getByRole("group", { name: "Clusters" });
+  expect(await within(clusters).findByRole("button", { name: "Remove cluster/a" })).toBeTruthy();
+  // Connections adds a kubeconfig; storage may not even hold it yet.
+  act(() => {
+    const fail = vi.spyOn(settingsStorage, "setItem").mockImplementation(() => { throw new Error("unavailable"); });
+    saveKubeconfigFiles(["/kube/edge.yaml"]);
+    fail.mockRestore();
+  });
+  await waitFor(() => expect(listContexts).toHaveBeenLastCalledWith(["/kube/edge.yaml"]));
+  fireEvent.click(within(clusters).getByRole("combobox", { name: "Add a cluster" }));
+  expect(await screen.findByRole("option", { name: "edge" })).toBeTruthy();
+});
+it("does not offer a limited app on two clusters that share one stable ID", async () => {
+  const { ExtensionResourceSlot } = await import("./Extensions");
+  const installed = structuredClone(plugin);
+  installed.manifest.contributions.detailTabs = [
+    { id: "detail", title: "GitOps apps", capability: "list", forKinds: ["/Namespace"] },
+  ];
+  installed.contexts = ["/kube/a#b#c"];
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [installed] });
+  // `a` + `b#c` and `a#b` + `c` read the same; the host refuses both, so neither is offered.
+  vi.mocked(listContexts).mockResolvedValue({
+    contexts: [
+      { name: "b#c", stableId: "/kube/a#b#c" },
+      { name: "c", stableId: "/kube/a#b#c" },
+    ],
+  } as any);
+  render(
+    <>
+      <div data-testid="b#c"><ExtensionResourceSlot context="b#c" kind="Namespace" namespace={null} name="argo" /></div>
+      <div data-testid="c"><ExtensionResourceSlot context="c" kind="Namespace" namespace={null} name="argo" /></div>
+    </>,
+  );
+  await waitFor(() => expect(listContexts).toHaveBeenCalled());
+  const alerts = await screen.findAllByRole("alert");
+  expect(alerts.map((a) => a.closest("[data-testid]")?.getAttribute("data-testid")).sort()).toEqual(["b#c", "c"]);
+  expect(alerts[0].textContent).toContain("shares its ID");
+  expect(screen.queryByRole("tab", { name: "GitOps apps" })).toBeNull();
+});
+it("says why the cluster list could not be loaded, and retries it", async () => {
+  vi.mocked(listContexts)
+    .mockResolvedValueOnce({ error: "kubeconfig unreadable" })
+    .mockResolvedValue({ contexts: [{ name: "cluster/a", stableId: "a" }] } as any);
+  const app = { ...updated(), contexts: ["cluster/b"] };
+  const details = await openDetails(app);
+  const clusters = within(details).getByRole("group", { name: "Clusters" });
+  const alert = await within(clusters).findByRole("alert");
+  expect(alert.textContent).toContain("kubeconfig unreadable");
+  fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(within(clusters).queryByRole("alert")).toBeNull());
+  expect(listContexts).toHaveBeenCalledTimes(2);
+});
 it("does not call a quarantined app's signature verified", async () => {
   const app = { ...updated(), enabled: false, quarantined: "App publisher signature is invalid" };
   const details = await openDetails(app);
@@ -449,6 +589,84 @@ it("adds namespace detail views and links, and removes them when disabled", asyn
   await waitFor(() =>
     expect(screen.queryByRole("tab", { name: "GitOps apps" })).toBeNull(),
   );
+});
+it("says a limited app's resource views could not be checked when the clusters fail to list, and retries", async () => {
+  const { ExtensionResourceSlot } = await import("./Extensions");
+  const installed = structuredClone(plugin);
+  installed.manifest.contributions.detailTabs = [
+    { id: "detail", title: "GitOps apps", capability: "list", forKinds: ["/Namespace"] },
+  ];
+  installed.contexts = ["/kube/s.yaml#staging"];
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [installed] });
+  vi.mocked(readExtension).mockResolvedValue({ items: [] });
+  vi.mocked(listContexts).mockResolvedValueOnce({ error: "kubeconfig unreadable" });
+  render(<ExtensionResourceSlot context="staging" kind="Namespace" namespace={null} name="argo" />);
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("Could not list clusters");
+  expect(alert.textContent).toContain("kubeconfig unreadable");
+  vi.mocked(listContexts).mockResolvedValue({ contexts: [{ name: "staging", stableId: "/kube/s.yaml#staging" }] } as any);
+  fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+  expect(await screen.findByRole("tab", { name: "GitOps apps" })).toBeTruthy();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+it("ignores a slower, older cluster listing that finishes after a newer one", async () => {
+  const { ExtensionResourceSlot } = await import("./Extensions");
+  const installed = structuredClone(plugin);
+  installed.manifest.contributions.detailTabs = [
+    { id: "detail", title: "GitOps apps", capability: "list", forKinds: ["/Namespace"] },
+  ];
+  installed.contexts = ["/kube/s.yaml#staging"];
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [installed] });
+  vi.mocked(readExtension).mockResolvedValue({ items: [] });
+  let finishOlder: (outcome: unknown) => void = () => {};
+  vi.mocked(listContexts)
+    .mockReturnValueOnce(new Promise((resolve) => (finishOlder = resolve)) as any)
+    .mockResolvedValueOnce({ contexts: [{ name: "staging", stableId: "/kube/s.yaml#staging" }] } as any);
+  render(<ExtensionResourceSlot context="staging" kind="Namespace" namespace={null} name="argo" />);
+  await waitFor(() => expect(listContexts).toHaveBeenCalledTimes(1));
+  fireEvent.focus(window);
+  expect(await screen.findByRole("tab", { name: "GitOps apps" })).toBeTruthy();
+  // The first listing answers last, with a list that no longer has the cluster.
+  await act(async () => finishOlder({ contexts: [] }));
+  expect(screen.getByRole("tab", { name: "GitOps apps" })).toBeTruthy();
+});
+it("lists the clusters again when the kubeconfig files change, without waiting for focus", async () => {
+  const { ExtensionResourceSlot } = await import("./Extensions");
+  const { saveKubeconfigFiles } = await import("@srelens/core");
+  const installed = structuredClone(plugin);
+  installed.manifest.contributions.detailTabs = [
+    { id: "detail", title: "GitOps apps", capability: "list", forKinds: ["/Namespace"] },
+  ];
+  installed.contexts = ["/kube/edge.yaml#edge"];
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [installed] });
+  vi.mocked(readExtension).mockResolvedValue({ items: [] });
+  render(<ExtensionResourceSlot context="edge" kind="Namespace" namespace={null} name="argo" />);
+  await waitFor(() => expect(listContexts).toHaveBeenCalledTimes(1));
+  // Settings → Contexts adds the kubeconfig that declares `edge`.
+  vi.mocked(listContexts).mockResolvedValue({ contexts: [{ name: "edge", stableId: "/kube/edge.yaml#edge" }] } as any);
+  act(() => saveKubeconfigFiles(["/kube/edge.yaml"]));
+  expect(await screen.findByRole("tab", { name: "GitOps apps" })).toBeTruthy();
+  saveKubeconfigFiles([]);
+});
+it("lists with the kubeconfig files in use when saving them failed", async () => {
+  const { ExtensionResourceSlot } = await import("./Extensions");
+  const { saveKubeconfigFiles, settingsStorage } = await import("@srelens/core");
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [] });
+  render(<ExtensionResourceSlot context="edge" kind="Namespace" namespace={null} name="argo" />);
+  await waitFor(() => expect(listContexts).toHaveBeenCalledTimes(1));
+  // Storage refused the save, so nothing is stored; the app still uses the new file.
+  act(() => {
+    const fail = vi.spyOn(settingsStorage, "setItem").mockImplementation(() => { throw new Error("unavailable"); });
+    saveKubeconfigFiles(["/kube/edge.yaml"]);
+    fail.mockRestore();
+  });
+  await waitFor(() => expect(listContexts).toHaveBeenLastCalledWith(["/kube/edge.yaml"]));
+  // And keeps using it on the next refresh too.
+  act(() => {
+    fireEvent.focus(window);
+  });
+  await waitFor(() => expect(listContexts).toHaveBeenCalledTimes(3));
+  expect(listContexts).toHaveBeenLastCalledWith(["/kube/edge.yaml"]);
 });
 it("does not attach a custom kind contribution to a built-in with the same name", async () => {
   const { ExtensionResourceSlot } = await import("./Extensions");
@@ -703,4 +921,44 @@ it("reports CRD discovery failure while retaining the fallback resource columns"
  render(<ExtensionResults plugin={plugin} capability="list" context="prod"/>);
  expect(await screen.findByText(/Could not load CRD columns: Forbidden/)).toBeTruthy();
  expect(await screen.findByRole("columnheader",{name:"Ready"})).toBeTruthy();
+});
+
+it("does not offer or save a cluster ID shared by two contexts", async () => {
+ const {ExtensionClusters}=await import("./ExtensionClusters");
+ vi.mocked(listContexts).mockResolvedValue({contexts:[{name:"one",stableId:"/k/a#b#c"},{name:"two",stableId:"/k/a#b#c"}]} as any);
+ const change=vi.fn();
+ render(<ExtensionClusters plugin={{...plugin,contexts:["/k/a#b#c","/k/gone#old"]}} busy={false} change={change}/>);
+ expect(await screen.findByText(/shares its ID|shared.*ID|IDs.*shared/i)).toBeTruthy();
+ fireEvent.click(screen.getByRole("button",{name:"Remove /k/gone#old"}));
+ expect((screen.getByRole("button",{name:"Save clusters"}) as HTMLButtonElement).disabled).toBe(true);
+ fireEvent.click(screen.getByRole("combobox",{name:"Add a cluster"}));
+ expect(screen.queryByRole("option",{name:"one"})).toBeNull();
+ expect(screen.queryByRole("option",{name:"two"})).toBeNull();
+});
+it("retains published files across context-store subscriptions", async () => {
+ const {ExtensionResourceSlot}=await import("./Extensions");
+ const {saveKubeconfigFiles,settingsStorage}=await import("@srelens/core");
+ const first=render(<ExtensionResourceSlot context="edge" kind="Namespace" namespace={null} name="argo"/>);
+ await waitFor(()=>expect(listContexts).toHaveBeenCalled());
+ const fail=vi.spyOn(settingsStorage,"setItem").mockImplementation(()=>{throw new Error("unavailable");});
+ act(()=>saveKubeconfigFiles(["/kube/live.yaml"]));
+ fail.mockRestore();
+ await waitFor(()=>expect(listContexts).toHaveBeenLastCalledWith(["/kube/live.yaml"]));
+ first.unmount();
+ const failAgain=vi.spyOn(settingsStorage,"setItem").mockImplementation(()=>{throw new Error("unavailable");});
+ saveKubeconfigFiles(["/kube/newer.yaml"]);
+ failAgain.mockRestore();
+ vi.mocked(listContexts).mockClear();
+ render(<ExtensionResourceSlot context="edge" kind="Namespace" namespace={null} name="argo"/>);
+ await waitFor(()=>expect(listContexts).toHaveBeenLastCalledWith(["/kube/newer.yaml"]));
+});
+it("uses live files saved before the cluster picker mounts", async () => {
+ const {ExtensionClusters}=await import("./ExtensionClusters");
+ const {saveKubeconfigFiles,settingsStorage}=await import("@srelens/core");
+ const fail=vi.spyOn(settingsStorage,"setItem").mockImplementation(()=>{throw new Error("unavailable");});
+ saveKubeconfigFiles(["/kube/session.yaml"]);
+ fail.mockRestore();
+ render(<ExtensionClusters plugin={plugin} busy={false} change={vi.fn()}/>);
+ await waitFor(()=>expect(listContexts).toHaveBeenLastCalledWith(["/kube/session.yaml"]));
+ saveKubeconfigFiles([]);
 });

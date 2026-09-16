@@ -449,11 +449,11 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::helm_cli::helm_search_repo_capability(
         cache.clone(),
     ));
-    reg.register(srelens_kube::manifest::list_resource_capability(cache));
+    reg.register(srelens_kube::manifest::list_resource_capability(cache.clone()));
 
     if let Some(path) = settings_path {
         let core = Arc::new(reg.clone());
-        extensions::register(&mut reg, path.with_extension("extensions.json"), core);
+        extensions::register(&mut reg, path.with_extension("extensions.json"), core, cache);
         settings::register(&mut reg, path);
     }
 

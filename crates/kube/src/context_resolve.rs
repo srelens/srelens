@@ -55,6 +55,52 @@ impl ResolvedContext {
     pub fn stable_id(&self) -> String {
         format!("{}#{}", self.source.display(), self.original_name)
     }
+
+    /// [`stable_id`](Self::stable_id) with the kubeconfig path made absolute: the form a
+    /// caller that has already checked this context passes on, so a later lookup reaches
+    /// this context and nothing else.
+    ///
+    /// Explicitly prefixed, so [`resolve_context`] never takes it for a context name, even when
+    /// the kubeconfig was added by a relative path. Never persisted: settings keep
+    /// `stable_id`, which must not change for relative paths.
+    ///
+    /// Unlike `stable_id`, it names exactly one context: `#` and `%` in the path are
+    /// percent-encoded, so the first `#` is always the delimiter. A path `a` with context
+    /// `b#c` and a path `a#b` with context `c` share a stable ID but not a pinned one.
+    ///
+    /// `None` when the path cannot be made absolute (an empty path, or a working directory
+    /// that no longer exists): a relative fallback would not be recognised as an ID, so a
+    /// caller must refuse rather than dispatch under it.
+    pub fn pinned_id(&self) -> Option<String> {
+        let source = std::path::absolute(&self.source).ok()?;
+        let source = source
+            .display()
+            .to_string()
+            .replace('%', "%25")
+            .replace('#', "%23");
+        let original_name = self.original_name.replace('%', "%25").replace('#', "%23");
+        Some(format!("srelens-context:{source}#{original_name}"))
+    }
+}
+
+/// The complete dispatch form emitted by `pinned_id`: the prefix alone is also
+/// valid in ordinary context names and must not reserve them.
+pub fn is_pinned_context(name: &str) -> bool {
+    let Some((source, context)) = name
+        .strip_prefix("srelens-context:")
+        .and_then(|id| id.split_once('#'))
+    else {
+        return false;
+    };
+    // The generator escapes only `%` and `#`. A raw delimiter or any other
+    // percent escape cannot occur inside either generated component.
+    let encoded = |part: &str| {
+        !part.contains('#')
+            && part.split('%').skip(1).all(|suffix| {
+                suffix.starts_with("25") || suffix.starts_with("23")
+            })
+    };
+    Path::new(source).is_absolute() && encoded(source) && encoded(context)
 }
 
 /// A parsed kubeconfig paired with the file it came from.
@@ -272,6 +318,19 @@ pub fn resolve_contexts(paths: &[PathBuf]) -> Vec<ResolvedContext> {
     resolve_contexts_with(paths, |path| Kubeconfig::read_from(path).ok())
 }
 
+/// Each kubeconfig in `paths` that cannot be read or parsed. [`resolve_contexts`] skips
+/// these, so a context declared only in one of them looks absent.
+///
+/// Only the paths: a parse error can quote the file's contents, credentials included, so
+/// the reason is not passed on (as `contexts.rs` also does).
+pub fn unreadable_kubeconfigs(paths: &[PathBuf]) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .filter(|path| Kubeconfig::read_from(path).is_err())
+        .cloned()
+        .collect()
+}
+
 /// Same as [`resolve_contexts`], but takes the file reader as a parameter so
 /// a test can count how many times each path is actually read. Kept private:
 /// this seam exists for that one pinning test, not as a public extension
@@ -287,14 +346,47 @@ fn resolve_contexts_with(
     resolve_from(&configs)
 }
 
-/// Find a resolved context by display name, falling back to a raw original name
-/// (for MCP/tests that pass the kubeconfig's own context name directly).
+/// Find a resolved context by [stable ID](ResolvedContext::stable_id),
+/// [pinned ID](ResolvedContext::pinned_id) or display name, falling back to a raw original
+/// name (for MCP/tests that pass the kubeconfig's own context name directly).
+///
+/// A caller that has checked a context passes its pinned ID on, so the lookup reaches the
+/// context that was checked: a display name can pass to another cluster when kubeconfig
+/// files change in between (#265).
 pub fn resolve_context(paths: &[PathBuf], name: &str) -> Option<ResolvedContext> {
-    let all = resolve_contexts(paths);
-    all.iter()
+    find_context(&resolve_contexts(paths), name)
+}
+
+/// [`resolve_context`] over an already resolved listing.
+///
+/// One string can mean two different contexts to two kinds of caller: an ID to extension
+/// dispatch, and a display name to delete, connect or the toolbox, when a context is
+/// literally named after another's ID. Such a string resolves to nothing, so neither caller
+/// is redirected. Likewise a stable ID that more than one listed context carries (see
+/// [`ResolvedContext::pinned_id`]) names no single context and resolves to nothing.
+pub fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedContext> {
+    let by_id: Vec<&ResolvedContext> = all
+        .iter()
+        .filter(|context| {
+            context.pinned_id().as_deref() == Some(name) || context.stable_id() == name
+        })
+        .collect();
+    let by_name = all
+        .iter()
         .find(|context| context.display_name == name)
-        .or_else(|| all.iter().find(|context| context.original_name == name))
-        .cloned()
+        .or_else(|| all.iter().find(|context| context.original_name == name));
+    match (by_id.as_slice(), by_name) {
+        ([found], None) => return Some((*found).clone()),
+        ([found], Some(named)) if std::ptr::eq(*found, named) => return Some((*found).clone()),
+        ([], _) => {}
+        _ => return None,
+    }
+    // Only the reserved dispatch form forbids name fallback. Ordinary kubeconfig names
+    // may contain `#`, including names resembling the legacy stable-ID format.
+    if is_pinned_context(name) {
+        return None;
+    }
+    by_name.cloned()
 }
 
 #[cfg(test)]
@@ -635,6 +727,159 @@ mod tests {
         let by_display = resolved.iter().find(|c| c.display_name == "kube_stage/default").unwrap();
         assert_eq!(by_display.source, PathBuf::from("/kube/kube_stage.yaml"));
         assert_eq!(by_display.original_name, "default");
+    }
+
+    #[test]
+    fn literal_hash_names_resolve_and_can_be_pinned() {
+        for name in ["team#prod", "first.yaml#default"] {
+            let yaml = PROD.replace("default", name);
+            let all = resolve_from(&[cfg("/kube/team.yaml", &yaml)]);
+            let found = find_context(&all, name).expect("literal context name resolves");
+            assert_eq!(found.original_name, name);
+            let pinned = found.pinned_id().unwrap();
+            assert!(pinned.starts_with("srelens-context:"));
+            assert_eq!(find_context(&all, &pinned).unwrap(), found);
+        }
+    }
+
+    #[test]
+    fn a_prefix_alone_does_not_reserve_a_literal_context_name() {
+        for name in [
+            "srelens-context:team",
+            "srelens-context:team#prod",
+            "srelens-context:/kube/team",
+            "srelens-context:/kube/team#prod#extra",
+            "srelens-context:/kube/team%oops#prod",
+            "srelens-context:/kube/team#prod%oops",
+            "srelens-context:/kube/team#prod%2%253",
+        ] {
+            assert!(!is_pinned_context(name), "literal name: {name}");
+            let yaml = PROD.replace("default", name);
+            let all = resolve_from(&[cfg("/kube/team.yaml", &yaml)]);
+            let found = find_context(&all, name).expect("literal prefixed name resolves");
+            assert_eq!(found.original_name, name);
+            let pinned = found.pinned_id().unwrap();
+            assert!(is_pinned_context(&pinned), "generated ID: {pinned}");
+            assert_eq!(find_context(&all, &pinned).unwrap(), found);
+        }
+    }
+
+    #[test]
+    fn a_pinned_id_finds_its_own_context_whatever_it_is_displayed_as() {
+        let id = resolve_from(&[cfg("/kube/kube_prod.yaml", PROD)])[0]
+            .pinned_id()
+            .unwrap();
+
+        // A second file renames prod's `default`; its ID still finds it, not stage's.
+        let clashing = resolve_from(&[
+            cfg("/kube/kube_stage.yaml", STAGE),
+            cfg("/kube/kube_prod.yaml", PROD),
+        ]);
+        let found = find_context(&clashing, &id).expect("the stable ID still resolves");
+        assert_eq!(found.display_name, "kube_prod/default");
+        assert_eq!(found.server, "https://prod:6443");
+
+        // With prod's file gone, the ID finds nothing rather than the other `default`.
+        let stage_only = resolve_from(&[cfg("/kube/kube_stage.yaml", STAGE)]);
+        assert!(find_context(&stage_only, &id).is_none());
+
+        // A context literally named after prod's ID never takes it, with prod listed or gone.
+        let impostor = cfg(
+            "/kube/impostor.yaml",
+            "clusters:\n  - name: c\n    cluster: { server: https://impostor }\ncontexts:\n  - name: \"srelens-context:/kube/kube_prod.yaml#default\"\n    context: { cluster: c, user: u }\n",
+        );
+        // Listed together, the string names two different contexts for two kinds of caller
+        // (an ID for extension dispatch, a display name for delete or connect), so it
+        // resolves to neither rather than redirecting either.
+        let listed = resolve_from(&[impostor, cfg("/kube/kube_prod.yaml", PROD)]);
+        assert!(find_context(&listed, &id).is_none());
+        assert!(find_context(&listed[..1], &id).is_none());
+        assert_eq!(
+            find_context(&listed[1..], &id).unwrap().server,
+            "https://prod:6443"
+        );
+    }
+
+    /// An ordinary caller looking a context up by its display name is never sent to a
+    /// different context because that name happens to be another context's ID.
+    #[test]
+    fn a_name_that_is_also_another_contexts_id_is_refused_rather_than_redirected() {
+        let prod = resolve_from(&[cfg("/kube/kube_prod.yaml", PROD)]).remove(0);
+        let named_like_prod = cfg(
+            "/kube/other.yaml",
+            &format!(
+                "clusters:\n  - name: c\n    cluster: {{ server: https://other }}\ncontexts:\n  - name: '{}'\n    context: {{ cluster: c, user: u }}\n",
+                prod.pinned_id().unwrap()
+            ),
+        );
+        let both = resolve_from(&[cfg("/kube/kube_prod.yaml", PROD), named_like_prod]);
+        assert_eq!(both[1].display_name, prod.pinned_id().unwrap());
+        // By that display name: not prod.
+        assert!(find_context(&both, &both[1].display_name).is_none());
+        // Prod itself stays reachable by its own name.
+        assert_eq!(
+            find_context(&both, "default").unwrap().server,
+            "https://prod:6443"
+        );
+    }
+
+    #[test]
+    fn a_relative_kubeconfig_keeps_its_stable_id_and_pins_by_an_absolute_one() {
+        // Settings persist the stable ID, so a relative kubeconfig path must stay in it.
+        let listed = resolve_from(&[cfg("kube/prod.yaml", PROD)]);
+        assert_eq!(listed[0].stable_id(), "kube/prod.yaml#default");
+        let pinned = listed[0].pinned_id().unwrap();
+        assert!(
+            Path::new(pinned.strip_prefix("srelens-context:").unwrap()).is_absolute(),
+            "{pinned}"
+        );
+        assert_eq!(
+            find_context(&listed, &pinned).unwrap().server,
+            "https://prod:6443"
+        );
+
+        // A context literally named after the pinned ID never takes it.
+        let impostor = cfg(
+            "/kube/impostor.yaml",
+            &format!(
+                "clusters:\n  - name: c\n    cluster: {{ server: https://impostor }}\ncontexts:\n  - name: '{pinned}'\n    context: {{ cluster: c, user: u }}\n"
+            ),
+        );
+        let with_impostor = resolve_from(&[impostor, cfg("kube/prod.yaml", PROD)]);
+        assert!(find_context(&with_impostor, &pinned).is_none());
+        assert!(find_context(&with_impostor[..1], &pinned).is_none());
+    }
+
+    /// A pinned ID is only ever absolute. When the path cannot be made absolute (an empty
+    /// path, or a working directory that no longer exists), there is no pinned ID rather
+    /// than a relative one that a lookup would take for a name.
+    #[test]
+    fn a_context_whose_path_cannot_be_made_absolute_has_no_pinned_id() {
+        let unplaceable = resolve_from(&[cfg("", PROD)]).remove(0);
+        assert_eq!(unplaceable.stable_id(), "#default");
+        assert_eq!(unplaceable.pinned_id(), None);
+        let placeable = resolve_from(&[cfg("/kube/prod.yaml", PROD)]).remove(0);
+        assert!(placeable.pinned_id().is_some());
+    }
+
+    #[test]
+    fn contexts_that_share_a_stable_id_have_distinct_pinned_ids_and_resolve_to_neither() {
+        // `a` + `b#c` and `a#b` + `c` both read `/kube/a#b#c`.
+        let named = |name: &str| {
+            format!(
+                "clusters:\n  - name: c\n    cluster: {{ server: https://{} }}\ncontexts:\n  - name: '{name}'\n    context: {{ cluster: c, user: u }}\n",
+                name.replace('#', "-")
+            )
+        };
+        let both = resolve_from(&[cfg("/kube/a", &named("b#c")), cfg("/kube/a#b", &named("c"))]);
+        assert_eq!(both[0].stable_id(), both[1].stable_id());
+        assert_ne!(both[0].pinned_id(), both[1].pinned_id());
+        for context in &both {
+            let pinned = context.pinned_id().unwrap();
+            assert_eq!(find_context(&both, &pinned).unwrap().server, context.server);
+        }
+        // The shared stable ID names no single context, so it reaches none.
+        assert!(find_context(&both, &both[0].stable_id()).is_none());
     }
 
     #[test]

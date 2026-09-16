@@ -9,6 +9,16 @@ is the bug.
 Tracking: [#163](https://github.com/srelens/srelens/issues/163). Field reference:
 [manifest.md](manifest.md).
 
+## Scope
+
+- **Hosts.** Apps run in the desktop app, whose extension capabilities are also exposed
+  over MCP. The web host refuses every `extensions.*` capability.
+- **The terminal UI is out of scope for extension API 1.0.** The TUI neither loads nor
+  renders apps, and nothing in this specification applies to it.
+- **Clusters.** An app is installed for the whole application. It may be limited to
+  chosen kubeconfig contexts; on the others it is hidden and the host refuses its reads
+  and actions.
+
 ## Terms
 
 - **Extension API version**: the version of this contract, in SemVer form
@@ -244,6 +254,13 @@ that existing `^0.1` manifests receive without an update.
   - `extensions.configure` gains `rollback`, which restores a kept version with explicit grants, keeps settings and assigns a new revision.
   - Settings → Apps shows an app's manifest, grants with their annotations, source and install time; it exports settings as JSON, resets them to defaults, and rolls back.
   - The capability catalog carries a `sensitive` flag.
+- **#535:**
+  - An installed app may be limited to chosen kubeconfig contexts in `contexts`. Each is kept by stable ID (`{file}#{name}`: the declaring kubeconfig and the context's name in it), because a display name changes when another kubeconfig declares the same name (#265). Without the list the app is offered on every cluster, as before.
+  - `extensions.configure` gains `clusters`. On a cluster the app is not enabled for, `extensions.read`, `extensions.resource` and `extensions.action` refuse with "App is not enabled for this cluster", and both desktop designs hide its pages, detail tabs and detail links.
+  - Those three send the request on under the checked context's pinned ID (the reserved `srelens-context:` prefix followed by the absolute kubeconfig path and encoded context name), and a context lookup accepts either ID as well as a name, so a kubeconfig change mid-request cannot move it to another cluster. Pinned requests never fall back to merged kubeconfig entries, and managed authentication resolves the pinned context's original name. Stable IDs themselves are unchanged, since settings persist them. A pinned ID names exactly one context (`#` and `%` in the path are percent-encoded); a stable ID that two contexts share (`a` + `b#c` and `a#b` + `c`) is refused for both, since it does not say which cluster was chosen.
+  - A limited app's page waits while the contexts are listed, and shows the failure with a retry if the listing fails. Resource views do the same for a limited app's tabs and actions. A failed refresh keeps the contexts already known.
+  - On a context the host cannot resolve, a limited app is refused with the reason (no kubeconfig declares it, or which kubeconfig could not be read), not with "App is not enabled for this cluster".
+  - The terminal UI is recorded as out of scope for extension API 1.0 (see [Scope](#scope)).
 - **#537:** pre-release rename.
   - The `rowActions` contribution is now `detailLinks`, with the same shape. Each entry opens a read-only results panel from the resource detail view's **App links** menu; it was never a row menu or a cluster write.
   - A manifest that still uses `rowActions` is rejected with `EXTENSION_UNKNOWN_FIELD`. There is no alias and API 0.1 is not bumped: a rename is breaking under [Compatibility rules](#compatibility-rules), and this one is an exception made because extensions had not gone live.

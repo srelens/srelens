@@ -73,8 +73,16 @@ impl ClientCache {
         // for OIDC this consults the token provider (and may refresh, single-
         // flighted). A needs-login propagates out as the marker String error.
         let resolver = self.auth_resolver.read().await.clone();
+        let auth_context =
+            if resolver.is_some() && crate::context_resolve::is_pinned_context(context) {
+                crate::context_resolve::resolve_context(&self.paths().await, context)
+                    .ok_or_else(|| "Pinned context is unavailable or ambiguous".to_string())?
+                    .original_name
+            } else {
+                context.to_owned()
+            };
         let want_bearer: Option<String> = match resolver {
-            Some(r) => match r.resolve(context).await? {
+            Some(r) => match r.resolve(&auth_context).await? {
                 crate::auth_resolver::AuthMode::Bearer(tok) => Some(tok),
                 crate::auth_resolver::AuthMode::Default => None,
             },
@@ -178,6 +186,25 @@ mod tests {
         ));
         std::fs::write(&path, contents).unwrap();
         path
+    }
+
+    #[tokio::test]
+    async fn pinned_requests_use_the_original_name_for_managed_auth() {
+        let path = write_temp_kubeconfig(
+            "pinned-auth",
+            "contexts:\n- name: prod\n  context: {cluster: c, user: u}\n",
+        );
+        let pinned = crate::context_resolve::resolve_context(&[path.clone()], "prod")
+            .unwrap()
+            .pinned_id()
+            .unwrap();
+        let cache = ClientCache::new(path.clone());
+        cache
+            .set_auth_resolver(Arc::new(NeedsLoginResolver { key: "oidc".into() }))
+            .await;
+        let error = cache.get(&pinned).await.err().expect("login required");
+        assert_eq!(error, needs_login_marker("oidc", "prod"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

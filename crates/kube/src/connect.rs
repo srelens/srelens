@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
-use crate::context_resolve::resolve_context;
+use crate::context_resolve::{is_pinned_context, resolve_context};
 
 /// Default per-request timeout budget (connect + list/get/apply), in seconds.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 8;
@@ -147,11 +147,20 @@ pub fn single_context_kubeconfig_yaml(paths: &[PathBuf], context: &str) -> Resul
     // Map the (possibly disambiguated) display name back to its owning file and
     // in-file name, so a duplicate-named context scopes to its own cluster/user.
     let resolved = resolve_context(paths, context);
+    if is_pinned_context(context) && resolved.is_none() {
+        return Err("Pinned context is unavailable or ambiguous".into());
+    }
     let in_config = resolved
         .as_ref()
         .map(|target| target.original_name.clone())
         .unwrap_or_else(|| context.to_string());
 
+    if is_pinned_context(context) {
+        let target = resolved.as_ref().expect("checked pinned context");
+        let config = Kubeconfig::read_from(&target.source)
+            .map_err(|_| "Pinned kubeconfig could not be read".to_string())?;
+        return standalone_context_yaml(config, &target.original_name);
+    }
     // Prefer the owning file (correct for duplicate names); fall back to the
     // merged view when the context is a single config split across files.
     if let Some(target) = &resolved {
@@ -240,6 +249,9 @@ pub fn write_single_context_kubeconfig(
 /// instead of always resolving to the first.
 pub(crate) async fn config_for_context(paths: &[PathBuf], context: &str) -> Result<Config, String> {
     let resolved = resolve_context(paths, context);
+    if is_pinned_context(context) && resolved.is_none() {
+        return Err("Pinned context is unavailable or ambiguous".into());
+    }
     // The name kube-rs must find inside the kubeconfig (display names may be
     // prefixed for disambiguation; the file itself still uses the raw name).
     let in_config = resolved
@@ -247,6 +259,20 @@ pub(crate) async fn config_for_context(paths: &[PathBuf], context: &str) -> Resu
         .map(|target| target.original_name.clone())
         .unwrap_or_else(|| context.to_string());
 
+    if is_pinned_context(context) {
+        let target = resolved.as_ref().expect("checked pinned context");
+        let kc = Kubeconfig::read_from(&target.source)
+            .map_err(|_| "Pinned kubeconfig could not be read".to_string())?;
+        return Config::from_custom_kubeconfig(
+            kc,
+            &KubeConfigOptions {
+                context: Some(target.original_name.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|_| "Pinned context configuration is invalid".to_string());
+    }
     // Prefer the specific file that owns this context: kube-rs merge is "first
     // file wins" by name, so a same-named cluster/user in another merged file
     // can shadow (or drop) this context's own entries.
@@ -309,11 +335,29 @@ async fn config_for_context_with_bearer(
     bearer: &str,
 ) -> Result<Config, String> {
     let resolved = resolve_context(paths, context);
+    if is_pinned_context(context) && resolved.is_none() {
+        return Err("Pinned context is unavailable or ambiguous".into());
+    }
     let in_config = resolved
         .as_ref()
         .map(|target| target.original_name.clone())
         .unwrap_or_else(|| context.to_string());
 
+    if is_pinned_context(context) {
+        let target = resolved.as_ref().expect("checked pinned context");
+        let mut kc = Kubeconfig::read_from(&target.source)
+            .map_err(|_| "Pinned kubeconfig could not be read".to_string())?;
+        set_context_bearer(&mut kc, &target.original_name, bearer);
+        return Config::from_custom_kubeconfig(
+            kc,
+            &KubeConfigOptions {
+                context: Some(target.original_name.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|_| "Pinned context configuration is invalid".to_string());
+    }
     if let Some(target) = &resolved {
         if let Ok(mut kc) = Kubeconfig::read_from(&target.source) {
             set_context_bearer(&mut kc, &target.original_name, bearer);
@@ -696,6 +740,47 @@ pub fn cluster_facts_capability(cache: Arc<ClientCache>) -> Capability {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pinned_context_never_falls_back_to_a_merged_impostor() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("original.yaml");
+        let yaml = "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster: {server: https://original}\ncontexts:\n- name: prod\n  context: {cluster: c, user: u}\nusers:\n- name: u\n  user: {}\n";
+        std::fs::write(&source, yaml).unwrap();
+        let pinned = resolve_context(&[source.clone()], "prod")
+            .unwrap()
+            .pinned_id()
+            .unwrap();
+        let impostor = dir.path().join("impostor.yaml");
+        std::fs::write(
+            &impostor,
+            yaml.replace("prod", &pinned)
+                .replace("https://original", "https://impostor"),
+        )
+        .unwrap();
+        let paths = [impostor];
+        assert!(config_for_context(&paths, &pinned).await.is_err());
+        assert!(
+            config_for_context_with_bearer(&paths, &pinned, "test-token")
+                .await
+                .is_err()
+        );
+        assert!(single_context_kubeconfig_yaml(&paths, &pinned).is_err());
+        // A listed but incomplete owning file must not borrow another cluster's entries.
+        std::fs::write(
+            &source,
+            "contexts:\n- name: prod\n  context: {cluster: c, user: u}\n",
+        )
+        .unwrap();
+        let paths = [source, paths[0].clone()];
+        assert!(config_for_context(&paths, &pinned).await.is_err());
+        assert!(
+            config_for_context_with_bearer(&paths, &pinned, "test-token")
+                .await
+                .is_err()
+        );
+        assert!(single_context_kubeconfig_yaml(&paths, &pinned).is_err());
+    }
 
     /// kube's `rustls-tls` feature no longer selects a crypto provider on its
     /// own -- kube 4 split `ring` and `aws-lc-rs` out into separate features.

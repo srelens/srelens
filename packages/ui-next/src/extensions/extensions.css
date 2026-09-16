@@ -323,6 +323,28 @@
   gap: 4px 12px;
 }
 .extension-grants code { font-family: var(--font-mono); }
+.extension-clusters {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.extension-clusters legend {
+  margin-bottom: 4px;
+  font-size: var(--text-body, 0.8125rem);
+  font-weight: 600;
+}
+.extension-clusters > button { justify-self: start; }
+.extension-cluster-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding-left: 20px;
+  list-style: none;
+}
+.extension-cluster-list li { display: flex; align-items: center; gap: 8px; }
+.extension-cluster-list code { font-family: var(--font-mono); white-space: nowrap; overflow-x: auto; }
 .extension-grants span { color: var(--ink-muted, var(--fl-color-text-muted)); }
 .extension-problem-code {
   color: var(--ink-muted, var(--fl-color-text-muted));

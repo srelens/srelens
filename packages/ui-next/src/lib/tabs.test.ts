@@ -201,3 +201,9 @@ describe("reconcile", () => {
     expect(reconcile(state, [ctx("a")])).toBe(state);
   });
 });
+
+it("keeps an app tab's cluster label when the rail changes", async () => {
+ const {relabel}=await import("./tabs");
+ const tab=makeTab("/extension-clusters/id%3Aprod/org.app/page/",{clusterName:"Production"});
+ expect(relabel(tab,"Staging").sub).toBe("Production");
+});

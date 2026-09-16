@@ -166,6 +166,16 @@
     "Installed": {
       "additionalProperties": false,
       "properties": {
+        "contexts": {
+          "description": "The stable IDs of the kubeconfig contexts the app is enabled for (`{file}#{name}`, as `ResolvedContext::stable_id`); `None` is every cluster. A context's display name is not identity: it changes when another kubeconfig declares the same name (#265).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "enabled": {
           "type": "boolean"
         },

@@ -23,8 +23,10 @@ struct Action {
 async fn resolve(
     path: PathBuf,
     core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
     selection: Selection,
 ) -> Result<ResourceIn, CapabilityError> {
+    let resolved = request_context(&cache, &selection.context).await;
     let state = tokio::task::spawn_blocking(move || read(&path))
         .await
         .map_err(|e| CapabilityError::Handler(e.to_string()))?
@@ -38,6 +40,7 @@ async fn resolve(
                 "App was disabled, removed or updated; refresh the view".into(),
             )
         })?;
+    plugin.check_scope(&resolved)?;
     validate_app(&plugin.manifest, &plugin.grants, core)
         .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
     let binding = plugin
@@ -55,7 +58,11 @@ async fn resolve(
             .to_owned()
     };
     let resource = ResourceIn {
-        context: selection.context,
+        // The pinned ID of the context scope was checked as (see `request_context`).
+        context: resolved
+            .ok()
+            .and_then(|context| context.pinned_id())
+            .unwrap_or(selection.context),
         namespace: selection.namespace,
         name: selection.name,
         group: field("group"),
@@ -67,9 +74,15 @@ async fn resolve(
     resource.validate().map_err(CapabilityError::InvalidInput)?;
     Ok(resource)
 }
-pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
+pub(super) fn register(
+    reg: &mut Registry,
+    path: PathBuf,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+) {
     let p = path.clone();
     let c = core.clone();
+    let k = cache.clone();
     reg.register(Capability::typed::<Selection, Value, _, _>(
         "extensions.resource",
         "Inspect the selected resource of an enabled app",
@@ -77,8 +90,9 @@ pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
         move |selection| {
             let p = p.clone();
             let c = c.clone();
+            let k = k.clone();
             async move {
-                let resource = resolve(p, c.clone(), selection).await?;
+                let resource = resolve(p, c.clone(), k, selection).await?;
                 c.invoke(
                     "k8s.getCustomResource",
                     serde_json::to_value(resource).unwrap(),
@@ -88,8 +102,8 @@ pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
         },
     ));
     reg.register(Capability::typed::<Action, Value, _, _>("extensions.action", "Request a host-owned GitOps action on an app resource; requires explicit confirmation", Annotations::MUTATING, move |input| {
-        let p = path.clone(); let c = core.clone(); async move {
-            let resource = resolve(p,c.clone(),input.resource).await?;
+        let p = path.clone(); let c = core.clone(); let k = cache.clone(); async move {
+            let resource = resolve(p,c.clone(),k,input.resource).await?;
             c.invoke("k8s.gitOpsAction", json!({"resource":resource,"action":input.action,"uid":input.uid,"resourceVersion":input.resource_version})).await
         }
     }));
@@ -111,6 +125,7 @@ mod tests {
         let resolved = resolve(
             path.clone(),
             core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
             serde_json::from_value(payload.clone()).unwrap(),
         )
         .await
@@ -130,10 +145,39 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            resolve(path, core, serde_json::from_value(payload).unwrap())
-                .await
-                .is_err()
+        assert!(resolve(
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            serde_json::from_value(payload).unwrap()
+        )
+        .await
+        .is_err());
+    }
+    #[tokio::test]
+    async fn a_selection_goes_to_the_cluster_its_scope_was_checked_against() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let core = super::super::tests::fake_core();
+        let revision = super::super::tests::install(&path, core.clone());
+        let config = super::super::tests::kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let binding = read(&path).unwrap().plugins[0].manifest.capabilities[0]
+            .name
+            .clone();
+        let selection = json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"default","namespace":"team","name":"app"});
+        let resolved = resolve(
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![config.clone()]),
+            serde_json::from_value(selection).unwrap(),
+        )
+        .await
+        .unwrap();
+        // Inspection and actions go out under the ID scope was checked as, so the capability
+        // cannot resolve the name again to a cluster that took it since.
+        assert_eq!(
+            resolved.context,
+            format!("srelens-context:{}#default", config.display())
         );
     }
     #[tokio::test]
@@ -155,7 +199,12 @@ mod tests {
             .name
             .clone();
         let mut reg = Registry::new();
-        register(&mut reg, path.clone(), core.clone());
+        register(
+            &mut reg,
+            path.clone(),
+            core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
         let selected = json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"cluster/a","namespace":"team","name":"app"});
         let payload = json!({"resource":selected,"action":"sync","uid":"u","resourceVersion":"2"});
         let result = reg
@@ -180,10 +229,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            resolve(path, core, serde_json::from_value(selected).unwrap())
-                .await
-                .is_err()
-        );
+        assert!(resolve(
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            serde_json::from_value(selected).unwrap()
+        )
+        .await
+        .is_err());
     }
 }

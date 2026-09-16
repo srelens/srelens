@@ -8,6 +8,7 @@ import {
   type InstalledExtension,
 } from "@srelens/core";
 import { CodeEditor } from "@srelens/ui-kit";
+import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionControls } from "./ExtensionControls";
 
 const facts = new Map(CAPABILITY_CATALOG.map((capability) => [capability.id, capability]));
@@ -84,6 +85,8 @@ export function ExtensionDetails({
         {origin(plugin)} · version {manifest.version}, revision {plugin.revision} · installed{" "}
         {installedOn(plugin.installedAt)}
       </p>
+
+      <ExtensionClusters key={JSON.stringify(plugin.contexts ?? null)} plugin={plugin} busy={busy} change={change} />
 
       <h3>Granted capabilities</h3>
       <ul className="extension-grants" aria-label="Granted capabilities">
