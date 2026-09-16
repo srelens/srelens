@@ -114,7 +114,10 @@ exactly that.
   - `settings` on `extensions.configure` keeps its setting names but loses
     every value. An app's settings are free-form and nothing marks one as
     secret, so a value under `credential` or `certificate` would otherwise be
-    written verbatim — for a denied call too.
+    written verbatim — for a denied call too;
+  - a recorded error message is scrubbed of every value the rules above
+    removed, because a capability that refuses an argument tends to echo it
+    (`invalid type: string "…", expected a map`).
 
   Identifying fields like `context`, `namespace`, `name` and `kind` survive,
   so you can still see which cluster and object an agent touched, and the

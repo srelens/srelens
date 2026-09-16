@@ -100,6 +100,51 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
     }
 }
 
+/// Scrub from an error message every value that `redact` dropped from `args`.
+///
+/// A capability that refuses an argument tends to echo it — the registry maps
+/// serde's error to a string as-is, and for a scalar `settings` that reads
+/// `invalid type: string "hunter2", expected a map` — and `handle_request`
+/// records the message beside the redacted arguments, which would put the
+/// value straight back in the log. So every string or number that is in
+/// `args` and not in `redacted` is replaced wherever it appears, longest
+/// first so a value that contains another is not left half visible, and in
+/// the escaped form serde's `{:?}` prints as well as verbatim. Values the
+/// redaction kept are left alone, so a message naming the app or the
+/// namespace still says which one.
+///
+/// Over-scrubbing is the safe direction: a hidden value that happens to be an
+/// ordinary word costs a few characters of an error text, where the
+/// alternative is a credential on disk.
+pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
+    fn leaves(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::String(s) => out.push(s.clone()),
+            Value::Number(n) => out.push(n.to_string()),
+            Value::Object(m) => m.values().for_each(|v| leaves(v, out)),
+            Value::Array(a) => a.iter().for_each(|v| leaves(v, out)),
+            Value::Bool(_) | Value::Null => {}
+        }
+    }
+    let mut kept = Vec::new();
+    leaves(redacted, &mut kept);
+    let mut hidden = Vec::new();
+    leaves(args, &mut hidden);
+    hidden.retain(|s| !s.is_empty() && !kept.contains(s));
+    hidden.sort_by_key(|s| std::cmp::Reverse(s.len()));
+
+    let mut out = error.to_string();
+    for value in hidden {
+        out = out.replace(&value, "<redacted>");
+        let escaped = format!("{value:?}");
+        let escaped = &escaped[1..escaped.len() - 1];
+        if escaped != value {
+            out = out.replace(escaped, "<redacted>");
+        }
+    }
+    out
+}
+
 /// The most recent `limit` entries, newest first.
 ///
 /// Reads at most a bounded window from the END of the log rather than the whole
@@ -597,6 +642,55 @@ mod tests {
             assert_eq!(out["settings"], json!("<redacted>"), "got {out}");
             assert!(!out.to_string().contains("hunter2"), "leaked: {out}");
         }
+    }
+
+    /// PR #625 review. A capability that refuses an argument tends to echo it:
+    /// the registry maps serde's error straight to a string, and for a scalar
+    /// `settings` that is `invalid type: string "hunter2", expected a map`.
+    /// `handle_request` records the error beside the redacted arguments, which
+    /// put the value straight back in the log. Every value redaction hid must
+    /// be scrubbed from the message; everything it kept is left alone.
+    #[test]
+    fn redact_error_scrubs_the_values_redaction_hid_and_nothing_else() {
+        let args =
+            json!({ "action": "settings", "id": "org.example.argocd", "settings": "hunter2" });
+        let redacted = redact(&args, false);
+        let error = "invalid input: invalid type: string \"hunter2\", expected a map";
+
+        let out = redact_error(error, &args, &redacted);
+
+        assert!(!out.contains("hunter2"), "the refused value leaked: {out}");
+        assert!(
+            out.contains("expected a map"),
+            "the rest of the message survives: {out}"
+        );
+
+        let visible = redact_error("no app org.example.argocd is installed", &args, &redacted);
+        assert_eq!(
+            visible, "no app org.example.argocd is installed",
+            "kept values are not scrubbed"
+        );
+    }
+
+    /// serde prints the value it echoes with `{:?}`, so a value holding a quote
+    /// or a newline appears escaped, not verbatim; a number appears bare.
+    #[test]
+    fn redact_error_scrubs_escaped_and_numeric_values_too() {
+        let args =
+            json!({ "action": "settings", "id": "org.example.argocd", "settings": "hun\"ter\n2" });
+        let redacted = redact(&args, false);
+        let error = "invalid input: invalid type: string \"hun\\\"ter\\n2\", expected a map";
+        let out = redact_error(error, &args, &redacted);
+        assert!(!out.contains("ter"), "the escaped value leaked: {out}");
+
+        let args = json!({ "action": "settings", "id": "org.example.argocd", "settings": { "pin": 4711 } });
+        let redacted = redact(&args, false);
+        let out = redact_error(
+            "handler error: pin 4711 is not four digits",
+            &args,
+            &redacted,
+        );
+        assert!(!out.contains("4711"), "the numeric value leaked: {out}");
     }
 
     /// The other `extensions.configure` actions carry no settings, and their
