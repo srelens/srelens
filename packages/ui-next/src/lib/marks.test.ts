@@ -151,7 +151,7 @@ describe("classic context identity parity", () => {
     s.m.set(MARKS_KEY, JSON.stringify({ id: { ...defaultMark("prod"), color: "var(--mark-teal)", mark: "icon", icon: "server", withText: true } }));
     loadMarks(s);
 
-    rememberContextMarks([{ name: "prod", stableId: "id" } as import("@srelens/core").ClusterContext], s);
+    rememberContextMarks([{ name: "prod", stableId: "id", key: "id" } as import("@srelens/core").ClusterContext], s);
 
     expect(JSON.parse(s.m.get("srelens.contextProfiles")!).id).toMatchObject({
       displayName: "Production",
@@ -167,7 +167,7 @@ describe("classic context identity parity", () => {
     s.m.set(MARKS_KEY, JSON.stringify({ id: { ...defaultMark("prod"), color: "var(--mark-teal)" } }));
     loadMarks(s);
 
-    rememberContextMarks([{ name: "file/prod", stableId: "id" } as import("@srelens/core").ClusterContext], s);
+    rememberContextMarks([{ name: "file/prod", stableId: "id", key: "id" } as import("@srelens/core").ClusterContext], s);
 
     const profile = JSON.parse(s.m.get("srelens.contextProfiles")!).id;
     expect(profile).not.toHaveProperty("displayName");
@@ -184,8 +184,8 @@ describe("classic context identity parity", () => {
     s.m.set("srelens.contextProfiles", JSON.stringify({ prod: { displayName: "Original production" } }));
     loadMarks(s);
     rememberContextMarks([
-      { name: "file-a/prod", stableId: "id-a" },
-      { name: "file-b/prod", stableId: "id-b" },
+      { name: "file-a/prod", stableId: "id-a", key: "id-a" },
+      { name: "file-b/prod", stableId: "id-b", key: "id-b" },
     ] as import("@srelens/core").ClusterContext[], s);
 
     expect(JSON.parse(s.m.get("srelens.contextProfiles")!)).toHaveProperty("prod");
@@ -195,7 +195,7 @@ describe("classic context identity parity", () => {
     // that the unresolved profile belonged to it.
     loadMarks(s);
     rememberContextMarks([
-      { name: "prod", stableId: "id-b" },
+      { name: "prod", stableId: "id-b", key: "id-b" },
     ] as import("@srelens/core").ClusterContext[], s);
     expect(JSON.parse(s.m.get("srelens.contextProfiles")!)).toHaveProperty("prod");
     expect(JSON.parse(s.m.get("srelens.contextProfiles")!)).not.toHaveProperty("id-b");
@@ -222,7 +222,7 @@ it("honours a profile reset in classic after importing it by stable ID", async (
   const s = fakeStorage();
   s.m.set("srelens.contextProfiles", JSON.stringify({ prod: { displayName: "Production", shortName: "P" } }));
   loadMarks(s);
-  rememberContextMarks([{ name: "prod", stableId: "id" } as import("@srelens/core").ClusterContext], s);
+  rememberContextMarks([{ name: "prod", stableId: "id", key: "id" } as import("@srelens/core").ClusterContext], s);
   s.m.set("srelens.contextProfiles", "{}");
   loadMarks(s);
   expect(getMark("id", "prod")).toEqual(defaultMark("prod"));

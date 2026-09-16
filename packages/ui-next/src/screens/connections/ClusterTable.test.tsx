@@ -8,7 +8,7 @@ import { STATUS } from "./clusterText";
 
 const ctx = (over: Partial<ClusterContext> = {}): ClusterContext => ({
   name: "prod-eu",
-  stableId: "prod-eu",
+  stableId: "prod-eu", key: "prod-eu",
   cluster: "prod",
   server: "https://prod:6443",
   namespace: "",
@@ -133,7 +133,7 @@ describe("ClusterTable", () => {
       <ClusterTable
         rows={[
           { context: ctx(), probe: { state: "reachable", latencyMs: 12 } },
-          { context: ctx({ stableId: "b", name: "b" }), probe: { state: "unreachable", error: "…" } },
+          { context: ctx({ stableId: "b", key: "b", name: "b" }), probe: { state: "unreachable", error: "…" } },
         ]}
         onOpen={() => {}}
       />,
@@ -146,8 +146,8 @@ describe("ClusterTable", () => {
       <ClusterTable
         rows={[
           { context: ctx(), probe: { state: "reachable", latencyMs: 12 } },
-          { context: ctx({ stableId: "b", name: "b" }), probe: { state: "unreachable", error: "…" } },
-          { context: ctx({ stableId: "c", name: "c" }), probe: { state: "unread" } },
+          { context: ctx({ stableId: "b", key: "b", name: "b" }), probe: { state: "unreachable", error: "…" } },
+          { context: ctx({ stableId: "c", key: "c", name: "c" }), probe: { state: "unread" } },
         ]}
         onOpen={() => {}}
       />,
@@ -169,7 +169,7 @@ describe("ClusterTable", () => {
         rows={[
           { context: ctx(), probe: { state: "unread" } },
           {
-            context: ctx({ stableId: "kind-dev", name: "kind-dev", isLocal: true, provider: "kind" }),
+            context: ctx({ stableId: "kind-dev", key: "kind-dev", name: "kind-dev", isLocal: true, provider: "kind" }),
             probe: { state: "unread" },
           },
         ]}
@@ -239,7 +239,7 @@ describe("ClusterTable", () => {
         rows={[
           {
             context: ctx({
-              stableId: "kind-dev",
+              stableId: "kind-dev", key: "kind-dev",
               name: "kind-dev",
               isLocal: true,
               provider: "kind",
@@ -262,7 +262,7 @@ describe("ClusterTable", () => {
         rows={[
           {
             context: ctx({
-              stableId: "local",
+              stableId: "local", key: "local",
               name: "local",
               isLocal: true,
               server: "https://127.0.0.1:6443",
@@ -282,7 +282,7 @@ describe("ClusterTable", () => {
       <ClusterTable
         rows={[
           {
-            context: ctx({ stableId: "odd", name: "odd", isLocal: true, server: "not-a-url" }),
+            context: ctx({ stableId: "odd", key: "odd", name: "odd", isLocal: true, server: "not-a-url" }),
             probe: { state: "unread" },
           },
         ]}
@@ -307,14 +307,14 @@ describe("ClusterTable", () => {
     render(
       <ClusterTable
         rows={[
-          { context: ctx({ stableId: "prod-eu", name: "prod-eu" }), probe: { state: "unread" } },
+          { context: ctx({ stableId: "prod-eu", key: "prod-eu", name: "prod-eu" }), probe: { state: "unread" } },
           {
-            context: ctx({ stableId: "kind-dev", name: "kind-dev", isLocal: true, provider: "kind" }),
+            context: ctx({ stableId: "kind-dev", key: "kind-dev", name: "kind-dev", isLocal: true, provider: "kind" }),
             probe: { state: "unread" },
           },
-          { context: ctx({ stableId: "staging", name: "staging" }), probe: { state: "unread" } },
+          { context: ctx({ stableId: "staging", key: "staging", name: "staging" }), probe: { state: "unread" } },
           {
-            context: ctx({ stableId: "k3d-lab", name: "k3d-lab", isLocal: true, provider: "k3d" }),
+            context: ctx({ stableId: "k3d-lab", key: "k3d-lab", name: "k3d-lab", isLocal: true, provider: "k3d" }),
             probe: { state: "unread" },
           },
         ]}
@@ -346,14 +346,14 @@ describe("ClusterTable", () => {
   describe("the group boundary", () => {
     /** Two of each, interleaved on the way in so the order is the table's doing. */
     const two = [
-      { context: ctx({ stableId: "a#prod", name: "prod-eu" }), probe: { state: "reachable" as const, latencyMs: 41 } },
+      { context: ctx({ stableId: "a#prod", key: "a#prod", name: "prod-eu" }), probe: { state: "reachable" as const, latencyMs: 41 } },
       {
-        context: ctx({ stableId: "b#kind", name: "kind-dev", isLocal: true, provider: "kind" }),
+        context: ctx({ stableId: "b#kind", key: "b#kind", name: "kind-dev", isLocal: true, provider: "kind" }),
         probe: { state: "reachable" as const, latencyMs: 3 },
       },
-      { context: ctx({ stableId: "c#staging", name: "staging" }), probe: { state: "reachable" as const, latencyMs: 12 } },
+      { context: ctx({ stableId: "c#staging", key: "c#staging", name: "staging" }), probe: { state: "reachable" as const, latencyMs: 12 } },
       {
-        context: ctx({ stableId: "d#k3d", name: "k3d-lab", isLocal: true, provider: "k3d" }),
+        context: ctx({ stableId: "d#k3d", key: "d#k3d", name: "k3d-lab", isLocal: true, provider: "k3d" }),
         probe: { state: "reachable" as const, latencyMs: 1 },
       },
     ];
@@ -396,7 +396,7 @@ describe("ClusterTable", () => {
     it("counts the rows in its own group, not the whole list", () => {
       const { container } = render(
         <ClusterTable
-          rows={[two[0], two[1], two[2], { context: ctx({ stableId: "e#edge", name: "edge-1" }), probe: { state: "unread" } }]}
+          rows={[two[0], two[1], two[2], { context: ctx({ stableId: "e#edge", key: "e#edge", name: "edge-1" }), probe: { state: "unread" } }]}
           onOpen={() => {}}
         />,
       );
@@ -444,7 +444,7 @@ describe("ClusterTable", () => {
       <ClusterTable
         rows={[
           { context: ctx(), probe: { state: "unread" } },
-          { context: ctx({ stableId: "staging#name", name: "staging" }), probe: { state: "unread" } },
+          { context: ctx({ stableId: "staging#name", key: "staging#name", name: "staging" }), probe: { state: "unread" } },
         ]}
         onOpen={onOpen}
       />,
@@ -520,7 +520,7 @@ describe("ClusterTable", () => {
       <ClusterTable
         rows={[
           { context: ctx(), probe: { state: "unread" } },
-          { context: ctx({ stableId: "b#staging", name: "staging" }), probe: { state: "unread" } },
+          { context: ctx({ stableId: "b#staging", key: "b#staging", name: "staging" }), probe: { state: "unread" } },
         ]}
         onOpen={() => {}}
       />,
@@ -565,12 +565,12 @@ describe("ClusterTable", () => {
    */
   describe("the Latency column's order", () => {
     const mixed: { context: ClusterContext; probe: Probe }[] = [
-      { context: ctx({ stableId: "a#alpha", name: "alpha" }), probe: { state: "reachable", latencyMs: 41 } },
-      { context: ctx({ stableId: "b#bravo", name: "bravo" }), probe: { state: "unread" } },
-      { context: ctx({ stableId: "c#charlie", name: "charlie" }), probe: { state: "reachable", latencyMs: 12 } },
+      { context: ctx({ stableId: "a#alpha", key: "a#alpha", name: "alpha" }), probe: { state: "reachable", latencyMs: 41 } },
+      { context: ctx({ stableId: "b#bravo", key: "b#bravo", name: "bravo" }), probe: { state: "unread" } },
+      { context: ctx({ stableId: "c#charlie", key: "c#charlie", name: "charlie" }), probe: { state: "reachable", latencyMs: 12 } },
       // Unreachable, and so also without a reading: `latencyLabel` gates on the
       // state as well as on the number.
-      { context: ctx({ stableId: "d#delta", name: "delta" }), probe: { state: "unreachable", error: "no route" } },
+      { context: ctx({ stableId: "d#delta", key: "d#delta", name: "delta" }), probe: { state: "unreachable", error: "no route" } },
     ];
     const order = () => screen.getAllByTestId(/^cluster-name-/).map((el) => el.textContent);
     const byLatency = () => screen.getByRole("button", { name: "Sort by Latency" });
@@ -597,9 +597,9 @@ describe("ClusterTable", () => {
      */
     it("keeps clusters with no reading in the order they were given", async () => {
       const unread: { context: ClusterContext; probe: Probe }[] = [
-        { context: ctx({ stableId: "a#alpha", name: "alpha" }), probe: { state: "unread" } },
-        { context: ctx({ stableId: "b#bravo", name: "bravo" }), probe: { state: "unread" } },
-        { context: ctx({ stableId: "c#charlie", name: "charlie" }), probe: { state: "unread" } },
+        { context: ctx({ stableId: "a#alpha", key: "a#alpha", name: "alpha" }), probe: { state: "unread" } },
+        { context: ctx({ stableId: "b#bravo", key: "b#bravo", name: "bravo" }), probe: { state: "unread" } },
+        { context: ctx({ stableId: "c#charlie", key: "c#charlie", name: "charlie" }), probe: { state: "unread" } },
       ];
       render(<ClusterTable rows={unread} onOpen={() => {}} />);
       await userEvent.click(byLatency());

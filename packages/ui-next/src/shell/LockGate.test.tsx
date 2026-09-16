@@ -69,6 +69,7 @@ const TYPED = "not-the-one";
 const ctx = (stableId: string) => ({
   name: stableId,
   stableId,
+  key: stableId,
   cluster: stableId,
   server: "",
   isCurrent: false,

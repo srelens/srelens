@@ -129,6 +129,7 @@ function setup({ onToggleTheme = () => {} }: { onToggleTheme?: () => void } = {}
 const ctx = (stableId: string, name = stableId): ClusterContext => ({
   name,
   stableId,
+  key: stableId,
   cluster: name,
   server: "",
   isCurrent: false,

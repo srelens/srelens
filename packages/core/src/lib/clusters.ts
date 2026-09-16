@@ -6,6 +6,10 @@ export interface ClusterContext {
    *  `file/` prefix as soon as another kubeconfig declares the same context
    *  name, so anything persisted per context must key on this instead. */
   stableId: string;
+  /** The identity an app's cluster list holds: `stableId` with `#` and `%` encoded in the
+   *  file and the name, so no two contexts share it (`a` + `b#c` and `a#b` + `c` share a
+   *  stable ID). Kept separate from `stableId`, which is persisted elsewhere and cannot change. */
+  key: string;
   cluster: string;
   server: string;
   isCurrent: boolean;

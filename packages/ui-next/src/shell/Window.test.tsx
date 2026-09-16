@@ -208,7 +208,7 @@ const VAULT_SEALED = {
 };
 
 const ctx = (stableId: string, name = stableId) => ({
-  name, stableId, cluster: name, server: "", isCurrent: false,
+  name, stableId, key: stableId, cluster: name, server: "", isCurrent: false,
   sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 

@@ -6,7 +6,7 @@ import { defaultState } from "./tabs";
 import { currentWorkspace, setClusterPaused, setState, switchWorkspace } from "./tabsStore";
 
 const ctx = {
-  name: "prod-eu", stableId: "prod", cluster: "c", server: "", isCurrent: false,
+  name: "prod-eu", stableId: "prod", key: "prod", cluster: "c", server: "", isCurrent: false,
   sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 };
 
@@ -317,7 +317,7 @@ describe("one read per cluster", () => {
   it("reads two different clusters at once", async () => {
     const connect = vi.fn(() => new Promise<never>(() => {}));
     void probeCluster(ctx, connect as never, () => 0);
-    void probeCluster({ ...ctx, stableId: "staging", name: "staging-eu" }, connect as never, () => 0);
+    void probeCluster({ ...ctx, stableId: "staging", key: "staging", name: "staging-eu" }, connect as never, () => 0);
     expect(connect).toHaveBeenCalledTimes(2);
   });
 

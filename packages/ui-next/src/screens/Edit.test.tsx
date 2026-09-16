@@ -32,7 +32,7 @@ vi.mock("@srelens/core/react", async (orig) => ({
 }));
 // The rail's cluster, mutable so a test can move it out from under an open
 // editor the way a reader would.
-const { active } = vi.hoisted(() => ({ active: { name: "prod-eu", stableId: "prod-eu" } }));
+const { active } = vi.hoisted(() => ({ active: { name: "prod-eu", stableId: "prod-eu", key: "prod-eu" } }));
 // The console the Review button hands the draft to.
 const { ask } = vi.hoisted(() => ({ ask: vi.fn() }));
 vi.mock("../console", () => ({ useConsole: () => ({ ask }) }));
@@ -160,7 +160,7 @@ describe("EditResource", () => {
     const { rerender } = render(<Body {...props} />);
     await waitFor(() => expect(latestEditor()?.value).toBeTruthy());
     act(() => latestEditor().onChange(EDITED));
-    rerender(<Body {...props} pausedContext={{ name: "prod-eu", stableId: "prod-eu", cluster: "prod", server: "", isCurrent: false, sourceFile: "", authKind: "token" }} />);
+    rerender(<Body {...props} pausedContext={{ name: "prod-eu", stableId: "prod-eu", key: "prod-eu", cluster: "prod", server: "", isCurrent: false, sourceFile: "", authKind: "token" }} />);
     expect(screen.getByText("prod-eu is paused")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Apply" })).toBeNull();
     rerender(<Body {...props} />);

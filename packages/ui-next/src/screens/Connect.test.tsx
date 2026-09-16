@@ -42,7 +42,7 @@ const EDGE_FILE = "/home/dana/work/edge.yaml";
 
 const PROD: ClusterContext = {
   name: "prod-eu",
-  stableId: "prod-eu",
+  stableId: "prod-eu", key: "prod-eu",
   cluster: "prod",
   server: "https://prod-eu.example:6443",
   isCurrent: true,
@@ -53,7 +53,7 @@ const PROD: ClusterContext = {
 
 const STAGING: ClusterContext = {
   name: "staging-eu",
-  stableId: "staging-eu",
+  stableId: "staging-eu", key: "staging-eu",
   cluster: "staging",
   server: "https://staging-eu.example:6443",
   isCurrent: false,
@@ -63,7 +63,7 @@ const STAGING: ClusterContext = {
 
 const EDGE: ClusterContext = {
   name: "edge-1",
-  stableId: "edge-1",
+  stableId: "edge-1", key: "edge-1",
   cluster: "edge",
   server: "https://edge-1.example:6443",
   isCurrent: false,
@@ -79,7 +79,7 @@ const EDGE: ClusterContext = {
  */
 const LOCAL: ClusterContext = {
   name: "kind-lab",
-  stableId: "kind-lab",
+  stableId: "kind-lab", key: "kind-lab",
   cluster: "kind-lab",
   server: "https://127.0.0.1:52001",
   isCurrent: false,
@@ -106,7 +106,7 @@ const LOCAL: ClusterContext = {
  */
 const TWIN: ClusterContext = {
   name: "staging-eu",
-  stableId: `${EDGE_FILE}#staging-eu`,
+  stableId: `${EDGE_FILE}#staging-eu`, key: `${EDGE_FILE}#staging-eu`,
   cluster: "staging",
   server: "https://staging-eu.example:6443",
   isCurrent: false,
