@@ -269,6 +269,36 @@ fn names_titles_and_groups_refuse_bidirectional_and_invisible_characters() {
     }
 }
 
+/// A problem message quotes the rejected value, and the problem list is rendered as the
+/// host's own text. A value carrying a bidirectional override or a control character must
+/// not reach the screen as-is, or it reorders or reshapes the row that reports it.
+#[test]
+fn problem_messages_never_echo_control_or_format_characters() {
+    let mut value = manifest();
+    value["contributions"]["detailLinks"] = json!([{
+        "id":"inspect", "title":"Inspect", "capability":"applications",
+        "forKinds":["\u{202E}apps/Deployment", "core\u{0008}Pod", "/Pod", "/Pod"]
+    }]);
+    let found = errors(&value);
+    let messages: Vec<&str> = found.iter().map(|e| e.message.as_str()).collect();
+    assert!(
+        messages.iter().any(|m| m.contains("\\u{202e}")),
+        "the override is shown as an escape: {messages:?}"
+    );
+    assert!(
+        messages.iter().any(|m| m.contains("\\u{8}")),
+        "the control character is shown as an escape: {messages:?}"
+    );
+    for message in &messages {
+        assert!(
+            !message
+                .chars()
+                .any(|c| c.is_control() || srelens_plugin_host::is_format_character(c)),
+            "raw character in {message:?}"
+        );
+    }
+}
+
 #[test]
 fn names_and_titles_in_any_script_still_validate() {
     let mut value = manifest();

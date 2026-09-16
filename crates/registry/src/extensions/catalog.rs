@@ -166,14 +166,14 @@ pub(super) fn parse_catalog(raw: &[u8]) -> Result<Catalog, String> {
         }
         // A format character, such as a right-to-left override, can make one app's name
         // display as another's, and a control character can hide or reshape the rest of
-        // the line. The catalog's name and description are rendered as a manifest label
-        // is, so they are held to the same rule (`label` in srelens-plugin-host).
-        if [&entry.name, &entry.description]
+        // the line. The catalog's name, description and license are rendered as a manifest
+        // label is, so they are held to the same rule (`label` in srelens-plugin-host).
+        if [&entry.name, &entry.description, &entry.license]
             .iter()
             .any(|s| s.chars().any(|c| c.is_control() || is_format_character(c)))
         {
             return Err(format!(
-                "Catalog app {} has a control or invisible formatting character in its name or description",
+                "Catalog app {} has a control or invisible formatting character in its name, description or license",
                 entry.id
             ));
         }
@@ -671,6 +671,9 @@ mod tests {
             ("/extensions/0/name", "Argo CD\u{0008}\u{0008}X"),
             ("/extensions/1/name", "Flux\u{007F}"),
             ("/extensions/0/description", "GitOps\nresources"),
+            // The license is rendered beside the version, so it is held to the same rule.
+            ("/extensions/0/license", "MIT\u{202E}"),
+            ("/extensions/1/license", "Apache\u{0000}2.0"),
         ] {
             let mut value = base.clone();
             *value.pointer_mut(pointer).unwrap() = json!(text);
