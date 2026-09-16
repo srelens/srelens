@@ -1551,14 +1551,17 @@ mod tests {
         let first = kubeconfig(dir.path(), "a", &["b#c"]);
         let second = kubeconfig(dir.path(), "a#b", &["c"]);
         let shared = format!("{}#b#c", first.display());
-        let (reg, _cache) = setup_with(&path, vec![first, second]);
+        let (reg, _cache) = setup_with(&path, vec![first.clone(), second.clone()]);
         let revision = install(&path, fake_core());
         configure(
             &path,
             json!({"action":"clusters","id":"org.example.argocd","contexts":[shared]}),
         )
         .unwrap();
-        for context in ["b#c", "c"] {
+        let all = srelens_kube::context_resolve::resolve_contexts(&[first.clone(), second.clone()]);
+        let first_pinned = all[0].pinned_id().unwrap();
+        let second_pinned = all[1].pinned_id().unwrap();
+        for context in [&first_pinned, &second_pinned] {
             let error = reg
                 .invoke(
                     "extensions.read",

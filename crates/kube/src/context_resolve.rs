@@ -78,7 +78,8 @@ impl ResolvedContext {
             .to_string()
             .replace('%', "%25")
             .replace('#', "%23");
-        Some(format!("{source}#{}", self.original_name))
+        let original_name = self.original_name.replace('%', "%25").replace('#', "%23");
+        Some(format!("{source}#{original_name}"))
     }
 }
 
@@ -363,7 +364,8 @@ pub fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedConte
     // No context carries this ID. A name shaped like a pinned ID (an absolute kubeconfig
     // path, `#`, a context name) is still taken as one, so a request pinned to a context
     // that has since gone reaches nothing, never a context that took that string as its name.
-    if name.contains('#') && Path::new(name).is_absolute() {
+    // The same applies to stable IDs, which can be relative paths containing `#`.
+    if name.contains('#') {
         return None;
     }
     by_name.cloned()
