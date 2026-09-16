@@ -83,9 +83,24 @@ impl ResolvedContext {
     }
 }
 
-/// Reserved dispatch form, distinct from literal kubeconfig names containing `#`.
+/// The complete dispatch form emitted by `pinned_id`: the prefix alone is also
+/// valid in ordinary context names and must not reserve them.
 pub fn is_pinned_context(name: &str) -> bool {
-    name.starts_with("srelens-context:")
+    let Some((source, context)) = name
+        .strip_prefix("srelens-context:")
+        .and_then(|id| id.split_once('#'))
+    else {
+        return false;
+    };
+    // The generator escapes only `%` and `#`. A raw delimiter or any other
+    // percent escape cannot occur inside either generated component.
+    let encoded = |part: &str| {
+        !part.contains('#')
+            && part.split('%').skip(1).all(|suffix| {
+                suffix.starts_with("25") || suffix.starts_with("23")
+            })
+    };
+    Path::new(source).is_absolute() && encoded(source) && encoded(context)
 }
 
 /// A parsed kubeconfig paired with the file it came from.
@@ -723,6 +738,28 @@ mod tests {
             assert_eq!(found.original_name, name);
             let pinned = found.pinned_id().unwrap();
             assert!(pinned.starts_with("srelens-context:"));
+            assert_eq!(find_context(&all, &pinned).unwrap(), found);
+        }
+    }
+
+    #[test]
+    fn a_prefix_alone_does_not_reserve_a_literal_context_name() {
+        for name in [
+            "srelens-context:team",
+            "srelens-context:team#prod",
+            "srelens-context:/kube/team",
+            "srelens-context:/kube/team#prod#extra",
+            "srelens-context:/kube/team%oops#prod",
+            "srelens-context:/kube/team#prod%oops",
+            "srelens-context:/kube/team#prod%2%253",
+        ] {
+            assert!(!is_pinned_context(name), "literal name: {name}");
+            let yaml = PROD.replace("default", name);
+            let all = resolve_from(&[cfg("/kube/team.yaml", &yaml)]);
+            let found = find_context(&all, name).expect("literal prefixed name resolves");
+            assert_eq!(found.original_name, name);
+            let pinned = found.pinned_id().unwrap();
+            assert!(is_pinned_context(&pinned), "generated ID: {pinned}");
             assert_eq!(find_context(&all, &pinned).unwrap(), found);
         }
     }

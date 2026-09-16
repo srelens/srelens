@@ -113,7 +113,7 @@ export function Nav({ contexts }: NavProps) {
   const nodes = useMemo<ResourceNode[]>(
     () => [
       ...kindNodes().slice(0, 1),
-      ...(ctx && extensions.data && extensions.data.plugins.some(p => p.enabled && extensionEnabledFor(p, scopeId) && p.manifest.contributions.pages.length)
+      ...(ctx && scopeId !== undefined && extensions.data && extensions.data.plugins.some(p => p.enabled && extensionEnabledFor(p, scopeId) && p.manifest.contributions.pages.length)
         ? [{
             id: "extensions", label: "Apps", icon: Icons.apps,
             children: extensions.data.plugins.filter(p => p.enabled && extensionEnabledFor(p, scopeId) && p.manifest.contributions.pages.length).map(p => ({

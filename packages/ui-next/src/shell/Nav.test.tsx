@@ -255,3 +255,14 @@ it("hides limited apps when the selected stable ID is shared", async () => {
  render(<Nav contexts={[PROD,{...ctx("other"),stableId:PROD.stableId}]} />);
  expect(screen.queryByRole("treeitem",{name:"Apps"})).toBeNull();
 });
+
+it("hides unrestricted apps on shared IDs and restores them when the collision is removed", () => {
+  extensionState.data = { plugins: [{
+    enabled: true,
+    manifest: { id: "org.test.app", name: "Test app", contributions: { pages: [{ id: "page", title: "Page" }] } },
+  }] };
+  const mounted = render(<Nav contexts={[PROD, { ...ctx("other"), stableId: PROD.stableId }]} />);
+  expect(screen.queryByRole("treeitem", { name: "Apps" })).toBeNull();
+  mounted.rerender(<Nav contexts={[PROD]} />);
+  expect(screen.getByRole("treeitem", { name: "Apps" })).toBeTruthy();
+});
