@@ -578,28 +578,52 @@ pub fn node_runtime_diagnostics_capability(cache: Arc<ClientCache>) -> Capabilit
                 );
 
                 let (stdout, stderr, exit_code) = run_ssh_command(&args, DEFAULT_SSH_TIMEOUT_SECS).await?;
-
-                if exit_code == 255 && !stderr.is_empty() && stdout.is_empty() {
-                    return Err(CapabilityError::Handler(format!(
-                        "SSH connection to '{target_host}' failed: {}",
-                        stderr.trim()
-                    )));
-                }
-
-                let output = if !stdout.is_empty() {
-                    stdout
-                } else {
-                    stderr
-                };
-
-                Ok(NodeRuntimeDiagnosticsOut {
-                    check: check_name.to_string(),
-                    command: remote_cmd.to_string(),
-                    output,
-                })
+                diagnostics_result(&target_host, check_name, remote_cmd, stdout, &stderr, exit_code)
             }
         },
     )
+}
+
+/// The journal read's rule, applied to the host checks: a diagnostic that could
+/// not run is not a diagnostic that found nothing. Every command
+/// `build_diagnostics_command` returns ends in a fallback that exits 0, so a
+/// non-zero exit is the utility itself failing — `df` denied, `free` missing —
+/// and putting its stderr in `output` would render as readings (#615).
+pub fn diagnostics_result(
+    target_host: &str,
+    check: &str,
+    command: &str,
+    stdout: String,
+    stderr: &str,
+    exit_code: i32,
+) -> Result<NodeRuntimeDiagnosticsOut, CapabilityError> {
+    if exit_code == 255 && !stderr.is_empty() && stdout.is_empty() {
+        return Err(CapabilityError::Handler(format!(
+            "SSH connection to '{target_host}' failed: {}",
+            stderr.trim()
+        )));
+    }
+    // ssh's first-connection notice is ssh talking, not the check failing.
+    let check_stderr = stderr
+        .lines()
+        .filter(|line| !line.starts_with("Warning: Permanently added"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if exit_code != 0 {
+        let reason = if check_stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            check_stderr.trim()
+        };
+        return Err(CapabilityError::Handler(format!(
+            "'{check}' on '{target_host}' failed (exit {exit_code}): {reason}"
+        )));
+    }
+    Ok(NodeRuntimeDiagnosticsOut {
+        check: check.to_string(),
+        command: command.to_string(),
+        output: if stdout.is_empty() { check_stderr } else { stdout },
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -956,6 +980,64 @@ mod tests {
 
         let logs = journal_logs_result("worker-1", "one\ntwo\n".into(), "", 0).unwrap();
         assert_eq!(logs.lines_returned, 2);
+    }
+
+    #[test]
+    fn a_diagnostic_that_could_not_run_is_an_error_not_a_reading() {
+        let err = diagnostics_result(
+            "worker-1",
+            "disk",
+            "df -h",
+            String::new(),
+            "df: /: Permission denied\n",
+            1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("'disk' on 'worker-1' failed (exit 1)"), "{err}");
+        assert!(err.contains("Permission denied"), "{err}");
+
+        // Exit 0 is a reading...
+        let ok = diagnostics_result(
+            "worker-1",
+            "memory",
+            "free -m",
+            "total used free\n".into(),
+            "",
+            0,
+        )
+        .unwrap();
+        assert_eq!(ok.check, "memory");
+        assert_eq!(ok.command, "free -m");
+        assert!(ok.output.contains("total"));
+
+        // ...including the fallback echo, which is an answer about the host
+        // rather than a failure: it exits 0.
+        let fallback = diagnostics_result(
+            "worker-1",
+            "containers",
+            "crictl ps ... || echo 'No container runtime CLI ... found'",
+            "No container runtime CLI (crictl/nerdctl/docker/ctr) found\n".into(),
+            "",
+            0,
+        )
+        .unwrap();
+        assert!(fallback.output.contains("No container runtime CLI"));
+
+        let unreachable = diagnostics_result(
+            "worker-1",
+            "disk",
+            "df -h",
+            String::new(),
+            "ssh: connect to host worker-1 port 22: Connection refused\n",
+            255,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            unreachable.contains("SSH connection to 'worker-1' failed"),
+            "{unreachable}"
+        );
     }
 
     #[test]
