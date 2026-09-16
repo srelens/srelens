@@ -164,16 +164,23 @@ export function extensionRoute(
 ) {
   return `/extensions/${[context, id, page, namespace].map(encodeURIComponent).join("/")}`;
 }
+/** A cluster identity route; legacy `/extensions/` routes still carry display names. */
+export function extensionClusterRoute(clusterId: string, id: string, page: string, namespace = "") {
+  return extensionRoute(clusterId, id, page, namespace).replace("/extensions/", "/extension-clusters/");
+}
+export function extensionClusterResourceRoute(clusterId: string, id: string, page: string, namespace: string, name: string) {
+  return `${extensionClusterRoute(clusterId, id, page, namespace)}/${encodeURIComponent(name)}`;
+}
 export function parseExtensionRoute(route: string) {
   const pieces = route.split("/");
-  if ((pieces.length !== 6 && pieces.length !== 7) || pieces[1] !== "extensions") return null;
+  if ((pieces.length !== 6 && pieces.length !== 7) || !["extensions", "extension-clusters"].includes(pieces[1])) return null;
   try {
     const [context, id, page, namespace] = pieces
       .slice(2)
       .map(decodeURIComponent);
     const resourceName = pieces.length === 7 ? decodeURIComponent(pieces[6]) : undefined;
     if (pieces.length === 7 && !resourceName) return null;
-    return context && id && page ? { context, id, page, namespace, ...(resourceName ? { resourceName } : {}) } : null;
+    return context && id && page ? { context, id, page, namespace, ...(pieces[1] === "extension-clusters" ? { clusterId: context } : {}), ...(resourceName ? { resourceName } : {}) } : null;
   } catch {
     return null;
   }

@@ -175,7 +175,10 @@ mod tests {
         .unwrap();
         // Inspection and actions go out under the ID scope was checked as, so the capability
         // cannot resolve the name again to a cluster that took it since.
-        assert_eq!(resolved.context, format!("{}#default", config.display()));
+        assert_eq!(
+            resolved.context,
+            format!("srelens-context:{}#default", config.display())
+        );
     }
     #[tokio::test]
     async fn action_dispatch_uses_bound_api_and_mcp_cannot_bypass_confirmation() {

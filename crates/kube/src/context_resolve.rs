@@ -60,7 +60,7 @@ impl ResolvedContext {
     /// caller that has already checked this context passes on, so a later lookup reaches
     /// this context and nothing else.
     ///
-    /// Always absolute, so [`resolve_context`] never takes it for a context name, even when
+    /// Explicitly prefixed, so [`resolve_context`] never takes it for a context name, even when
     /// the kubeconfig was added by a relative path. Never persisted: settings keep
     /// `stable_id`, which must not change for relative paths.
     ///
@@ -79,8 +79,13 @@ impl ResolvedContext {
             .replace('%', "%25")
             .replace('#', "%23");
         let original_name = self.original_name.replace('%', "%25").replace('#', "%23");
-        Some(format!("{source}#{original_name}"))
+        Some(format!("srelens-context:{source}#{original_name}"))
     }
+}
+
+/// Reserved dispatch form, distinct from literal kubeconfig names containing `#`.
+pub fn is_pinned_context(name: &str) -> bool {
+    name.starts_with("srelens-context:")
 }
 
 /// A parsed kubeconfig paired with the file it came from.
@@ -361,11 +366,9 @@ pub fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedConte
         ([], _) => {}
         _ => return None,
     }
-    // No context carries this ID. A name shaped like a pinned ID (an absolute kubeconfig
-    // path, `#`, a context name) is still taken as one, so a request pinned to a context
-    // that has since gone reaches nothing, never a context that took that string as its name.
-    // The same applies to stable IDs, which can be relative paths containing `#`.
-    if name.contains('#') {
+    // Only the reserved dispatch form forbids name fallback. Ordinary kubeconfig names
+    // may contain `#`, including names resembling the legacy stable-ID format.
+    if is_pinned_context(name) {
         return None;
     }
     by_name.cloned()
@@ -712,8 +715,23 @@ mod tests {
     }
 
     #[test]
-    fn a_stable_id_finds_its_own_context_whatever_it_is_displayed_as() {
-        let id = resolve_from(&[cfg("/kube/kube_prod.yaml", PROD)])[0].stable_id();
+    fn literal_hash_names_resolve_and_can_be_pinned() {
+        for name in ["team#prod", "first.yaml#default"] {
+            let yaml = PROD.replace("default", name);
+            let all = resolve_from(&[cfg("/kube/team.yaml", &yaml)]);
+            let found = find_context(&all, name).expect("literal context name resolves");
+            assert_eq!(found.original_name, name);
+            let pinned = found.pinned_id().unwrap();
+            assert!(pinned.starts_with("srelens-context:"));
+            assert_eq!(find_context(&all, &pinned).unwrap(), found);
+        }
+    }
+
+    #[test]
+    fn a_pinned_id_finds_its_own_context_whatever_it_is_displayed_as() {
+        let id = resolve_from(&[cfg("/kube/kube_prod.yaml", PROD)])[0]
+            .pinned_id()
+            .unwrap();
 
         // A second file renames prod's `default`; its ID still finds it, not stage's.
         let clashing = resolve_from(&[
@@ -731,7 +749,7 @@ mod tests {
         // A context literally named after prod's ID never takes it, with prod listed or gone.
         let impostor = cfg(
             "/kube/impostor.yaml",
-            "clusters:\n  - name: c\n    cluster: { server: https://impostor }\ncontexts:\n  - name: \"/kube/kube_prod.yaml#default\"\n    context: { cluster: c, user: u }\n",
+            "clusters:\n  - name: c\n    cluster: { server: https://impostor }\ncontexts:\n  - name: \"srelens-context:/kube/kube_prod.yaml#default\"\n    context: { cluster: c, user: u }\n",
         );
         // Listed together, the string names two different contexts for two kinds of caller
         // (an ID for extension dispatch, a display name for delete or connect), so it
@@ -774,7 +792,10 @@ mod tests {
         let listed = resolve_from(&[cfg("kube/prod.yaml", PROD)]);
         assert_eq!(listed[0].stable_id(), "kube/prod.yaml#default");
         let pinned = listed[0].pinned_id().unwrap();
-        assert!(Path::new(&pinned).is_absolute(), "{pinned}");
+        assert!(
+            Path::new(pinned.strip_prefix("srelens-context:").unwrap()).is_absolute(),
+            "{pinned}"
+        );
         assert_eq!(
             find_context(&listed, &pinned).unwrap().server,
             "https://prod:6443"

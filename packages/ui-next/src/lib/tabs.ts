@@ -1,4 +1,4 @@
-import type { ClusterContext } from "@srelens/core";
+import { parseExtensionRoute, type ClusterContext } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
 import { describe, type TabKind } from "./routes";
 import { parseEditRoute, parseNewRoute } from "./detailRoute";
@@ -99,7 +99,7 @@ export function makeTab(route: string, opts: { preview?: boolean; clusterName?: 
  * that store writes a file.
  */
 export function relabel(tab: Tab, clusterName?: string): Tab {
-  if (!clusterName) return tab;
+  if (!clusterName || parseExtensionRoute(tab.route)) return tab;
   const info = describe(tab.route, clusterName);
   if (info.title === tab.title && info.sub === tab.sub) return tab;
   const next: Tab = { ...tab, title: info.title };

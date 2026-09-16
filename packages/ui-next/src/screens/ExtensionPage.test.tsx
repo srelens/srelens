@@ -9,7 +9,7 @@ vi.mock("../extensions/ExtensionWorkspace",async()=>{
  const {useContext}=await import("react");const {ExtensionResourceNavigation}=await import("../extensions/resourceNavigation");
  return {ExtensionWorkspace:()=>{const open=useContext(ExtensionResourceNavigation);return <button onClick={()=>open?.({id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"wrong-rail-cluster",namespace:"team",name:"apps"})}>Open resource</button>;}};
 });
-import {listExtensions,listContexts,extensionRoute,extensionResourceRoute,type InstalledExtension} from "@srelens/core";
+import {listExtensions,listContexts,extensionRoute,extensionResourceRoute,extensionClusterRoute,extensionClusterResourceRoute,type InstalledExtension} from "@srelens/core";
 import {setContexts} from "../lib/clusters";
 import {openTab} from "../lib/tabsStore";
 import {ExtensionPage} from "./ExtensionPage";
@@ -21,7 +21,7 @@ const openKustomizations=()=>render(<ExtensionPage ported={[]} onSwitchToClassic
 it("promotes a selected resource using the page's pinned cluster rather than the rail",async()=>{
  render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionRoute("cluster/a",manifest.id,"kustomizations")}/>);
  fireEvent.click(await screen.findByText("Open resource"));
- expect(openTab).toHaveBeenCalledWith(extensionResourceRoute("cluster/a",manifest.id,"kustomizations","team","apps"),{clusterName:"cluster/a"});
+ expect(openTab).toHaveBeenCalledWith(extensionClusterResourceRoute("cluster/a",manifest.id,"kustomizations","team","apps"),{clusterName:"cluster/a"});
 });
 it("renders the independent detail route without mounting the resource list",async()=>{
  render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionResourceRoute("cluster/a",manifest.id,"kustomizations","team","apps")}/>);
@@ -63,4 +63,43 @@ it("says the cluster is gone rather than that a limited app is not enabled",asyn
  openKustomizations();
  expect(await screen.findByText(/no longer in your kubeconfig files/)).toBeTruthy();
  expect(screen.queryByText(/not enabled for this cluster/)).toBeNull();
+});
+
+it("keeps a stable route on its cluster after display names change", async () => {
+ const id="/kube/a.yaml#default";
+ limitedTo(id);
+ Object.assign(clusters,{contexts:[{name:"first/default",stableId:id},{name:"second/default",stableId:"/kube/b.yaml#default"}]});
+ render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionClusterResourceRoute(id,manifest.id,"kustomizations","team","apps")}/>);
+ const detail=JSON.parse((await screen.findByTestId("detail-page")).textContent!);
+ expect(detail.selection.context).toBe(id);
+ expect(screen.queryByText(/no longer in your kubeconfig files/)).toBeNull();
+});
+it("does not dispatch an unrestricted app when its pinned cluster is missing",async()=>{
+ clusters.contexts=[];
+ render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionClusterRoute("/kube/a.yaml#default",manifest.id,"kustomizations")}/>);
+ expect(await screen.findByText(/no longer in your kubeconfig files/)).toBeTruthy();
+ expect(screen.queryByText("Open resource")).toBeNull();
+});
+
+it("never substitutes a literal name for a missing stable route identity",async()=>{
+ const id="/kube/a.yaml#default";
+ limitedTo(id);
+ clusters.contexts=[{name:id,stableId:"/kube/impostor.yaml#literal"}];
+ render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionClusterRoute(id,manifest.id,"kustomizations")}/>);
+ expect(await screen.findByText(/no longer in your kubeconfig files/)).toBeTruthy();
+ expect(screen.queryByText("Open resource")).toBeNull();
+});
+
+it("retains the identity of an already-open legacy route when its name changes",async()=>{
+ const id="/kube/a.yaml#default";
+ limitedTo(id);
+ clusters.contexts=[{name:"cluster/a",stableId:id}];
+ const props={ported:[],onSwitchToClassic:vi.fn(),onLocked:vi.fn(),route:extensionRoute("cluster/a",manifest.id,"kustomizations")};
+ const mounted=render(<ExtensionPage {...props}/>);
+ expect(await screen.findByText("Open resource")).toBeTruthy();
+ clusters.contexts=[{name:"first/cluster/a",stableId:id},{name:"second/cluster/a",stableId:"/kube/b#cluster/a"}];
+ mounted.rerender(<ExtensionPage {...props}/>);
+ expect(screen.getByText("Open resource")).toBeTruthy();
+ fireEvent.click(screen.getByText("Open resource"));
+ expect(openTab).toHaveBeenCalledWith(extensionClusterResourceRoute(id,manifest.id,"kustomizations","team","apps"),{clusterName:"first/cluster/a"});
 });

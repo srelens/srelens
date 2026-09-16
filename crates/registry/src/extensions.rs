@@ -1472,7 +1472,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(output["context"], format!("{}#default", first.display()));
+        assert_eq!(
+            output["context"],
+            format!("srelens-context:{}#default", first.display())
+        );
     }
     /// A context can be named anything, including another context's stable ID. A request the
     /// broker sends under that ID reaches the context the ID names, and never the one that
@@ -1481,7 +1484,7 @@ mod tests {
     fn a_context_named_like_a_stable_id_cannot_take_a_pinned_request() {
         let dir = tempfile::tempdir().unwrap();
         let first = kubeconfig(dir.path(), "first.yaml", &["default"]);
-        let first_default = format!("{}#default", first.display());
+        let first_default = format!("srelens-context:{}#default", first.display());
         let impostor = kubeconfig(dir.path(), "impostor.yaml", &[&first_default]);
         let reached = |paths: &[PathBuf]| {
             srelens_kube::context_resolve::resolve_context(paths, &first_default)
@@ -1528,7 +1531,8 @@ mod tests {
             .unwrap();
         let pinned = output["context"].as_str().unwrap().to_owned();
         assert!(
-            Path::new(&pinned).is_absolute() && pinned.ends_with("first.yaml#default"),
+            Path::new(pinned.strip_prefix("srelens-context:").unwrap()).is_absolute()
+                && pinned.ends_with("first.yaml#default"),
             "{pinned}"
         );
 

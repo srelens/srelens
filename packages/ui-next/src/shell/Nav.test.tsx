@@ -243,9 +243,15 @@ it("groups app pages under their display name", async () => {
   expect(fluxNode.querySelector("[data-extension-logo]")?.getAttribute("data-extension-logo")).toBe("org.srelens.flux");
   await userEvent.click(fluxNode);
   await userEvent.click(await screen.findByRole("treeitem", { name: "Kustomizations" }));
-  expect(tabFor("/extensions/prod-eu/org.srelens.flux/kustomizations/")?.sub).toBe("prod-eu");
+  expect(tabFor("/extension-clusters/id%3Aprod-eu/org.srelens.flux/kustomizations/")?.sub).toBe("prod-eu");
   expect(screen.queryByText("org.srelens.flux")).toBeNull();
   await userEvent.click(screen.getByRole("treeitem", { name: "Sources" }));
   await userEvent.click(screen.getByRole("treeitem", { name: "Git repositories" }));
-  expect(tabFor("/extensions/prod-eu/org.srelens.flux/repositories/")?.sub).toBe("prod-eu");
+  expect(tabFor("/extension-clusters/id%3Aprod-eu/org.srelens.flux/repositories/")?.sub).toBe("prod-eu");
+});
+
+it("hides limited apps when the selected stable ID is shared", async () => {
+ extensionState.data={plugins:[{enabled:true,contexts:[PROD.stableId],manifest:{id:"org.test.app",name:"Test app",contributions:{pages:[{id:"page",title:"Page"}]}}}]};
+ render(<Nav contexts={[PROD,{...ctx("other"),stableId:PROD.stableId}]} />);
+ expect(screen.queryByRole("treeitem",{name:"Apps"})).toBeNull();
 });

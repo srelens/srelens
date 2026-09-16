@@ -168,6 +168,12 @@ export function contextDisplayName(context: string, profile?: ContextProfile): s
   return profile?.displayName?.trim() || context;
 }
 
+// Session truth survives unmounted subscribers and an unavailable settings backend.
+let liveKubeconfigFiles: string[] | undefined;
+export function getLiveKubeconfigFiles(): string[] {
+  return [...(liveKubeconfigFiles ?? loadKubeconfigFiles())];
+}
+
 export function loadKubeconfigFiles(): string[] {
   try {
     const parsed = JSON.parse(stored(KUBECONFIG_FILES_KEY) ?? "[]") as unknown;
@@ -191,6 +197,7 @@ export const KUBECONFIG_FILES_CHANGED = "srelens:kubeconfig-files-changed";
 
 export function saveKubeconfigFiles(paths: string[]): void {
   const files = [...new Set(paths)];
+  liveKubeconfigFiles = [...files];
   try {
     settingsStorage.setItem(KUBECONFIG_FILES_KEY, JSON.stringify(files));
   } catch {

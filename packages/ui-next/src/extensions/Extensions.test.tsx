@@ -365,7 +365,7 @@ it("allows every cluster again, and keeps listing a chosen cluster the kubeconfi
   );
 });
 it("offers a cluster added while the app details stay open", async () => {
-  const { KUBECONFIG_FILES_CHANGED } = await import("@srelens/core");
+  const { saveKubeconfigFiles, settingsStorage } = await import("@srelens/core");
   vi.mocked(listContexts)
     .mockResolvedValueOnce({ contexts: [{ name: "cluster/a", stableId: "/kube/a.yaml#cluster/a" }] } as any)
     .mockResolvedValue({
@@ -380,7 +380,9 @@ it("offers a cluster added while the app details stay open", async () => {
   expect(await within(clusters).findByRole("button", { name: "Remove cluster/a" })).toBeTruthy();
   // Connections adds a kubeconfig; storage may not even hold it yet.
   act(() => {
-    window.dispatchEvent(new CustomEvent(KUBECONFIG_FILES_CHANGED, { detail: ["/kube/edge.yaml"] }));
+    const fail = vi.spyOn(settingsStorage, "setItem").mockImplementation(() => { throw new Error("unavailable"); });
+    saveKubeconfigFiles(["/kube/edge.yaml"]);
+    fail.mockRestore();
   });
   await waitFor(() => expect(listContexts).toHaveBeenLastCalledWith(["/kube/edge.yaml"]));
   fireEvent.click(within(clusters).getByRole("combobox", { name: "Add a cluster" }));
@@ -648,13 +650,15 @@ it("lists the clusters again when the kubeconfig files change, without waiting f
 });
 it("lists with the kubeconfig files in use when saving them failed", async () => {
   const { ExtensionResourceSlot } = await import("./Extensions");
-  const { KUBECONFIG_FILES_CHANGED } = await import("@srelens/core");
+  const { saveKubeconfigFiles, settingsStorage } = await import("@srelens/core");
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [] });
   render(<ExtensionResourceSlot context="edge" kind="Namespace" namespace={null} name="argo" />);
   await waitFor(() => expect(listContexts).toHaveBeenCalledTimes(1));
   // Storage refused the save, so nothing is stored; the app still uses the new file.
   act(() => {
-    window.dispatchEvent(new CustomEvent(KUBECONFIG_FILES_CHANGED, { detail: ["/kube/edge.yaml"] }));
+    const fail = vi.spyOn(settingsStorage, "setItem").mockImplementation(() => { throw new Error("unavailable"); });
+    saveKubeconfigFiles(["/kube/edge.yaml"]);
+    fail.mockRestore();
   });
   await waitFor(() => expect(listContexts).toHaveBeenLastCalledWith(["/kube/edge.yaml"]));
   // And keeps using it on the next refresh too.
@@ -917,4 +921,44 @@ it("reports CRD discovery failure while retaining the fallback resource columns"
  render(<ExtensionResults plugin={plugin} capability="list" context="prod"/>);
  expect(await screen.findByText(/Could not load CRD columns: Forbidden/)).toBeTruthy();
  expect(await screen.findByRole("columnheader",{name:"Ready"})).toBeTruthy();
+});
+
+it("does not offer or save a cluster ID shared by two contexts", async () => {
+ const {ExtensionClusters}=await import("./ExtensionClusters");
+ vi.mocked(listContexts).mockResolvedValue({contexts:[{name:"one",stableId:"/k/a#b#c"},{name:"two",stableId:"/k/a#b#c"}]} as any);
+ const change=vi.fn();
+ render(<ExtensionClusters plugin={{...plugin,contexts:["/k/a#b#c","/k/gone#old"]}} busy={false} change={change}/>);
+ expect(await screen.findByText(/shares its ID|shared.*ID|IDs.*shared/i)).toBeTruthy();
+ fireEvent.click(screen.getByRole("button",{name:"Remove /k/gone#old"}));
+ expect((screen.getByRole("button",{name:"Save clusters"}) as HTMLButtonElement).disabled).toBe(true);
+ fireEvent.click(screen.getByRole("combobox",{name:"Add a cluster"}));
+ expect(screen.queryByRole("option",{name:"one"})).toBeNull();
+ expect(screen.queryByRole("option",{name:"two"})).toBeNull();
+});
+it("retains published files across context-store subscriptions", async () => {
+ const {ExtensionResourceSlot}=await import("./Extensions");
+ const {saveKubeconfigFiles,settingsStorage}=await import("@srelens/core");
+ const first=render(<ExtensionResourceSlot context="edge" kind="Namespace" namespace={null} name="argo"/>);
+ await waitFor(()=>expect(listContexts).toHaveBeenCalled());
+ const fail=vi.spyOn(settingsStorage,"setItem").mockImplementation(()=>{throw new Error("unavailable");});
+ act(()=>saveKubeconfigFiles(["/kube/live.yaml"]));
+ fail.mockRestore();
+ await waitFor(()=>expect(listContexts).toHaveBeenLastCalledWith(["/kube/live.yaml"]));
+ first.unmount();
+ const failAgain=vi.spyOn(settingsStorage,"setItem").mockImplementation(()=>{throw new Error("unavailable");});
+ saveKubeconfigFiles(["/kube/newer.yaml"]);
+ failAgain.mockRestore();
+ vi.mocked(listContexts).mockClear();
+ render(<ExtensionResourceSlot context="edge" kind="Namespace" namespace={null} name="argo"/>);
+ await waitFor(()=>expect(listContexts).toHaveBeenLastCalledWith(["/kube/newer.yaml"]));
+});
+it("uses live files saved before the cluster picker mounts", async () => {
+ const {ExtensionClusters}=await import("./ExtensionClusters");
+ const {saveKubeconfigFiles,settingsStorage}=await import("@srelens/core");
+ const fail=vi.spyOn(settingsStorage,"setItem").mockImplementation(()=>{throw new Error("unavailable");});
+ saveKubeconfigFiles(["/kube/session.yaml"]);
+ fail.mockRestore();
+ render(<ExtensionClusters plugin={plugin} busy={false} change={vi.fn()}/>);
+ await waitFor(()=>expect(listContexts).toHaveBeenLastCalledWith(["/kube/session.yaml"]));
+ saveKubeconfigFiles([]);
 });

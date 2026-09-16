@@ -150,3 +150,12 @@ it("gives each app resource its own cluster, page, namespace and name route", as
   expect(parseExtensionRoute(route)).toEqual({context:"cluster/a",id:"org.srelens.flux",page:"kustomizations",namespace:"team",resourceName:"apps"});
   expect(route).not.toBe(extensionResourceRoute("cluster/b","org.srelens.flux","kustomizations","team","apps"));
 });
+
+it("distinguishes stable cluster routes from literal context-name routes", async () => {
+  const { extensionClusterRoute, extensionClusterResourceRoute } = await import("./extensions");
+  const id = "/kube/team.yaml#team#prod";
+  const route = extensionClusterRoute(id, "org.test.app", "page", "team");
+  expect(parseExtensionRoute(route)).toEqual({ context: id, clusterId: id, id: "org.test.app", page: "page", namespace: "team" });
+  expect(parseExtensionRoute(extensionRoute(id, "org.test.app", "page"))).not.toHaveProperty("clusterId");
+  expect(parseExtensionRoute(extensionClusterResourceRoute(id, "org.test.app", "page", "team", "resource"))?.resourceName).toBe("resource");
+});
