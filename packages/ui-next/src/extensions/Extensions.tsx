@@ -1,6 +1,6 @@
 import { ExtensionDetails } from "./ExtensionDetails";
 import { ExtensionRequirements } from "./ExtensionRequirements";
-import { SHARED_CONTEXT_ID_MESSAGE, refreshContextIds, useContextLookup } from "./contextIds";
+import { refreshContextIds, useContextLookup } from "./contextIds";
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useState } from "react";
 import {
@@ -327,7 +327,7 @@ export function ExtensionManager() {
 /** The detail tabs and detail links apps offer for a kind, on a cluster they are enabled for. */
 export function useExtensionContributions(context: string, kind: string, group?: string) {
   const inventory = useExtensions();
-  // App scope keys on the context's stable ID, not its name (#265).
+  // App scope keys on the context's key, not its name (#265) or stable ID (#623).
   const lookup = useContextLookup(context);
   const contextId = lookup.status === "found" ? lookup.id : undefined;
   const qualified = contributionKind(kind, group);
@@ -341,14 +341,12 @@ export function useExtensionContributions(context: string, kind: string, group?:
     inventory,
     /**
      * Why a limited app that offers something here cannot be checked: the clusters could
-     * not be listed (with a retry), or this cluster shares its ID with another.
+     * not be listed (with a retry).
      */
     lookupProblem:
       lookup.status === "failed" && enabled.some((p) => p.contexts && offersHere(p))
         ? { title: "Could not list clusters", message: lookup.error, retry: () => void refreshContextIds() }
-        : lookup.status === "shared" && enabled.some((p) => p.contexts && offersHere(p))
-          ? { title: "Cluster ID is shared", message: SHARED_CONTEXT_ID_MESSAGE }
-          : undefined,
+        : undefined,
     tabs: plugins.flatMap((plugin) =>
       plugin.manifest.contributions.detailTabs
         .filter((c) => c.forKinds?.includes(qualified))

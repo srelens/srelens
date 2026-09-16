@@ -73,14 +73,32 @@ impl ResolvedContext {
     /// caller must refuse rather than dispatch under it.
     pub fn pinned_id(&self) -> Option<String> {
         let source = std::path::absolute(&self.source).ok()?;
-        let source = source
-            .display()
-            .to_string()
-            .replace('%', "%25")
-            .replace('#', "%23");
-        let original_name = self.original_name.replace('%', "%25").replace('#', "%23");
-        Some(format!("srelens-context:{source}#{original_name}"))
+        Some(format!(
+            "srelens-context:{}#{}",
+            encode_part(&source.display().to_string()),
+            encode_part(&self.original_name)
+        ))
     }
+
+    /// The identity an app's cluster list holds (`extensions.configure` `clusters`).
+    ///
+    /// Like [`stable_id`](Self::stable_id) it keeps the path as given, so it does not depend
+    /// on the working directory; unlike it, `#` and `%` are percent-encoded in each part, so
+    /// the first `#` is always the delimiter and no two contexts share a key. A path `a` with
+    /// context `b#c` and a path `a#b` with context `c` share a stable ID but not a key, so a
+    /// list naming one can never admit the other, whether or not both are ever listed.
+    pub fn key(&self) -> String {
+        format!(
+            "{}#{}",
+            encode_part(&self.source.display().to_string()),
+            encode_part(&self.original_name)
+        )
+    }
+}
+
+/// One part of a pinned ID or key: `%` and `#` encoded, so `#` can delimit the parts.
+fn encode_part(part: &str) -> String {
+    part.replace('%', "%25").replace('#', "%23")
 }
 
 /// The complete dispatch form emitted by `pinned_id`: the prefix alone is also
@@ -823,6 +841,24 @@ mod tests {
         );
     }
 
+    /// The key an app's cluster list holds. Like the stable ID it keeps the path as given, but
+    /// `#` and `%` are encoded in each part, so the first `#` is always the delimiter and no two
+    /// contexts share a key, whether or not they are ever listed together.
+    #[test]
+    fn a_context_key_names_exactly_one_context() {
+        let plain = resolve_from(&[cfg("/kube/prod.yaml", PROD)]).remove(0);
+        assert_eq!(plain.key(), plain.stable_id());
+        let relative = resolve_from(&[cfg("kube/prod.yaml", PROD)]).remove(0);
+        assert_eq!(relative.key(), "kube/prod.yaml#default");
+
+        let named = |name: &str| PROD.replace("default", name);
+        let both = resolve_from(&[cfg("/kube/a", &named("b#c")), cfg("/kube/a#b", &named("c"))]);
+        assert_eq!(both[0].stable_id(), both[1].stable_id());
+        assert_eq!(both[0].key(), "/kube/a#b%23c");
+        assert_eq!(both[1].key(), "/kube/a%23b#c");
+        let percent = resolve_from(&[cfg("/kube/100%", &named("x%y"))]).remove(0);
+        assert_eq!(percent.key(), "/kube/100%25#x%25y");
+    }
     #[test]
     fn a_relative_kubeconfig_keeps_its_stable_id_and_pins_by_an_absolute_one() {
         // Settings persist the stable ID, so a relative kubeconfig path must stay in it.

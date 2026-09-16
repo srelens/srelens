@@ -187,7 +187,7 @@ describe("NextApp", () => {
     // Default workspace makes the one context active, so no seeding is needed.
     const onExit = vi.fn(() => null);
     listContexts.mockResolvedValue({
-      contexts: [{ name: "prod", stableId: "prod", cluster: "prod", server: "", isCurrent: false }],
+      contexts: [{ name: "prod", stableId: "prod", key: "prod", cluster: "prod", server: "", isCurrent: false }],
     });
     render(<NextApp onExit={onExit} />);
     await screen.findByRole("tablist");

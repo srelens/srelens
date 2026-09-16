@@ -20,6 +20,7 @@ vi.mock("@srelens/core", async (orig) => ({
 const ctx = (name: string): ClusterContext => ({
   name,
   stableId: `id:${name}`,
+  key: `id:${name}`,
   cluster: name,
   server: "https://example",
   isCurrent: false,

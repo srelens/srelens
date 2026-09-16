@@ -26,11 +26,11 @@ export function ExtensionResourceSlot(
   );
 }
 
-import { ErrorNotice, ExtensionWorkspace, ExtensionLogo, useExtensions, useContextLookup, refreshContextIds, SHARED_CONTEXT_ID_MESSAGE, ExtensionResourceNavigation, ExtensionResourceDetails } from "@srelens/ui-next/extensions";
+import { ErrorNotice, ExtensionWorkspace, ExtensionLogo, useExtensions, useContextLookup, refreshContextIds, ExtensionResourceNavigation, ExtensionResourceDetails } from "@srelens/ui-next/extensions";
 import { extensionEnabledFor } from "@srelens/core";
 export function ClassicAppsNav({context,onOpen}:{context:string;onOpen(context:string,id:string,page:string):void}) {
   const inventory=useExtensions();
-  // App scope keys on the context's stable ID, not its name (#265).
+  // App scope keys on the context's key, not its name (#265) or stable ID (#623).
   const lookup=useContextLookup(context);
   const contextId=lookup.status==="found"?lookup.id:undefined;
   const withPages=inventory.data?.plugins.filter(p=>p.enabled && p.manifest.contributions.pages.length)??[];
@@ -49,6 +49,6 @@ export function ClassicAppPage({context,id,page,namespace="",resourceName,onOpen
   // Only an app limited to some clusters waits on the lookup, and a failed lookup is not a denial.
   const limited=Boolean(plugin?.contexts);
   return <ExtensionControlsProvider value={controls}><div className="flex min-h-0 flex-1 flex-col overflow-auto">
-    {inventory.status==="loading"||(limited&&lookup.status==="loading")?<p className="p-3">Loading app…</p>:inventory.status==="error"?<div role="alert" className="p-3">{inventory.error}<Button onClick={inventory.reload}>Retry</Button></div>:limited&&lookup.status==="failed"?<div className="p-3"><ErrorNotice title="Could not list clusters" message={lookup.error} retry={()=>void refreshContextIds()}/></div>:limited&&lookup.status==="shared"?<p className="p-3">{SHARED_CONTEXT_ID_MESSAGE}</p>:limited&&lookup.status==="missing"?<p className="p-3">This cluster is no longer in your kubeconfig files, so its apps cannot be opened here. Manage your kubeconfig files in Settings → Contexts.</p>:plugin&&contribution&&!extensionEnabledFor(plugin,contextId)?<p className="p-3">This app is not enabled for this cluster. Manage it in Settings → Apps.</p>:plugin&&contribution?<ExtensionResourceNavigation.Provider value={onOpenResource ? resource=>onOpenResource(resource.name,resource.namespace):undefined}>{resourceName ? <ExtensionResourceDetails fullPage selection={{id,revision:plugin.revision,capability:contribution.capability,context,namespace,name:resourceName}}/> : <ExtensionWorkspace key={`${context}/${id}/${plugin.revision}`} context={context} plugin={plugin} page={contribution} namespace={namespace} onPage={onPage} onNamespace={onNamespace}/>}</ExtensionResourceNavigation.Provider>:<p className="p-3">This app page is unavailable. Manage it in Settings → Apps.</p>}
+    {inventory.status==="loading"||(limited&&lookup.status==="loading")?<p className="p-3">Loading app…</p>:inventory.status==="error"?<div role="alert" className="p-3">{inventory.error}<Button onClick={inventory.reload}>Retry</Button></div>:limited&&lookup.status==="failed"?<div className="p-3"><ErrorNotice title="Could not list clusters" message={lookup.error} retry={()=>void refreshContextIds()}/></div>:limited&&lookup.status==="missing"?<p className="p-3">This cluster is no longer in your kubeconfig files, so its apps cannot be opened here. Manage your kubeconfig files in Settings → Contexts.</p>:plugin&&contribution&&!extensionEnabledFor(plugin,contextId)?<p className="p-3">This app is not enabled for this cluster. Manage it in Settings → Apps.</p>:plugin&&contribution?<ExtensionResourceNavigation.Provider value={onOpenResource ? resource=>onOpenResource(resource.name,resource.namespace):undefined}>{resourceName ? <ExtensionResourceDetails fullPage selection={{id,revision:plugin.revision,capability:contribution.capability,context,namespace,name:resourceName}}/> : <ExtensionWorkspace key={`${context}/${id}/${plugin.revision}`} context={context} plugin={plugin} page={contribution} namespace={namespace} onPage={onPage} onNamespace={onNamespace}/>}</ExtensionResourceNavigation.Provider>:<p className="p-3">This app page is unavailable. Manage it in Settings → Apps.</p>}
   </div></ExtensionControlsProvider>;
 }

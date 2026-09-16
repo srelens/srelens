@@ -44,7 +44,7 @@ vi.mock("../lib/workspace", async (orig) => ({
 
 vi.mock("../lib/clusters", async (orig) => ({
   ...(await orig<typeof import("../lib/clusters")>()),
-  useActiveContext: () => ({ name: "prod-eu", stableId: "prod-eu" }),
+  useActiveContext: () => ({ name: "prod-eu", stableId: "prod-eu", key: "prod-eu" }),
 }));
 
 import { Topology } from "./Topology";

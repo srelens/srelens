@@ -240,7 +240,7 @@ import { flushSaveOpenTabs } from "@srelens/core";
 
 const context = (name: string) => ({
   name,
-  stableId: `/k/config#${name}`,
+  stableId: `/k/config#${name}`, key: `/k/config#${name}`,
   cluster: name,
   server: "https://example",
   isCurrent: false,

@@ -18,7 +18,7 @@ import { NodePodsSection } from "./sections";
 const NOW = Date.parse("2026-09-01T12:00:00Z");
 const CTX: ClusterContext = {
   name: "prod-eu",
-  stableId: "prod",
+  stableId: "prod", key: "prod",
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,

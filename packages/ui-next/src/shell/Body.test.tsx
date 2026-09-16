@@ -48,7 +48,7 @@ describe("Body", () => {
     const props = { route, ported: [], onOpenInClassic: () => {}, onLocked: () => {} };
     const { rerender } = render(<Body {...props} />);
     fireEvent.change(screen.getByRole("textbox", { name: "Manifest" }), { target: { value: "unsaved changes" } });
-    rerender(<Body {...props} pausedContext={{ name: "prod-eu", stableId: "prod", cluster: "prod", server: "", isCurrent: false, sourceFile: "", authKind: "token" }} />);
+    rerender(<Body {...props} pausedContext={{ name: "prod-eu", stableId: "prod", key: "prod", cluster: "prod", server: "", isCurrent: false, sourceFile: "", authKind: "token" }} />);
     expect(screen.queryByRole("textbox", { name: "Manifest" })).toBeNull();
     expect(stopped).toHaveBeenCalledTimes(1);
     rerender(<Body {...props} />);
@@ -119,7 +119,7 @@ describe("Body", () => {
         ported={[]}
         onOpenInClassic={() => {}}
         onLocked={() => {}}
-        pausedContext={{ name: "prod-eu", stableId: "prod", cluster: "prod", server: "", isCurrent: false, sourceFile: "", authKind: "token" }}
+        pausedContext={{ name: "prod-eu", stableId: "prod", key: "prod", cluster: "prod", server: "", isCurrent: false, sourceFile: "", authKind: "token" }}
       />,
     );
     expect(screen.getByText("prod-eu is paused")).toBeDefined();

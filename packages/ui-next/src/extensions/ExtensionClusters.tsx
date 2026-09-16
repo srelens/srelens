@@ -11,9 +11,10 @@ import { ErrorNotice } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 
 /**
- * Which clusters an installed app is offered on. The list keeps each context's stable ID,
- * never its name: a name gains a `file/` prefix as soon as another kubeconfig declares the
- * same one, and a removed context's name can pass to another cluster (#265). On other
+ * Which clusters an installed app is offered on. The list keeps each context's key, never
+ * its name: a name gains a `file/` prefix as soon as another kubeconfig declares the same
+ * one, and a removed context's name can pass to another cluster (#265). Nor its stable ID,
+ * which two contexts can share (#623); the key encodes both parts. On other
  * clusters the app's pages, tabs and actions are hidden and the host refuses its reads and
  * actions. Mount it keyed by the saved list, so a saved change resets the form.
  */
@@ -48,12 +49,8 @@ export function ExtensionClusters({
   }, [reload]);
   // `listContexts` reports a failed listing in its result as well as by rejecting.
   const failure = listing.status === "error" ? listing.error : listing.data?.error;
-  const contexts = listing.data?.contexts ?? [];
-  const counts = new Map<string, number>();
-  for (const context of contexts) counts.set(context.stableId, (counts.get(context.stableId) ?? 0) + 1);
-  const shared = new Set([...counts].filter(([, count]) => count > 1).map(([id]) => id));
-  const names = new Map(contexts.filter((context) => !shared.has(context.stableId)).map((context) => [context.stableId, context.name]));
-  // A chosen ID the kubeconfig no longer has shows as the ID itself, so it can still be removed.
+  const names = new Map((listing.data?.contexts ?? []).map((context) => [context.key, context.name]));
+  // A chosen key the kubeconfig no longer has shows as the key itself, so it can still be removed.
   const label = (id: string) => names.get(id) ?? id;
   // A kubeconfig can hold hundreds of contexts, so they are searched rather than listed.
   const available = [...names]
@@ -85,7 +82,6 @@ export function ExtensionClusters({
               </p>
             )
           )}
-          {shared.size > 0 && <p role="alert" className="extension-message">Some cluster IDs are shared by multiple contexts. Rename those contexts in your kubeconfig files before choosing them.</p>}
           <Combobox
             value=""
             onValueChange={(id) =>
@@ -123,7 +119,7 @@ export function ExtensionClusters({
       </p>
       <Button
         variant="secondary"
-        disabled={busy || unchanged || (limited && (chosen.length === 0 || chosen.some((id) => shared.has(id))))}
+        disabled={busy || unchanged || (limited && chosen.length === 0)}
         onClick={() =>
           void change({ action: "clusters", id: plugin.manifest.id, contexts: limited ? chosen : null })
         }

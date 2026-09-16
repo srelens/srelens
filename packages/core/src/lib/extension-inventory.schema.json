@@ -167,7 +167,7 @@
       "additionalProperties": false,
       "properties": {
         "contexts": {
-          "description": "The stable IDs of the kubeconfig contexts the app is enabled for (`{file}#{name}`, as `ResolvedContext::stable_id`); `None` is every cluster. A context's display name is not identity: it changes when another kubeconfig declares the same name (#265).",
+          "description": "The keys of the kubeconfig contexts the app is enabled for (`ResolvedContext::key`: `{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports under `key`); `None` is every cluster. A context's display name is not identity: it changes when another kubeconfig declares the same name (#265). A stable ID is not either: `a` + `b#c` and `a#b` + `c` share one (#623).",
           "items": {
             "type": "string"
           },

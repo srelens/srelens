@@ -52,7 +52,7 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
   (see [migration.md](migration.md#rolling-back)).
 - Each installed version records its source: `catalog` when its exact bytes are a
   release in the cached catalog, otherwise `local`. The host decides this, not the caller.
-- An app may be limited to chosen kubeconfig contexts, kept by stable ID because a context's
+- An app may be limited to chosen kubeconfig contexts, kept by context key (`k8s.listContexts` `key`: the stable ID with `#` and `%` encoded, so two contexts never share one, #623) because a context's
   display name changes when another kubeconfig declares the same name (#265). The broker
   resolves each request's context name to that ID the same way a connection does, and sends
   the request on under that ID, so a kubeconfig change mid-request cannot reach a cluster that

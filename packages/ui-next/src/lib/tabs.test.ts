@@ -5,7 +5,7 @@ import type { ClusterContext } from "@srelens/core";
 import { CLOSED_CAP, defaultState, makeTab, newId, reconcile, type TabsState, type Workspace } from "./tabs";
 
 const ctx = (stableId: string, name = stableId): ClusterContext => ({
-  name, stableId, cluster: name, server: `https://${name}`, isCurrent: false,
+  name, stableId, key: stableId, cluster: name, server: `https://${name}`, isCurrent: false,
   sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 

@@ -5,7 +5,7 @@ import { defaultState, type TabsState } from "./tabs";
 import * as store from "./tabsStore";
 
 const ctx = (id: string): ClusterContext => ({
-  name: id, stableId: id, cluster: id, server: `https://${id}`, isCurrent: false,
+  name: id, stableId: id, key: id, cluster: id, server: `https://${id}`, isCurrent: false,
   sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 

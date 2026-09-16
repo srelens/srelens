@@ -5,7 +5,7 @@ import { moveContext, removeContextFromOrder, useOrderedContexts } from "./conte
 beforeEach(() => localStorage.clear());
 it("uses classic's saved order and persists a move while keeping unlisted contexts", () => {
   saveContextOrder(["staging", "prod", "offline"]);
-  const contexts = [{ name: "prod", stableId: "prod" }, { name: "staging", stableId: "staging" }, { name: "dev", stableId: "dev" }];
+  const contexts = [{ name: "prod", stableId: "prod", key: "prod" }, { name: "staging", stableId: "staging", key: "staging" }, { name: "dev", stableId: "dev", key: "dev" }];
   const { result } = renderHook(() => useOrderedContexts(contexts));
   expect(result.current.map(c => c.name)).toEqual(["staging", "prod", "dev"]);
   act(() => moveContext(contexts, "dev", "staging"));
@@ -14,7 +14,7 @@ it("uses classic's saved order and persists a move while keeping unlisted contex
 });
 it("reads classic's stable-ID order after kubeconfig names change", () => {
   saveContextOrder(["staging-id", "prod-id"]);
-  const contexts = [{ name: "config/prod", stableId: "prod-id" }, { name: "config/staging", stableId: "staging-id" }];
+  const contexts = [{ name: "config/prod", stableId: "prod-id", key: "prod-id" }, { name: "config/staging", stableId: "staging-id", key: "staging-id" }];
   const { result } = renderHook(() => useOrderedContexts(contexts));
   expect(result.current.map(c => c.stableId)).toEqual(["staging-id", "prod-id"]);
   act(() => moveContext(contexts, "config/prod", "config/staging"));
@@ -22,7 +22,7 @@ it("reads classic's stable-ID order after kubeconfig names change", () => {
 });
 it("persists a legacy name-keyed order as stable IDs when contexts become known", () => {
   saveContextOrder(["staging", "prod"]);
-  const contexts = [{ name: "prod", stableId: "prod-id" }, { name: "staging", stableId: "staging-id" }];
+  const contexts = [{ name: "prod", stableId: "prod-id", key: "prod-id" }, { name: "staging", stableId: "staging-id", key: "staging-id" }];
 
   renderHook(() => useOrderedContexts(contexts));
 
@@ -31,8 +31,8 @@ it("persists a legacy name-keyed order as stable IDs when contexts become known"
 it("does not resolve an ambiguous legacy order from a workspace subset", () => {
   saveContextOrder(["prod"]);
   const all = [
-    { name: "file-a/prod", stableId: "a-id" },
-    { name: "file-b/prod", stableId: "b-id" },
+    { name: "file-a/prod", stableId: "a-id", key: "a-id" },
+    { name: "file-b/prod", stableId: "b-id", key: "b-id" },
   ];
 
   renderHook(() => useOrderedContexts([all[0]], all));
@@ -46,7 +46,7 @@ it("forgets a confirmed deletion while retaining offline contexts", () => {
 });
 
 it("remembers ambiguous order entries after a duplicate disappears and the view remounts", () => {
-  const all = [{ name: "file-a/prod", stableId: "a-id" }, { name: "file-b/prod", stableId: "b-id" }];
+  const all = [{ name: "file-a/prod", stableId: "a-id", key: "a-id" }, { name: "file-b/prod", stableId: "b-id", key: "b-id" }];
   saveContextOrder(["prod"]);
   const view = renderHook(() => useOrderedContexts(all)); view.unmount();
   renderHook(() => useOrderedContexts([all[1]]));
@@ -54,7 +54,7 @@ it("remembers ambiguous order entries after a duplicate disappears and the view 
 });
 it("does not migrate order from a partial context inventory", async () => {
   const { setContexts, resetContexts } = await import("./clusters");
-  const all = [{ name: "prod", stableId: "a-id" }];
+  const all = [{ name: "prod", stableId: "a-id", key: "a-id" }];
   saveContextOrder(["prod"]);
   act(() => setContexts(all as import("@srelens/core").ClusterContext[], "Unreadable source"));
   const view = renderHook(() => useOrderedContexts(all));
