@@ -75,7 +75,7 @@ impl ResolvedContext {
         let source = std::path::absolute(&self.source).ok()?;
         Some(format!(
             "srelens-context:{}#{}",
-            encode_part(&source.display().to_string()),
+            encode_path(&source),
             encode_part(&self.original_name)
         ))
     }
@@ -90,7 +90,7 @@ impl ResolvedContext {
     pub fn key(&self) -> String {
         format!(
             "{}#{}",
-            encode_part(&self.source.display().to_string()),
+            encode_path(&self.source),
             encode_part(&self.original_name)
         )
     }
@@ -99,6 +99,45 @@ impl ResolvedContext {
 /// One part of a pinned ID or key: `%` and `#` encoded, so `#` can delimit the parts.
 fn encode_part(part: &str) -> String {
     part.replace('%', "%25").replace('#', "%23")
+}
+
+/// The path part of a pinned ID or key, from the path's native bytes rather than its
+/// `display()` form, which is lossy: two files that differ only in bytes that are not UTF-8
+/// display as the same replacement character. A path that is valid UTF-8 is encoded as text
+/// (`encode_part`); any other is encoded unit by unit, with every unit that is not printable
+/// ASCII written as `%xx` (Unix bytes) or `%uxxxx` (Windows code units). A literal `%` is
+/// always `%25`, so the two forms cannot collide.
+fn encode_path(path: &Path) -> String {
+    if let Some(text) = path.to_str() {
+        return encode_part(text);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str()
+            .as_bytes()
+            .iter()
+            .map(|&b| match b {
+                b'#' => "%23".to_string(),
+                b'%' => "%25".to_string(),
+                0x20..=0x7e => (b as char).to_string(),
+                _ => format!("%{b:02x}"),
+            })
+            .collect()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .map(|unit| match unit {
+                0x23 => "%23".to_string(),
+                0x25 => "%25".to_string(),
+                0x20..=0x7e => (unit as u8 as char).to_string(),
+                _ => format!("%u{unit:04x}"),
+            })
+            .collect()
+    }
 }
 
 /// The complete dispatch form emitted by `pinned_id`: the prefix alone is also
@@ -844,6 +883,43 @@ mod tests {
     /// The key an app's cluster list holds. Like the stable ID it keeps the path as given, but
     /// `#` and `%` are encoded in each part, so the first `#` is always the delimiter and no two
     /// contexts share a key, whether or not they are ever listed together.
+    /// Two files can differ only in bytes that are not UTF-8, which `Path::display` renders
+    /// as the same replacement character. The key encodes the native path bytes instead, so
+    /// such files still get distinct keys and pinned IDs.
+    #[cfg(unix)]
+    #[test]
+    fn paths_that_are_not_utf8_get_distinct_keys() {
+        use std::os::unix::ffi::OsStrExt;
+        let source = |bytes: &[u8]| SourceConfig {
+            source: PathBuf::from(std::ffi::OsStr::from_bytes(bytes)),
+            config: Kubeconfig::from_yaml(PROD).unwrap(),
+        };
+        let both = resolve_from(&[source(b"/kube/a\x80"), source(b"/kube/a\x81")]);
+        assert_eq!(both[0].stable_id(), both[1].stable_id(), "display is lossy");
+        assert_ne!(both[0].key(), both[1].key());
+        assert_ne!(both[0].pinned_id(), both[1].pinned_id());
+        assert_eq!(both[0].key(), "/kube/a%80#default");
+        // A valid path that literally reads the same as an escape stays distinct.
+        let literal = resolve_from(&[source(b"/kube/a%80")]).remove(0);
+        assert_eq!(literal.key(), "/kube/a%2580#default");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn paths_that_are_not_utf16_get_distinct_keys() {
+        use std::os::windows::ffi::OsStringExt;
+        let source = |units: &[u16]| SourceConfig {
+            source: PathBuf::from(std::ffi::OsString::from_wide(units)),
+            config: Kubeconfig::from_yaml(PROD).unwrap(),
+        };
+        let a: Vec<u16> = "C:\\kube\\a".encode_utf16().chain([0xD800]).collect();
+        let b: Vec<u16> = "C:\\kube\\a".encode_utf16().chain([0xD801]).collect();
+        let both = resolve_from(&[source(&a), source(&b)]);
+        assert_eq!(both[0].stable_id(), both[1].stable_id(), "display is lossy");
+        assert_ne!(both[0].key(), both[1].key());
+        assert_ne!(both[0].pinned_id(), both[1].pinned_id());
+        assert_eq!(both[0].key(), "C:\\kube\\a%ud800#default");
+    }
     #[test]
     fn a_context_key_names_exactly_one_context() {
         let plain = resolve_from(&[cfg("/kube/prod.yaml", PROD)]).remove(0);

@@ -208,6 +208,7 @@ impl App {
             .map(|rc| ContextDto {
                 name: rc.display_name.clone(),
                 stable_id: rc.stable_id().to_string(),
+                key: rc.key(),
                 cluster: rc.cluster.clone(),
                 server: rc.server.clone(),
                 namespace: rc.namespace.clone(),
