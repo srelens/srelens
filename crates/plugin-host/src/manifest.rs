@@ -354,26 +354,11 @@ fn unique<'a>(
             problems.push(
                 Code::DuplicateIdentifier,
                 path,
-                format!("\"{}\" is listed more than once", shown(value)),
+                format!("\"{value}\" is listed more than once"),
             );
         }
     }
     seen
-}
-/// A rejected value as a problem message may quote it: control and format characters are
-/// written as `\u{…}` escapes, so a value carrying a bidirectional override cannot reorder
-/// or reshape the host's own problem row when the message is shown.
-fn shown(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| {
-            if c.is_control() || is_format_character(c) {
-                format!("\\u{{{:x}}}", c as u32)
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
 }
 fn kinds(problems: &mut ValidationErrors, path: &str, values: &[String]) {
     if values.is_empty() || values.len() > 32 {
@@ -389,12 +374,12 @@ fn kinds(problems: &mut ValidationErrors, path: &str, values: &[String]) {
             None => problems.push(
                 Code::InvalidKind,
                 at,
-                format!("Qualify \"{}\" with its API group, for example apps/Deployment, or /Pod for the core group", shown(value)),
+                format!("Qualify \"{value}\" with its API group, for example apps/Deployment, or /Pod for the core group"),
             ),
             Some((group, kind))
                 if !identifier(kind) || (!group.is_empty() && !group.split('.').all(identifier)) =>
             {
-                problems.push(Code::InvalidKind, at, format!("\"{}\" is not a qualified Kubernetes kind", shown(value)))
+                problems.push(Code::InvalidKind, at, format!("\"{value}\" is not a qualified Kubernetes kind"))
             }
             Some(_) => {}
         }

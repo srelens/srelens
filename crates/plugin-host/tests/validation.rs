@@ -279,8 +279,17 @@ fn problem_messages_never_echo_control_or_format_characters() {
         "id":"inspect", "title":"Inspect", "capability":"applications",
         "forKinds":["\u{202E}apps/Deployment", "core\u{0008}Pod", "/Pod", "/Pod"]
     }]);
+    // An input name repeated as a bound argument is quoted by a different rule.
+    value["capabilities"][0]["inputs"] = json!(["\u{202E}context"]);
+    value["capabilities"][0]["arguments"]["\u{202E}context"] = json!("x");
     let found = errors(&value);
     let messages: Vec<&str> = found.iter().map(|e| e.message.as_str()).collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("is a bound argument") && m.contains("\\u{202e}")),
+        "the input collision quotes an escape: {messages:?}"
+    );
     assert!(
         messages.iter().any(|m| m.contains("\\u{202e}")),
         "the override is shown as an escape: {messages:?}"
@@ -289,14 +298,25 @@ fn problem_messages_never_echo_control_or_format_characters() {
         messages.iter().any(|m| m.contains("\\u{8}")),
         "the control character is shown as an escape: {messages:?}"
     );
-    for message in &messages {
-        assert!(
-            !message
-                .chars()
-                .any(|c| c.is_control() || srelens_plugin_host::is_format_character(c)),
-            "raw character in {message:?}"
-        );
+    for problem in &found {
+        for text in [problem.message.as_str(), problem.path.as_str()] {
+            assert!(
+                !text
+                    .chars()
+                    .any(|c| c.is_control() || srelens_plugin_host::is_format_character(c)),
+                "raw character in {text:?}"
+            );
+        }
     }
+    // A manifest that is not JSON is reported through the same funnel.
+    let broken = srelens_plugin_host::Manifest::parse("{\"name\": \"\u{202E}").unwrap_err();
+    assert!(
+        !broken
+            .to_string()
+            .chars()
+            .any(srelens_plugin_host::is_format_character),
+        "{broken}"
+    );
 }
 
 #[test]
