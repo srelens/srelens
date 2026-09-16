@@ -544,6 +544,39 @@ describe("PodDetailsBody", () => {
       expect(factLabels(container)).toEqual(["Status", "Namespace"]);
     });
 
+    it("shows the pod's own reason and message right under Status when the kubelet set them (#619)", () => {
+      // An evicted pod: the container statuses say nothing useful, and the
+      // why lives only on `status.reason` / `status.message` — the lines
+      // `kubectl describe pod` prints under Status.
+      const message = "The node was low on resource: memory. Threshold quantity: 100Mi, available: 64Mi.";
+      const { container } = renderFacts(
+        pod(
+          { containers: [APP_CONTAINER], nodeName: "node-a" },
+          { phase: "Failed", reason: "Evicted", message },
+          { name: "web-1", namespace: "default" },
+        ),
+      );
+      expect(factLabels(container).slice(0, 4)).toEqual(["Status", "Reason", "Message", "Node"]);
+      expect(screen.getByText("Evicted")).toBeDefined();
+      expect(screen.getByText(message)).toBeDefined();
+    });
+
+    it("shows a reason without a message, and a message without a reason", () => {
+      const { container, unmount } = renderFacts(pod({}, { phase: "Failed", reason: "NodeLost" }, { name: "a" }));
+      expect(factLabels(container)).toContain("Reason");
+      expect(factLabels(container)).not.toContain("Message");
+      unmount();
+      const second = renderFacts(pod({}, { phase: "Pending", message: "Pod was rejected" }, { name: "b" }));
+      expect(factLabels(second.container)).not.toContain("Reason");
+      expect(factLabels(second.container)).toContain("Message");
+    });
+
+    it("omits Reason and Message on a healthy pod, where the API leaves them unset", () => {
+      const { container } = renderFacts(FULL_POD);
+      expect(factLabels(container)).not.toContain("Reason");
+      expect(factLabels(container)).not.toContain("Message");
+    });
+
     it("is one flat block, not a card", () => {
       // Whichever screen draws it: an unheaded run of pairs, divided from
       // what follows by a rule rather than boxed in a frame.

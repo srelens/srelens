@@ -306,6 +306,33 @@ describe("ObjectDetail (Pod)", () => {
   });
 });
 
+describe("ObjectDetail (Pod reason and message: #619)", () => {
+  const propertyLabels = () =>
+    Array.from(
+      screen.getByRole("heading", { name: "Properties" }).parentElement!.querySelectorAll("dt"),
+    ).map((dt) => dt.textContent);
+
+  it("shows the pod's reason and message right after Status when they are set", () => {
+    const message = "The node was low on resource: memory. Threshold quantity: 100Mi, available: 64Mi.";
+    const evicted: K8sObject = {
+      ...podObject,
+      status: { phase: "Failed", reason: "Evicted", message },
+    };
+    render(<ObjectDetail kind="Pod" obj={evicted} now={NOW} />);
+    const labels = propertyLabels();
+    const at = labels.indexOf("Status");
+    expect(labels.slice(at, at + 3)).toEqual(["Status", "Reason", "Message"]);
+    expect(screen.getByText("Evicted")).toBeDefined();
+    expect(screen.getByText(message)).toBeDefined();
+  });
+
+  it("omits both rows on a pod where the API leaves them unset", () => {
+    render(<ObjectDetail kind="Pod" obj={podObject} now={NOW} />);
+    expect(propertyLabels()).not.toContain("Reason");
+    expect(propertyLabels()).not.toContain("Message");
+  });
+});
+
 describe("ObjectDetail (Pod parity: #13)", () => {
   const parityPod: K8sObject = {
     kind: "Pod",
