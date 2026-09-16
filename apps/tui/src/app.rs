@@ -1227,13 +1227,7 @@ impl App {
     }
 
     pub fn handle_yaml_applied(&mut self, title: &str, msg: &str) {
-        let (kind, ns) = if let ActiveView::Yaml(yaml) = &mut self.active_view {
-            yaml.commit_content(yaml.yaml_content.clone());
-            (
-                yaml.resource_kind.clone(),
-                yaml.namespace.clone().unwrap_or_default(),
-            )
-        } else if let Some(stripped) = title.strip_prefix("yaml_applied:") {
+        let (mut kind, mut ns) = if let Some(stripped) = title.strip_prefix("yaml_applied:") {
             let parts: Vec<&str> = stripped.split(':').collect();
             let k = parts.first().unwrap_or(&"").to_string();
             let n = parts.get(1).unwrap_or(&"").to_string();
@@ -1242,23 +1236,44 @@ impl App {
             (String::new(), String::new())
         };
 
-        // Invalidate resource_cache for this kind so stale data is purged
+        if let ActiveView::Yaml(yaml) = &mut self.active_view {
+            yaml.commit_content(yaml.yaml_content.clone());
+            if kind.is_empty() {
+                kind = yaml.resource_kind.clone();
+            }
+            if ns.is_empty() {
+                ns = yaml.namespace.clone().unwrap_or_default();
+            }
+        }
+
+        // Invalidate resource_cache for this kind across target, active, and all-namespaces scopes
         if !kind.is_empty() {
             let ctx = self.active_context.clone();
-            self.resource_cache
-                .remove(&(ctx.clone(), ns.clone(), kind.clone()));
-            if let Some(crd) = self
+            let candidate_namespaces = [
+                ns.clone(),
+                self.active_namespace.clone(),
+                String::new(),
+            ];
+            let crd_match = self
                 .crds
                 .iter()
                 .find(|c| {
                     c.kind.eq_ignore_ascii_case(&kind) || c.plural.eq_ignore_ascii_case(&kind)
                 })
-                .cloned()
-            {
+                .cloned();
+
+            for c_ns in &candidate_namespaces {
                 self.resource_cache
-                    .remove(&(ctx.clone(), ns.clone(), crd.crd_name.clone()));
-                self.resource_cache
-                    .remove(&(ctx.clone(), ns.clone(), crd.plural.clone()));
+                    .remove(&(ctx.clone(), c_ns.clone(), kind.clone()));
+                if let Some(ref crd) = crd_match {
+                    self.resource_cache
+                        .remove(&(ctx.clone(), c_ns.clone(), crd.crd_name.clone()));
+                    self.resource_cache
+                        .remove(&(ctx.clone(), c_ns.clone(), crd.plural.clone()));
+                }
+            }
+
+            if let Some(crd) = crd_match {
                 self.fetch_crd_instances(crd);
             }
         }
@@ -8063,11 +8078,12 @@ impl App {
                 plural: crd.plural.clone(),
             };
 
-            let api: kube::Api<kube::core::DynamicObject> = if crd.namespaced && !ns.is_empty() {
-                kube::Api::namespaced_with(client, &ns, &ar)
-            } else {
-                kube::Api::all_with(client, &ar)
-            };
+            let api: kube::Api<kube::core::DynamicObject> =
+                if crd.namespaced && !ns.is_empty() && ns != "all" {
+                    kube::Api::namespaced_with(client, &ns, &ar)
+                } else {
+                    kube::Api::all_with(client, &ar)
+                };
 
             match api.list(&kube::api::ListParams::default()).await {
                 Ok(list) => {

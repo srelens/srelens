@@ -646,6 +646,9 @@ pub fn strip_server_managed_fields(value: &mut serde_json::Value) {
                 "generation",
                 "uid",
                 "creationTimestamp",
+                "deletionTimestamp",
+                "deletionGracePeriodSeconds",
+                "selfLink",
             ] {
                 meta.remove(k);
             }

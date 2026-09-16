@@ -2552,3 +2552,75 @@ async fn yaml_applied_invalidates_cache_and_commits_content() {
     let toast = app.toast.expect("toast must be set on yaml applied");
     assert!(toast.0.contains("Updated ConfigMap/cfg in cluster"));
 }
+
+#[tokio::test]
+async fn yaml_applied_invalidates_cache_in_all_namespaces_view() {
+    let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "").await;
+    app.active_namespace = String::new(); // all namespaces
+
+    let crd = srelens_tui::commands::CrdMeta {
+        crd_name: "secretstores.external-secrets.io".to_string(),
+        group: "external-secrets.io".to_string(),
+        version: "v1".to_string(),
+        kind: "SecretStore".to_string(),
+        plural: "secretstores".to_string(),
+        singular: "secretstore".to_string(),
+        namespaced: true,
+        short_names: vec![],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    app.crds = vec![crd];
+
+    let initial = "apiVersion: external-secrets.io/v1\nkind: SecretStore\nmetadata:\n  name: store\n  namespace: cluster-autoscaler\n";
+    let mut yaml_view = srelens_tui::views::yaml_view::YamlViewState::new(
+        "store".to_string(),
+        "SecretStore".to_string(),
+        Some("cluster-autoscaler".to_string()),
+        initial.to_string(),
+    );
+    let new_yaml = "apiVersion: external-secrets.io/v1\nkind: SecretStore\nmetadata:\n  name: store\n  namespace: cluster-autoscaler\nspec:\n  provider: {}\n";
+    yaml_view.update_content(new_yaml.to_string());
+    app.active_view = ActiveView::Yaml(yaml_view);
+
+    let all_ns_key = (
+        FAKE_CONTEXT.to_string(),
+        "".to_string(),
+        "SecretStore".to_string(),
+    );
+    let target_ns_key = (
+        FAKE_CONTEXT.to_string(),
+        "cluster-autoscaler".to_string(),
+        "SecretStore".to_string(),
+    );
+    let crd_plural_key = (
+        FAKE_CONTEXT.to_string(),
+        "".to_string(),
+        "secretstores".to_string(),
+    );
+
+    app.resource_cache
+        .insert(all_ns_key.clone(), vec![json!({"name": "store"})]);
+    app.resource_cache
+        .insert(target_ns_key.clone(), vec![json!({"name": "store"})]);
+    app.resource_cache
+        .insert(crd_plural_key.clone(), vec![json!({"name": "store"})]);
+
+    app.handle_yaml_applied(
+        "yaml_applied:SecretStore:cluster-autoscaler",
+        "Updated SecretStore/store in cluster",
+    );
+
+    assert!(
+        !app.resource_cache.contains_key(&all_ns_key),
+        "all-namespaces cache key must be invalidated"
+    );
+    assert!(
+        !app.resource_cache.contains_key(&target_ns_key),
+        "target namespace cache key must be invalidated"
+    );
+    assert!(
+        !app.resource_cache.contains_key(&crd_plural_key),
+        "crd plural cache key must be invalidated"
+    );
+}

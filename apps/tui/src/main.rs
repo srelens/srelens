@@ -505,87 +505,77 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 2. Run external action
             match action {
                 SuspendAction::EditYaml => {
-                    if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
-                        match yaml.spawn_editor() {
-                            Ok(Some(new_yaml)) => {
-                                yaml.update_content(new_yaml.clone());
+                    let (editor_res, res_kind, res_ns) = if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
+                        (yaml.spawn_editor(), yaml.resource_kind.clone(), yaml.namespace.clone())
+                    } else {
+                        (Ok(None), String::new(), None)
+                    };
 
-                                let ctx = app.active_context.clone();
-                                let active_ns = app.active_namespace.clone();
-                                let cache = app.client_cache.clone();
-                                let ny = new_yaml.clone();
-                                let event_tx = app.event_tx.clone();
-                                tokio::spawn(async move {
-                                    let client = match cache.get(&ctx).await {
-                                        Ok(c) => c,
-                                        Err(e) => {
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "yaml_error".to_string(),
-                                                result: Err(format!("Cluster connect error: {}", e)),
-                                            });
-                                            return;
+                    match editor_res {
+                        Ok(Some(new_yaml)) => {
+                            let ctx = app.active_context.clone();
+                            let active_ns = app.active_namespace.clone();
+                            let fallback_ns = res_ns.as_deref().or_else(|| {
+                                if active_ns.is_empty() || active_ns == "all" {
+                                    None
+                                } else {
+                                    Some(active_ns.as_str())
+                                }
+                            });
+
+                            let client = match app.client_cache.get(&ctx).await {
+                                Ok(c) => Some(c),
+                                Err(e) => {
+                                    app.handle_yaml_error(&format!("Cluster connect error: {}", e));
+                                    None
+                                }
+                            };
+
+                            if let Some(client) = client {
+                                match srelens_kube::manifest::split_documents(&new_yaml) {
+                                    Ok(docs) if !docs.is_empty() => {
+                                        let results = srelens_kube::manifest::apply_documents(&client, docs, fallback_ns, true).await;
+                                        let all_ok = !results.is_empty() && results.iter().all(|d| d.applied);
+                                        if all_ok {
+                                            let updated_names: Vec<String> = results.iter().map(|d| format!("{}/{}", d.kind, d.name)).collect();
+                                            let msg = format!("Updated {} in cluster", updated_names.join(", "));
+                                            if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
+                                                yaml.commit_content(new_yaml);
+                                            }
+                                            app.handle_yaml_applied(
+                                                &format!("yaml_applied:{}:{}", res_kind, res_ns.as_deref().unwrap_or("")),
+                                                &msg,
+                                            );
+                                        } else {
+                                            let errors: Vec<String> = results
+                                                .iter()
+                                                .filter(|d| !d.applied)
+                                                .map(|d| {
+                                                    let err = d.error.as_deref().unwrap_or("unknown apply error");
+                                                    if !d.kind.is_empty() && !d.name.is_empty() {
+                                                        format!("{}/{}: {}", d.kind, d.name, err)
+                                                    } else {
+                                                        err.to_string()
+                                                    }
+                                                })
+                                                .collect();
+                                            app.handle_yaml_error(&errors.join("; "));
                                         }
-                                    };
-
-                                    let docs = match srelens_kube::manifest::split_documents(&ny) {
-                                        Ok(d) if !d.is_empty() => d,
-                                        Ok(_) => {
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "yaml_error".to_string(),
-                                                result: Err("No YAML documents found in file".to_string()),
-                                            });
-                                            return;
-                                        }
-                                        Err(e) => {
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "yaml_error".to_string(),
-                                                result: Err(format!("YAML parse error: {}", e)),
-                                            });
-                                            return;
-                                        }
-                                    };
-
-                                    let fallback_ns = if active_ns.is_empty() || active_ns == "all" {
-                                        None
-                                    } else {
-                                        Some(active_ns.as_str())
-                                    };
-
-                                    let results = srelens_kube::manifest::apply_documents(&client, docs, fallback_ns, true).await;
-                                    let all_ok = !results.is_empty() && results.iter().all(|d| d.applied);
-                                    if all_ok {
-                                        let updated_names: Vec<String> = results.iter().map(|d| format!("{}/{}", d.kind, d.name)).collect();
-                                        let _ = event_tx.send(AppEvent::ActionResult {
-                                            title: "yaml_applied".to_string(),
-                                            result: Ok(format!("Updated {} in cluster", updated_names.join(", "))),
-                                        });
-                                    } else {
-                                        let errors: Vec<String> = results
-                                            .iter()
-                                            .filter(|d| !d.applied)
-                                            .map(|d| {
-                                                let err = d.error.as_deref().unwrap_or("unknown apply error");
-                                                if !d.kind.is_empty() && !d.name.is_empty() {
-                                                    format!("{}/{}: {}", d.kind, d.name, err)
-                                                } else {
-                                                    err.to_string()
-                                                }
-                                            })
-                                            .collect();
-                                        let _ = event_tx.send(AppEvent::ActionResult {
-                                            title: "yaml_error".to_string(),
-                                            result: Err(errors.join("; ")),
-                                        });
                                     }
-                                });
-                                app.set_toast("Applying changes to cluster...".to_string(), theme::Theme::status_ok());
+                                    Ok(_) => {
+                                        app.handle_yaml_error("No YAML documents found in file");
+                                    }
+                                    Err(e) => {
+                                        app.handle_yaml_error(&format!("YAML parse error: {}", e));
+                                    }
+                                }
                             }
-                            Ok(None) => {
-                                app.set_toast("No changes made in $EDITOR".to_string(), theme::Theme::status_dim());
-                            }
-                            Err(e) => {
-                                app.set_toast(format!("Editor error: {}", e), theme::Theme::status_error());
-                            }
+                        }
+                        Ok(None) => {
+                            app.set_toast("No changes made in $EDITOR".to_string(), theme::Theme::status_dim());
+                        }
+                        Err(e) => {
+                            app.set_toast(format!("Editor error: {}", e), theme::Theme::status_error());
                         }
                     }
                 }
