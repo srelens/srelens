@@ -30,6 +30,7 @@ mod vault_password;
 mod toolbox;
 mod updater;
 mod watch;
+mod window;
 
 use app_log::{app_log_path, read_app_log, reveal_app_log};
 use bridge::{invoke_capability, AppRegistry};
@@ -169,7 +170,12 @@ fn install_macos_menu(app: &tauri::App) -> tauri::Result<()> {
 
     app.on_menu_event(move |app, event| {
         if event.id().as_ref() == CLOSE_TAB_MENU_ID {
-            let _ = app.emit("close-active-tab", ());
+            for (_, window) in app.webview_windows() {
+                if window.is_focused().unwrap_or(false) {
+                    let _ = window.emit("close-active-tab", ());
+                    break;
+                }
+            }
         }
     });
 
@@ -517,7 +523,8 @@ pub fn run() {
             reveal_app_log,
             cluster_oidc_cmd::cluster_login,
             cluster_oidc_cmd::cluster_logout,
-            cluster_oidc_cmd::list_clusters
+            cluster_oidc_cmd::list_clusters,
+            window::open_context_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

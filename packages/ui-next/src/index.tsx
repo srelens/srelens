@@ -70,6 +70,7 @@ export function NextApp({
   onToggleTheme = () => {},
   controls = "none",
   brandMarkSrc,
+  windowLabel = "main",
 }: {
   onExit: (route: string, context?: string) => Promise<string | null> | string | null;
   /** Display names of the screens that exist in the new design. */
@@ -92,6 +93,10 @@ export function NextApp({
    * is what its own comment calls "a state, not an error to report".
    */
   brandMarkSrc?: string;
+  /**
+   * The window's Tauri label, used to isolate its saved workspaces.
+   */
+  windowLabel?: string;
 }) {
   const [error, setError] = useState<string | null>(null);
 
@@ -132,6 +137,7 @@ export function NextApp({
             active={!gallery}
             controls={controls}
             brandMarkSrc={brandMarkSrc}
+            windowLabel={windowLabel}
             onToggleTheme={onToggleTheme}
             onOpenInClassic={leave}
             onOpenGallery={() => {

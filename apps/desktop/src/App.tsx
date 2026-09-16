@@ -97,11 +97,20 @@ export function App() {
   // the open tabs are restored from a prior session (a browser reload otherwise
   // wipes them); desktop starts empty. Computed once so tabs/activeTabId/the id
   // counter all agree on the same restored snapshot.
-  const [restored] = useState(loadOpenTabs);
-  const [tabs, setTabs] = useState<ViewTab[]>(() => restored?.tabs ?? []);
-  const [activeTabId, setActiveTabId] = useState<number | null>(
-    () => restored?.activeTabId ?? null,
-  );
+  const windowLabel = useMemo(() => isTauri() ? getCurrentWindow().label : "main", []);
+  const [restored] = useState(() => loadOpenTabs(windowLabel));
+  const [tabs, setTabs] = useState<ViewTab[]>(() => {
+    if (restored?.tabs?.length) return restored.tabs;
+    const ctx = new URLSearchParams(window.location.search).get("context");
+    if (ctx) return [{ id: 1, cluster: ctx, kind: "overview", history: [] }];
+    return [];
+  });
+  const [activeTabId, setActiveTabId] = useState<number | null>(() => {
+    if (restored?.activeTabId) return restored.activeTabId;
+    const ctx = new URLSearchParams(window.location.search).get("context");
+    if (ctx) return 1;
+    return null;
+  });
   // The latest full state is read only when its restorable projection changes.
   // Draft YAML remains on its tab in memory, but is absent from both the key
   // and the settings write that the key triggers.
@@ -128,7 +137,7 @@ export function App() {
   // Global fallback namespace for clusters with no remembered selection.
   const [defaultNs, setDefaultNs] = useState(getDefaultNamespace);
   // Start the id counter past any restored tab so ids are never reused.
-  const tabIdRef = useRef(restored ? nextTabId(restored.tabs) : 1);
+  const tabIdRef = useRef(restored ? nextTabId(restored.tabs) : new URLSearchParams(window.location.search).get("context") ? 2 : 1);
   const focusNonce = useRef(0);
   // Mirror the active tab id into a ref so the (once-registered) Cmd+W menu
   // event listener always sees the latest value without re-subscribing.
@@ -243,7 +252,7 @@ export function App() {
   // paths DRAIN the same slot, so a link is acted on exactly once.
   const [pendingLinks, setPendingLinks] = useState<string[]>([]);
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri() || windowLabel !== "main") return;
     const drain = () => {
       void invokeCommand<string[]>("take_pending_deep_links")
         .then((urls) => {
@@ -456,8 +465,8 @@ export function App() {
   // mutate their transient tab, but must not queue the same fsync every 400ms.
   useEffect(() => {
     const snapshot = openTabsForSave.current;
-    scheduleSaveOpenTabs(snapshot.tabs, snapshot.activeTabId);
-  }, [openTabsSaveKey]);
+    scheduleSaveOpenTabs(snapshot.tabs, snapshot.activeTabId, windowLabel);
+  }, [openTabsSaveKey, windowLabel]);
 
   // Web: localStorage writes are synchronous, so unload handlers suffice.
   useEffect(() => {
@@ -646,7 +655,7 @@ export function App() {
         // persistence effect. Without queueing the post-close snapshot here,
         // the close-request flush would write the pre-close one and the tab
         // the user just closed would come back on the next launch.
-        scheduleSaveOpenTabs(remaining, remaining.at(-1)?.id ?? null);
+        scheduleSaveOpenTabs(remaining, remaining.at(-1)?.id ?? null, windowLabel);
         if (closingLastTab) void getCurrentWindow().close();
       } else {
         void getCurrentWindow().close();

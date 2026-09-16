@@ -16,6 +16,7 @@ import {
   vaultUnlockPassword,
   type VaultStatus,
 } from "@srelens/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   Button,
   Checkbox,
@@ -349,7 +350,21 @@ function useSealed(): boolean {
  * moment it happens on every single launch.
  */
 export function useWorkspaceSealed(): boolean {
-  return useSyncExternalStore(subscribe, isCovered, isCovered);
+  const store = useSyncExternalStore(subscribe, isCovered, isCovered);
+
+  // Sync locks across multiple context windows. When one window calls lockWorkspace(),
+  // the backend vault_lock command emits this event.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const unlistenPromise = listen("vault-locked", () => {
+      lockWorkspace();
+    });
+    return () => {
+      void unlistenPromise.then((fn) => fn());
+    };
+  }, []);
+
+  return store;
 }
 
 /**

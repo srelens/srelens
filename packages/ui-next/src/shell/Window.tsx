@@ -11,7 +11,10 @@ import {
   startMcpHttp,
   vaultLock,
   type ClusterContext,
+  type ContextProfiles,
+  flushSettingsWrites,
 } from "@srelens/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button, Checkbox, Drawer, LoadingState, TabStrip, TextInput, type ContextMenuItem, type StripTab } from "@srelens/ui-kit";
 import { contextLabelFor } from "../lib/agentSuggestions";
 import { setContexts, setKubeconfigFiles, useContexts, useContextsError } from "../lib/clusters";
@@ -24,7 +27,7 @@ import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
 import { loadExpanded, loadNamespaces } from "../lib/workspace";
 import { getInfo, probeCluster } from "../lib/probe";
-import { defaultState, reconcile } from "../lib/tabs";
+import { defaultState, makeTab, reconcile } from "../lib/tabs";
 import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
 import { isClusterScopedRoute, keepsManagementWhenPaused, tabDetail } from "../lib/routes";
 import { flushSave, installFlushOnUnload, loadTabsState, scheduleSave } from "../lib/tabsPersist";
@@ -80,6 +83,10 @@ export interface WindowProps {
    * stop listening, but the tab bodies stay mounted so the session survives.
    */
   active?: boolean;
+  /**
+   * The window's Tauri label, used to isolate its saved workspaces.
+   */
+  windowLabel?: string;
 }
 
 /**
@@ -103,6 +110,7 @@ export function Window({
   controls = "none",
   brandMarkSrc,
   active = true,
+  windowLabel = "main",
 }: WindowProps) {
   const [booted, setBooted] = useState(false);
   /**
@@ -136,6 +144,7 @@ export function Window({
   // under Tauri. In a browser the native zoom already does this (see core's
   // uiScale doc), so a zoom chord here has to fall through to it untouched.
   const desktop = useMemo(() => isTauri(), []);
+  
   const { setOpen, setScope } = useConsole();
   const { tabs, activeId, workspace } = useTabs();
   useMark("", "");
@@ -228,7 +237,44 @@ export function Window({
         found = outcome.contexts ?? [];
         failure = outcome.error ?? "";
         listed = true;
-        const saved = loadTabsState();
+        const ctxQuery = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("context") : null;
+        let saved = loadTabsState(undefined, undefined, windowLabel);
+        
+        if (!saved && ctxQuery && windowLabel !== "main") {
+          let mainSaved = loadTabsState(undefined, undefined, "main");
+          if (!mainSaved) {
+            mainSaved = defaultState(found);
+          }
+          if (mainSaved) {
+            saved = JSON.parse(JSON.stringify(mainSaved));
+            if (saved) {
+              let targetWorkspace = saved.workspaces.find((w: any) => w.clusters.includes(ctxQuery));
+              if (!targetWorkspace && saved!.currentId) {
+                targetWorkspace = saved.workspaces.find((w: any) => w.id === saved!.currentId);
+                if (targetWorkspace && !targetWorkspace.clusters.includes(ctxQuery)) {
+                  targetWorkspace.clusters.push(ctxQuery);
+                }
+              }
+              const contextName = found.find(c => c.stableId === ctxQuery || c.name === ctxQuery)?.name || ctxQuery;
+              for (const w of saved.workspaces) {
+                const home = makeTab("/");
+                w.tabs = [home];
+                w.activeId = home.id;
+                w.closed = [];
+                if (w === targetWorkspace) {
+                  w.activeCluster = ctxQuery;
+                  const ot = makeTab("/overview", { clusterName: contextName });
+                  w.tabs.push(ot);
+                  w.activeId = ot.id;
+                }
+              }
+              if (targetWorkspace) {
+                saved.currentId = targetWorkspace.id;
+              }
+            }
+          }
+        }
+
         if (saved && failure !== "") {
           // The list failed, not the clusters: reconciling against nothing would
           // strip every workspace's cluster ids and the next change would persist
@@ -261,7 +307,7 @@ export function Window({
   // over the real one on the way in.
   useEffect(() => {
     if (!booted) return;
-    const off = subscribe(() => scheduleSave(getState()));
+    const off = subscribe(() => scheduleSave(getState(), undefined, undefined, windowLabel));
     const offUnload = installFlushOnUnload();
     return () => {
       off();
@@ -272,6 +318,42 @@ export function Window({
       flushSave();
     };
   }, [booted]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const win = getCurrentWindow();
+    if (typeof win?.onCloseRequested !== "function") return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    let closing = false;
+    const CLOSE_WRITE_TIMEOUT_MS = 500;
+    
+    void win
+      .onCloseRequested(async (event) => {
+        if (closing) return;
+        event.preventDefault();
+        closing = true;
+        try {
+          flushSave();
+          await Promise.race([
+            flushSettingsWrites(),
+            new Promise((resolve) => setTimeout(resolve, CLOSE_WRITE_TIMEOUT_MS)),
+          ]);
+        } finally {
+          await win.destroy().catch(() => win.close());
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+      
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
 
   /**

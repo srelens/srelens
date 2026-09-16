@@ -360,8 +360,11 @@ fn change_password_core(
 /// Afterwards `vault_status` reports `"locked"` and every read is empty and
 /// every write refused until the next unlock.
 #[tauri::command]
-pub async fn vault_lock(vault: tauri::State<'_, Arc<Vault>>) -> Result<(), String> {
-    lock_core(&vault)
+pub async fn vault_lock(app: tauri::AppHandle, vault: tauri::State<'_, Arc<Vault>>) -> Result<(), String> {
+    lock_core(&vault)?;
+    use tauri::Emitter;
+    app.emit("vault-locked", ()).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// The lock behind the #28 seam — no AppHandle needed, since locking touches

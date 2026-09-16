@@ -449,7 +449,7 @@ describe("Window boot", () => {
     await booted();
     expect(installFlushOnUnload).toHaveBeenCalled();
     act(() => store.openTab("/k/pods"));
-    expect(scheduleSave).toHaveBeenCalledWith(store.getState());
+    expect(scheduleSave).toHaveBeenCalledWith(store.getState(), undefined, undefined, "main");
   });
 
   it("flushes the debounced save when it unmounts", async () => {
