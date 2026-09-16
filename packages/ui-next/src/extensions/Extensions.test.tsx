@@ -236,6 +236,10 @@ it("shows a quarantined app by ID, not by a name this host no longer accepts", a
         ...plugin,
         enabled: false,
         quarantined: "name: Must be 1–120 characters (EXTENSION_INVALID_VALUE)",
+        grants: ["k8s.listCustomResource"],
+        source: "local",
+        installedAt: 1,
+        history: [],
         manifest: { ...plugin.manifest, name: "‮Argo CD" },
       },
     ],
@@ -243,7 +247,12 @@ it("shows a quarantined app by ID, not by a name this host no longer accepts", a
   render(<ExtensionManager />);
   await screen.findByText(/Disabled:/);
   expect(document.body.textContent).not.toContain("‮");
-  expect(screen.getByLabelText(`Details for ${plugin.manifest.id}`)).toBeTruthy();
+  // Its stored manifest is shown with the character written as an escape, not drawn.
+  fireEvent.click(screen.getByLabelText(`Details for ${plugin.manifest.id}`));
+  const details = await screen.findByRole("region", { name: `${plugin.manifest.id} details` });
+  const manifest = within(details).getByRole("textbox", { name: `${plugin.manifest.id} manifest` });
+  await waitFor(() => expect(manifest.textContent).toContain(String.raw`\u202e`));
+  expect(document.body.textContent).not.toContain("‮");
 });
 it("says the manifest check failed, offers a retry and does not offer to install", async () => {
   vi.mocked(validateExtension).mockRejectedValueOnce(new Error("bridge timed out"));

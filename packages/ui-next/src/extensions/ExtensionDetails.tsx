@@ -96,8 +96,11 @@ export function ExtensionDetails({
       </ul>
 
       <h3>Manifest</h3>
+      {/* A stored manifest can carry a format character this host now refuses (an app
+          installed before the rule is quarantined, not rewritten). JSON escapes control
+          characters but not those, so they are written as escapes here rather than drawn. */}
       <CodeEditor
-        value={JSON.stringify(manifest, null, 2)}
+        value={JSON.stringify(manifest, null, 2).replace(/\p{Cf}/gu, (c) => `\\u${c.codePointAt(0)!.toString(16).padStart(4, "0")}`)}
         readOnly
         language="none"
         ariaLabel={`${extensionLabel(plugin)} manifest`}
