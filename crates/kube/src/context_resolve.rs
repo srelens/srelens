@@ -149,22 +149,41 @@ pub fn is_pinned_context(name: &str) -> bool {
     else {
         return false;
     };
-    // Each part carries only the escapes its generator emits: `%23` and `%25` in both,
-    // and in the path part also `%xx` (a raw byte) or `%uxxxx` (a UTF-16 code unit) for a
-    // path that is not UTF-8 (see `encode_path`). Anything else is a literal name.
-    let hex =
-        |s: &str, n: usize| s.len() >= n && s.as_bytes()[..n].iter().all(u8::is_ascii_hexdigit);
+    // Each part carries only the escapes its generator emits, and nothing else is
+    // reserved: `%23` and `%25` in both parts, and in the path part the escapes
+    // `encode_path` writes for a unit it does not print (lowercase hex; `%xx` for a byte on
+    // Unix, `%uxxxx` for a UTF-16 unit on Windows). A literal name such as `%41` for a
+    // printable `A`, or the other platform's form, stays a name.
     let escaped = |suffix: &str| suffix.starts_with("25") || suffix.starts_with("23");
     let text = |part: &str| !part.contains('#') && part.split('%').skip(1).all(escaped);
     let path_part = |part: &str| {
         !part.contains('#')
-            && part.split('%').skip(1).all(|suffix| {
-                escaped(suffix)
-                    || hex(suffix, 2)
-                    || (suffix.starts_with('u') && hex(&suffix[1..], 4))
-            })
+            && part
+                .split('%')
+                .skip(1)
+                .all(|suffix| escaped(suffix) || unprintable_escape(suffix))
     };
     Path::new(source).is_absolute() && path_part(source) && text(context)
+}
+
+/// Whether `suffix` (the text after a `%`) starts with the escape `encode_path` writes for
+/// a unit it does not print: lowercase hex, and a value outside printable ASCII.
+fn unprintable_escape(suffix: &str) -> bool {
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    #[cfg(unix)]
+    {
+        let Some(hex) = suffix.get(..2) else {
+            return false;
+        };
+        digits(hex) && !matches!(u8::from_str_radix(hex, 16), Ok(0x20..=0x7e))
+    }
+    #[cfg(windows)]
+    {
+        let Some(hex) = suffix.strip_prefix('u').and_then(|rest| rest.get(..4)) else {
+            return false;
+        };
+        digits(hex) && !matches!(u16::from_str_radix(hex, 16), Ok(0x20..=0x7e))
+    }
 }
 
 /// A parsed kubeconfig paired with the file it came from.
@@ -816,6 +835,14 @@ mod tests {
             "srelens-context:/kube/team%oops#prod",
             "srelens-context:/kube/team#prod%oops",
             "srelens-context:/kube/team#prod%2%253",
+            // `A` is printable, so the encoder never writes `%41`; uppercase hex is never written.
+            "srelens-context:/kube/team%41#prod",
+            "srelens-context:/kube/team%C3%A9#prod",
+            // The other platform's escape form.
+            #[cfg(unix)]
+            "srelens-context:/kube/team%ud800#prod",
+            #[cfg(windows)]
+            "srelens-context:/kube/team%80#prod",
         ] {
             assert!(!is_pinned_context(name), "literal name: {name}");
             let yaml = PROD.replace("default", name);
