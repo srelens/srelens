@@ -755,6 +755,7 @@ async fn every_table_kind_renders_its_own_key_hints() {
         namespaced: true,
         short_names: vec![],
         printer_columns: vec![],
+        created_at: None,
     });
     let cases: Vec<(ResourceKind, &str)> = vec![
         (ResourceKind::Workloads, "Segment"),
@@ -774,7 +775,8 @@ async fn every_table_kind_renders_its_own_key_hints() {
     ];
     for (kind, hint) in cases {
         let title = kind.display_name().to_string();
-        app.active_view = ActiveView::Table(table_with(kind.clone(), vec![pod("web-0", "default")]));
+        app.active_view =
+            ActiveView::Table(table_with(kind.clone(), vec![pod("web-0", "default")]));
         let screen = wide(&mut app);
         assert!(
             screen.contains(&title),
@@ -786,7 +788,10 @@ async fn every_table_kind_renders_its_own_key_hints() {
         );
 
         // Non-pod/non-workload resources must not advertise pod or workload actions
-        if matches!(kind, ResourceKind::ConfigMaps | ResourceKind::CustomResource(_)) {
+        if matches!(
+            kind,
+            ResourceKind::ConfigMaps | ResourceKind::CustomResource(_)
+        ) {
             for excluded in ["PortForward", "Shell", "Restart", "Scale"] {
                 assert!(
                     !screen.contains(excluded),
@@ -2298,7 +2303,8 @@ async fn node_inspector_keys_navigate_pods_and_offer_node_actions() {
 
     app.handle_key_event(common::ch('c')).await;
     common::type_str(&mut app, "confirm").await;
-    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter))
+        .await;
     assert_eq!(toast(&app), "Cordoning node 'gpu-1'...");
 
     app.handle_key_event(common::ch('x')).await;
@@ -2351,7 +2357,8 @@ async fn node_inspector_without_pods_targets_the_node_and_toggles_uncordon() {
 
     app.handle_key_event(common::ch('c')).await;
     common::type_str(&mut app, "confirm").await;
-    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter))
+        .await;
     assert_eq!(toast(&app), "Uncordoning node 'gpu-1'...");
 
     app.handle_key_event(common::ch('x')).await;
@@ -2798,6 +2805,7 @@ async fn switching_to_a_crd_uses_cached_instances_and_discovered_columns() {
             priority: 0,
             description: None,
         }],
+        created_at: None,
     };
     app.crds.push(discovered.clone());
     app.resource_cache.insert(
@@ -2850,15 +2858,14 @@ async fn crd_live_watch_channel_management_and_stream_updates() {
         singular: "secretstore".into(),
         namespaced: true,
         short_names: vec!["ss".into()],
-        printer_columns: vec![
-            PrinterColumn {
-                name: "READY".into(),
-                json_path: ".status.conditions[?(@.type==\"Ready\")].status".into(),
-                col_type: "string".into(),
-                priority: 0,
-                description: None,
-            },
-        ],
+        printer_columns: vec![PrinterColumn {
+            name: "READY".into(),
+            json_path: ".status.conditions[?(@.type==\"Ready\")].status".into(),
+            col_type: "string".into(),
+            priority: 0,
+            description: None,
+        }],
+        created_at: None,
     };
     app.crds.push(crd.clone());
 
@@ -2882,14 +2889,23 @@ async fn crd_live_watch_channel_management_and_stream_updates() {
     ]);
     app.handle_stream_event(expected_ch.to_string(), payload);
 
-    let ActiveView::Table(t) = &app.active_view else { panic!("expected table") };
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
     assert!(!t.is_loading);
     assert_eq!(t.raw_items.len(), 1);
     assert_eq!(t.raw_items[0]["name"], "vault");
 
     // Informer cache also updated
     assert_eq!(
-        app.resource_cache.get(&("test-cluster".into(), "default".into(), "secretstores.external-secrets.io".into())).unwrap().len(),
+        app.resource_cache
+            .get(&(
+                "test-cluster".into(),
+                "default".into(),
+                "secretstores.external-secrets.io".into()
+            ))
+            .unwrap()
+            .len(),
         1
     );
 
@@ -3463,13 +3479,19 @@ async fn node_ssh_opens_modal_and_executes_suspend_action() {
 
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Nodes,
-        vec![serde_json::json!({ "name": "worker-1", "status": "Ready", "internalIp": "10.0.1.20" })],
+        vec![
+            serde_json::json!({ "name": "worker-1", "status": "Ready", "internalIp": "10.0.1.20" }),
+        ],
     ));
 
     // 'S' opens NodeSsh modal prefilled with internal IP
     app.handle_key_event(common::ch('S')).await;
     match &app.modal {
-        Some(Modal::NodeSsh { node_name, destination_input, cursor_pos }) => {
+        Some(Modal::NodeSsh {
+            node_name,
+            destination_input,
+            cursor_pos,
+        }) => {
             assert_eq!(node_name, "worker-1");
             assert_eq!(destination_input, "10.0.1.20");
             assert_eq!(*cursor_pos, 9);
@@ -3478,7 +3500,8 @@ async fn node_ssh_opens_modal_and_executes_suspend_action() {
     }
 
     // Pressing Enter in the modal triggers terminal suspend with NodeSsh action
-    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter)).await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter))
+        .await;
     assert!(app.modal.is_none());
     assert!(matches!(
         &app.requires_terminal_suspend,
@@ -3512,9 +3535,14 @@ async fn test_node_ssh_modal_cursor_navigation() {
     }
 
     // 3. Ctrl+A moves cursor to start (0)
-    app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)).await;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+        .await;
     match &app.modal {
-        Some(Modal::NodeSsh { cursor_pos, destination_input, .. }) => {
+        Some(Modal::NodeSsh {
+            cursor_pos,
+            destination_input,
+            ..
+        }) => {
             assert_eq!(*cursor_pos, 0);
             assert_eq!(destination_input, "10.0.1.20");
         }
@@ -3524,7 +3552,11 @@ async fn test_node_ssh_modal_cursor_navigation() {
     // 4. Typing at cursor 0 inserts at beginning
     app.handle_key_event(common::ch('x')).await;
     match &app.modal {
-        Some(Modal::NodeSsh { cursor_pos, destination_input, .. }) => {
+        Some(Modal::NodeSsh {
+            cursor_pos,
+            destination_input,
+            ..
+        }) => {
             assert_eq!(*cursor_pos, 1);
             assert_eq!(destination_input, "x10.0.1.20");
         }
@@ -3532,9 +3564,14 @@ async fn test_node_ssh_modal_cursor_navigation() {
     }
 
     // 5. Ctrl+E jumps to end
-    app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)).await;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL))
+        .await;
     match &app.modal {
-        Some(Modal::NodeSsh { cursor_pos, destination_input, .. }) => {
+        Some(Modal::NodeSsh {
+            cursor_pos,
+            destination_input,
+            ..
+        }) => {
             assert_eq!(*cursor_pos, 10);
             assert_eq!(destination_input, "x10.0.1.20");
         }
@@ -3544,7 +3581,11 @@ async fn test_node_ssh_modal_cursor_navigation() {
     // 6. Backspace at end removes last char
     app.handle_key_event(common::key(KeyCode::Backspace)).await;
     match &app.modal {
-        Some(Modal::NodeSsh { cursor_pos, destination_input, .. }) => {
+        Some(Modal::NodeSsh {
+            cursor_pos,
+            destination_input,
+            ..
+        }) => {
             assert_eq!(*cursor_pos, 9);
             assert_eq!(destination_input, "x10.0.1.2");
         }
@@ -3561,7 +3602,11 @@ async fn test_node_ssh_modal_cursor_navigation() {
     // 8. Delete at 0 removes first char ('x')
     app.handle_key_event(common::key(KeyCode::Delete)).await;
     match &app.modal {
-        Some(Modal::NodeSsh { cursor_pos, destination_input, .. }) => {
+        Some(Modal::NodeSsh {
+            cursor_pos,
+            destination_input,
+            ..
+        }) => {
             assert_eq!(*cursor_pos, 0);
             assert_eq!(destination_input, "10.0.1.2");
         }
@@ -3576,14 +3621,16 @@ async fn test_node_ssh_modal_cursor_navigation() {
     }
 
     // 10. Cmd+Left (Super+Left) jumps to start
-    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER)).await;
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER))
+        .await;
     match &app.modal {
         Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 0),
         _ => panic!("expected Modal::NodeSsh"),
     }
 
     // 11. Cmd+Right (Super+Right) jumps to end
-    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER)).await;
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER))
+        .await;
     match &app.modal {
         Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8),
         _ => panic!("expected Modal::NodeSsh"),
@@ -3595,29 +3642,216 @@ async fn test_node_ssh_modal_cursor_navigation() {
         destination_input: "-p 2222 root@10.0.1.2".to_string(),
         cursor_pos: 21,
     });
-    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)).await;
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))
+        .await;
     match &app.modal {
         Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8), // before root@10.0.1.2
         _ => panic!("expected Modal::NodeSsh"),
     }
-    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)).await;
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT))
+        .await;
     match &app.modal {
         Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 3), // before 2222
         _ => panic!("expected Modal::NodeSsh"),
     }
-    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT)).await;
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT))
+        .await;
     match &app.modal {
         Some(Modal::NodeSsh { cursor_pos, .. }) => assert_eq!(*cursor_pos, 8), // after 2222 and space
         _ => panic!("expected Modal::NodeSsh"),
     }
 
     // 13. Ctrl+W deletes previous word
-    app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).await;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL))
+        .await;
     match &app.modal {
-        Some(Modal::NodeSsh { destination_input, cursor_pos, .. }) => {
+        Some(Modal::NodeSsh {
+            destination_input,
+            cursor_pos,
+            ..
+        }) => {
             assert_eq!(destination_input, "-p root@10.0.1.2");
             assert_eq!(*cursor_pos, 3);
         }
         _ => panic!("expected Modal::NodeSsh"),
     }
+}
+
+#[tokio::test]
+async fn crd_table_view_renders_without_loading_and_updates_live() {
+    let (mut app, _rx) = common::app().await;
+    app.crds = vec![
+        CrdMeta {
+            crd_name: "virtualmachines.kubevirt.io".into(),
+            group: "kubevirt.io".into(),
+            version: "v1".into(),
+            kind: "VirtualMachine".into(),
+            plural: "virtualmachines".into(),
+            singular: "virtualmachine".into(),
+            namespaced: true,
+            short_names: vec!["vm".into()],
+            printer_columns: vec![],
+            created_at: Some("2026-01-01T00:00:00Z".into()),
+        },
+        CrdMeta {
+            crd_name: "ciliumloadbalancerippools.cilium.io".into(),
+            group: "cilium.io".into(),
+            version: "v2".into(),
+            kind: "CiliumLoadBalancerIPPool".into(),
+            plural: "ciliumloadbalancerippools".into(),
+            singular: "ciliumloadbalancerippool".into(),
+            namespaced: false,
+            short_names: vec!["ippool".into()],
+            printer_columns: vec![],
+            created_at: None,
+        },
+    ];
+
+    // 1. Switch to CRD view: rows populated immediately from self.crds, is_loading = false
+    app.switch_view_to_kind(ResourceKind::CustomResourceDefinitions)
+        .await;
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
+    assert!(!t.is_loading, "crd table must not hang in loading");
+    assert_eq!(t.raw_items.len(), 2);
+    assert_eq!(t.filtered_indices.len(), 2);
+
+    // 2. Table rows carry NAME, GROUP, VERSION, SCOPE, AGE
+    assert_eq!(t.raw_items[0]["name"], "virtualmachines.kubevirt.io");
+    assert_eq!(t.raw_items[0]["group"], "kubevirt.io");
+    assert_eq!(t.raw_items[0]["version"], "v1");
+    assert_eq!(t.raw_items[0]["scope"], "Namespaced");
+    assert!(!t.raw_items[0]["age"].as_str().unwrap().is_empty()); // humanized age from created_at
+    assert_eq!(t.raw_items[1]["scope"], "Cluster");
+    assert_eq!(t.raw_items[1]["age"], "");
+
+    // 3. Render screen: headers and CRD names appear
+    let screen = wide(&mut app);
+    assert!(
+        screen.contains("CustomResourceDefinitions"),
+        "header in screen:\n{screen}"
+    );
+    assert!(
+        screen.contains("virtualmachines.kubevirt.io"),
+        "vm in screen:\n{screen}"
+    );
+    assert!(
+        screen.contains("ciliumloadbalancerippools.cilium.io"),
+        "cilium in screen:\n{screen}"
+    );
+
+    // 4. Live update via handle_crds_update updates active table view
+    let update_payload = serde_json::to_string(&vec![CrdMeta {
+        crd_name: "prometheuses.monitoring.coreos.com".into(),
+        group: "monitoring.coreos.com".into(),
+        version: "v1".into(),
+        kind: "Prometheus".into(),
+        plural: "prometheuses".into(),
+        singular: "prometheus".into(),
+        namespaced: true,
+        short_names: vec!["prom".into()],
+        printer_columns: vec![],
+        created_at: None,
+    }])
+    .unwrap();
+    app.handle_crds_update(&update_payload);
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
+    assert_eq!(t.raw_items.len(), 1);
+    assert_eq!(t.raw_items[0]["name"], "prometheuses.monitoring.coreos.com");
+    assert!(!t.is_loading);
+
+    // 5. Failure via handle_crds_failed clears loading and sets error toast
+    let ActiveView::Table(ref mut t) = app.active_view else {
+        panic!("expected table")
+    };
+    t.is_loading = true;
+    app.handle_crds_failed("connection refused");
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
+    assert!(!t.is_loading, "failure must clear loading");
+    assert!(toast(&app).contains("Failed to load CRDs: connection refused"));
+}
+
+#[tokio::test]
+async fn crd_table_drilldown_switches_view_and_triggers_fetch() {
+    let (mut app, _rx) = common::app().await;
+    let vm_crd = CrdMeta {
+        crd_name: "virtualmachines.kubevirt.io".into(),
+        group: "kubevirt.io".into(),
+        version: "v1".into(),
+        kind: "VirtualMachine".into(),
+        plural: "virtualmachines".into(),
+        singular: "virtualmachine".into(),
+        namespaced: true,
+        short_names: vec!["vm".into()],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    app.crds = vec![vm_crd.clone()];
+
+    // Start in CRD table
+    app.switch_view_to_kind(ResourceKind::CustomResourceDefinitions)
+        .await;
+
+    // Press Enter to drill down into the selected CRD
+    app.handle_key_event(common::key(KeyCode::Enter)).await;
+
+    // Active view must now be CustomResource(vm_crd)
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
+    assert_eq!(t.kind, ResourceKind::CustomResource(vm_crd));
+    assert_eq!(
+        app.current_watch_channel.as_deref(),
+        Some("watch:test-cluster:default:virtualmachines.kubevirt.io")
+    );
+}
+
+#[tokio::test]
+async fn crd_stream_error_payload_and_instances_failed_clears_loading() {
+    let (mut app, _rx) = common::app().await;
+    let vm_crd = CrdMeta {
+        crd_name: "virtualmachines.kubevirt.io".into(),
+        group: "kubevirt.io".into(),
+        version: "v1".into(),
+        kind: "VirtualMachine".into(),
+        plural: "virtualmachines".into(),
+        singular: "virtualmachine".into(),
+        namespaced: true,
+        short_names: vec!["vm".into()],
+        printer_columns: vec![],
+        created_at: None,
+    };
+    app.crds = vec![vm_crd.clone()];
+    app.switch_view_to_crd(vm_crd.clone()).await;
+
+    let ch = "watch:test-cluster:default:virtualmachines.kubevirt.io".to_string();
+    assert_eq!(app.current_watch_channel.as_deref(), Some(ch.as_str()));
+
+    // 1. Stream event with error payload (e.g. 404 Not Found from permanent watch error)
+    app.handle_stream_event(
+        ch,
+        json!({ "error": "the server could not find the requested resource (get virtualmachines.kubevirt.io)" }),
+    );
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
+    assert!(!t.is_loading, "stream error payload must clear is_loading");
+    assert!(toast(&app).contains("the server could not find the requested resource"));
+
+    // 2. Direct REST list failure via handle_crd_instances_failed clears is_loading
+    let ActiveView::Table(ref mut t) = app.active_view else {
+        panic!("expected table")
+    };
+    t.is_loading = true;
+    app.handle_crd_instances_failed("VirtualMachine", "connection timeout");
+    let ActiveView::Table(t) = &app.active_view else {
+        panic!("expected table")
+    };
+    assert!(!t.is_loading, "instance fetch error must clear is_loading");
+    assert!(toast(&app).contains("Failed to list VirtualMachine: connection timeout"));
 }

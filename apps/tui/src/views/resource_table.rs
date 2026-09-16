@@ -1525,6 +1525,7 @@ mod tests {
                     description: None,
                 },
             ],
+            created_at: None,
         };
 
         // Check generated columns

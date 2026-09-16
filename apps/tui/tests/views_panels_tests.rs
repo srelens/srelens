@@ -1862,6 +1862,7 @@ fn crd(namespaced: bool, columns: &[(&str, &str, i32)]) -> ResourceKind {
                 description: None,
             })
             .collect(),
+        created_at: None,
     })
 }
 

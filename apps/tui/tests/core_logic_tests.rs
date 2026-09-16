@@ -29,8 +29,9 @@ use srelens_tui::ai_skills::{
     CavemanCommandAction, CavemanLevel, BUILTIN_PLAYBOOKS,
 };
 use srelens_tui::commands::{
-    command_suggestions, command_suggestions_with_crds, resolve_command, resolve_command_with_crds,
-    CommandTarget, CrdMeta, DynamicCommandDef, ResourceKind, COMMAND_REGISTRY,
+    command_suggestions, command_suggestions_with_crds, crd_cache_path, load_cached_crds,
+    resolve_command, resolve_command_with_crds, save_cached_crds, CommandTarget, CrdMeta,
+    DynamicCommandDef, ResourceKind, COMMAND_REGISTRY,
 };
 use srelens_tui::deep_link::DeepLink;
 use srelens_tui::event::{AppEvent, EventHandler};
@@ -69,6 +70,7 @@ fn crd(plural: &str, singular: &str, kind: &str, group: &str, short_names: &[&st
         namespaced: true,
         short_names: short_names.iter().map(|s| s.to_string()).collect(),
         printer_columns: vec![],
+        created_at: None,
     }
 }
 
@@ -1967,8 +1969,10 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_max_visible: 12,
         command_popup_density: CommandPopupDensity::Large,
         show_feature_banner: true,
+        check_updates: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        update_available: None,
     };
     cfg.save().expect("save succeeds");
     assert!(file.is_file());
@@ -1985,31 +1989,107 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         command_popup_max_visible: 1,
         command_popup_density: CommandPopupDensity::Compact,
         show_feature_banner: true,
+        check_updates: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        update_available: None,
     };
     clamped.clamp();
     assert_eq!(clamped.command_popup_max_width, 200);
     assert_eq!(clamped.command_popup_max_visible, 3);
     assert_eq!(clamped.command_popup_density, CommandPopupDensity::Compact);
     assert!(clamped.show_feature_banner);
+    assert!(clamped.check_updates);
 
     let mut low = TuiConfig {
         command_popup_max_width: 10,
         command_popup_max_visible: 99,
         command_popup_density: CommandPopupDensity::Large,
         show_feature_banner: false,
+        check_updates: false,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        update_available: None,
     };
     low.clamp();
     assert_eq!(low.command_popup_max_width, 40);
     assert_eq!(low.command_popup_max_visible, 20);
     assert_eq!(low.command_popup_density, CommandPopupDensity::Large);
     assert!(!low.show_feature_banner);
+    assert!(!low.check_updates);
 
     // 5. Corrupt file gracefully falls back to default
     std::fs::write(&file, "{ corrupt json").unwrap();
     std::env::set_var("SRELENS_TUI_CONFIG_PATH", &file);
     assert_eq!(TuiConfig::load(), TuiConfig::default());
+}
+
+#[test]
+fn crd_cache_persistence_and_sanitization() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    std::env::set_var("SRELENS_CACHE_DIR", temp_dir.path());
+
+    // 1. Empty context returns None
+    assert_eq!(crd_cache_path(""), None);
+    assert_eq!(crd_cache_path("   "), None);
+
+    // 2. Path sanitizes special characters like slashes, colons, spaces
+    let complex_ctx = "arn:aws:eks:us-west-2:123456789012:cluster/prod-cluster";
+    let path = crd_cache_path(complex_ctx).expect("path exists");
+    assert!(path
+        .to_string_lossy()
+        .contains("arn_aws_eks_us-west-2_123456789012_cluster_prod-cluster.json"));
+    assert!(!path.to_string_lossy().contains(':'));
+
+    // 3. Loading non-existent cache returns empty vec
+    let loaded = load_cached_crds("nonexistent-cluster");
+    assert!(loaded.is_empty());
+
+    // 4. Save and load round trip with created_at and printer columns
+    let test_meta = vec![
+        CrdMeta {
+            crd_name: "virtualmachines.kubevirt.io".to_string(),
+            group: "kubevirt.io".to_string(),
+            version: "v1".to_string(),
+            kind: "VirtualMachine".to_string(),
+            plural: "virtualmachines".to_string(),
+            singular: "virtualmachine".to_string(),
+            namespaced: true,
+            short_names: vec!["vm".to_string(), "vms".to_string()],
+            printer_columns: vec![srelens_tui::commands::PrinterColumn {
+                name: "AGE".to_string(),
+                json_path: ".metadata.creationTimestamp".to_string(),
+                col_type: "date".to_string(),
+                priority: 0,
+                description: None,
+            }],
+            created_at: Some("2026-01-15T10:00:00Z".to_string()),
+        },
+        cilium_pool(),
+    ];
+
+    save_cached_crds("kind-kind", &test_meta);
+    let reloaded = load_cached_crds("kind-kind");
+    assert_eq!(reloaded.len(), 2);
+    assert_eq!(reloaded[0].kind, "VirtualMachine");
+    assert_eq!(
+        reloaded[0].created_at.as_deref(),
+        Some("2026-01-15T10:00:00Z")
+    );
+    assert_eq!(reloaded[0].printer_columns.len(), 1);
+    assert_eq!(reloaded[1].crd_name, "ciliumloadbalancerippools.cilium.io");
+
+    // 5. Saving empty slice does not overwrite or create empty files
+    let empty: Vec<CrdMeta> = vec![];
+    save_cached_crds("empty-cluster", &empty);
+    assert!(load_cached_crds("empty-cluster").is_empty());
+
+    // 6. Corrupt cache file gracefully returns empty vec
+    let corrupt_ctx = "corrupt-cluster";
+    let corrupt_path = crd_cache_path(corrupt_ctx).unwrap();
+    std::fs::create_dir_all(corrupt_path.parent().unwrap()).unwrap();
+    std::fs::write(&corrupt_path, "{ not valid json").unwrap();
+    assert!(load_cached_crds(corrupt_ctx).is_empty());
+
+    std::env::remove_var("SRELENS_CACHE_DIR");
 }

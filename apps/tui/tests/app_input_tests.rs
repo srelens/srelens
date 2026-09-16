@@ -133,6 +133,7 @@ fn widget_crd() -> CrdMeta {
             priority: 0,
             description: None,
         }],
+        created_at: None,
     }
 }
 
@@ -1403,6 +1404,7 @@ async fn command_completion_preserves_crd_identity_across_alias_and_group_collis
                 namespaced: false,
                 short_names: vec![],
                 printer_columns: vec![],
+                created_at: None,
             })
             .collect();
         let expected = CommandTarget::CustomResource(
@@ -4003,6 +4005,7 @@ async fn non_pod_and_custom_resources_reject_pod_actions() {
         namespaced: true,
         short_names: vec![],
         printer_columns: vec![],
+        created_at: None,
     });
 
     for kind in [
@@ -4294,7 +4297,8 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
     assert!(matches!(
         app.modal,
         Some(Modal::FeatureBanner {
-            show_on_startup: false
+            show_on_startup: false,
+            ..
         })
     ));
 
@@ -4304,7 +4308,8 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
     assert!(matches!(
         app.modal,
         Some(Modal::FeatureBanner {
-            show_on_startup: true
+            show_on_startup: true,
+            ..
         })
     ));
 
@@ -4323,6 +4328,7 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
     std::fs::remove_dir(&config_file).unwrap();
     app.modal = Some(Modal::FeatureBanner {
         show_on_startup: false,
+        update_available: None,
     });
 
     // Press '1' jumps directly to Helm releases
@@ -4343,6 +4349,27 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
     common::type_str(&mut app, ":features").await;
     press(&mut app, key(KeyCode::Enter)).await;
     assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    // Press 'u' checks for updates or shows update notice
+    press(&mut app, ch('u')).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+    assert!(app
+        .toast
+        .as_ref()
+        .unwrap()
+        .0
+        .contains("Checking for updates"));
+
+    app.tui_config.update_available = Some("0.99.0".to_string());
+    press(&mut app, ch('u')).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+    assert!(app
+        .toast
+        .as_ref()
+        .unwrap()
+        .0
+        .contains("Update available: 0.99.0"));
+    assert!(app.toast.as_ref().unwrap().0.contains("srelens-tui update"));
 
     // Press '9' keeps banner open and shows a toast
     press(&mut app, ch('9')).await;
@@ -4375,9 +4402,9 @@ async fn tui_config_hub_dialog_left_right_cursor_and_paste() {
     press(&mut app, key(KeyCode::Enter)).await;
     assert!(matches!(app.active_view, ActiveView::TuiConfig(_)));
 
-    // Select field 4 (Hub Context)
+    // Select field 5 (Hub Context)
     if let ActiveView::TuiConfig(ref mut cfg) = app.active_view {
-        cfg.selected_field = 4;
+        cfg.selected_field = 5;
     }
 
     // Press 'e' to start editing
@@ -5373,9 +5400,19 @@ async fn tui_config_view_key_interactions() {
     press(&mut app, ch('+')).await;
     press(&mut app, ch('-')).await;
 
-    // 3. Edit field 4 (Argo hub context)
+    // 2b. Field 4 toggle (Startup update check)
     if let ActiveView::TuiConfig(ref mut c) = app.active_view {
         c.selected_field = 4;
+    }
+    assert!(app.tui_config.check_updates);
+    press(&mut app, ch(' ')).await;
+    assert!(!app.tui_config.check_updates);
+    press(&mut app, ch(' ')).await;
+    assert!(app.tui_config.check_updates);
+
+    // 3. Edit field 5 (Argo hub context)
+    if let ActiveView::TuiConfig(ref mut c) = app.active_view {
+        c.selected_field = 5;
     }
     // Enter editing mode
     press(&mut app, key(KeyCode::Enter)).await;

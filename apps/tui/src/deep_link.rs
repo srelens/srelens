@@ -61,6 +61,7 @@ impl DeepLink {
                     CommandTarget::SetTheme(t) => format!("theme/{}", t),
                     CommandTarget::FeatureBanner => "features".to_string(),
                     CommandTarget::OpenUrl(u) => format!("open/{}", u),
+                    CommandTarget::Update => "update".to_string(),
                 };
                 format!("srelens://view/{}/{}/{}", ctx, ns, target_name)
             }

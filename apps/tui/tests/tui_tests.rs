@@ -81,6 +81,7 @@ mod tests {
             namespaced: false,
             short_names: vec!["ippool".to_string(), "lbippool".to_string()],
             printer_columns: vec![],
+            created_at: None,
         };
         let crds = vec![cilium_crd];
 
@@ -2596,6 +2597,7 @@ mod tests {
                     description: None,
                 },
             ],
+            created_at: None,
         };
 
         app.crds = vec![es_meta.clone()];
@@ -5538,6 +5540,7 @@ mod tests {
                 namespaced: false,
                 short_names: vec!["nfg".to_string()],
                 printer_columns: vec![],
+                created_at: None,
             },
             CrdMeta {
                 crd_name: "nodefeaturerules.nfd.k8s.bin".to_string(),
@@ -5549,6 +5552,7 @@ mod tests {
                 namespaced: false,
                 short_names: vec!["nfr".to_string()],
                 printer_columns: vec![],
+                created_at: None,
             },
         ];
 
@@ -5617,6 +5621,7 @@ mod tests {
             namespaced: false,
             short_names: vec![],
             printer_columns: vec![],
+            created_at: None,
         };
 
         // 1. Test fallback when no CRD is present
