@@ -19,7 +19,7 @@ import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 export { ExtensionResults } from "./ExtensionResults";
 
 
-import { useExtensions } from "./inventoryStore";
+import { extensionLabel as label, useExtensions } from "./inventoryStore";
 export { useExtensions } from "./inventoryStore";
 
 export function ExtensionManager() {
@@ -129,13 +129,23 @@ export function ExtensionManager() {
         {review && (
           <section className="extension-install extension-permission-review" aria-label="Review app permissions">
             <p>
-              {/* The name is the manifest's own text, and a manifest that has not passed
-                  the host's checks may hold one that displays as another app's, or that
-                  reorders this line. Until the host accepts it, the review says
-                  "This manifest" instead. */}
-              <strong>{review.errors?.length === 0 ? review.name : "This manifest"}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) requests:{" "}
-              {review.permissions.join(", ") || "no permissions"}. Installing an existing ID
-              replaces its manifest and refreshes its open pages.
+              {/* The name and the permission IDs are the manifest's own text, and a
+                  manifest the host has not accepted may hold text that displays as
+                  another app's or reorders this sentence. Neither is drawn until the
+                  check comes back with no problems; nothing can be installed before
+                  then either. */}
+              {review.errors?.length === 0 ? (
+                <>
+                  <strong>{review.name}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) requests:{" "}
+                  {review.permissions.join(", ") || "no permissions"}. Installing an existing ID
+                  replaces its manifest and refreshes its open pages.
+                </>
+              ) : (
+                <>
+                  <strong>This manifest</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) has
+                  not passed the host's checks, so its name and the permissions it requests are not shown.
+                </>
+              )}
             </p>
             {review.checkError ? (
               <ErrorNotice
@@ -218,12 +228,12 @@ export function ExtensionManager() {
       {state.plugins.map((plugin) => (
         <section className="extension-installed" key={plugin.manifest.id}>
           <div className="extension-toolbar">
-            <ExtensionLogo id={plugin.manifest.id} name={plugin.manifest.name} size={24} />
-            <strong>{plugin.manifest.name}</strong>
+            <ExtensionLogo id={plugin.manifest.id} name={label(plugin)} size={24} />
+            <strong>{label(plugin)}</strong>
             <span>{plugin.manifest.version} · {!plugin.signatureProof ? "Unsigned local" : plugin.quarantined ? "Signature not verified" : "Signed by srelens"}</span>
             <label>
               <input
-                aria-label={`Enable ${plugin.manifest.name}`}
+                aria-label={`Enable ${label(plugin)}`}
                 type="checkbox"
                 checked={plugin.enabled}
                 disabled={busy || Boolean(plugin.quarantined)}
@@ -239,7 +249,7 @@ export function ExtensionManager() {
             </label>
             <Button
               variant="secondary"
-              aria-label={`Details for ${plugin.manifest.name}`}
+              aria-label={`Details for ${label(plugin)}`}
               aria-expanded={details === plugin.manifest.id}
               onClick={() => setDetails(details === plugin.manifest.id ? null : plugin.manifest.id)}
             >
@@ -280,7 +290,7 @@ export function ExtensionManager() {
       ))}
       {removing && (
         <section className="extension-install" role="alertdialog" aria-label="Remove app" onKeyDown={e=>{if(e.key==="Escape" && !busy)setRemoving(null);}}>
-          <strong>Remove {removing.manifest.name}?</strong>
+          <strong>Remove {label(removing)}?</strong>
           <p>This removes the app and its saved settings.</p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={()=>setRemoving(null)}>Cancel</Button>
           <Button variant="danger" disabled={busy} onClick={()=>{void change({action:"remove",id:removing.manifest.id}).then(removed=>{if(removed)setRemoving(null);});}}>Remove app</Button>
