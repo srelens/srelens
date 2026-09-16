@@ -141,22 +141,35 @@ pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
     leaves(redacted, &mut kept);
     let mut all = HashSet::new();
     leaves(args, &mut all);
-    let mut hidden: Vec<String> = all
+    let hidden: Vec<String> = all
         .into_iter()
         .filter(|s| !s.is_empty() && !kept.contains(s))
         .collect();
-    hidden.sort_by_key(|s| std::cmp::Reverse(s.len()));
 
-    let mut out = error.to_string();
-    for value in hidden {
-        out = out.replace(&value, "<redacted>");
-        let escaped = format!("{value:?}");
-        let escaped = &escaped[1..escaped.len() - 1];
-        if escaped != value {
-            out = out.replace(escaped, "<redacted>");
-        }
+    if hidden.is_empty() {
+        return error.to_string();
     }
-    out
+
+    let mut patterns = Vec::new();
+    for value in hidden {
+        let escaped = format!("{value:?}");
+        let escaped = escaped[1..escaped.len() - 1].to_string();
+        if escaped != value {
+            patterns.push(escaped);
+        }
+        patterns.push(value);
+    }
+
+    patterns.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    patterns.dedup();
+
+    let ac = aho_corasick::AhoCorasick::builder()
+        .match_kind(aho_corasick::MatchKind::LeftmostFirst)
+        .build(&patterns)
+        .expect("AhoCorasick failed to build");
+
+    let replacements = vec!["<redacted>"; patterns.len()];
+    ac.replace_all(error, &replacements)
 }
 
 /// The most recent `limit` entries, newest first.
