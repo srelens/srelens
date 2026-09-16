@@ -2567,8 +2567,8 @@ fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
     assert!(text_enabled.contains("[0]"), "shows jump key 0");
     assert!(text_enabled.contains("[9]"), "shows jump key 9");
     assert!(
-        text_enabled.contains("up to date"),
-        "shows up to date status when no update"
+        text_enabled.contains("Version v"),
+        "shows version in banner header"
     );
     assert!(text_enabled.contains("[●]"), "shows enabled checkbox dot");
     assert!(

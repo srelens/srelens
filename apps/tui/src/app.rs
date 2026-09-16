@@ -1246,39 +1246,55 @@ impl App {
             }
         }
 
-        // Invalidate resource_cache for this kind across target, active, and all-namespaces scopes
-        if !kind.is_empty() {
-            let ctx = self.active_context.clone();
-            let candidate_namespaces = [
-                ns.clone(),
-                self.active_namespace.clone(),
-                String::new(),
-            ];
-            let crd_match = self
-                .crds
-                .iter()
-                .find(|c| {
-                    c.kind.eq_ignore_ascii_case(&kind) || c.plural.eq_ignore_ascii_case(&kind)
-                })
-                .cloned();
+        self.invalidate_resource_cache_for(&kind, &ns);
+        self.set_toast(msg.to_string(), Theme::status_ok());
+    }
 
-            for c_ns in &candidate_namespaces {
+    pub fn invalidate_resource_cache_for(&mut self, kind: &str, ns: &str) {
+        if kind.is_empty() {
+            return;
+        }
+        let ctx = self.active_context.clone();
+        let candidate_namespaces = [
+            ns.to_string(),
+            self.active_namespace.clone(),
+            String::new(),
+        ];
+        let crd_match = self
+            .crds
+            .iter()
+            .find(|c| {
+                c.kind.eq_ignore_ascii_case(kind) || c.plural.eq_ignore_ascii_case(kind)
+            })
+            .cloned();
+
+        for c_ns in &candidate_namespaces {
+            self.resource_cache
+                .remove(&(ctx.clone(), c_ns.clone(), kind.to_string()));
+            if let Some(ref crd) = crd_match {
                 self.resource_cache
-                    .remove(&(ctx.clone(), c_ns.clone(), kind.clone()));
-                if let Some(ref crd) = crd_match {
-                    self.resource_cache
-                        .remove(&(ctx.clone(), c_ns.clone(), crd.crd_name.clone()));
-                    self.resource_cache
-                        .remove(&(ctx.clone(), c_ns.clone(), crd.plural.clone()));
-                }
-            }
-
-            if let Some(crd) = crd_match {
-                self.fetch_crd_instances(crd);
+                    .remove(&(ctx.clone(), c_ns.clone(), crd.crd_name.clone()));
+                self.resource_cache
+                    .remove(&(ctx.clone(), c_ns.clone(), crd.plural.clone()));
             }
         }
 
-        self.set_toast(msg.to_string(), Theme::status_ok());
+        if let Some(crd) = crd_match {
+            self.fetch_crd_instances(crd);
+        }
+    }
+
+    pub fn handle_yaml_partial_applied(&mut self, applied_summary: &str, error_summary: &str) {
+        if let ActiveView::Yaml(yaml) = &mut self.active_view {
+            yaml.commit_content(yaml.yaml_content.clone());
+        }
+        self.set_toast(
+            format!(
+                "Partial apply: updated {}; failed {}",
+                applied_summary, error_summary
+            ),
+            Theme::status_error(),
+        );
     }
 
     pub fn handle_yaml_error(&mut self, err: &str) {

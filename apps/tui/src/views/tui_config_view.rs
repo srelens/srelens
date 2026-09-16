@@ -1111,13 +1111,13 @@ pub fn render_tui_config_view(
         let current_ver = env!("CARGO_PKG_VERSION");
         let update_status_span = match &config.update_available {
             Some(ver) => Span::styled(
-                format!("▲ Update Available: {}", ver),
+                format!("▲ Update Available: v{}", ver),
                 Style::default()
                     .fg(Theme::yellow())
                     .add_modifier(Modifier::BOLD),
             ),
             None => Span::styled(
-                format!("Up to date (current: v{})", current_ver),
+                format!("v{} (latest known)", current_ver),
                 Style::default().fg(Theme::dim()),
             ),
         };

@@ -535,9 +535,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match srelens_kube::manifest::split_documents(&new_yaml) {
                                     Ok(docs) if !docs.is_empty() => {
                                         let results = srelens_kube::manifest::apply_documents(&client, docs, fallback_ns, true).await;
-                                        let all_ok = !results.is_empty() && results.iter().all(|d| d.applied);
-                                        if all_ok {
-                                            let updated_names: Vec<String> = results.iter().map(|d| format!("{}/{}", d.kind, d.name)).collect();
+                                        let applied_docs: Vec<_> = results.iter().filter(|d| d.applied).collect();
+                                        let failed_docs: Vec<_> = results.iter().filter(|d| !d.applied).collect();
+
+                                        // Invalidate cache for every document that was applied
+                                        for doc in &applied_docs {
+                                            let doc_ns = res_ns.as_deref().unwrap_or("");
+                                            app.invalidate_resource_cache_for(&doc.kind, doc_ns);
+                                        }
+
+                                        if failed_docs.is_empty() && !applied_docs.is_empty() {
+                                            let updated_names: Vec<String> = applied_docs.iter().map(|d| format!("{}/{}", d.kind, d.name)).collect();
                                             let msg = format!("Updated {} in cluster", updated_names.join(", "));
                                             if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
                                                 yaml.commit_content(new_yaml);
@@ -546,10 +554,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 &format!("yaml_applied:{}:{}", res_kind, res_ns.as_deref().unwrap_or("")),
                                                 &msg,
                                             );
-                                        } else {
-                                            let errors: Vec<String> = results
+                                        } else if !applied_docs.is_empty() {
+                                            let applied_names: Vec<String> = applied_docs.iter().map(|d| format!("{}/{}", d.kind, d.name)).collect();
+                                            let error_msgs: Vec<String> = failed_docs
                                                 .iter()
-                                                .filter(|d| !d.applied)
+                                                .map(|d| {
+                                                    let err = d.error.as_deref().unwrap_or("unknown apply error");
+                                                    if !d.kind.is_empty() && !d.name.is_empty() {
+                                                        format!("{}/{}: {}", d.kind, d.name, err)
+                                                    } else {
+                                                        err.to_string()
+                                                    }
+                                                })
+                                                .collect();
+                                            if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
+                                                yaml.commit_content(new_yaml);
+                                            }
+                                            app.handle_yaml_partial_applied(&applied_names.join(", "), &error_msgs.join("; "));
+                                        } else {
+                                            let errors: Vec<String> = failed_docs
+                                                .iter()
                                                 .map(|d| {
                                                     let err = d.error.as_deref().unwrap_or("unknown apply error");
                                                     if !d.kind.is_empty() && !d.name.is_empty() {

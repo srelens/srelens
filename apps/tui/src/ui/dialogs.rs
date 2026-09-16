@@ -1215,7 +1215,7 @@ pub fn render_feature_banner_modal(
         header_lines.push(Line::from(vec![
             Span::styled(
                 format!(
-                    "Version v{} (up to date) • Type ",
+                    "Version v{} • Type ",
                     env!("CARGO_PKG_VERSION")
                 ),
                 Style::default().fg(Theme::dim()),
