@@ -9,7 +9,7 @@ Everything this server exposes over MCP, generated from the live registry so it 
 
 Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
-### Kubernetes — read-only (58)
+### Kubernetes — read-only (55)
 
 | Tool | Summary |
 | --- | --- |
@@ -51,10 +51,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.listServices` | list services in a namespace of a connected kube context |
 | `k8s.listStatefulSets` | list StatefulSets in a namespace of a connected kube context |
 | `k8s.listStorageClasses` | list StorageClasses of a connected kube context (cluster-scoped) |
-| `k8s.nodeJournalLogs` | retrieve journalctl logs for a service on a node via SSH |
 | `k8s.nodeMetrics` | node CPU/memory usage (requires metrics-server) |
-| `k8s.nodeRuntimeDiagnostics` | run non-invasive host diagnostics (containers, dmesg, disk, memory, process) on a node via SSH |
-| `k8s.nodeServiceStatus` | check the status of a systemd service (e.g. rke2-server, kubelet) on a node via SSH |
 | `k8s.openApiSchema` | fetch the OpenAPI schema for a resource kind (for field autocomplete) |
 | `k8s.podCount` | running vs total pod counts for a cluster, counted without listing pod bodies |
 | `k8s.podLogs` | fetch logs for a pod in a connected kube context: the last 200 lines by default (tail_lines to change), or set all_lines to get everything the runtime still retains (can be large) |
@@ -72,11 +69,14 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.topologyGraph` | graph the ingresses, services, workloads and dependencies of one or more namespaces |
 | `k8s.validateManifest` | validate a resource manifest against the API server (dry-run, strict) |
 
-### Kubernetes — sensitive read (3)
+### Kubernetes — sensitive read (6)
 
 | Tool | Summary |
 | --- | --- |
 | `k8s.getSecret` | read a Secret's values (sensitive; returns base64-encoded data) |
+| `k8s.nodeJournalLogs` | retrieve journalctl logs for a service on a node via SSH |
+| `k8s.nodeRuntimeDiagnostics` | run non-invasive host diagnostics (containers, dmesg, disk, memory, process) on a node via SSH |
+| `k8s.nodeServiceStatus` | check the status of a systemd service (e.g. rke2-server, kubelet) on a node via SSH |
 | `k8s.podConnections` | read the established TCP connections of pods, from their own /proc/net/tcp |
 | `k8s.topologyProbe` | the topology graph, plus each pod's open connections read over pods/exec (one exec per pod) |
 

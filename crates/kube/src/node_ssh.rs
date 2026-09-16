@@ -335,7 +335,7 @@ pub fn node_service_status_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<NodeServiceStatusIn, NodeServiceStatusOut, _, _>(
         "k8s.nodeServiceStatus",
         "check the status of a systemd service (e.g. rke2-server, kubelet) on a node via SSH",
-        Annotations::READ_ONLY,
+        Annotations::SENSITIVE_READ,
         move |input: NodeServiceStatusIn| {
             let cache = cache.clone();
             async move {
@@ -404,6 +404,15 @@ pub struct NodeJournalLogsOut {
     pub lines_returned: usize,
 }
 
+/// Quote `value` as one POSIX shell word. `ssh` hands the remote command to the
+/// target's login shell as a single string, so a caller-supplied argument has to
+/// survive that shell intact. Inside single quotes nothing is special — not `\`,
+/// `"`, `>` or `#` — and a literal `'` closes the quote, adds an escaped one and
+/// reopens. Escaping only `"` inside double quotes was not enough (#615).
+pub fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
 pub fn build_journalctl_command(
     service: &str,
     lines: u32,
@@ -416,10 +425,10 @@ pub fn build_journalctl_command(
         lines.min(2000)
     );
     if let Some(s) = since.filter(|s| !s.trim().is_empty()) {
-        cmd.push_str(&format!(" --since \"{}\"", s.trim()));
+        cmd.push_str(&format!(" --since {}", shell_quote(s.trim())));
     }
     if let Some(g) = grep.filter(|g| !g.trim().is_empty()) {
-        cmd.push_str(&format!(" --grep \"{}\"", g.trim().replace('"', "\\\"")));
+        cmd.push_str(&format!(" --grep {}", shell_quote(g.trim())));
     }
     cmd
 }
@@ -428,7 +437,7 @@ pub fn node_journal_logs_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<NodeJournalLogsIn, NodeJournalLogsOut, _, _>(
         "k8s.nodeJournalLogs",
         "retrieve journalctl logs for a service on a node via SSH",
-        Annotations::READ_ONLY,
+        Annotations::SENSITIVE_READ,
         move |input: NodeJournalLogsIn| {
             let cache = cache.clone();
             async move {
@@ -459,22 +468,47 @@ pub fn node_journal_logs_capability(cache: Arc<ClientCache>) -> Capability {
 
                 let (stdout, stderr, exit_code) =
                     run_ssh_command(&args, DEFAULT_SSH_TIMEOUT_SECS).await?;
-
-                if exit_code == 255 && !stderr.is_empty() && stdout.is_empty() {
-                    return Err(CapabilityError::Handler(format!(
-                        "SSH connection to '{target_host}' failed: {}",
-                        stderr.trim()
-                    )));
-                }
-
-                let line_count = stdout.lines().count();
-                Ok(NodeJournalLogsOut {
-                    logs: stdout,
-                    lines_returned: line_count,
-                })
+                journal_logs_result(&target_host, stdout, &stderr, exit_code)
             }
         },
     )
+}
+
+/// Turn a remote `journalctl` run into logs or an error. A failed call and an
+/// empty journal must not read as the same answer: `--since nonsense` exits 1
+/// with "Failed to parse timestamp" on stderr, and returning that as zero lines
+/// claims the node has no logs (#615). A `--grep` that matches nothing also
+/// exits 1, but with nothing on stderr, so it stays an honest empty result.
+pub fn journal_logs_result(
+    target_host: &str,
+    stdout: String,
+    stderr: &str,
+    exit_code: i32,
+) -> Result<NodeJournalLogsOut, CapabilityError> {
+    if exit_code == 255 && !stderr.is_empty() && stdout.is_empty() {
+        return Err(CapabilityError::Handler(format!(
+            "SSH connection to '{target_host}' failed: {}",
+            stderr.trim()
+        )));
+    }
+    // `StrictHostKeyChecking=accept-new` announces a first connection on
+    // stderr; that notice is ssh talking, not journalctl failing.
+    let journal_stderr = stderr
+        .lines()
+        .filter(|line| !line.starts_with("Warning: Permanently added"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if exit_code != 0 && !journal_stderr.trim().is_empty() {
+        return Err(CapabilityError::Handler(format!(
+            "journalctl on '{target_host}' failed (exit {exit_code}): {}",
+            journal_stderr.trim()
+        )));
+    }
+    let line_count = stdout.lines().count();
+    Ok(NodeJournalLogsOut {
+        logs: stdout,
+        lines_returned: line_count,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +558,7 @@ pub fn node_runtime_diagnostics_capability(cache: Arc<ClientCache>) -> Capabilit
     Capability::typed::<NodeRuntimeDiagnosticsIn, NodeRuntimeDiagnosticsOut, _, _>(
         "k8s.nodeRuntimeDiagnostics",
         "run non-invasive host diagnostics (containers, dmesg, disk, memory, process) on a node via SSH",
-        Annotations::READ_ONLY,
+        Annotations::SENSITIVE_READ,
         move |input: NodeRuntimeDiagnosticsIn| {
             let cache = cache.clone();
             async move {
@@ -544,28 +578,52 @@ pub fn node_runtime_diagnostics_capability(cache: Arc<ClientCache>) -> Capabilit
                 );
 
                 let (stdout, stderr, exit_code) = run_ssh_command(&args, DEFAULT_SSH_TIMEOUT_SECS).await?;
-
-                if exit_code == 255 && !stderr.is_empty() && stdout.is_empty() {
-                    return Err(CapabilityError::Handler(format!(
-                        "SSH connection to '{target_host}' failed: {}",
-                        stderr.trim()
-                    )));
-                }
-
-                let output = if !stdout.is_empty() {
-                    stdout
-                } else {
-                    stderr
-                };
-
-                Ok(NodeRuntimeDiagnosticsOut {
-                    check: check_name.to_string(),
-                    command: remote_cmd.to_string(),
-                    output,
-                })
+                diagnostics_result(&target_host, check_name, remote_cmd, stdout, &stderr, exit_code)
             }
         },
     )
+}
+
+/// The journal read's rule, applied to the host checks: a diagnostic that could
+/// not run is not a diagnostic that found nothing. Every command
+/// `build_diagnostics_command` returns ends in a fallback that exits 0, so a
+/// non-zero exit is the utility itself failing — `df` denied, `free` missing —
+/// and putting its stderr in `output` would render as readings (#615).
+pub fn diagnostics_result(
+    target_host: &str,
+    check: &str,
+    command: &str,
+    stdout: String,
+    stderr: &str,
+    exit_code: i32,
+) -> Result<NodeRuntimeDiagnosticsOut, CapabilityError> {
+    if exit_code == 255 && !stderr.is_empty() && stdout.is_empty() {
+        return Err(CapabilityError::Handler(format!(
+            "SSH connection to '{target_host}' failed: {}",
+            stderr.trim()
+        )));
+    }
+    // ssh's first-connection notice is ssh talking, not the check failing.
+    let check_stderr = stderr
+        .lines()
+        .filter(|line| !line.starts_with("Warning: Permanently added"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if exit_code != 0 {
+        let reason = if check_stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            check_stderr.trim()
+        };
+        return Err(CapabilityError::Handler(format!(
+            "'{check}' on '{target_host}' failed (exit {exit_code}): {reason}"
+        )));
+    }
+    Ok(NodeRuntimeDiagnosticsOut {
+        check: check.to_string(),
+        command: command.to_string(),
+        output: if stdout.is_empty() { check_stderr } else { stdout },
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -748,8 +806,55 @@ mod tests {
         let cmd_filtered = build_journalctl_command("kubelet", 200, Some("10m ago"), Some("error"));
         assert_eq!(
             cmd_filtered,
-            "journalctl -u kubelet -n 200 --no-pager --since \"10m ago\" --grep \"error\""
+            "journalctl -u kubelet -n 200 --no-pager --since '10m ago' --grep 'error'"
         );
+    }
+
+    #[test]
+    fn journalctl_arguments_cannot_escape_their_quoting() {
+        // The payload from #615: `validate_grep` lets it through, and under the
+        // old `"`-escaping the backslash closed the quote and the rest became a
+        // redirection on the node.
+        let payload = r#"\" > /tmp/output #"#;
+        assert!(validate_grep(Some(payload)).is_ok());
+        assert_eq!(
+            build_journalctl_command("kubelet", 10, None, Some(payload)),
+            r#"journalctl -u kubelet -n 10 --no-pager --grep '\" > /tmp/output #'"#
+        );
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// Quoting is only right if a real shell agrees. Run the built command with
+    /// `journalctl` stubbed to print its arguments one per line: every argument
+    /// must come back verbatim, and a redirection that escaped would swallow
+    /// the output instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_posix_shell_reads_journalctl_arguments_back_verbatim() {
+        for grep in [r#"\" > /dev/null #"#, r#"it's "quoted" \ $HOME `id`"#] {
+            let cmd = build_journalctl_command("kubelet", 10, Some("10m ago"), Some(grep));
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("journalctl() {{ printf '%s\\n' \"$@\"; }}; {cmd}"))
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            assert_eq!(
+                stdout.lines().collect::<Vec<_>>(),
+                [
+                    "-u",
+                    "kubelet",
+                    "-n",
+                    "10",
+                    "--no-pager",
+                    "--since",
+                    "10m ago",
+                    "--grep",
+                    grep
+                ],
+                "{cmd}"
+            );
+        }
     }
 
     #[test]
@@ -812,25 +917,127 @@ mod tests {
     #[test]
     fn capability_annotations_match_safety_rules() {
         let cache = ClientCache::new(std::path::PathBuf::from("/dev/null"));
-        let status = node_service_status_capability(cache.clone());
-        assert!(status.annotations.read_only);
-        assert!(!status.annotations.destructive);
-        assert!(!status.annotations.requires_confirm);
-
-        let logs = node_journal_logs_capability(cache.clone());
-        assert!(logs.annotations.read_only);
-        assert!(!logs.annotations.destructive);
-        assert!(!logs.annotations.requires_confirm);
-
-        let diag = node_runtime_diagnostics_capability(cache.clone());
-        assert!(diag.annotations.read_only);
-        assert!(!diag.annotations.destructive);
-        assert!(!diag.annotations.requires_confirm);
+        // The reads change nothing, but service status, the journal and `ps`
+        // output carry process arguments and log lines that can hold
+        // credentials, so an MCP client must not get them unprompted (#615).
+        for read in [
+            node_service_status_capability(cache.clone()),
+            node_journal_logs_capability(cache.clone()),
+            node_runtime_diagnostics_capability(cache.clone()),
+        ] {
+            assert!(read.annotations.read_only, "{}", read.id);
+            assert!(!read.annotations.destructive, "{}", read.id);
+            assert!(read.annotations.requires_confirm, "{}", read.id);
+            assert!(read.annotations.sensitive, "{}", read.id);
+        }
 
         let restart = node_service_restart_capability(cache);
         assert!(!restart.annotations.read_only);
         assert!(restart.annotations.destructive);
         assert!(restart.annotations.requires_confirm);
+    }
+
+    /// Outputs captured from journalctl 259, the exit codes included.
+    #[test]
+    fn a_failed_journalctl_is_an_error_but_a_grep_with_no_match_is_not() {
+        // An unparseable --since exits 1 and says why on stderr. Returning
+        // that as zero lines would claim the node has no logs.
+        let err =
+            journal_logs_result("worker-1", String::new(), "Failed to parse timestamp: nonsense\n", 1)
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("Failed to parse timestamp"), "{err}");
+        assert!(err.contains("worker-1"), "{err}");
+
+        // A --grep that matches nothing ALSO exits 1, with nothing on stderr.
+        let no_match = journal_logs_result(
+            "worker-1",
+            "-- Boot 327c08b63df648a7a51850bde913f768 --\n".into(),
+            "",
+            1,
+        );
+        assert!(no_match.is_ok(), "{no_match:?}");
+
+        // ssh's accept-new notice on a first connection is not journalctl failing.
+        let first_contact = journal_logs_result(
+            "worker-1",
+            String::new(),
+            "Warning: Permanently added 'worker-1' (ED25519) to the list of known hosts.\r\n",
+            1,
+        );
+        assert!(first_contact.is_ok(), "{first_contact:?}");
+
+        // A connection failure keeps its own message.
+        let unreachable = journal_logs_result(
+            "worker-1",
+            String::new(),
+            "ssh: connect to host worker-1 port 22: Connection refused\n",
+            255,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unreachable.contains("SSH connection to 'worker-1' failed"), "{unreachable}");
+
+        let logs = journal_logs_result("worker-1", "one\ntwo\n".into(), "", 0).unwrap();
+        assert_eq!(logs.lines_returned, 2);
+    }
+
+    #[test]
+    fn a_diagnostic_that_could_not_run_is_an_error_not_a_reading() {
+        let err = diagnostics_result(
+            "worker-1",
+            "disk",
+            "df -h",
+            String::new(),
+            "df: /: Permission denied\n",
+            1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("'disk' on 'worker-1' failed (exit 1)"), "{err}");
+        assert!(err.contains("Permission denied"), "{err}");
+
+        // Exit 0 is a reading...
+        let ok = diagnostics_result(
+            "worker-1",
+            "memory",
+            "free -m",
+            "total used free\n".into(),
+            "",
+            0,
+        )
+        .unwrap();
+        assert_eq!(ok.check, "memory");
+        assert_eq!(ok.command, "free -m");
+        assert!(ok.output.contains("total"));
+
+        // ...including the fallback echo, which is an answer about the host
+        // rather than a failure: it exits 0.
+        let fallback = diagnostics_result(
+            "worker-1",
+            "containers",
+            "crictl ps ... || echo 'No container runtime CLI ... found'",
+            "No container runtime CLI (crictl/nerdctl/docker/ctr) found\n".into(),
+            "",
+            0,
+        )
+        .unwrap();
+        assert!(fallback.output.contains("No container runtime CLI"));
+
+        let unreachable = diagnostics_result(
+            "worker-1",
+            "disk",
+            "df -h",
+            String::new(),
+            "ssh: connect to host worker-1 port 22: Connection refused\n",
+            255,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            unreachable.contains("SSH connection to 'worker-1' failed"),
+            "{unreachable}"
+        );
     }
 
     #[test]

@@ -496,6 +496,44 @@ pub fn matches_destination(
 
     let app_dest_name = &app.destination_name;
 
+    // The explicit opt-in: match on names alone, whatever the servers say.
+    let name_fallback = || {
+        match_by_name
+            && !app_dest_name.is_empty()
+            && (name_matches(current_context, app_dest_name)
+                || current_cluster_name.is_some_and(|c| name_matches(c, app_dest_name)))
+    };
+
+    // Server identity outranks names, `match_by_name` included. The app's
+    // server is its own destination.server, or what Argo's cluster secrets
+    // register for its destination.name. When that and the current server are
+    // both known and differ, this is another cluster however alike the names
+    // read — context `prod` passes `name_matches` against destination
+    // `team-prod` — and listing it would let a sync land on the wrong spoke
+    // (#615). The flag cannot override this: the only production caller
+    // (`apps/tui`, the applications fetch) hardcodes it to `true`, so an
+    // override would leave that wrong-spoke listing exactly as it was.
+    //
+    // The cost is that a cluster Argo registers under a different URL than the
+    // local kubeconfig no longer matches by name. Two known, differing servers
+    // are the one signal here that cannot be a coincidence, and acting on the
+    // wrong cluster is worse than not listing its apps.
+    let app_server = if !app.destination_server.trim().is_empty() {
+        Some(app.destination_server.as_str())
+    } else if !app_dest_name.is_empty() {
+        cluster_mapping.and_then(|mapping| mapping.server_for_name(app_dest_name))
+    } else {
+        None
+    };
+    if let (Some(current), Some(app_server)) = (
+        current_server_url.filter(|s| !s.trim().is_empty()),
+        app_server,
+    ) {
+        if normalize_server_url(current) != normalize_server_url(app_server) {
+            return false;
+        }
+    }
+
     // 1. Direct match by destination_name against context or cluster name
     if !app_dest_name.is_empty() {
         if name_matches(current_context, app_dest_name) {
@@ -552,18 +590,7 @@ pub fn matches_destination(
     }
 
     // 4. Fallback match_by_name if enabled
-    if match_by_name && !app_dest_name.is_empty() {
-        if name_matches(current_context, app_dest_name) {
-            return true;
-        }
-        if let Some(c_cluster) = current_cluster_name {
-            if name_matches(c_cluster, app_dest_name) {
-                return true;
-            }
-        }
-    }
-
-    false
+    name_fallback()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -856,6 +883,26 @@ pub async fn trigger_argo_sync(
     Ok(())
 }
 
+/// The merge patch that turns auto-sync on or off.
+///
+/// Enabling sends `automated: {}` and nothing more. Under JSON merge patch
+/// (RFC 7386, what `Patch::Merge` sends for a custom resource) an empty object
+/// creates `automated` when the Application has none — auto-sync starts with
+/// Argo's defaults, prune and self-heal off — and leaves every key already
+/// there untouched when it has one. The confirmation says only "Enable
+/// Auto-Sync", so enabling must not switch pruning or self-heal on (#615). Nor
+/// may it read the policy first and write it back: a change made between the
+/// read and the write would be overwritten with the stale value, and a role
+/// allowed to patch Applications but not get them could no longer toggle.
+pub fn auto_sync_patch(enable: bool) -> Value {
+    let automated = if enable {
+        serde_json::json!({})
+    } else {
+        Value::Null
+    };
+    serde_json::json!({ "spec": { "syncPolicy": { "automated": automated } } })
+}
+
 pub async fn toggle_argo_auto_sync(
     cache: &Arc<ClientCache>,
     context: &str,
@@ -871,26 +918,7 @@ pub async fn toggle_argo_auto_sync(
     let ar = argo_application_resource();
     let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
 
-    let patch = if enable {
-        serde_json::json!({
-            "spec": {
-                "syncPolicy": {
-                    "automated": {
-                        "prune": true,
-                        "selfHeal": true
-                    }
-                }
-            }
-        })
-    } else {
-        serde_json::json!({
-            "spec": {
-                "syncPolicy": {
-                    "automated": null
-                }
-            }
-        })
-    };
+    let patch = auto_sync_patch(enable);
 
     api.patch(name, &PatchParams::apply("srelens"), &Patch::Merge(&patch))
         .await
@@ -1110,7 +1138,11 @@ mod tests {
             None,
             true
         ));
-        assert!(matches_destination(
+        // ...but not once the servers are known to differ: this app targets
+        // api.prod.example.com and the reader is on other-url.com, so the
+        // matching name is a coincidence, and `match_by_name` does not override
+        // it (#615). This asserted a match until that change.
+        assert!(!matches_destination(
             &app,
             "prod-cluster",
             None,
@@ -1314,6 +1346,80 @@ mod tests {
                 false,
             ),
             "App targeting active cluster via registered destination_server must match"
+        );
+    }
+
+    #[test]
+    fn a_known_different_server_outranks_a_similar_name() {
+        // #615: context `prod` passes `name_matches` against destination
+        // `team-prod`. Once both servers are known and differ, that app belongs
+        // to another spoke and must not be listed, or synced, from this one.
+        let mut mapping = ArgoClusterMapping::new();
+        mapping.insert("prod", "https://10.0.0.1:6443");
+        mapping.insert("team-prod", "https://10.0.0.2:6443");
+        let mut by_name = ArgoApplication::from_json(&serde_json::json!({}));
+        by_name.destination_name = "team-prod".to_string();
+        let mut by_server = ArgoApplication::from_json(&serde_json::json!({}));
+        by_server.destination_server = "https://10.0.0.2:6443".to_string();
+
+        for app in [&by_name, &by_server] {
+            assert!(!matches_destination(
+                app,
+                "prod",
+                Some("prod"),
+                Some("https://10.0.0.1:6443"),
+                Some(&mapping),
+                false,
+            ));
+        }
+
+        // `match_by_name` does not override it. The only production caller
+        // hardcodes the flag to `true`, so an override would leave the
+        // wrong-spoke listing exactly as it was.
+        assert!(!matches_destination(
+            &by_name,
+            "prod",
+            None,
+            Some("https://10.0.0.1:6443"),
+            Some(&mapping),
+            true,
+        ));
+
+        // With no server known on one side, the name is the only signal there
+        // is, and fuzzy matching still applies.
+        assert!(matches_destination(
+            &by_name,
+            "prod",
+            None,
+            None,
+            Some(&mapping),
+            false
+        ));
+        assert!(matches_destination(
+            &by_name,
+            "prod",
+            None,
+            Some("https://10.0.0.1:6443"),
+            Some(&ArgoClusterMapping::new()),
+            false,
+        ));
+    }
+
+    #[test]
+    fn enabling_auto_sync_sets_no_policy_flags_of_its_own() {
+        // #615: enabling once patched prune and selfHeal to true whatever the
+        // Application declared, so a toggle labelled "Enable Auto-Sync" also
+        // opted it into deleting resources and reverting live changes. An empty
+        // `automated` under merge patch creates the policy with Argo's defaults
+        // when absent and leaves an existing one's keys untouched, without a
+        // read that could write back a stale policy.
+        assert_eq!(
+            auto_sync_patch(true),
+            serde_json::json!({"spec": {"syncPolicy": {"automated": {}}}})
+        );
+        assert_eq!(
+            auto_sync_patch(false),
+            serde_json::json!({"spec": {"syncPolicy": {"automated": null}}})
         );
     }
 

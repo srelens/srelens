@@ -493,8 +493,8 @@
     "id": "k8s.nodeJournalLogs",
     "readOnly": true,
     "destructive": false,
-    "requiresConfirm": false,
-    "sensitive": false
+    "requiresConfirm": true,
+    "sensitive": true
   },
   {
     "id": "k8s.nodeMetrics",
@@ -507,8 +507,8 @@
     "id": "k8s.nodeRuntimeDiagnostics",
     "readOnly": true,
     "destructive": false,
-    "requiresConfirm": false,
-    "sensitive": false
+    "requiresConfirm": true,
+    "sensitive": true
   },
   {
     "id": "k8s.nodeServiceRestart",
@@ -521,8 +521,8 @@
     "id": "k8s.nodeServiceStatus",
     "readOnly": true,
     "destructive": false,
-    "requiresConfirm": false,
-    "sensitive": false
+    "requiresConfirm": true,
+    "sensitive": true
   },
   {
     "id": "k8s.openApiSchema",
