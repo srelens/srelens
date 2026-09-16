@@ -75,7 +75,8 @@ exactly that.
   below is not one, because a non-browser client can send any `Host` it
   likes.
 - A **Host header check** rejects requests whose `Host` isn't a loopback
-  value (`127.0.0.1`, `::1`, or `localhost`). Binding loopback alone doesn't
+  value (a loopback IP such as `127.0.0.1` or `::1`, or `localhost`) —
+  every address the bind rule above accepts. Binding loopback alone doesn't
   stop a page on another domain from resolving to 127.0.0.1 and posting to
   the port; the Host check does. It applies to every route, including the
   unauthenticated `/healthz`, so nothing here answers a caller that isn't

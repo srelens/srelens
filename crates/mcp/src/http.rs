@@ -398,8 +398,9 @@ async fn rpc(
     }
 }
 
-/// True for `127.0.0.1[:port]`, `[::1]`, `[::1]:port`, bare `::1`, and
-/// `localhost[:port]` (case-insensitively). Host header hostnames are
+/// True for any loopback IP literal — `127.0.0.1[:port]` and the rest of
+/// `127.0.0.0/8`, `[::1]`, `[::1]:port`, bare `::1`, an IPv4-mapped
+/// loopback — and `localhost[:port]` (case-insensitively). Host header hostnames are
 /// case-insensitive per HTTP semantics, and IPv6 needs care: a bracketed
 /// address may carry a `:port` suffix outside the brackets, but the colons
 /// *inside* the brackets are part of the address, not port separators, and
@@ -436,7 +437,14 @@ fn host_is_loopback(host: &str) -> bool {
             _ => host,
         }
     };
-    h.eq_ignore_ascii_case("127.0.0.1") || h == "::1" || h.eq_ignore_ascii_case("localhost")
+    // Any loopback IP, not just `127.0.0.1` and `::1`: `check_bind_addr`
+    // lets a host bind `127.0.0.2` or `[::ffff:127.0.0.1]`, and a client of
+    // that server sends the address it connected to as `Host`. The same
+    // canonical-loopback test on both sides keeps them in step.
+    h.eq_ignore_ascii_case("localhost")
+        || h.parse::<std::net::IpAddr>()
+            .map(|ip| ip.to_canonical().is_loopback())
+            .unwrap_or(false)
 }
 
 /// True when the host part of a `Host` header is an IP literal — a dotted
@@ -1350,6 +1358,40 @@ mod tests {
             "::1",
         ] {
             assert!(host_is_loopback(host), "expected {host:?} to be accepted");
+        }
+    }
+
+    /// Every loopback address `check_bind_addr` lets a host bind must also
+    /// pass the Host guard, or a client of `--mcp-http 127.0.0.2:8765` sends
+    /// `Host: 127.0.0.2:8765` and gets 403 from a server that just reported
+    /// itself up.
+    #[test]
+    fn host_is_loopback_accepts_every_loopback_address_the_bind_accepts() {
+        for host in [
+            "127.0.0.2:8765",
+            "127.255.255.254",
+            "[::ffff:127.0.0.1]:8765",
+            "[::ffff:127.0.0.1]",
+        ] {
+            assert!(host_is_loopback(host), "expected {host:?} to be accepted");
+        }
+    }
+
+    #[tokio::test]
+    async fn loopback_router_answers_the_address_it_was_bound_on() {
+        let token = crate::auth::Token::generate();
+        for host in ["127.0.0.2:8765", "[::ffff:127.0.0.1]:8765"] {
+            let app = router_with_auth(test_server(), token.clone(), Exposure::Loopback);
+            let resp = app
+                .oneshot(
+                    Request::get("/healthz")
+                        .header("host", host)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "Host {host:?}");
         }
     }
 
