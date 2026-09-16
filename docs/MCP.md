@@ -110,10 +110,15 @@ exactly that.
     write, `yaml` on `k8s.applyManifest`, and `values` on the helm
     capabilities. These carry secret material under key names that look
     perfectly ordinary (`username`, `ca.crt`), so matching key names alone
-    would miss them.
+    would miss them;
+  - `settings` on `extensions.configure` keeps its setting names but loses
+    every value. An app's settings are free-form and nothing marks one as
+    secret, so a value under `credential` or `certificate` would otherwise be
+    written verbatim — for a denied call too.
 
   Identifying fields like `context`, `namespace`, `name` and `kind` survive,
-  so you can still see which cluster and object an agent touched.
+  so you can still see which cluster and object an agent touched, and the
+  `action` and app `id` of an `extensions.configure` call survive with them.
 - The bearer token lives in your **OS keychain** where one is available,
   falling back to a `0600` file otherwise (headless Linux, minimal window
   managers). Settings → MCP only speaks up about this when it has fallen

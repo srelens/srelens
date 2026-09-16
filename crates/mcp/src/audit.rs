@@ -33,9 +33,10 @@ impl AuditSink for NoopAudit {
 
 /// Redact argument VALUES while keeping keys, so an operator can see the shape
 /// of a call without its secrets. Sensitive-annotated tools redact everything;
-/// otherwise a value goes only if its key names a credential or holds a
-/// caller-supplied payload. Recursively walks nested objects and arrays to find
-/// and redact credentials at any depth.
+/// otherwise a value goes only if its key names a credential, holds a
+/// caller-supplied payload, or is a map of settings whose names are the shape
+/// and whose values are the secrets. Recursively walks nested objects and
+/// arrays to find and redact credentials at any depth.
 pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// Substring-matched: a key admitting it holds a credential, at any depth
     /// and in any casing (`apiToken`, `tls.key`, `rootPassword`).
@@ -52,6 +53,18 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// point is to keep the shape of a call auditable while dropping the part
     /// that carries secrets.
     const PAYLOAD_FIELDS: [&str; 4] = ["data", "stringdata", "yaml", "values"];
+    /// Fields holding a map of caller-chosen names to caller-chosen values,
+    /// where the NAMES are the auditable shape and every VALUE is treated as a
+    /// secret: `settings` on `extensions.configure` (#605). An app's settings
+    /// are free-form JSON and nothing marks one as sensitive, so a value under
+    /// `credential` or `certificate` — which no needle matches — would
+    /// otherwise be written verbatim, even for a denied call, and persist
+    /// through rotation. The map is redacted as a sensitive capability's
+    /// arguments are: keys kept, values blanked. Anything but a map is blanked
+    /// whole, since a denied call is audited before its arguments are checked
+    /// against the schema. Matched exactly, like `PAYLOAD_FIELDS`, and no other
+    /// capability takes a `settings` argument (`settings.set` takes `values`).
+    const KEYED_PAYLOAD_FIELDS: [&str; 1] = ["settings"];
 
     match args {
         Value::Object(map) => {
@@ -64,6 +77,13 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
                 if sensitive || is_credential_key {
                     // Redact this value entirely
                     out.insert(k.clone(), json!("<redacted>"));
+                } else if KEYED_PAYLOAD_FIELDS.contains(&lower.as_str()) {
+                    // Keep the names, drop every value.
+                    let redacted = match v {
+                        Value::Object(_) => redact(v, true),
+                        _ => json!("<redacted>"),
+                    };
+                    out.insert(k.clone(), redacted);
                 } else {
                     // Recurse into the value to find nested credentials
                     out.insert(k.clone(), redact(v, false));
@@ -498,6 +518,115 @@ mod tests {
         assert_eq!(out["release"], json!("web"));
         assert_eq!(out["chart"], json!("bitnami/nginx"));
         assert_eq!(out["values"], json!("<redacted>"));
+    }
+
+    /// Issue #605. An app's settings are free-form JSON and nothing marks a
+    /// value as secret, so a `settings` action on `extensions.configure` with
+    /// a value under `credential` or `certificate` — no needle matches either —
+    /// was written to the log verbatim, and stayed in `audit.jsonl.1` after
+    /// rotation. The setting NAMES are the auditable shape (which knobs an
+    /// agent turned); the values are the secret material and every one goes,
+    /// at any depth, alongside the action and app ID an operator needs.
+    #[test]
+    fn redacts_every_extension_setting_value_but_keeps_the_action_id_and_setting_keys() {
+        let args = json!({
+            "action": "settings",
+            "id": "org.example.argocd",
+            "settings": {
+                "credential": "hunter2",
+                "endpoint": "https://argo.example",
+                "tls": { "certificate": "-----BEGIN CERTIFICATE-----" }
+            }
+        });
+        let out = redact(&args, false);
+        assert_eq!(
+            out["action"],
+            json!("settings"),
+            "the action must stay visible"
+        );
+        assert_eq!(
+            out["id"],
+            json!("org.example.argocd"),
+            "the app ID must stay visible"
+        );
+        let settings = out["settings"]
+            .as_object()
+            .expect("setting keys must survive");
+        assert_eq!(
+            settings.len(),
+            3,
+            "every setting key must survive, got {settings:?}"
+        );
+        assert_eq!(settings["credential"], json!("<redacted>"));
+        assert_eq!(
+            settings["endpoint"],
+            json!("<redacted>"),
+            "no setting value is known safe"
+        );
+        assert_eq!(
+            settings["tls"],
+            json!("<redacted>"),
+            "a nested map goes whole"
+        );
+        let line = out.to_string();
+        assert!(!line.contains("hunter2"), "the credential leaked: {line}");
+        assert!(
+            !line.contains("BEGIN CERTIFICATE"),
+            "the certificate leaked: {line}"
+        );
+        assert!(
+            !line.contains("argo.example"),
+            "a setting value leaked: {line}"
+        );
+    }
+
+    /// A denied call is audited before its arguments are ever deserialized, so
+    /// `settings` need not be the object the capability's schema demands. A
+    /// scalar or array there is blanked whole rather than walked, where the
+    /// scalars would come through untouched.
+    #[test]
+    fn redacts_a_settings_payload_that_is_not_an_object_whole() {
+        for settings in [
+            json!("hunter2"),
+            json!(["hunter2"]),
+            json!([{ "v": "hunter2" }]),
+        ] {
+            let args =
+                json!({ "action": "settings", "id": "org.example.argocd", "settings": settings });
+            let out = redact(&args, false);
+            assert_eq!(out["settings"], json!("<redacted>"), "got {out}");
+            assert!(!out.to_string().contains("hunter2"), "leaked: {out}");
+        }
+    }
+
+    /// The other `extensions.configure` actions carry no settings, and their
+    /// audit shape is unchanged: an operator can still read which app was
+    /// installed with which grants, enabled, or limited to which clusters.
+    #[test]
+    fn other_configure_actions_keep_their_audit_shape() {
+        let install = redact(
+            &json!({ "action": "install", "manifest": "{\"id\":\"org.example.argocd\"}", "grants": ["k8s.listCustomResource"] }),
+            false,
+        );
+        assert_eq!(install["action"], json!("install"));
+        assert_eq!(
+            install["manifest"],
+            json!("{\"id\":\"org.example.argocd\"}")
+        );
+        assert_eq!(install["grants"], json!(["k8s.listCustomResource"]));
+
+        let enable = redact(
+            &json!({ "action": "enable", "id": "org.example.argocd", "enabled": false }),
+            false,
+        );
+        assert_eq!(enable["id"], json!("org.example.argocd"));
+        assert_eq!(enable["enabled"], json!(false));
+
+        let clusters = redact(
+            &json!({ "action": "clusters", "id": "org.example.argocd", "contexts": ["prod", "staging"] }),
+            false,
+        );
+        assert_eq!(clusters["contexts"], json!(["prod", "staging"]));
     }
 
     /// Deliberately nests under `spec`/`template` rather than `data`: those are

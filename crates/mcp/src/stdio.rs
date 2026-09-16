@@ -1039,6 +1039,67 @@ mod tests {
         assert_eq!(seen[0].1, "denied");
     }
 
+    /// Issue #605, end to end. `extensions.configure` is mutating, not
+    /// sensitive, so its arguments reach the log through the key-name
+    /// redaction — which knows nothing about `credential`. The denied path is
+    /// the one exercised here because it is the one the issue calls out: a
+    /// refused call is still recorded, arguments and all, before anything has
+    /// looked at them.
+    #[tokio::test]
+    async fn a_denied_extension_settings_call_is_audited_without_its_setting_values() {
+        use srelens_capability::Annotations;
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct Spy(Mutex<Vec<crate::audit::AuditRecord>>);
+        impl crate::audit::AuditSink for Spy {
+            fn record(&self, rec: crate::audit::AuditRecord) {
+                self.0.lock().unwrap().push(rec);
+            }
+        }
+        let mut reg = Registry::new();
+        let mut cap =
+            Capability::read_only("extensions.configure", "configure an app", |_| async {
+                Ok(json!({}))
+            });
+        cap.annotations = Annotations::MUTATING;
+        reg.register(cap);
+        let spy = Arc::new(Spy::default());
+        // The default policy is AlwaysDeny.
+        let server = McpServer::new(Arc::new(reg)).with_audit(spy.clone());
+
+        let resp = handle_request(
+            &server,
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "extensions.configure", "arguments": {
+                    "action": "settings",
+                    "id": "org.example.argocd",
+                    "settings": { "credential": "hunter2" }
+                } }
+            }),
+            Transport::Http,
+        )
+        .await
+        .expect("response");
+        assert_eq!(resp["result"]["isError"], json!(true), "got {resp}");
+
+        let seen = spy.0.lock().unwrap();
+        assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
+        let rec = &seen[0];
+        assert_eq!(rec.tool, "extensions.configure");
+        assert_eq!(rec.decision, "denied");
+        assert_eq!(rec.args["action"], json!("settings"));
+        assert_eq!(rec.args["id"], json!("org.example.argocd"));
+        assert!(
+            rec.args["settings"].get("credential").is_some(),
+            "setting keys survive: {rec:?}"
+        );
+        assert!(
+            !rec.args.to_string().contains("hunter2"),
+            "the setting value leaked: {rec:?}"
+        );
+    }
+
     /// Sibling of `every_tool_call_is_audited_with_its_decision`, pinning the
     /// `"approved"` value: without this, `"approved"` and `"auto"` could be
     /// swapped in the implementation and no test would notice — `decision` is
