@@ -520,6 +520,25 @@ reviews:
     issue_assessment:
       mode: warning
     custom_checks:
+      # The built-in description check is skipped while high_level_summary is
+      # on, so the PR template is checked here instead.
+      - name: PR template completed
+        mode: warning
+        instructions: |
+          The description must follow .github/PULL_REQUEST_TEMPLATE.md. Pass only
+          if ALL hold:
+          1. "What changed and why" states the problem and the resulting
+             behaviour, not only a list of files.
+          2. "Related issues" references an issue (e.g. "Closes #123", or "Part of
+             #123" when the PR does not fully resolve it). The release-promotion
+             PR from dev to main and bot release PRs are exempt.
+          3. "Validation" lists the commands actually run and their results (e.g.
+             pnpm typecheck / pnpm build / pnpm test, cargo test --workspace), or
+             for a docs/config-only change says how it was checked; any check that
+             could not be run is named with the reason. A bare "tests pass" fails.
+          4. Optional sections that do not apply are removed, not left holding the
+             template's HTML comments.
+          Name each condition that fails.
       - name: Capability change completeness
         mode: error
         instructions: |
