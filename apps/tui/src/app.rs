@@ -1256,17 +1256,11 @@ impl App {
             return;
         }
         let ctx = self.active_context.clone();
-        let candidate_namespaces = [
-            ns.to_string(),
-            self.active_namespace.clone(),
-            String::new(),
-        ];
+        let candidate_namespaces = [ns.to_string(), self.active_namespace.clone(), String::new()];
         let crd_match = self
             .crds
             .iter()
-            .find(|c| {
-                c.kind.eq_ignore_ascii_case(kind) || c.plural.eq_ignore_ascii_case(kind)
-            })
+            .find(|c| c.kind.eq_ignore_ascii_case(kind) || c.plural.eq_ignore_ascii_case(kind))
             .cloned();
 
         for c_ns in &candidate_namespaces {
@@ -1360,7 +1354,11 @@ impl App {
 
     pub fn handle_update_available(&mut self, version: &str) {
         self.tui_config.update_available = Some(version.to_string());
-        if let Some(Modal::FeatureBanner { ref mut update_available, .. }) = self.modal {
+        if let Some(Modal::FeatureBanner {
+            ref mut update_available,
+            ..
+        }) = self.modal
+        {
             *update_available = Some(version.to_string());
         }
         self.set_toast(
@@ -2209,7 +2207,10 @@ impl App {
                                     Theme::status_warn(),
                                 );
                             } else {
-                                self.set_toast("Checking for updates...".to_string(), Theme::status_ok());
+                                self.set_toast(
+                                    "Checking for updates...".to_string(),
+                                    Theme::status_ok(),
+                                );
                                 self.spawn_update_check();
                             }
                         }
@@ -7028,7 +7029,31 @@ impl App {
         let active_ctx = self.active_context.clone();
         let active_ns = self.active_namespace.clone();
 
-        if provider == crate::ai_config::AiProvider::Cursor {
+        if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
+            let event_tx = self.event_tx.clone();
+            let cache = self.client_cache.clone();
+            let kubeconfig_paths = self.kubeconfig_paths.clone();
+            let active_ctx = self.active_context.clone();
+            let active_ns = self.active_namespace.clone();
+            let history = ai.native_history.clone();
+            let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
+
+            tokio::spawn(async move {
+                let server = crate::agent::build_mcp_server(cache, kubeconfig_paths);
+                let invoker = std::sync::Arc::new(crate::agent::McpToolInvoker::new(server));
+                crate::agent::run_native_agent_turn(
+                    config,
+                    invoker,
+                    history,
+                    query,
+                    active_ctx,
+                    active_ns,
+                    event_tx,
+                    timeout_seconds,
+                )
+                .await;
+            });
+        } else if provider == crate::ai_config::AiProvider::Cursor {
             if let Some(cursor_bin) = crate::ai_config::find_cursor_binary() {
                 let event_tx = self.event_tx.clone();
                 let model = self.ai_settings.get_model(provider);
@@ -7053,32 +7078,8 @@ impl App {
                     .await;
                 });
             } else {
-                ai.add_assistant_message("cursor-agent CLI was not found on PATH. Install from https://docs.cursor.com/en/cli/overview or ensure ~/.local/bin is in your PATH.".to_string());
+                ai.add_assistant_message("No CURSOR_API_KEY configured and cursor-agent CLI was not found. Set your CURSOR_API_KEY in settings (<Ctrl+s>) or install cursor-agent.".to_string());
             }
-        } else if let Some(config) = self.ai_settings.resolve_provider_config(provider) {
-            let event_tx = self.event_tx.clone();
-            let cache = self.client_cache.clone();
-            let kubeconfig_paths = self.kubeconfig_paths.clone();
-            let active_ctx = self.active_context.clone();
-            let active_ns = self.active_namespace.clone();
-            let history = ai.native_history.clone();
-            let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
-
-            tokio::spawn(async move {
-                let server = crate::agent::build_mcp_server(cache, kubeconfig_paths);
-                let invoker = std::sync::Arc::new(crate::agent::McpToolInvoker::new(server));
-                crate::agent::run_native_agent_turn(
-                    config,
-                    invoker,
-                    history,
-                    query,
-                    active_ctx,
-                    active_ns,
-                    event_tx,
-                    timeout_seconds,
-                )
-                .await;
-            });
         } else {
             let env_var = crate::ai_config::env_var_for_provider(provider);
             let prov_name = crate::ai_config::provider_display_name(provider);

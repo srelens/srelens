@@ -35,6 +35,11 @@ impl ProviderConfig {
             ProviderKind::OpenAiCompatible => "",
         }
     }
+
+    /// Normalized base URL without trailing slashes.
+    pub fn base(&self) -> &str {
+        self.base_url.trim_end_matches('/')
+    }
 }
 
 /// A `Provider` backed by real HTTP. Cheap to build; holds a shared reqwest
@@ -51,11 +56,15 @@ pub struct HttpProvider {
 
 impl HttpProvider {
     pub fn new(config: ProviderConfig) -> Self {
-        Self { config, http: reqwest::Client::new(), gemini_round: std::sync::atomic::AtomicU64::new(0) }
+        Self {
+            config,
+            http: reqwest::Client::new(),
+            gemini_round: std::sync::atomic::AtomicU64::new(0),
+        }
     }
 
     fn base(&self) -> &str {
-        self.config.base_url.trim_end_matches('/')
+        self.config.base()
     }
 }
 
@@ -91,7 +100,13 @@ impl Provider for HttpProvider {
         let (url, body, mut parser) = match self.config.kind {
             ProviderKind::Anthropic => (
                 format!("{}/v1/messages", self.base()),
-                anthropic::build_request(&self.config.model, self.config.max_tokens, system, turns, tools),
+                anthropic::build_request(
+                    &self.config.model,
+                    self.config.max_tokens,
+                    system,
+                    turns,
+                    tools,
+                ),
                 StreamParser::Anthropic(anthropic::Stream::new()),
             ),
             ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => (
@@ -100,10 +115,15 @@ impl Provider for HttpProvider {
                 StreamParser::OpenAi(openai::Stream::new()),
             ),
             ProviderKind::Gemini => (
-                format!("{}/v1beta/models/{}:streamGenerateContent?alt=sse", self.base(), self.config.model),
+                format!(
+                    "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
+                    self.base(),
+                    self.config.model
+                ),
                 gemini::build_request(system, turns, tools),
                 StreamParser::Gemini(gemini::Stream::for_round(
-                    self.gemini_round.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    self.gemini_round
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 )),
             ),
         };
@@ -146,14 +166,23 @@ impl Provider for HttpProvider {
     async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
         let url = match self.config.kind {
             ProviderKind::Anthropic => format!("{}/v1/models", self.base()),
-            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => format!("{}/models", self.base()),
+            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
+                format!("{}/models", self.base())
+            }
             ProviderKind::Gemini => format!("{}/v1beta/models", self.base()),
         };
-        let resp = self.auth(self.http.get(&url)).send().await.map_err(|e| LlmError::Http(e.to_string()))?;
+        let resp = self
+            .auth(self.http.get(&url))
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
         if !resp.status().is_success() {
             return Err(LlmError::Api(error_message(resp).await));
         }
-        let body: Value = resp.json().await.map_err(|e| LlmError::Decode(e.to_string()))?;
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| LlmError::Decode(e.to_string()))?;
         Ok(parse_models(self.config.kind, &body))
     }
 }
@@ -162,10 +191,12 @@ impl HttpProvider {
     /// Attach the provider's auth header to a request builder.
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match self.config.kind {
-            ProviderKind::Anthropic => {
-                req.header("x-api-key", &self.config.api_key).header("anthropic-version", "2023-06-01")
+            ProviderKind::Anthropic => req
+                .header("x-api-key", &self.config.api_key)
+                .header("anthropic-version", "2023-06-01"),
+            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
+                req.bearer_auth(&self.config.api_key)
             }
-            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => req.bearer_auth(&self.config.api_key),
             ProviderKind::Gemini => req.header("x-goog-api-key", &self.config.api_key),
         }
     }
@@ -178,32 +209,61 @@ async fn error_message(resp: reqwest::Response) -> String {
     let text = resp.text().await.unwrap_or_default();
     serde_json::from_str::<Value>(&text)
         .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).map(str::to_string))
-        .unwrap_or_else(|| if text.is_empty() { format!("HTTP {status}") } else { format!("HTTP {status}: {text}") })
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| {
+            if text.is_empty() {
+                format!("HTTP {status}")
+            } else {
+                format!("HTTP {status}: {text}")
+            }
+        })
 }
 
 /// Parse a provider's models-list response into `ModelInfo`s.
 fn parse_models(kind: ProviderKind, body: &Value) -> Vec<ModelInfo> {
     let entries = match kind {
         // OpenAI/Anthropic/compatible: `{ "data": [{ "id": ... }] }`.
-        ProviderKind::Anthropic | ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => body.get("data"),
+        ProviderKind::Anthropic | ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
+            body.get("data")
+        }
         // Gemini: `{ "models": [{ "name": "models/gemini-...", "displayName": ... }] }`.
         ProviderKind::Gemini => body.get("models"),
     };
-    let Some(arr) = entries.and_then(Value::as_array) else { return Vec::new() };
+    let Some(arr) = entries.and_then(Value::as_array) else {
+        return Vec::new();
+    };
     arr.iter()
         .filter_map(|m| match kind {
             ProviderKind::Gemini => {
                 let name = m.get("name").and_then(Value::as_str)?;
                 // Gemini ids are `models/<id>`; strip the prefix for display use.
                 let id = name.strip_prefix("models/").unwrap_or(name).to_string();
-                let display = m.get("displayName").and_then(Value::as_str).unwrap_or(&id).to_string();
-                Some(ModelInfo { id, display_name: display })
+                let display = m
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&id)
+                    .to_string();
+                Some(ModelInfo {
+                    id,
+                    display_name: display,
+                })
             }
             _ => {
                 let id = m.get("id").and_then(Value::as_str)?.to_string();
-                let display = m.get("display_name").and_then(Value::as_str).unwrap_or(&id).to_string();
-                Some(ModelInfo { id, display_name: display })
+                let display = m
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&id)
+                    .to_string();
+                Some(ModelInfo {
+                    id,
+                    display_name: display,
+                })
             }
         })
         .collect()
@@ -250,10 +310,16 @@ mod tests {
 
     #[test]
     fn default_base_urls_are_set_for_the_hosted_providers() {
-        assert!(ProviderConfig::default_base_url(ProviderKind::Anthropic).starts_with("https://api.anthropic"));
+        assert!(ProviderConfig::default_base_url(ProviderKind::Anthropic)
+            .starts_with("https://api.anthropic"));
         assert!(ProviderConfig::default_base_url(ProviderKind::OpenAi).ends_with("/v1"));
-        assert!(ProviderConfig::default_base_url(ProviderKind::Gemini).contains("generativelanguage"));
-        assert_eq!(ProviderConfig::default_base_url(ProviderKind::OpenAiCompatible), "");
+        assert!(
+            ProviderConfig::default_base_url(ProviderKind::Gemini).contains("generativelanguage")
+        );
+        assert_eq!(
+            ProviderConfig::default_base_url(ProviderKind::OpenAiCompatible),
+            ""
+        );
     }
 
     #[test]
@@ -305,6 +371,22 @@ mod tests {
     #[test]
     fn a_models_body_of_the_wrong_shape_yields_an_empty_list() {
         assert!(parse_models(ProviderKind::OpenAi, &serde_json::json!({})).is_empty());
-        assert!(parse_models(ProviderKind::Gemini, &serde_json::json!({ "models": "nope" })).is_empty());
+        assert!(parse_models(
+            ProviderKind::Gemini,
+            &serde_json::json!({ "models": "nope" })
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn test_cursor_and_openai_compatible_base_url_trimming() {
+        let cfg = ProviderConfig {
+            kind: ProviderKind::OpenAiCompatible,
+            api_key: "cur-key-xyz".into(),
+            base_url: "https://api.cursor.com/v1/".into(),
+            model: "claude-3-7-sonnet-20250219".into(),
+            max_tokens: 4096,
+        };
+        assert_eq!(cfg.base(), "https://api.cursor.com/v1");
     }
 }

@@ -1080,7 +1080,12 @@ fn every_provider_maps_to_its_slug_label_defaults_and_env_var() {
             "OPENAI_COMPATIBLE_API_KEY",
             Some(ProviderKind::OpenAiCompatible),
         ),
-        (AiProvider::Cursor, "cursor", "CURSOR_API_KEY", None),
+        (
+            AiProvider::Cursor,
+            "cursor",
+            "CURSOR_API_KEY",
+            Some(ProviderKind::OpenAiCompatible),
+        ),
     ];
     for (provider, slug, env, kind) in table {
         assert_eq!(provider_slug(provider), slug);
@@ -1090,7 +1095,10 @@ fn every_provider_maps_to_its_slug_label_defaults_and_env_var() {
         assert!(!default_model_for_provider(provider).is_empty());
     }
     assert_eq!(ALL_PROVIDERS.len(), 5);
-    assert_eq!(default_base_url_for_provider(AiProvider::Cursor), "");
+    assert_eq!(
+        default_base_url_for_provider(AiProvider::Cursor),
+        "https://api.cursor.com/v1"
+    );
     assert_eq!(
         default_base_url_for_provider(AiProvider::OpenAi),
         "https://api.openai.com/v1"
@@ -1099,7 +1107,7 @@ fn every_provider_maps_to_its_slug_label_defaults_and_env_var() {
         default_base_url_for_provider(AiProvider::Gemini),
         "https://generativelanguage.googleapis.com"
     );
-    assert!(provider_display_name(AiProvider::Cursor).contains("cursor-agent"));
+    assert!(provider_display_name(AiProvider::Cursor).contains("Cursor"));
 }
 
 #[test]
@@ -1158,7 +1166,7 @@ fn caveman_level_setting_round_trips_and_clears() {
 }
 
 #[test]
-fn an_explicit_api_key_produces_a_provider_config_and_cursor_never_does() {
+fn an_explicit_api_key_produces_a_provider_config_for_all_providers() {
     let mut s = AiSettings::default();
     s.api_keys.insert("anthropic".into(), "sk-ant-test".into());
     s.models.insert("anthropic".into(), "claude-x".into());
@@ -1177,10 +1185,12 @@ fn an_explicit_api_key_produces_a_provider_config_and_cursor_never_does() {
         s.get_api_key(AiProvider::Cursor).as_deref(),
         Some("cur-key")
     );
-    assert!(
-        s.resolve_provider_config(AiProvider::Cursor).is_none(),
-        "cursor is not a native provider"
-    );
+    let cur_cfg = s
+        .resolve_provider_config(AiProvider::Cursor)
+        .expect("cursor resolves to in-process provider");
+    assert_eq!(cur_cfg.kind, ProviderKind::OpenAiCompatible);
+    assert_eq!(cur_cfg.api_key, "cur-key");
+    assert_eq!(cur_cfg.base_url, "https://api.cursor.com/v1");
 
     s.api_keys.insert("openai".into(), "   ".into());
     assert!(s.api_keys.contains_key("openai"));

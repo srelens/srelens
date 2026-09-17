@@ -1,8 +1,8 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use srelens_llm::types::ProviderKind;
 use srelens_llm::ProviderConfig;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,8 +20,9 @@ impl AiProvider {
             AiProvider::Anthropic => Some(ProviderKind::Anthropic),
             AiProvider::OpenAi => Some(ProviderKind::OpenAi),
             AiProvider::Gemini => Some(ProviderKind::Gemini),
-            AiProvider::OpenAiCompatible => Some(ProviderKind::OpenAiCompatible),
-            AiProvider::Cursor => None,
+            AiProvider::OpenAiCompatible | AiProvider::Cursor => {
+                Some(ProviderKind::OpenAiCompatible)
+            }
         }
     }
 }
@@ -51,7 +52,7 @@ pub fn provider_display_name(kind: AiProvider) -> &'static str {
         AiProvider::OpenAi => "OpenAI (GPT-4o)",
         AiProvider::Gemini => "Google Gemini",
         AiProvider::OpenAiCompatible => "OpenAI-Compatible / Ollama (Local)",
-        AiProvider::Cursor => "Cursor Agent (cursor-agent)",
+        AiProvider::Cursor => "Cursor API (In-Process)",
     }
 }
 
@@ -61,7 +62,7 @@ pub fn default_model_for_provider(kind: AiProvider) -> &'static str {
         AiProvider::OpenAi => "gpt-4o",
         AiProvider::Gemini => "gemini-2.5-flash",
         AiProvider::OpenAiCompatible => "llama3.2",
-        AiProvider::Cursor => "default",
+        AiProvider::Cursor => "claude-3-7-sonnet-20250219",
     }
 }
 
@@ -71,7 +72,7 @@ pub fn default_base_url_for_provider(kind: AiProvider) -> &'static str {
         AiProvider::OpenAi => "https://api.openai.com/v1",
         AiProvider::Gemini => "https://generativelanguage.googleapis.com",
         AiProvider::OpenAiCompatible => "http://localhost:11434/v1",
-        AiProvider::Cursor => "",
+        AiProvider::Cursor => "https://api.cursor.com/v1",
     }
 }
 
@@ -86,7 +87,10 @@ pub fn env_var_for_provider(kind: AiProvider) -> &'static str {
 }
 
 pub fn find_cursor_binary() -> Option<String> {
-    if let Ok(output) = std::process::Command::new("which").arg("cursor-agent").output() {
+    if let Ok(output) = std::process::Command::new("which")
+        .arg("cursor-agent")
+        .output()
+    {
         if output.status.success() {
             let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !s.is_empty() {
@@ -145,8 +149,14 @@ impl Default for AiSettings {
         let mut timeouts = HashMap::new();
         for provider in ALL_PROVIDERS {
             let slug = provider_slug(provider).to_string();
-            models.insert(slug.clone(), default_model_for_provider(provider).to_string());
-            base_urls.insert(slug.clone(), default_base_url_for_provider(provider).to_string());
+            models.insert(
+                slug.clone(),
+                default_model_for_provider(provider).to_string(),
+            );
+            base_urls.insert(
+                slug.clone(),
+                default_base_url_for_provider(provider).to_string(),
+            );
             timeouts.insert(slug, 120);
         }
 
@@ -269,7 +279,11 @@ impl AiSettings {
         self.timeouts
             .get(slug)
             .copied()
-            .unwrap_or(if self.timeout_seconds == 0 { 120 } else { self.timeout_seconds })
+            .unwrap_or(if self.timeout_seconds == 0 {
+                120
+            } else {
+                self.timeout_seconds
+            })
     }
 
     pub fn set_timeout_seconds(&mut self, kind: AiProvider, seconds: u32) {
@@ -279,7 +293,9 @@ impl AiSettings {
     }
 
     pub fn get_caveman_level(&self) -> Option<crate::ai_skills::CavemanLevel> {
-        self.caveman_level.as_deref().and_then(crate::ai_skills::CavemanLevel::parse)
+        self.caveman_level
+            .as_deref()
+            .and_then(crate::ai_skills::CavemanLevel::parse)
     }
 
     pub fn set_caveman_level(&mut self, level: Option<crate::ai_skills::CavemanLevel>) {
@@ -318,10 +334,23 @@ mod tests {
     fn test_default_ai_settings() {
         let s = AiSettings::default();
         assert_eq!(s.default_provider, AiProvider::Anthropic);
-        assert_eq!(s.get_model(AiProvider::Anthropic), "claude-3-7-sonnet-20250219");
+        assert_eq!(
+            s.get_model(AiProvider::Anthropic),
+            "claude-3-7-sonnet-20250219"
+        );
         assert_eq!(s.get_model(AiProvider::OpenAi), "gpt-4o");
-        assert_eq!(s.get_base_url(AiProvider::OpenAiCompatible), "http://localhost:11434/v1");
-        assert_eq!(s.get_model(AiProvider::Cursor), "default");
+        assert_eq!(
+            s.get_base_url(AiProvider::OpenAiCompatible),
+            "http://localhost:11434/v1"
+        );
+        assert_eq!(
+            s.get_base_url(AiProvider::Cursor),
+            "https://api.cursor.com/v1"
+        );
+        assert_eq!(
+            s.get_model(AiProvider::Cursor),
+            "claude-3-7-sonnet-20250219"
+        );
         assert_eq!(s.get_timeout_seconds(AiProvider::Anthropic), 120);
         assert_eq!(s.get_timeout_seconds(AiProvider::Cursor), 120);
         assert_eq!(s.get_caveman_level(), None);
@@ -331,8 +360,10 @@ mod tests {
     fn test_serialization_round_trip() {
         let mut s = AiSettings::default();
         s.default_provider = AiProvider::Cursor;
-        s.api_keys.insert("cursor".to_string(), "cur-test-12345".to_string());
-        s.models.insert("cursor".to_string(), "claude-3.5-sonnet".to_string());
+        s.api_keys
+            .insert("cursor".to_string(), "cur-test-12345".to_string());
+        s.models
+            .insert("cursor".to_string(), "claude-3.5-sonnet".to_string());
         s.set_timeout_seconds(AiProvider::Cursor, 180);
         s.set_timeout_seconds(AiProvider::Anthropic, 60);
         s.set_caveman_level(Some(crate::ai_skills::CavemanLevel::Ultra));
@@ -341,11 +372,44 @@ mod tests {
         let deserialized: AiSettings = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.default_provider, AiProvider::Cursor);
-        assert_eq!(deserialized.get_api_key(AiProvider::Cursor).as_deref(), Some("cur-test-12345"));
-        assert_eq!(deserialized.get_model(AiProvider::Cursor), "claude-3.5-sonnet");
+        assert_eq!(
+            deserialized.get_api_key(AiProvider::Cursor).as_deref(),
+            Some("cur-test-12345")
+        );
+        assert_eq!(
+            deserialized.get_model(AiProvider::Cursor),
+            "claude-3.5-sonnet"
+        );
         assert_eq!(deserialized.get_timeout_seconds(AiProvider::Cursor), 180);
         assert_eq!(deserialized.get_timeout_seconds(AiProvider::Anthropic), 60);
         assert_eq!(deserialized.get_timeout_seconds(AiProvider::OpenAi), 120);
-        assert_eq!(deserialized.get_caveman_level(), Some(crate::ai_skills::CavemanLevel::Ultra));
+        assert_eq!(
+            deserialized.get_caveman_level(),
+            Some(crate::ai_skills::CavemanLevel::Ultra)
+        );
+    }
+
+    #[test]
+    fn test_cursor_provider_maps_to_llm_kind() {
+        assert_eq!(
+            AiProvider::Cursor.to_llm_kind(),
+            Some(ProviderKind::OpenAiCompatible)
+        );
+    }
+
+    #[test]
+    fn test_resolve_cursor_provider_config_from_key_and_env() {
+        let mut s = AiSettings::default();
+        s.api_keys
+            .insert("cursor".to_string(), "key-123".to_string());
+        let cfg = s.resolve_provider_config(AiProvider::Cursor);
+        assert!(
+            cfg.is_some(),
+            "Cursor provider config should resolve when API key is set"
+        );
+        let cfg = cfg.unwrap();
+        assert_eq!(cfg.kind, ProviderKind::OpenAiCompatible);
+        assert_eq!(cfg.api_key, "key-123");
+        assert_eq!(cfg.base_url, "https://api.cursor.com/v1");
     }
 }

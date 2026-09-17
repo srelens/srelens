@@ -305,3 +305,48 @@ async fn two_boxed_cursor_turns_at_once_each_get_their_own_port_and_channel() {
     // runtime is torn down underneath it.
     tokio::task::yield_now().await;
 }
+
+#[tokio::test]
+async fn test_cursor_provider_resolves_and_runs_native_in_process_turn() {
+    let base_url = stalled_endpoint().await;
+    let (tx, mut rx) = unbounded_channel();
+    let history = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+    let mut settings = srelens_tui::ai_config::AiSettings::default();
+    settings.default_provider = srelens_tui::ai_config::AiProvider::Cursor;
+    settings
+        .api_keys
+        .insert("cursor".to_string(), "cur-test-key".to_string());
+    settings.base_urls.insert("cursor".to_string(), base_url);
+
+    let config = settings
+        .resolve_provider_config(srelens_tui::ai_config::AiProvider::Cursor)
+        .expect("Cursor provider config resolves when API key is set");
+
+    assert_eq!(config.kind, ProviderKind::OpenAiCompatible);
+    assert_eq!(config.api_key, "cur-test-key");
+
+    run_native_agent_turn(
+        config,
+        invoker(),
+        history.clone(),
+        "check cluster".into(),
+        "prod-cluster".into(),
+        "default".into(),
+        tx,
+        1,
+    )
+    .await;
+
+    let results = action_results(&mut rx);
+    let titles: Vec<&str> = results.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(
+        titles,
+        vec![
+            "ai_chunk:prod-cluster",
+            "ai_usage:prod-cluster",
+            "ai_chunk:prod-cluster",
+            "ai_done:prod-cluster"
+        ]
+    );
+}
