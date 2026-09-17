@@ -18,8 +18,7 @@
     "@srelens/ui-kit": "workspace:*",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
-    "lucide-react": "^1.22.0",
-    "@tauri-apps/api": "^2.0.0"
+    "lucide-react": "^1.22.0"
   },
   "peerDependencies": {
     "react": "^19.0.0",

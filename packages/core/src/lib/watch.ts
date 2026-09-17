@@ -59,7 +59,7 @@ export async function watchResource(
   // can contain other characters (e.g. the "@" in "admin@cluster"), which makes
   // `listen` throw. Sanitize to the allowed set; the `watchSeq` suffix keeps
   // every channel unique regardless of any collisions the replacement introduces.
-  const channel = `watch:${kind}:${context}:${namespace}:${++watchSeq}`.replace(/[^a-zA-Z0-9/:_-]/g, "_");
+  const channel = `watch:${kind}:${context}:${namespace}:${++watchSeq}-${Math.random().toString(36).slice(2, 10)}`.replace(/[^a-zA-Z0-9/:_-]/g, "_");
   const dispose = await subscribe(channel, (payload) => {
     // The backend emits a snapshot (array), a `{status}` object, or, for a
     // permanent (403/401) failure that won't self-heal, an `{error}` object.

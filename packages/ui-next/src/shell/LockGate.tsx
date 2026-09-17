@@ -15,8 +15,8 @@ import {
   vaultStatus,
   vaultUnlockPassword,
   type VaultStatus,
+  on,
 } from "@srelens/core";
-import { listen } from "@tauri-apps/api/event";
 import {
   Button,
   Checkbox,
@@ -356,12 +356,9 @@ export function useWorkspaceSealed(): boolean {
   // the backend vault_lock command emits this event.
   useEffect(() => {
     if (!isTauri()) return;
-    const unlistenPromise = listen("vault-locked", () => {
+    return on("vault-locked", () => {
       lockWorkspace();
     });
-    return () => {
-      void unlistenPromise.then((fn) => fn());
-    };
   }, []);
 
   return store;

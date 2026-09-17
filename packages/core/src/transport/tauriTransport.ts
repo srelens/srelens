@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { parseClusterLoginRequired, requestClusterLogin } from "../lib/clusterLogin";
 
@@ -62,4 +63,42 @@ export async function appVersion(): Promise<string> {
 /** Set the webview's native zoom level (1 = 100%) — the #237 interface scale. */
 export async function setWebviewZoom(factor: number): Promise<void> {
   await getCurrentWebview().setZoom(factor);
+}
+
+/**
+ * Intercept window close request, run an async cleanup handler (e.g. flushing
+ * state writes to disk), then destroy the window.
+ */
+export function onWindowCloseRequested(
+  handler: () => Promise<void> | void,
+  timeoutMs = 500,
+): () => void {
+  const win = getCurrentWindow();
+  if (typeof win?.onCloseRequested !== "function") return () => {};
+  let unlisten: (() => void) | undefined;
+  let disposed = false;
+  let closing = false;
+  void win
+    .onCloseRequested(async (event) => {
+      if (closing) return;
+      event.preventDefault();
+      closing = true;
+      try {
+        await Promise.race([
+          Promise.resolve(handler()),
+          new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+        ]);
+      } finally {
+        await win.destroy().catch(() => win.close());
+      }
+    })
+    .then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    })
+    .catch(() => {});
+  return () => {
+    disposed = true;
+    unlisten?.();
+  };
 }

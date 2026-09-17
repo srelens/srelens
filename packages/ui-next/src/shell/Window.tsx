@@ -13,8 +13,8 @@ import {
   type ClusterContext,
   type ContextProfiles,
   flushSettingsWrites,
+  onWindowCloseRequested,
 } from "@srelens/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Button, Checkbox, Drawer, LoadingState, TabStrip, TextInput, type ContextMenuItem, type StripTab } from "@srelens/ui-kit";
 import { contextLabelFor } from "../lib/agentSuggestions";
 import { setContexts, setKubeconfigFiles, useContexts, useContextsError } from "../lib/clusters";
@@ -320,39 +320,10 @@ export function Window({
   }, [booted]);
 
   useEffect(() => {
-    if (!isTauri()) return;
-    const win = getCurrentWindow();
-    if (typeof win?.onCloseRequested !== "function") return;
-    let unlisten: (() => void) | undefined;
-    let disposed = false;
-    let closing = false;
-    const CLOSE_WRITE_TIMEOUT_MS = 500;
-    
-    void win
-      .onCloseRequested(async (event) => {
-        if (closing) return;
-        event.preventDefault();
-        closing = true;
-        try {
-          flushSave();
-          await Promise.race([
-            flushSettingsWrites(),
-            new Promise((resolve) => setTimeout(resolve, CLOSE_WRITE_TIMEOUT_MS)),
-          ]);
-        } finally {
-          await win.destroy().catch(() => win.close());
-        }
-      })
-      .then((fn) => {
-        if (disposed) fn();
-        else unlisten = fn;
-      })
-      .catch(() => {});
-      
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
+    return onWindowCloseRequested(async () => {
+      flushSave();
+      await flushSettingsWrites();
+    });
   }, []);
 
 

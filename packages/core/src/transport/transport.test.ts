@@ -1,23 +1,33 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const { invokeMock, listenMock, relaunchMock, getVersionMock } = vi.hoisted(() => ({
+const { invokeMock, listenMock, relaunchMock, getVersionMock, onCloseRequestedMock, windowDestroyMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
   listenMock: vi.fn(),
   relaunchMock: vi.fn(),
   getVersionMock: vi.fn(),
+  onCloseRequestedMock: vi.fn(),
+  windowDestroyMock: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: getVersionMock }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: relaunchMock }));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    onCloseRequested: onCloseRequestedMock,
+    destroy: windowDestroyMock,
+  }),
+}));
 
-import { invokeCapability, invokeCommand, on, relaunchApp, appVersion } from "./tauriTransport";
+import { invokeCapability, invokeCommand, on, relaunchApp, appVersion, onWindowCloseRequested } from "./tauriTransport";
 
 beforeEach(() => {
   invokeMock.mockReset();
   listenMock.mockReset();
   relaunchMock.mockReset();
   getVersionMock.mockReset();
+  onCloseRequestedMock.mockReset();
+  windowDestroyMock.mockReset();
 });
 
 describe("transport", () => {
@@ -57,5 +67,17 @@ describe("transport", () => {
   it("appVersion reads the bundle version", async () => {
     getVersionMock.mockResolvedValue("1.2.3");
     expect(await appVersion()).toBe("1.2.3");
+  });
+
+  it("onWindowCloseRequested registers a close handler on the current window", async () => {
+    const unlisten = vi.fn();
+    onCloseRequestedMock.mockResolvedValue(unlisten);
+    const handler = vi.fn();
+    const dispose = onWindowCloseRequested(handler);
+    expect(onCloseRequestedMock).toHaveBeenCalledWith(expect.any(Function));
+    const flush = () => new Promise<void>((r) => setTimeout(r, 0));
+    await flush();
+    dispose();
+    expect(unlisten).toHaveBeenCalled();
   });
 });

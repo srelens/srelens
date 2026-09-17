@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Lock } from "lucide-react";
 import { Button, TextInput } from "../ui";
 import {
+  on,
   vaultBiometricUnlock,
   vaultRecoverPassword,
   vaultSetupPassword,
@@ -20,7 +21,7 @@ import {
  *
  * Renders nothing outside a Tauri window (web mode has no vault commands).
  */
-export function VaultGate({ onReady }: { onReady?: () => void }) {
+export function VaultGate({ onReady, onLocked }: { onReady?: () => void; onLocked?: () => void }) {
   const [status, setStatus] = useState<VaultStatus | null>(null);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -79,6 +80,16 @@ export function VaultGate({ onReady }: { onReady?: () => void }) {
       }
     });
   }, []);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    const off = on("vault-locked", () => {
+      readyNotified.current = false;
+      onLocked?.();
+      void refresh();
+    });
+    return () => off();
+  }, [onLocked]);
 
   if (statusFailed) {
     return (

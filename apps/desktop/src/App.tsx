@@ -1297,7 +1297,7 @@ export function App() {
       <ShortcutCheatSheet open={cheatSheetOpen} onOpenChange={setCheatSheetOpen} desktop={!isWeb} />
       <Toaster position="top-right" richColors closeButton />
       <McpConfirmDialog />
-      <VaultGate onReady={() => setVaultReady(true)} />
+      <VaultGate onReady={() => setVaultReady(true)} onLocked={() => setVaultReady(false)} />
     </div>
   );
 }
