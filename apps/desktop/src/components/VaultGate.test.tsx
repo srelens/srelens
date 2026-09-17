@@ -159,4 +159,25 @@ describe("VaultGate", () => {
     });
     expect(screen.getByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
   });
+
+  it("keeps one vault-locked subscription across onLocked identity changes", async () => {
+    mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "unlocked", keySource: "password" }));
+    const first = vi.fn();
+    const { rerender } = render(<VaultGate onLocked={first} />);
+    await waitFor(() => expect(mcpSecurity.vaultStatus).toHaveBeenCalled());
+    expect(listeners["vault-locked"]).toBeDefined();
+
+    // App passes an inline `() => setVaultReady(false)` every render. A
+    // dependency on that identity would unlisten and re-listen here, leaving a
+    // gap where a broadcast is dropped.
+    const second = vi.fn();
+    rerender(<VaultGate onLocked={second} />);
+    expect(listeners["vault-locked"]).toBeDefined();
+
+    act(() => {
+      listeners["vault-locked"]?.();
+    });
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
+  });
 });

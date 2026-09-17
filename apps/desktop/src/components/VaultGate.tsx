@@ -36,6 +36,12 @@ export function VaultGate({ onReady, onLocked }: { onReady?: () => void; onLocke
   // `onReady` fires exactly once, when the vault becomes usable — consumers
   // (the MCP auto-start) must not run against a locked vault.
   const readyNotified = useRef(false);
+  // Read at event time, not closed over by the subscription. App passes an
+  // inline `onLocked={() => setVaultReady(false)}`; putting that identity in
+  // the effect deps would tear the listener down on every re-render and leave
+  // a gap where a `vault-locked` broadcast is missed.
+  const onLockedRef = useRef(onLocked);
+  onLockedRef.current = onLocked;
 
   function notifyReady() {
     if (!readyNotified.current) {
@@ -95,11 +101,11 @@ export function VaultGate({ onReady, onLocked }: { onReady?: () => void; onLocke
           ? { ...prev, mode: "locked" }
           : { mode: "locked", keySource: "password", biometricAvailable: false, biometricEnrolled: false },
       );
-      onLocked?.();
+      onLockedRef.current?.();
       void refresh();
     });
     return () => off();
-  }, [onLocked]);
+  }, []);
 
   if (statusFailed) {
     return (

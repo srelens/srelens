@@ -47,13 +47,26 @@ pub fn take_pending_deep_links(pending: tauri::State<'_, PendingDeepLink>) -> Ve
 
 /// Bring the main window to the user. A second launch, or a link click while
 /// the app sits minimized behind other windows, should surface it.
+///
+/// When the reader has closed `main` but left a context window open, Tauri
+/// keeps the process alive with no `main` label at all. Deep links and the
+/// single-instance focus path still need a consumer that drains
+/// `take_pending_deep_links` (only classic `App` on `main` registers that
+/// listener), so recreate `main` rather than nudging into the void.
 pub fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    use tauri::Manager;
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        return;
     }
+    let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("srelens")
+        .inner_size(1440.0, 900.0)
+        .min_inner_size(960.0, 640.0)
+        .center()
+        .build();
 }
 
 /// Whether the window-state plugin has a saved geometry to restore.
@@ -99,5 +112,34 @@ pub fn register_deep_links(app: &tauri::App) {
         if let Some(pending) = app.try_state::<PendingDeepLink>() {
             pending.push(urls.iter().map(ToString::to_string));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tauri::Manager;
+
+    /// Context windows can outlive `main`. A deep link or second-instance
+    /// focus that then finds no `main` must recreate it, or the queued URL
+    /// is nudged to nobody and never drained.
+    #[test]
+    fn recreates_main_when_absent() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        for label in handle.webview_windows().keys().cloned().collect::<Vec<_>>() {
+            if let Some(w) = handle.get_webview_window(&label) {
+                let _ = w.close();
+            }
+        }
+        assert!(
+            handle.get_webview_window("main").is_none(),
+            "precondition: no main window"
+        );
+        focus_main_window(&handle);
+        assert!(
+            handle.get_webview_window("main").is_some(),
+            "focus_main_window must recreate main when it is gone"
+        );
     }
 }
