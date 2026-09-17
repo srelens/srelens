@@ -157,13 +157,14 @@ pub async fn handle_request(
                 if let crate::policy::Decision::Denied(reason) =
                     server.confirm_policy().confirm(name, &raw_args, kind).await
                 {
+                    let redacted_args = crate::audit::redact(&args, sensitive);
                     server.audit().record(crate::audit::AuditRecord {
                         transport,
                         tool: name.to_string(),
-                        args: crate::audit::redact(&args, sensitive),
+                        error: Some(crate::audit::redact_error(&reason, &args, &redacted_args)),
+                        args: redacted_args,
                         decision: "denied",
                         outcome: "error",
-                        error: Some(reason.clone()),
                     });
                     // A result, not a transport error, so the agent can adapt.
                     // `_meta` (reserved by MCP for exactly this) marks the
@@ -185,13 +186,20 @@ pub async fn handle_request(
             }
 
             let called = server.call_tool(name, args.clone()).await;
+            // The error is scrubbed against the same redaction: a refused
+            // argument is echoed by the refusal, and the log must not learn
+            // from the message what it was denied from the arguments.
+            let redacted_args = crate::audit::redact(&args, sensitive);
             server.audit().record(crate::audit::AuditRecord {
                 transport,
                 tool: name.to_string(),
-                args: crate::audit::redact(&args, sensitive),
+                error: called
+                    .as_ref()
+                    .err()
+                    .map(|e| crate::audit::redact_error(&e.to_string(), &args, &redacted_args)),
+                args: redacted_args,
                 decision,
                 outcome: if called.is_ok() { "ok" } else { "error" },
-                error: called.as_ref().err().map(|e| e.to_string()),
             });
             let result = match called {
                 Ok(v) => json!({
@@ -351,10 +359,12 @@ pub async fn handle_request(
                 server.audit().record(crate::audit::AuditRecord {
                     transport,
                     tool: capability_id.to_string(),
+                    error: called.as_ref().err().map(|e| {
+                        crate::audit::redact_error(&e.to_string(), &read.args, &redacted_args)
+                    }),
                     args: redacted_args,
                     decision: "auto",
                     outcome: if called.is_ok() { "ok" } else { "error" },
-                    error: called.as_ref().err().map(|e| e.to_string()),
                 });
 
                 match called {
@@ -1037,6 +1047,149 @@ mod tests {
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
         assert_eq!(seen[0].0, "danger");
         assert_eq!(seen[0].1, "denied");
+    }
+
+    /// Issue #605, end to end. `extensions.configure` is mutating, not
+    /// sensitive, so its arguments reach the log through the key-name
+    /// redaction — which knows nothing about `credential`. The denied path is
+    /// the one exercised here because it is the one the issue calls out: a
+    /// refused call is still recorded, arguments and all, before anything has
+    /// looked at them.
+    #[tokio::test]
+    async fn a_denied_extension_settings_call_is_audited_without_its_setting_values() {
+        use srelens_capability::Annotations;
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct Spy(Mutex<Vec<crate::audit::AuditRecord>>);
+        impl crate::audit::AuditSink for Spy {
+            fn record(&self, rec: crate::audit::AuditRecord) {
+                self.0.lock().unwrap().push(rec);
+            }
+        }
+        let mut reg = Registry::new();
+        let mut cap =
+            Capability::read_only("extensions.configure", "configure an app", |_| async {
+                Ok(json!({}))
+            });
+        cap.annotations = Annotations::MUTATING;
+        reg.register(cap);
+        let spy = Arc::new(Spy::default());
+        // The default policy is AlwaysDeny.
+        let server = McpServer::new(Arc::new(reg)).with_audit(spy.clone());
+
+        let resp = handle_request(
+            &server,
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "extensions.configure", "arguments": {
+                    "action": "settings",
+                    "id": "org.example.argocd",
+                    "settings": { "credential": "hunter2" }
+                } }
+            }),
+            Transport::Http,
+        )
+        .await
+        .expect("response");
+        assert_eq!(resp["result"]["isError"], json!(true), "got {resp}");
+
+        let seen = spy.0.lock().unwrap();
+        assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
+        let rec = &seen[0];
+        assert_eq!(rec.tool, "extensions.configure");
+        assert_eq!(rec.decision, "denied");
+        assert_eq!(rec.args["action"], json!("settings"));
+        assert_eq!(rec.args["id"], json!("org.example.argocd"));
+        assert!(
+            rec.args["settings"].get("credential").is_some(),
+            "setting keys survive: {rec:?}"
+        );
+        assert!(
+            !rec.args.to_string().contains("hunter2"),
+            "the setting value leaked: {rec:?}"
+        );
+    }
+
+    /// PR #625 review. The arguments are redacted, but an approved call whose
+    /// `settings` is a scalar is refused by the capability with serde's
+    /// `invalid type: string "hunter2", expected a map` — the registry maps
+    /// the error to a string as-is — and that message was recorded beside the
+    /// redacted arguments, putting the value back in the log by another door.
+    #[tokio::test]
+    async fn an_approved_settings_call_refused_by_the_capability_is_audited_without_the_refused_value(
+    ) {
+        use srelens_capability::{Annotations, CapabilityError};
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct Spy(Mutex<Vec<crate::audit::AuditRecord>>);
+        impl crate::audit::AuditSink for Spy {
+            fn record(&self, rec: crate::audit::AuditRecord) {
+                self.0.lock().unwrap().push(rec);
+            }
+        }
+        struct Approve;
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Approve {
+            async fn confirm(
+                &self,
+                _t: &str,
+                _a: &serde_json::Value,
+                _kind: crate::policy::ConsentKind,
+            ) -> crate::policy::Decision {
+                crate::policy::Decision::Approved
+            }
+        }
+        let mut reg = Registry::new();
+        let mut cap = Capability::read_only(
+            "extensions.configure",
+            "configure an app",
+            |args| async move {
+                // What the registry does: deserialize, and report serde's
+                // message verbatim.
+                serde_json::from_value::<serde_json::Map<String, serde_json::Value>>(
+                    args["settings"].clone(),
+                )
+                .map(|_| json!({}))
+                .map_err(|e| CapabilityError::InvalidInput(e.to_string()))
+            },
+        );
+        cap.annotations = Annotations::MUTATING;
+        reg.register(cap);
+        let spy = Arc::new(Spy::default());
+        let server = McpServer::new(Arc::new(reg))
+            .with_policy(Arc::new(Approve))
+            .with_audit(spy.clone());
+
+        let resp = handle_request(
+            &server,
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "extensions.configure", "arguments": {
+                    "action": "settings",
+                    "id": "org.example.argocd",
+                    "settings": "hunter2"
+                } }
+            }),
+            Transport::Http,
+        )
+        .await
+        .expect("response");
+        assert_eq!(resp["result"]["isError"], json!(true), "got {resp}");
+
+        let seen = spy.0.lock().unwrap();
+        assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
+        let rec = &seen[0];
+        assert_eq!(rec.decision, "approved");
+        assert_eq!(rec.outcome, "error");
+        let error = rec.error.as_deref().expect("the refusal is recorded");
+        assert!(
+            error.contains("expected a map"),
+            "the reason survives: {error}"
+        );
+        assert!(
+            !format!("{rec:?}").contains("hunter2"),
+            "the refused value leaked: {rec:?}"
+        );
     }
 
     /// Sibling of `every_tool_call_is_audited_with_its_decision`, pinning the
