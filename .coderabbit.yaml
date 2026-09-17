@@ -122,7 +122,6 @@ reviews:
     - "!**/*.ico"
     - "!**/*.icns"
     - "!**/*.sig"
-    - "!KEYS"
     - "!crates/registry/tests/fixtures/argocd-manifest.json"
     - "!fuzz/corpus/**"
     - "!fuzz/artifacts/**"
@@ -486,6 +485,16 @@ reviews:
         into `sh`: no bashisms, LF line endings (.gitattributes), verify checksums
         and signatures of what it downloads, fail on any error, never `curl | sh`
         a second script. Homebrew/AUR metadata must match the release assets.
+
+    - path: "KEYS"
+      instructions: |
+        The published release-signing keys, and CUMULATIVE: a verifier of an
+        older release still needs the key that signed it and its revocation
+        status. CI checks only that the current key is present, so this review is
+        what catches a lost key. Flag any diff that removes a key block or shrinks
+        the file instead of appending. A rotation must also add a new row to the
+        fingerprint table in docs/INSTALL.md and move the `**current**` marker,
+        keeping the previous row's fingerprint with its release range filled in.
 
     - path: "fuzz/**"
       instructions: |
