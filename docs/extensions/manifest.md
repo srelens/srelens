@@ -108,6 +108,14 @@ The desktop app accepts a narrower surface than the developer broker:
   and `kind` (letters, digits, `.` and `-`) and a boolean `namespaced`. It must accept
   `context`, may not fix `context` or `namespace`, and a namespaced binding must accept
   `namespace`.
+- That `group` must be shaped like a CustomResourceDefinition group: dot-separated labels
+  such as `argoproj.io` or `gateway.networking.k8s.io`, so built-in groups such as `apps`
+  and `batch` are refused. The problem is reported at `capabilities[i].arguments.group`,
+  and an installed app that breaks the rule is quarantined when the inventory loads.
+  Every read, inspection and action also checks that a CustomResourceDefinition named
+  `{plural}.{group}` serves the bound `version` on the cluster, and is refused when none
+  does. That refuses dotted built-in groups such as `networking.k8s.io` and aggregated
+  APIs.
 - A `k8s.listEvents` binding has no fixed arguments and accepts both `context` and
   `namespace`.
 - Every page, detail tab and detail link references a `k8s.listCustomResource` binding.

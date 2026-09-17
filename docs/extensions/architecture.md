@@ -80,8 +80,9 @@ table. An app that fails is **quarantined on its own**:
 - it cannot be re-enabled until it is reinstalled or removed
 - every other app keeps working
 
-This covers a rotated or withdrawn signing key, a modified proof or manifest, and an
-API version the host no longer supports. The reason is recomputed on each load and
+This covers a rotated or withdrawn signing key, a modified proof or manifest, an
+API version the host no longer supports, and a reader bound to a group no
+CustomResourceDefinition can declare, such as `apps`. The reason is recomputed on each load and
 never written to the inventory. A corrupt file or duplicate app IDs still fail the
 whole inventory, because no single entry can be trusted then.
 

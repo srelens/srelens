@@ -452,7 +452,10 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::manifest::list_resource_capability(cache.clone()));
 
     if let Some(path) = settings_path {
-        let core = Arc::new(reg.clone());
+        let mut core = reg.clone();
+        // Broker-only: kept out of `reg`, so neither the catalog nor MCP offers it.
+        core.register(extensions::crd::check_capability(cache.clone()));
+        let core = Arc::new(core);
         extensions::register(&mut reg, path.with_extension("extensions.json"), core, cache);
         settings::register(&mut reg, path);
     }

@@ -129,7 +129,7 @@ An author who wants an app to do more than show custom resources.
 |---|---|---|---|---|
 | APP-1 | Read kubeconfig, tokens or local files | I | No app code is loaded or run. `ManifestKind` has one variant, `declarative` (`crates/plugin-host/src/manifest.rs`), and the broker (`crates/plugin-host/src/lib.rs`) only forwards JSON arguments to host handlers. A manifest has no field that names a file, URL or command, and unknown fields are refused (`deny_unknown_fields`). The host resolves credentials from the context name; the app never sees them. | Shipped |
 | APP-2 | Reach arbitrary network endpoints or run commands | I, E | As APP-1. Desktop bindings may target only `k8s.listCustomResource` and `k8s.listEvents` (`validate_app` in `crates/registry/src/extensions.rs`), and no binding may target another app's `plugin/` capability (`Manifest::validate`). | Shipped. Brokered network access planned in [#568] |
-| APP-3 | Read Secrets or other core resources through the reader | I | `validate_app` (`crates/registry/src/extensions.rs`) requires a fixed, non-empty `group`, `version`, `plural` and `kind` of letters, digits, `.` and `-`, so the core group (Secrets, ConfigMaps, Pods) cannot be bound. `k8s.listCustomResource` returns names, namespaces, ages and the declared printer columns (`list_custom_resource_capability` in `crates/kube/src/crds.rs`). | Shipped. See residual risk |
+| APP-3 | Read Secrets or other core resources through the reader | I | `validate_app` (`crates/registry/src/extensions.rs`) requires a fixed, non-empty `group`, `version`, `plural` and `kind` of letters, digits, `.` and `-`, so the core group (Secrets, ConfigMaps, Pods) cannot be bound. The group must also be shaped like a CustomResourceDefinition group, with a dot and no empty label, so built-in groups such as `apps` and `batch` are refused (`group_problems` in `crates/registry/src/extensions/crd.rs`). The same rule runs when the inventory loads, so a stored app that breaks it is quarantined. Before dispatching, `extensions.read`, `extensions.resource` and `extensions.action` confirm that a CustomResourceDefinition named `{plural}.{group}` declares that group and plural and serves the bound version on the cluster (`require` in the same file, `custom_resource_serves` in `crates/kube/src/crds.rs`). That refuses dotted built-in groups such as `networking.k8s.io`, aggregated APIs, and a version the CRD does not serve; a failed lookup refuses the call and says so. `k8s.listCustomResource` returns names, namespaces, ages and the declared printer columns (`list_custom_resource_capability` in `crates/kube/src/crds.rs`). | Shipped. Built-in groups refused in [#601]. See residual risk |
 | APP-4 | Widen a read by overriding bound arguments | T, E | The broker refuses any input not listed in the binding's `inputs` and any missing required one, and the schema it exposes sets `additionalProperties: false` (`PluginHost::register`). Fixed `arguments` are merged into every call, and inputs may not overlap them, so a caller cannot override one. `extensions.read` forwards only `context` and `namespace` and checks the namespace's syntax; `validate_app` refuses a binding that fixes either. | Shipped |
 | APP-5 | Write to the cluster, or dispatch an operation that needs consent | E | `validate_app` refuses a target that is not read-only or carries `requires_confirm`, `sensitive` or `destructive`. A manifest cannot supply annotations: the broker copies the host's and forces `requires_confirm` on anything not read-only, sensitive or destructive. The only writes are host-owned GitOps actions: `resolve` (`crates/registry/src/extensions/resource.rs`) takes the group, version, plural, kind and scope from the app's declared reader, and `supported_actions` (`crates/kube/src/gitops.rs`) allowlists kinds, versions and actions. | Shipped. Declared actions planned in [#549]; an opt-in for unsigned apps that write in [#558] |
 | APP-6 | Keep acting after being disabled, removed, updated or quarantined | E | `extensions.read`, `extensions.resource` and `extensions.action` read the inventory on every call, and require the app to be enabled, at the caller's revision, and to pass `validate_app` with its stored grants. `Registration::unregister` revokes the handlers older registry snapshots still hold. Calls already admitted may finish. | Shipped |
@@ -142,25 +142,23 @@ An author who wants an app to do more than show custom resources.
 
 Residual risk:
 
-- **The custom-resource reader is not limited to custom resources.** `validate_app`
-  refuses the core group, but nothing checks that the bound group belongs to a
-  CustomResourceDefinition. A manifest may bind a built-in group such as `apps` or
-  `batch`, and that binding exposes those objects in two ways:
+- **Any custom resource is readable in full.** Since [#601] a binding reaches only a
+  version a CustomResourceDefinition serves, never a built-in or aggregated API, but it may name any CRD
+  on the cluster, not just the ones the app is about. Its objects are exposed in two
+  ways:
   - **Lists:** `k8s.listCustomResource` (`list_custom_resource_capability` in
     `crates/kube/src/crds.rs`) renders the binding's `printerColumns` JSON paths. These
-    can surface any scalar field, such as a literal environment variable in a Deployment.
+    can surface any scalar field of the custom resource.
   - **Whole objects:** `extensions.resource` resolves the same binding (`resolve` in
     `crates/registry/src/extensions/resource.rs`) and calls `k8s.getCustomResource`. That
     returns the complete object, with only `managedFields` removed (`inspect` in
-    `crates/kube/src/gitops.rs`), including every container's environment. The Manifest
-    tab shows all of it (`packages/ui-next/src/extensions/ExtensionResourceDetails.tsx`),
-    and an MCP client can request it without consent. No GitOps action is offered,
-    because `supported_actions` lists only Flux and Argo CD kinds.
+    `crates/kube/src/gitops.rs`). The Manifest tab shows all of it
+    (`packages/ui-next/src/extensions/ExtensionResourceDetails.tsx`), and an MCP client
+    can request it without consent. A custom resource can hold values as sensitive as a
+    built-in one, for example a CRD whose spec embeds credentials.
 
   RBAC still applies, but the install review shows only `k8s.listCustomResource`, not the
-  binding (see the next point). Planned in [#601], which refuses non-CRD groups at install
-  and load, and checks for a matching CRD in `extensions.read`, `extensions.resource` and
-  `extensions.action`.
+  binding (see the next point).
 - **Grants are per host capability, and the install review does not show what they
   cover.** Granting `k8s.listCustomResource` grants whatever the manifest binds. The
   review (`ExtensionManager` in `packages/ui-next/src/extensions/Extensions.tsx`, which
@@ -327,7 +325,6 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 | [#571] ([#521]) | VULN-1: sandboxed executable apps |
 | [#580] | VULN-2: parser fuzzing |
 | [#581] | APP-12, VULN-4: performance budgets |
-| [#601] | APP-3: refuse built-in API groups in reader bindings |
 | [#607] | MCP-1: refuse non-loopback addresses for headless HTTP unless explicitly exposed |
 | [#605] | VULN-3: redact extension settings in the MCP audit log |
 | [#608] | APP-3: show what an app binds in the install review |

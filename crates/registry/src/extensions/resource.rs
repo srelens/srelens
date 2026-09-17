@@ -41,7 +41,7 @@ async fn resolve(
             )
         })?;
     plugin.check_scope(&resolved)?;
-    validate_app(&plugin.manifest, &plugin.grants, core)
+    validate_app(&plugin.manifest, &plugin.grants, core.clone())
         .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
     let binding = plugin
         .manifest
@@ -72,6 +72,9 @@ async fn resolve(
         namespaced: binding.arguments["namespaced"] == true,
     };
     resource.validate().map_err(CapabilityError::InvalidInput)?;
+    // Before `k8s.getCustomResource` or `k8s.gitOpsAction` sees it: a whole built-in object,
+    // such as a Deployment with its environment, must not come back through an app (#601).
+    crd::require(&core, &resource.context, binding).await?;
     Ok(resource)
 }
 pub(super) fn register(
@@ -180,6 +183,75 @@ mod tests {
             format!("srelens-context:{}#default", config.display())
         );
     }
+    /// Neither `k8s.getCustomResource` nor `k8s.gitOpsAction` is reached for a binding that
+    /// is not a CustomResourceDefinition on the cluster, stored or installed (#601).
+    #[tokio::test]
+    async fn resources_and_actions_are_refused_without_a_matching_crd() {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let mut core = (*super::super::tests::fake_core()).clone();
+        for id in ["k8s.getCustomResource", "k8s.gitOpsAction"] {
+            let mut cap = core.get(id).unwrap().clone();
+            cap.handler = Arc::new(|args| {
+                CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move { Ok(args) })
+            });
+            core.register(cap);
+        }
+        // The cluster serves Argo CD's CRD, but not one for the aggregated group below.
+        super::super::tests::serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
+        let core = Arc::new(core);
+        let mut source: Value = serde_json::from_str(&super::super::tests::manifest()).unwrap();
+        source["capabilities"][0]["arguments"]["group"] = json!("apps.openshift.io");
+        mutate(
+            &path,
+            core.clone(),
+            Configure::Install {
+                signature: None,
+                manifest: source.to_string(),
+                grants: vec!["k8s.listCustomResource".into()],
+            },
+        )
+        .unwrap();
+        let state = read(&path).unwrap();
+        let binding = state.plugins[0].manifest.capabilities[0].name.clone();
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            path.clone(),
+            core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        let selected = |revision: u64| json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"cluster/a","namespace":"team","name":"app"});
+        let revision = state.plugins[0].revision;
+        let refused = reg
+            .invoke("extensions.resource", selected(revision))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("No CustomResourceDefinition applications.apps.openshift.io"),
+            "{refused}"
+        );
+        let action =
+            json!({"resource":selected(revision),"action":"sync","uid":"u","resourceVersion":"2"});
+        assert!(reg.invoke("extensions.action", action).await.is_err());
+
+        // A stored binding of apps/v1 deployments cannot return a Deployment either.
+        let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let arguments = &mut stored["plugins"][0]["manifest"]["capabilities"][0]["arguments"];
+        arguments["group"] = json!("apps");
+        arguments["plural"] = json!("deployments");
+        arguments["kind"] = json!("Deployment");
+        stored["plugins"][0]["enabled"] = json!(true);
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert!(reg
+            .invoke("extensions.resource", selected(revision))
+            .await
+            .is_err());
+        assert_eq!(CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
     #[tokio::test]
     async fn action_dispatch_uses_bound_api_and_mcp_cannot_bypass_confirmation() {
         let dir = tempfile::tempdir().unwrap();
@@ -193,6 +265,7 @@ mod tests {
             cap.handler = Arc::new(|args| Box::pin(async move { Ok(args) }));
             core.register(cap);
         }
+        super::super::tests::serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
         let core = Arc::new(core);
         let revision = super::super::tests::install(&path, core.clone());
         let binding = read(&path).unwrap().plugins[0].manifest.capabilities[0]
