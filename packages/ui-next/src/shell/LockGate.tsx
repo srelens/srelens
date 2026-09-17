@@ -350,18 +350,7 @@ function useSealed(): boolean {
  * moment it happens on every single launch.
  */
 export function useWorkspaceSealed(): boolean {
-  const store = useSyncExternalStore(subscribe, isCovered, isCovered);
-
-  // Sync locks across multiple context windows. When one window calls lockWorkspace(),
-  // the backend vault_lock command emits this event.
-  useEffect(() => {
-    if (!isTauri()) return;
-    return on("vault-locked", () => {
-      lockWorkspace();
-    });
-  }, []);
-
-  return store;
+  return useSyncExternalStore(subscribe, isCovered, isCovered);
 }
 
 /**
@@ -562,6 +551,15 @@ export function LockGate({ children, brandMarkSrc, onReady }: LockGateProps) {
   // every render and called from handlers that were not.
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
+
+  // Sync locks across multiple context windows. When one window calls lockWorkspace(),
+  // the backend vault_lock command emits this event.
+  useEffect(() => {
+    if (!desktop) return;
+    return on("vault-locked", () => {
+      lockWorkspace();
+    });
+  }, [desktop]);
 
   const covered = raised || checking;
 

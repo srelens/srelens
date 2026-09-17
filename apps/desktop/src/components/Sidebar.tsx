@@ -162,31 +162,33 @@ export function Sidebar({
     <aside className="fl-sidebar" aria-label="Cluster resources">
       <div className="flex flex-col p-1 text-sm">
         {clusters.map((cluster) => (
-          <div key={cluster} className="relative group">
+          <div key={cluster}>
             {/* Cluster (level 0) */}
-            <TreeRow
-              open={clusterOpen(cluster)}
-              onToggle={() => toggleCluster(cluster)}
-              className="fl-sidebar__cluster-row pl-1.5 font-medium"
-            >
-              <span className="size-2 shrink-0 rounded-full bg-emerald-500" />
-              <span className="truncate flex-1" title={cluster}>
-                {contextDisplayName(cluster, contextProfiles[cluster])}
-              </span>
-            </TreeRow>
-            {isTauri() && (
-              <button
-                type="button"
-                className="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1 hover:bg-muted-foreground/20 rounded transition-opacity"
-                title="Open in new window"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void invokeCommand("open_context_window", { contextId: cluster });
-                }}
+            <div className="relative group">
+              <TreeRow
+                open={clusterOpen(cluster)}
+                onToggle={() => toggleCluster(cluster)}
+                className="fl-sidebar__cluster-row pl-1.5 font-medium"
               >
-                <ExternalLink className="size-3.5 text-muted-foreground" />
-              </button>
-            )}
+                <span className="size-2 shrink-0 rounded-full bg-emerald-500" />
+                <span className="truncate flex-1" title={cluster}>
+                  {contextDisplayName(cluster, contextProfiles[cluster])}
+                </span>
+              </TreeRow>
+              {isTauri() && (
+                <button
+                  type="button"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1 hover:bg-muted-foreground/20 rounded transition-opacity"
+                  title="Open in new window"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void invokeCommand("open_context_window", { contextId: cluster });
+                  }}
+                >
+                  <ExternalLink className="size-3.5 text-muted-foreground" />
+                </button>
+              )}
+            </div>
 
             {clusterOpen(cluster) &&
               NAV_SECTIONS.map((section) => {

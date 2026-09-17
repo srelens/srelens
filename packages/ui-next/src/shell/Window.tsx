@@ -499,7 +499,7 @@ export function Window({
    * not the URL this start returns.
    */
   useEffect(() => {
-    if (!vaultReady) return;
+    if (!vaultReady || windowLabel !== "main") return;
     const mcp = loadMcpSettings();
     if (!mcp.enabled) return;
     void (async () => {
@@ -516,7 +516,7 @@ export function Window({
       }
       mcpAutoStartSettled();
     })();
-  }, [vaultReady]);
+  }, [vaultReady, windowLabel]);
 
   function menuFor(tab: StripTab): ContextMenuItem[] {
     return [

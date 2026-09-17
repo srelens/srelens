@@ -154,9 +154,15 @@ async fn start_server(
     prompts_dir: &std::path::Path,
     lifecycle: &Lifecycle<'_>,
 ) -> Result<String, String> {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    if let Some(r) = manager.running.lock().unwrap().as_ref() {
+        if r.addr == addr && r.token.matches(token.as_str()) {
+            return Ok(url_for(addr));
+        }
+    }
+
     stop_running(manager, pending, lifecycle).await;
 
-    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("Could not bind {addr}: {e}"))?;

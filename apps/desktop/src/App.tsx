@@ -812,12 +812,13 @@ export function App() {
   const [vaultReady, setVaultReady] = useState(false);
 
   // Start the in-app MCP HTTP server once the vault is ready if the user left
-  // it enabled, so agents can connect without opening Settings first.
+  // it enabled, so agents can connect without opening Settings first. Restrict
+  // auto-start to the main window so opening a context window does not restart it.
   useEffect(() => {
-    if (!isTauri() || !vaultReady) return;
+    if (!isTauri() || !vaultReady || windowLabel !== "main") return;
     const mcp = loadMcpSettings();
     if (mcp.enabled) void startMcpHttp(mcp.port).catch(() => {});
-  }, [vaultReady]);
+  }, [vaultReady, windowLabel]);
 
   /** Open a resource's kind view in a NAMED cluster and focus its detail.
    *  Takes the cluster explicitly because a deep link can target a context
