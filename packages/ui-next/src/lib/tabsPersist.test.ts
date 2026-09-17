@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ClusterContext } from "@srelens/core";
 import { defaultState, makeTab, type TabsState } from "./tabs";
 import {
-  BASE_STORAGE_KEY, STORAGE_VERSION, flushSave, loadTabsState, parseStoredState, saveTabsState, scheduleSave,
+  BASE_STORAGE_KEY, STORAGE_VERSION, flushSave, getStorageKey, loadTabsState, parseStoredState, saveTabsState, scheduleSave,
   installFlushOnUnload, type Storage,
 } from "./tabsPersist";
 
@@ -313,5 +313,19 @@ describe("installFlushOnUnload", () => {
     expect(spy).toHaveBeenCalledTimes(1);
     off();
     expect(handlers.has("beforeunload")).toBe(false);
+  });
+});
+
+describe("getStorageKey", () => {
+  it("hashes an over-long context window label before writing", () => {
+    const storage = memory();
+    const label = `ctx-${"61".repeat(120)}`;
+    const state = valid();
+    saveTabsState(state, storage, label);
+    const key = getStorageKey(label);
+    expect(key.length).toBeLessThanOrEqual(256);
+    expect(storage.getItem(key)).not.toBeNull();
+    expect(storage.getItem(`${BASE_STORAGE_KEY}-${label}`)).toBeNull();
+    expect(loadTabsState(storage, () => true, label)).toEqual(state);
   });
 });

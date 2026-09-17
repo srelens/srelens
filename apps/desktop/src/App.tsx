@@ -159,8 +159,12 @@ export function App() {
   // Durable per-context state lives under stable ids; everything below this
   // line works in display names, which is what the UI shows (#265).
   const knownContexts = contexts ?? [];
+  // Prefer the live listing; when it fails entirely classic keeps restored
+  // tabs, so fall back to each tab's stored `clusterId` rather than sending a
+  // display name into `?context=` (boot resolves that strictly as a stable id).
   const stableIdOf = (cluster: string) =>
-    knownContexts.find((context) => context.name === cluster)?.stableId;
+    knownContexts.find((context) => context.name === cluster)?.stableId
+    ?? tabs.find((tab) => tab.cluster === cluster)?.clusterId;
   const contextProfiles = projectToNames(contextProfilesById, knownContexts);
   const contextOrder = projectOrderToNames(contextOrderById, knownContexts);
   const clusterNs = projectToNames(clusterNsById, knownContexts);

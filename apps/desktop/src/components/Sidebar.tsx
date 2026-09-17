@@ -163,7 +163,9 @@ export function Sidebar({
     // nothing about which of the app's two navigation regions they are in.
     <aside className="fl-sidebar" aria-label="Cluster resources">
       <div className="flex flex-col p-1 text-sm">
-        {clusters.map((cluster) => (
+        {clusters.map((cluster) => {
+          const contextId = clusterId?.(cluster);
+          return (
           <div key={cluster}>
             {/* Cluster (level 0) */}
             <div className="relative group">
@@ -180,13 +182,15 @@ export function Sidebar({
               {isTauri() && (
                 <button
                   type="button"
-                  className="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1 hover:bg-muted-foreground/20 rounded transition-opacity"
-                  title="Open in new window"
+                  disabled={!contextId}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1 hover:bg-muted-foreground/20 rounded transition-opacity disabled:opacity-40 disabled:pointer-events-none"
+                  title={contextId ? "Open in new window" : "Open in new window once this cluster's identity is known"}
                   onClick={(e) => {
                     e.stopPropagation();
-                    // Same key Rail writes: a display name that equals another
-                    // cluster's stableId must not share that window's label.
-                    const contextId = clusterId?.(cluster) ?? cluster;
+                    // Same key Rail writes. Withhold until the stable id is known —
+                    // a display-name fallback opens a window whose `?context=` can
+                    // never match after a later successful listing.
+                    if (!contextId) return;
                     void invokeCommand("open_context_window", { contextId }).catch((err) => {
                       notify.error(`Couldn't open window for ${cluster}`, describeError(err).detail);
                     });
@@ -256,7 +260,8 @@ export function Sidebar({
               />
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
       <div className="fl-sidebar__resize" ref={handleRef} aria-hidden="true" />
     </aside>

@@ -7,17 +7,14 @@
 // localStorage — one code path, no platform branch.
 
 import { loadRestoreSession } from "./settings";
-import { settingsStorage } from "./settingsStorage";
+import { scopedSettingsKey, settingsStorage } from "./settingsStorage";
 import type { CrdRef } from "./crds";
 import type { ViewTab } from "./tabs";
 
 const BASE_KEY = "srelens.openTabs";
 
 function getStorageKey(windowLabel?: string): string {
-  if (!windowLabel || windowLabel === "main") {
-    return BASE_KEY;
-  }
-  return `${BASE_KEY}-${windowLabel}`;
+  return scopedSettingsKey(BASE_KEY, windowLabel);
 }
 
 export interface PersistedWorkspace {

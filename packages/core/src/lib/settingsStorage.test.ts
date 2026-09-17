@@ -286,3 +286,25 @@ it("reports a rejected backend save to callers that must wait before reloading",
   expect(localStorage.getItem("srelens.design")).toBeNull();
   error.mockRestore(); Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
 });
+
+describe("scopedSettingsKey", () => {
+  it("keeps short window labels in the key so existing per-window saves still load", async () => {
+    const { scopedSettingsKey } = await import("./settingsStorage");
+    expect(scopedSettingsKey("srelens.next.workspaces", "ctx-6b696e642d646576")).toBe(
+      "srelens.next.workspaces-ctx-6b696e642d646576",
+    );
+    expect(scopedSettingsKey("srelens.openTabs")).toBe("srelens.openTabs");
+    expect(scopedSettingsKey("srelens.openTabs", "main")).toBe("srelens.openTabs");
+  });
+
+  it("digests a window label that would exceed the settings key limit", async () => {
+    const { scopedSettingsKey } = await import("./settingsStorage");
+    // Hex of a stableId over 114 bytes pushes `base-ctx-<hex>` past 256.
+    const label = `ctx-${"61".repeat(120)}`;
+    const key = scopedSettingsKey("srelens.next.workspaces", label);
+    expect(key.length).toBeLessThanOrEqual(256);
+    expect(key.startsWith("srelens.next.workspaces-h")).toBe(true);
+    expect(key).toBe(scopedSettingsKey("srelens.next.workspaces", label));
+    expect(key).not.toBe(scopedSettingsKey("srelens.next.workspaces", `${label}x`));
+  });
+});

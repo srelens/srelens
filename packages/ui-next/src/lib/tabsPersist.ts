@@ -1,5 +1,5 @@
 import { describe } from "./routes";
-import { loadRestoreSession, settingsStorage } from "@srelens/core";
+import { loadRestoreSession, scopedSettingsKey, settingsStorage } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
 import type { Tab, TabsState, Workspace } from "./tabs";
 
@@ -16,10 +16,7 @@ export const BASE_STORAGE_KEY = "srelens.next.workspaces";
 export const STORAGE_VERSION = 1;
 
 export function getStorageKey(windowLabel?: string): string {
-  if (!windowLabel || windowLabel === "main") {
-    return BASE_STORAGE_KEY;
-  }
-  return `${BASE_STORAGE_KEY}-${windowLabel}`;
+  return scopedSettingsKey(BASE_STORAGE_KEY, windowLabel);
 }
 
 export interface Storage {

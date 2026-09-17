@@ -142,4 +142,20 @@ describe("Sidebar", () => {
       errorSpy.mockRestore();
     }
   });
+
+  it("withholds open-in-new-window when the stable id is unknown", () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    coreMock.invokeCommand.mockClear();
+    try {
+      render(<Sidebar {...base} clusterId={() => undefined} />);
+      const btn = screen.getByRole("button", {
+        name: "Open in new window once this cluster's identity is known",
+      });
+      expect((btn as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.click(btn);
+      expect(coreMock.invokeCommand).not.toHaveBeenCalled();
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  });
 });

@@ -167,3 +167,27 @@ export async function flushSettingsWrites(options: { throwOnError?: boolean } = 
   await writes;
   if (options.throwOnError && lastWriteError) throw lastWriteError;
 }
+
+/**
+ * Settings backend keys are capped at 256 bytes (`crates/registry/src/settings.rs`).
+ * Context windows label themselves `ctx-` plus hex of the stable id, which doubles
+ * every path byte and can blow that limit. Short labels stay in the key so
+ * existing per-window saves still load; only the over-long case digests.
+ */
+const SETTINGS_KEY_MAX = 256;
+
+function fnv1a64Hex(input: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= BigInt(input.charCodeAt(i));
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+export function scopedSettingsKey(base: string, windowLabel?: string): string {
+  if (!windowLabel || windowLabel === "main") return base;
+  const direct = `${base}-${windowLabel}`;
+  if (direct.length <= SETTINGS_KEY_MAX) return direct;
+  return `${base}-h${fnv1a64Hex(windowLabel)}`;
+}
