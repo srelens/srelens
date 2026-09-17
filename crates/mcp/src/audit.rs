@@ -117,8 +117,8 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
 /// ordinary word costs a few characters of an error text, where the
 /// alternative is a credential on disk.
 ///
-/// The arguments are untrusted and can be large (2 MiB over HTTP, unbounded
-/// over stdio), and a denied call is scrubbed too, so this stays near-linear
+/// The arguments are untrusted and can be large (up to
+/// [`crate::MAX_REQUEST_BYTES`] on either transport), and a denied call is scrubbed too, so this stays near-linear
 /// in the number of values: membership is a hash lookup, and each distinct
 /// hidden value is replaced once.
 pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
@@ -720,8 +720,8 @@ mod tests {
         assert!(!out.contains("4711"), "the numeric value leaked: {out}");
     }
 
-    /// PR #625 review. The arguments of a denied call are untrusted and, over
-    /// HTTP, up to 2 MiB; over stdio, unbounded. A `settings` map of very many
+    /// PR #625 review. The arguments of a denied call are untrusted and, on
+    /// either transport, up to 4 MiB. A `settings` map of very many
     /// short values gives `redact_error` one hidden value per setting and one
     /// `<redacted>` kept leaf per setting, and a linear membership scan per
     /// hidden value made the scrub quadratic in the number of settings — a
