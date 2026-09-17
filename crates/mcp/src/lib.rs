@@ -15,6 +15,12 @@ use std::sync::Arc;
 use srelens_capability::{CapabilityError, Registry};
 use serde_json::Value;
 
+/// The largest JSON-RPC request either transport accepts, in bytes: one stdio line
+/// (without its newline) or one HTTP request body. 4 MiB leaves room for the largest
+/// capability input — a 256 KiB manifest, even with every character escaped — and
+/// bounds what a client can make the server hold before any field is checked.
+pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolDescriptor {
     pub name: String,
