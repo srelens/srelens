@@ -23,7 +23,12 @@ early_access: false
 
 reviews:
   profile: assertive
-  request_changes_workflow: false
+  # Requests changes while its comments are open and approves once they are
+  # resolved and no pre-merge check errors. That approval can satisfy dev's
+  # one required review, so dev's branch protection dismisses stale approvals:
+  # a push after CodeRabbit approves clears the approval instead of riding on
+  # it. Do not turn that protection off while this is true.
+  request_changes_workflow: true
 
   high_level_summary: true
   high_level_summary_instructions: >-
