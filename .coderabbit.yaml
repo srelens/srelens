@@ -194,12 +194,17 @@ reviews:
       instructions: |
         The single place capabilities are registered; it must stay Tauri-free
         (no `tauri` dependency or import, directly or through a new crate).
-        A PR that adds, removes or renames a capability, or changes its schema or
-        annotations, must also: update packages/core/src/lib/capability-catalog.json
-        (regenerated with `UPDATE_CATALOG=1 cargo test -p srelens-registry`), add or
-        explicitly exclude an e2e case in apps/desktop/src-tauri/tests/e2e.rs, and
-        consume it in the UI only through a wrapper in @srelens/core. Flag any of
-        these that is missing.
+        Every capability change must update
+        packages/core/src/lib/capability-catalog.json (regenerated with
+        `UPDATE_CATALOG=1 cargo test -p srelens-registry`). Beyond that, it depends
+        on the change (a rename is both a removal and an addition):
+        - Added or changed: add or explicitly exclude an e2e case in
+          apps/desktop/src-tauri/tests/e2e.rs, and consume it in the UI only
+          through a wrapper in @srelens/core.
+        - Removed: its e2e case or exclusion is deleted, and no @srelens/core
+          wrapper, UI caller, MCP prompt or WEB_DENIED_CAPABILITIES entry still
+          names its id. Do not ask for e2e coverage of a removed capability.
+        Flag whichever of these is missing.
 
     - path: "crates/capability/**"
       instructions: |
@@ -251,12 +256,16 @@ reviews:
         - Per-user isolation: anything touching per-user state (kubeconfigs,
           materialized files, helm home, tokens, settings) goes through
           `users::UserEnvs`, never a process-wide path or global.
-        - Capabilities refused on the web (host shell, toolbox installs, helm
-          repo/plugin, extension app capabilities) are denied at BOTH layers:
-          WEB_DENIED_CAPABILITIES in api.rs and WEB_DENIED_COMMANDS /
-          HELM_DENIED_SUBCOMMANDS in api_command.rs. A new host-affecting
-          capability or command that is not added to these lists is a finding.
-          UI-only denial is never enough.
+        - Web denial is for what cannot be made safe on a shared multi-user
+          container: host shell, toolbox installs, helm repo/plugin operations,
+          app-extension capabilities, and anything else that would act as the
+          shared UID or leak state across users. Such a capability goes in
+          WEB_DENIED_CAPABILITIES (api.rs); such a streaming command goes in
+          WEB_DENIED_COMMANDS / HELM_DENIED_SUBCOMMANDS (api_command.rs). The
+          server enforces it; UI-only denial is never enough. Do NOT ask for
+          denial of a capability that touches files or host state only through
+          per-user paths the server supplies from `UserEnvs` (e.g. the user's
+          own materialized kubeconfig); that isolation is what makes it safe.
         - Every route authenticates and authorizes the session user; a user can
           never read or act on another user's clusters, kubeconfigs, tokens,
           streams or port-forwards.
@@ -559,8 +568,13 @@ reviews:
              @srelens/core wrapper sends (camelCase via serde rename).
           5. It is `read_only`, or `requires_confirm` (with `destructive` /
              `sensitive` where applicable).
-          6. If it touches the host (shell, filesystem, toolbox, helm repo/plugin),
-             it is added to the web-host denial list in crates/server.
+          6. If it cannot be safe on the shared multi-user web container (it runs
+             a host shell, installs toolbox binaries, performs helm repo/plugin
+             operations, or otherwise acts as the shared UID or reads/writes
+             state outside the caller's per-user `UserEnvs` paths), it is in
+             WEB_DENIED_CAPABILITIES in crates/server/src/api.rs. Touching files
+             only through per-user paths the server supplies (e.g. the user's own
+             kubeconfig) does not require denial.
 
           For each capability REMOVED, pass only if ALL hold:
           1. Its registration is gone from crates/registry/src/lib.rs.
