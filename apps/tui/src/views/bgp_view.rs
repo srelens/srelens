@@ -506,9 +506,15 @@ fn render_peers_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
             "0 / 0".to_string()
         };
         let uptime_str = format_uptime_display(n.uptime_or_last_change.as_deref());
+        let show_node_name = i == 0 || peers[i - 1].node_name != n.node_name;
+        let node_text = if show_node_name {
+            truncate_str(&n.node_name, col_node)
+        } else {
+            String::new()
+        };
 
         let spans = vec![
-            Span::styled(format!(" {:<col_node$} ", truncate_str(&n.node_name, col_node)), row_style),
+            Span::styled(format!(" {:<col_node$} ", node_text), row_style),
             Span::styled(format!("{:<col_ip$} ", truncate_str(&n.peer_address, col_ip)), Style::default().fg(Theme::cyan())),
             Span::styled(format!("{:<col_pasn$} ", n.peer_asn), Style::default().fg(Theme::fg())),
             Span::styled(format!("{:<col_lasn$} ", n.local_asn), Style::default().fg(Theme::dim())),

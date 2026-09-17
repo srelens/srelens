@@ -817,6 +817,12 @@ async fn discover_cilium_bgp(
         });
     }
 
+    neighbors.sort_by(|a, b| {
+        a.node_name.cmp(&b.node_name)
+            .then_with(|| a.peer_address.cmp(&b.peer_address))
+            .then_with(|| a.peer_asn.cmp(&b.peer_asn))
+    });
+
     let established = neighbors.iter().filter(|n| n.session_state == BgpSessionState::Established || n.session_state == BgpSessionState::Configured).count();
     let degraded = neighbors.iter().filter(|n| n.session_state == BgpSessionState::Active || n.session_state == BgpSessionState::Connect || n.session_state == BgpSessionState::Idle).count();
     
@@ -1103,6 +1109,12 @@ async fn discover_metallb_bgp(
         });
     }
 
+    neighbors.sort_by(|a, b| {
+        a.node_name.cmp(&b.node_name)
+            .then_with(|| a.peer_address.cmp(&b.peer_address))
+            .then_with(|| a.peer_asn.cmp(&b.peer_asn))
+    });
+
     let count = neighbors.len();
     Ok(BgpClusterSummary {
         engine: BgpEngineType::MetalLB,
@@ -1164,6 +1176,12 @@ async fn discover_calico_bgp(
             });
         }
     }
+
+    neighbors.sort_by(|a, b| {
+        a.node_name.cmp(&b.node_name)
+            .then_with(|| a.peer_address.cmp(&b.peer_address))
+            .then_with(|| a.peer_asn.cmp(&b.peer_asn))
+    });
 
     let count = neighbors.len();
     Ok(BgpClusterSummary {

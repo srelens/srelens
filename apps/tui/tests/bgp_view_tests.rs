@@ -454,4 +454,103 @@ fn bgp_view_dynamic_column_widths_and_uptime_formatting() {
     assert!(text.contains(&formatted_uptime));
 }
 
+#[test]
+fn bgp_view_groups_neighbors_by_node_and_suppresses_duplicate_node_name() {
+    let mut state = BgpViewState::new();
+    let mut summary = sample_bgp_summary();
+    
+    // Add two neighbors to node-worker-01
+    summary.peers = vec![
+        BgpNeighbor {
+            node_name: "node-worker-01".to_string(),
+            peer_address: "10.0.0.1".to_string(),
+            peer_asn: 65001,
+            local_asn: 65100,
+            session_state: BgpSessionState::Established,
+            policy_name: "tor-spine-a".to_string(),
+            policy_kind: "CiliumBGPClusterConfig".to_string(),
+            export_pod_cidr: true,
+            hold_time_seconds: Some(90),
+            keepalive_time_seconds: Some(30),
+            connect_retry_seconds: Some(120),
+            multihop_ttl: Some(64),
+            graceful_restart: true,
+            advertised_prefixes: vec!["10.244.0.0/24".to_string()],
+            routes_count: 8,
+            routes_received: 316,
+            uptime_or_last_change: Some("4d 12h".to_string()),
+        },
+        BgpNeighbor {
+            node_name: "node-worker-01".to_string(),
+            peer_address: "10.0.0.2".to_string(),
+            peer_asn: 65002,
+            local_asn: 65100,
+            session_state: BgpSessionState::Established,
+            policy_name: "tor-spine-b".to_string(),
+            policy_kind: "CiliumBGPClusterConfig".to_string(),
+            export_pod_cidr: true,
+            hold_time_seconds: Some(90),
+            keepalive_time_seconds: Some(30),
+            connect_retry_seconds: Some(120),
+            multihop_ttl: Some(64),
+            graceful_restart: true,
+            advertised_prefixes: vec!["10.244.0.0/24".to_string()],
+            routes_count: 8,
+            routes_received: 316,
+            uptime_or_last_change: Some("4d 12h".to_string()),
+        },
+        BgpNeighbor {
+            node_name: "node-worker-02".to_string(),
+            peer_address: "10.0.0.3".to_string(),
+            peer_asn: 65003,
+            local_asn: 65100,
+            session_state: BgpSessionState::Established,
+            policy_name: "tor-spine-a".to_string(),
+            policy_kind: "CiliumBGPClusterConfig".to_string(),
+            export_pod_cidr: true,
+            hold_time_seconds: Some(90),
+            keepalive_time_seconds: Some(30),
+            connect_retry_seconds: Some(120),
+            multihop_ttl: Some(64),
+            graceful_restart: true,
+            advertised_prefixes: vec!["10.244.1.0/24".to_string()],
+            routes_count: 4,
+            routes_received: 500,
+            uptime_or_last_change: Some("2d 06h".to_string()),
+        },
+    ];
+
+    state.set_summary(summary);
+
+    let lines = render_lines(160, 24, |f| {
+        render_bgp_view(f, f.area(), &state);
+    });
+
+    // Find the lines containing the peer IPs
+    let line_peer1 = lines.iter().find(|l| l.contains("10.0.0.1")).expect("peer 1 rendered");
+    let line_peer2 = lines.iter().find(|l| l.contains("10.0.0.2")).expect("peer 2 rendered");
+    let line_peer3 = lines.iter().find(|l| l.contains("10.0.0.3")).expect("peer 3 rendered");
+
+    // Peer 1 (first neighbor of node-worker-01) must show the node name
+    assert!(line_peer1.contains("node-worker-01"));
+
+    // Peer 2 (second neighbor of node-worker-01) must NOT repeat the node name
+    assert!(!line_peer2.contains("node-worker-01"));
+
+    // Peer 3 (first neighbor of node-worker-02) must show its node name
+    assert!(line_peer3.contains("node-worker-02"));
+
+    // Navigate to peer 2 (index 1) and verify inspector still displays node name
+    state.select_next();
+    assert_eq!(state.selected_peer_idx, 1);
+    assert_eq!(state.selected_peer().unwrap().peer_address, "10.0.0.2");
+    assert_eq!(state.selected_peer().unwrap().node_name, "node-worker-01");
+
+    let lines_sel2 = render_lines(160, 24, |f| {
+        render_bgp_view(f, f.area(), &state);
+    });
+    let text_sel2 = lines_sel2.join("\n");
+    assert!(text_sel2.contains("Selected Peer: 10.0.0.2 (Node: node-worker-01)"));
+}
+
 
