@@ -1854,7 +1854,7 @@ mod tests {
         for (group, plural, kind) in [
             ("apps", "deployments", "Deployment"),
             ("batch", "jobs", "Job"),
-            ("networking.k8s.io", "ingresses", "Ingress"),
+            ("apps.", "deployments", "Deployment"),
         ] {
             let mut source: Value = serde_json::from_str(&manifest()).unwrap();
             bind_builtin(&mut source, group, plural, kind);
@@ -1896,6 +1896,77 @@ mod tests {
         assert_eq!(
             reg.invoke("extensions.list", json!({})).await.unwrap()["plugins"],
             json!([])
+        );
+    }
+    /// A dotted group under `k8s.io` may be a CRD's, so installing it is left to the
+    /// per-cluster check; the built-in `networking.k8s.io` is refused there instead.
+    #[tokio::test]
+    async fn crd_groups_under_k8s_io_install_and_are_checked_per_cluster() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let mut core = (*fake_core()).clone();
+        serve_crds(&mut core, &["gateways.gateway.networking.k8s.io/v1"]);
+        let core = Arc::new(core);
+        let reader = |id: &str, group: &str, plural: &str, kind: &str| {
+            let mut source: Value = serde_json::from_str(&manifest()).unwrap();
+            source["id"] = json!(id);
+            bind_builtin(&mut source, group, plural, kind);
+            Configure::Install {
+                signature: None,
+                manifest: source.to_string(),
+                grants: vec!["k8s.listCustomResource".into()],
+            }
+        };
+        let state = mutate(
+            &path,
+            core.clone(),
+            reader(
+                "org.example.gateway",
+                "gateway.networking.k8s.io",
+                "gateways",
+                "Gateway",
+            ),
+        )
+        .unwrap();
+        let gateway = find(&state, "org.example.gateway").revision;
+        let state = mutate(
+            &path,
+            core.clone(),
+            reader(
+                "org.example.ingress",
+                "networking.k8s.io",
+                "ingresses",
+                "Ingress",
+            ),
+        )
+        .unwrap();
+        let ingress = find(&state, "org.example.ingress").revision;
+        assert!(read(&path)
+            .unwrap()
+            .plugins
+            .iter()
+            .all(|p| p.enabled && p.quarantined.is_none()));
+
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        let read_args = |id: &str, revision: u64| json!({"id":id,"revision":revision,"capability":"applications","context":"staging","namespace":""});
+        assert!(reg
+            .invoke("extensions.read", read_args("org.example.gateway", gateway))
+            .await
+            .is_ok());
+        let refused = reg
+            .invoke("extensions.read", read_args("org.example.ingress", ingress))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("No CustomResourceDefinition ingresses.networking.k8s.io serving v1"),
+            "{refused}"
         );
     }
     #[tokio::test]
@@ -1979,11 +2050,16 @@ mod tests {
         // A dotted group served by an aggregated API, or a CRD this cluster lacks.
         let absent = read_on(&[], false).await.unwrap_err().to_string();
         assert!(
-            absent.contains("applications.argoproj.io is not a CustomResourceDefinition"),
+            absent
+                .contains("No CustomResourceDefinition applications.argoproj.io serving v1alpha1"),
             "{absent}"
         );
+        // The CRD exists but does not serve the bound version, which another API may.
+        assert!(read_on(&["applications.argoproj.io/v1beta1"], false)
+            .await
+            .is_err());
         // A lookup that failed says so, and is not reported as an absence.
-        let failed = read_on(&["applications.argoproj.io"], true)
+        let failed = read_on(&["applications.argoproj.io/v1alpha1"], true)
             .await
             .unwrap_err()
             .to_string();
@@ -1991,7 +2067,9 @@ mod tests {
         assert!(failed.contains("forbidden"), "{failed}");
         assert_eq!(LISTED.load(std::sync::atomic::Ordering::SeqCst), 0);
 
-        assert!(read_on(&["applications.argoproj.io"], false).await.is_ok());
+        assert!(read_on(&["applications.argoproj.io/v1alpha1"], false)
+            .await
+            .is_ok());
         assert_eq!(LISTED.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
     pub(super) fn fake_core() -> Arc<Registry> {
@@ -2002,19 +2080,21 @@ mod tests {
         let mut cap = core.get("k8s.listCustomResource").unwrap().clone();
         cap.handler = Arc::new(|args| Box::pin(async move { Ok(args) }));
         core.register(cap);
-        serve_crds(&mut core, &["applications.argoproj.io"]);
+        serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
         Arc::new(core)
     }
-    /// Answers the broker's CRD check as a cluster serving exactly these CRDs would.
+    /// Answers the broker's CRD check as a cluster whose CRDs serve exactly these
+    /// `{plural}.{group}/{version}` would.
     pub(super) fn serve_crds(core: &mut Registry, names: &'static [&'static str]) {
         let mut cap =
             crd::check_capability(srelens_kube::client_cache::ClientCache::new_many(vec![]));
         cap.handler = Arc::new(move |args| {
             Box::pin(async move {
                 let name = format!(
-                    "{}.{}",
+                    "{}.{}/{}",
                     args["plural"].as_str().unwrap_or_default(),
-                    args["group"].as_str().unwrap_or_default()
+                    args["group"].as_str().unwrap_or_default(),
+                    args["version"].as_str().unwrap_or_default()
                 );
                 Ok(json!(names.contains(&name.as_str())))
             })

@@ -200,7 +200,7 @@ mod tests {
             core.register(cap);
         }
         // The cluster serves Argo CD's CRD, but not one for the aggregated group below.
-        super::super::tests::serve_crds(&mut core, &["applications.argoproj.io"]);
+        super::super::tests::serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
         let core = Arc::new(core);
         let mut source: Value = serde_json::from_str(&super::super::tests::manifest()).unwrap();
         source["capabilities"][0]["arguments"]["group"] = json!("apps.openshift.io");
@@ -231,7 +231,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            refused.contains("applications.apps.openshift.io is not a CustomResourceDefinition"),
+            refused.contains("No CustomResourceDefinition applications.apps.openshift.io"),
             "{refused}"
         );
         let action =
@@ -265,7 +265,7 @@ mod tests {
             cap.handler = Arc::new(|args| Box::pin(async move { Ok(args) }));
             core.register(cap);
         }
-        super::super::tests::serve_crds(&mut core, &["applications.argoproj.io"]);
+        super::super::tests::serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
         let core = Arc::new(core);
         let revision = super::super::tests::install(&path, core.clone());
         let binding = read(&path).unwrap().plugins[0].manifest.capabilities[0]

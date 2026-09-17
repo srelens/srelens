@@ -1,29 +1,33 @@
 //! A `k8s.listCustomResource` binding reads custom resources, never built-in ones (#601).
 //!
-//! Two checks keep it there. At install, rollback and load, the bound `group` must be one a
-//! CustomResourceDefinition can declare. At every broker call, `{plural}.{group}` must be a
-//! CustomResourceDefinition on the cluster, which also refuses a dotted group served by an
-//! aggregated API.
+//! Two checks keep it there. At install, rollback and load, the bound `group` must have
+//! the shape a CustomResourceDefinition group needs: dot-separated labels, which built-in
+//! groups such as `apps` lack. At every broker call, a CustomResourceDefinition named
+//! `{plural}.{group}` must serve the bound version on the cluster. That also refuses a
+//! dotted built-in group such as `networking.k8s.io`, an aggregated API, and a version of
+//! a CRD's group and plural that something other than the CRD serves.
 use super::*;
 use srelens_plugin_host::Binding;
 
-/// The broker's check that a bound group and plural name a CustomResourceDefinition.
-/// Registered only in the registry the broker dispatches through (`build_registry_*`), so
-/// it is not in the capability catalog and no MCP client or app binding can call it.
-pub(crate) const CHECK: &str = "extensions.customResourceDefinitionExists";
+/// The broker's check that a CustomResourceDefinition serves a bound group, version and
+/// plural. Registered only in the registry the broker dispatches through
+/// (`build_registry_*`), so it is not in the capability catalog and no MCP client or app
+/// binding can call it.
+pub(crate) const CHECK: &str = "extensions.customResourceServes";
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CheckIn {
     context: String,
     group: String,
+    version: String,
     plural: String,
 }
 
 pub(crate) fn check_capability(cache: Arc<srelens_kube::client_cache::ClientCache>) -> Capability {
     Capability::typed::<CheckIn, bool, _, _>(
         CHECK,
-        "Whether a group and plural name a CustomResourceDefinition on the cluster",
+        "Whether a CustomResourceDefinition on the cluster serves a group, version and plural",
         Annotations::READ_ONLY,
         move |input: CheckIn| {
             let cache = cache.clone();
@@ -32,9 +36,10 @@ pub(crate) fn check_capability(cache: Arc<srelens_kube::client_cache::ClientCach
                     .get(&input.context)
                     .await
                     .map_err(CapabilityError::Handler)?;
-                srelens_kube::crds::custom_resource_definition_exists(
+                srelens_kube::crds::custom_resource_serves(
                     client,
                     &input.group,
+                    &input.version,
                     &input.plural,
                 )
                 .await
@@ -46,18 +51,13 @@ pub(crate) fn check_capability(cache: Arc<srelens_kube::client_cache::ClientCach
 
 /// Why `group` cannot be a CustomResourceDefinition's group, if it cannot. Kubernetes
 /// requires a CRD group to be a DNS subdomain with at least one dot, which excludes the
-/// built-in groups `apps`, `batch`, `policy` and the like, and reserves `k8s.io` and its
-/// subdomains for Kubernetes.
+/// built-in groups `apps`, `batch`, `policy` and the like. Dotted groups under `k8s.io`
+/// are left to the broker's per-cluster check: some are built in, others, such as
+/// `gateway.networking.k8s.io`, are CRDs.
 fn group_problem(group: &str) -> Option<String> {
     if group.split('.').count() < 2 || group.split('.').any(str::is_empty) {
         return Some(format!(
             "\"{group}\" cannot be a CustomResourceDefinition group: one has dot-separated labels, such as argoproj.io, and built-in groups such as apps and batch do not"
-        ));
-    }
-    let lower = group.to_ascii_lowercase();
-    if lower == "k8s.io" || lower.ends_with(".k8s.io") {
-        return Some(format!(
-            "\"{group}\" is reserved for Kubernetes API groups; bind a custom resource group outside k8s.io"
         ));
     }
     None
@@ -86,8 +86,9 @@ pub(super) fn group_problems(manifest: &Manifest) -> ValidationErrors {
     problems
 }
 
-/// Refuses a call unless the binding's `{plural}.{group}` is a CustomResourceDefinition on
-/// the cluster `context` names. A failed lookup is reported as one, not as an absence.
+/// Refuses a call unless a CustomResourceDefinition named `{plural}.{group}` serves the
+/// binding's version on the cluster `context` names. A failed lookup is reported as one,
+/// not as an absence.
 pub(super) async fn require(
     core: &Registry,
     context: &str,
@@ -100,21 +101,21 @@ pub(super) async fn require(
             .and_then(Value::as_str)
             .unwrap_or_default()
     };
-    let (group, plural) = (field("group"), field("plural"));
+    let (group, version, plural) = (field("group"), field("version"), field("plural"));
     let name = format!("{plural}.{group}");
     match core
         .invoke(
             CHECK,
-            json!({ "context": context, "group": group, "plural": plural }),
+            json!({ "context": context, "group": group, "version": version, "plural": plural }),
         )
         .await
     {
         Ok(Value::Bool(true)) => Ok(()),
         Ok(_) => Err(CapabilityError::Handler(format!(
-            "{name} is not a CustomResourceDefinition on this cluster; an app reads only custom resources"
+            "No CustomResourceDefinition {name} serving {version} on this cluster; an app reads only custom resources"
         ))),
         Err(error) => Err(CapabilityError::Handler(format!(
-            "Could not confirm that {name} is a CustomResourceDefinition: {error}"
+            "Could not confirm that a CustomResourceDefinition {name} serves {version}: {error}"
         ))),
     }
 }
@@ -124,27 +125,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_groups_a_crd_can_declare_are_accepted() {
+    fn only_groups_shaped_like_a_crd_group_are_accepted() {
         for group in [
             "argoproj.io",
             "kustomize.toolkit.fluxcd.io",
             "cluster.x-k8s.io",
-            "k8s.io.example.com",
+            "gateway.networking.k8s.io",
         ] {
             assert_eq!(group_problem(group), None, "{group}");
         }
-        for group in [
-            "apps",
-            "batch",
-            "policy",
-            "apps.",
-            ".apps",
-            "a..b",
-            "k8s.io",
-            "networking.k8s.io",
-            "rbac.authorization.k8s.io",
-            "Metrics.K8S.io",
-        ] {
+        for group in ["apps", "batch", "policy", "apps.", ".apps", "a..b"] {
             assert!(group_problem(group).is_some(), "{group}");
         }
     }

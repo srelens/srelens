@@ -24,11 +24,11 @@ version, plural, kind and scope, plus explicitly granted `k8s.listEvents` reader
 - Only `context` and `namespace` are forwarded from the host view.
 - Core-group resources, caller-supplied resource selectors, executable entry points
   and operations that need consent are rejected.
-- A reader reaches custom resources only. A group no CustomResourceDefinition can
-  declare, such as `apps`, `batch` or anything under `k8s.io`, is refused at install
-  and quarantines an installed app. Each read, inspection and action first confirms
-  that the bound `{plural}.{group}` is a CustomResourceDefinition on the cluster, so a
-  built-in or aggregated API is refused there too.
+- A reader reaches custom resources only. A group with no dot, such as `apps` or
+  `batch`, is refused at install and quarantines an installed app. Each read,
+  inspection and action first confirms that a CustomResourceDefinition named
+  `{plural}.{group}` serves the bound version on the cluster, so a dotted built-in
+  group such as `networking.k8s.io`, or an aggregated API, is refused there.
 - The app receives no kubeconfig or token.
 - Reads remain subject to the selected cluster's RBAC. RBAC and discovery failures are
   shown as errors, never as empty results.

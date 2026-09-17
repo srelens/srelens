@@ -453,13 +453,16 @@ async fn discover_columns(
     columns_for_named_version(&crd.data["spec"], version)
 }
 
-/// Whether `{plural}.{group}` names a CustomResourceDefinition on the cluster, so a caller
-/// can tell a custom resource from a built-in or aggregated API before reading it.
-/// `Ok(false)` means only that the API server answered it has none; a failed lookup is an
-/// error, never an absence. Reads metadata only, not the CRD's schema.
-pub async fn custom_resource_definition_exists(
+/// Whether a CustomResourceDefinition named `{plural}.{group}` serves `version` of that
+/// group and plural, so a caller can tell a custom resource from a built-in or aggregated
+/// API before reading it. A CRD that exists but does not serve the version is not enough:
+/// the same group and plural at another version may be served by something else.
+/// `Ok(false)` means only that the API server answered and no such CRD serves it; a failed
+/// lookup is an error, never an absence.
+pub async fn custom_resource_serves(
     client: kube::Client,
     group: &str,
+    version: &str,
     plural: &str,
 ) -> Result<bool, String> {
     let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
@@ -468,14 +471,21 @@ pub async fn custom_resource_definition_exists(
         "CustomResourceDefinition",
     ));
     let api: Api<DynamicObject> = Api::all_with(client, &ar);
-    let found = tokio::time::timeout(
-        request_timeout(),
-        api.get_metadata_opt(&format!("{plural}.{group}")),
-    )
-    .await
-    .map_err(|_| "CustomResourceDefinition lookup timed out".to_string())?
-    .map_err(|e| e.to_string())?;
-    Ok(found.is_some())
+    let found = tokio::time::timeout(request_timeout(), api.get_opt(&format!("{plural}.{group}")))
+        .await
+        .map_err(|_| "CustomResourceDefinition lookup timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(found.is_some_and(|crd| crd_serves(&crd.data["spec"], group, version, plural)))
+}
+/// Whether a CRD `spec` declares this group and plural and serves this version.
+fn crd_serves(spec: &serde_json::Value, group: &str, version: &str, plural: &str) -> bool {
+    spec["group"] == group
+        && spec["names"]["plural"] == plural
+        && spec["versions"].as_array().is_some_and(|versions| {
+            versions
+                .iter()
+                .any(|v| v["name"] == version && v["served"] == true)
+        })
 }
 fn columns_for_named_version(
     spec: &serde_json::Value,
@@ -948,8 +958,13 @@ mod tests {
             seen.lock().unwrap().push(request.uri().path().to_owned());
             async move {
                 let body = if status == 200 {
-                    serde_json::json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata",
-                        "metadata":{"name":"applications.argoproj.io"}})
+                    serde_json::json!({"apiVersion":"apiextensions.k8s.io/v1",
+                        "kind":"CustomResourceDefinition",
+                        "metadata":{"name":"applications.argoproj.io"},
+                        "spec":{"group":"argoproj.io","names":{"plural":"applications","kind":"Application"},
+                            "scope":"Namespaced",
+                            "versions":[{"name":"v1alpha1","served":true,"storage":true},
+                                {"name":"v1beta1","served":false,"storage":false}]}})
                 } else {
                     let reason = if status == 404 {
                         "NotFound"
@@ -972,27 +987,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_crd_lookup_tells_absence_from_failure() {
+    async fn a_crd_lookup_checks_the_served_version_and_tells_absence_from_failure() {
         let (client, paths) = answering(200);
         assert_eq!(
-            custom_resource_definition_exists(client, "argoproj.io", "applications").await,
+            custom_resource_serves(client, "argoproj.io", "v1alpha1", "applications").await,
             Ok(true)
         );
         assert_eq!(
             paths.lock().unwrap().as_slice(),
             ["/apis/apiextensions.k8s.io/v1/customresourcedefinitions/applications.argoproj.io"]
         );
+        // The CRD exists, but another API may serve this version of the group.
+        let (client, _) = answering(200);
+        assert_eq!(
+            custom_resource_serves(client, "argoproj.io", "v1beta1", "applications").await,
+            Ok(false)
+        );
+        let (client, _) = answering(200);
+        assert_eq!(
+            custom_resource_serves(client, "argoproj.io", "v1", "applications").await,
+            Ok(false)
+        );
         let (client, _) = answering(404);
         assert_eq!(
-            custom_resource_definition_exists(client, "apps", "deployments").await,
+            custom_resource_serves(client, "apps", "v1", "deployments").await,
             Ok(false)
         );
         // Forbidden is not "no such CRD".
         let (client, _) = answering(403);
         assert!(
-            custom_resource_definition_exists(client, "argoproj.io", "applications")
+            custom_resource_serves(client, "argoproj.io", "v1alpha1", "applications")
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_crd_serves_only_its_own_group_plural_and_served_versions() {
+        let spec = serde_json::json!({"group":"argoproj.io","names":{"plural":"applications"},
+            "versions":[{"name":"v1alpha1","served":true},{"name":"v1beta1","served":false},
+                {"name":"v1"}]});
+        assert!(crd_serves(&spec, "argoproj.io", "v1alpha1", "applications"));
+        assert!(!crd_serves(&spec, "argoproj.io", "v1beta1", "applications"));
+        assert!(!crd_serves(&spec, "argoproj.io", "v1", "applications"));
+        assert!(!crd_serves(&spec, "argoproj.io", "v2", "applications"));
+        assert!(!crd_serves(&spec, "argoproj.io", "v1alpha1", "appprojects"));
+        assert!(!crd_serves(&spec, "other.io", "v1alpha1", "applications"));
+        assert!(!crd_serves(
+            &serde_json::json!({}),
+            "argoproj.io",
+            "v1alpha1",
+            "applications"
+        ));
     }
 }
