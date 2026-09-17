@@ -100,18 +100,14 @@ export function App() {
   // counter all agree on the same restored snapshot.
   const windowLabel = useMemo(() => currentWindowLabel(), []);
   const [restored] = useState(() => loadOpenTabs(windowLabel));
-  const [tabs, setTabs] = useState<ViewTab[]>(() => {
-    if (restored?.tabs?.length) return restored.tabs;
-    const ctx = new URLSearchParams(window.location.search).get("context");
-    if (ctx) return [{ id: 1, cluster: ctx, kind: "overview", history: [] }];
-    return [];
-  });
-  const [activeTabId, setActiveTabId] = useState<number | null>(() => {
-    if (restored?.activeTabId) return restored.activeTabId;
-    const ctx = new URLSearchParams(window.location.search).get("context");
-    if (ctx) return 1;
-    return null;
-  });
+  // A context window's `?context=` is NOT a tab yet: it becomes one once the
+  // contexts are listed, in the effect beside the design handoff below. What is
+  // in the query is not necessarily a name this design can use, and seeding a
+  // tab from it here would be seeding one before that can be known.
+  const [tabs, setTabs] = useState<ViewTab[]>(() => restored?.tabs ?? []);
+  const [activeTabId, setActiveTabId] = useState<number | null>(
+    () => restored?.activeTabId ?? null,
+  );
   // The latest full state is read only when its restorable projection changes.
   // Draft YAML remains on its tab in memory, but is absent from both the key
   // and the settings write that the key triggers.
@@ -138,7 +134,7 @@ export function App() {
   // Global fallback namespace for clusters with no remembered selection.
   const [defaultNs, setDefaultNs] = useState(getDefaultNamespace);
   // Start the id counter past any restored tab so ids are never reused.
-  const tabIdRef = useRef(restored ? nextTabId(restored.tabs) : new URLSearchParams(window.location.search).get("context") ? 2 : 1);
+  const tabIdRef = useRef(restored ? nextTabId(restored.tabs) : 1);
   const focusNonce = useRef(0);
   // Mirror the active tab id into a ref so the (once-registered) Cmd+W menu
   // event listener always sees the latest value without re-subscribing.
@@ -287,13 +283,53 @@ export function App() {
   // about where it was. Consumed once the contexts are known — same gate as
   // the deep links below, for the same reason — and consumed exactly once:
   // takeHandoff clears as it reads, so a later launch starts at home.
+  const handoffOpened = useRef(false);
   useEffect(() => {
     if (!contexts) return;
     const handoff = takeHandoff();
     if (!handoff) return;
     if (contexts.some((c) => c.name === handoff.context)) {
       openView(handoff.context, handoff.kind);
+      handoffOpened.current = true;
     }
+  }, [contexts]);
+
+  // A context window's first tab, from the `?context=` in its URL. Resolved
+  // here and not in the tab initializers because WHICH identifier that query
+  // carries depends on the design that asked for the window: the next design's
+  // Rail keys its clusters on `stableId` and so writes that, while the classic
+  // Sidebar writes the display name. Classic tabs are keyed by display name
+  // (#265), so a tab seeded straight from the query is pointed at a cluster
+  // that does not exist — its overview call fails, and `refreshContexts` then
+  // prunes it, because `resolveStoredKey` matches names and never ids. That
+  // drops the window's only tab and leaves it empty with nothing saying why.
+  // Going through `openView` also fills in `clusterId`, which is what lets the
+  // tab follow a later rename instead of being pruned by it.
+  const contextParam = useMemo(
+    () => new URLSearchParams(window.location.search).get("context"),
+    [],
+  );
+  const contextParamConsumed = useRef(false);
+  useEffect(() => {
+    if (!contexts || contextParamConsumed.current) return;
+    contextParamConsumed.current = true;
+    // A restored session, and a design switch that has already picked this
+    // window's first view, both outrank the query.
+    if (!contextParam || handoffOpened.current || restored?.tabs?.length) return;
+    const match = contexts.find((c) => c.stableId === contextParam || c.name === contextParam);
+    if (!match) {
+      // Not a silent empty window. And which of the two facts this is — the
+      // list failed, or the list answered and the context is not in it — is
+      // the difference between "try again" and "it is gone".
+      notify.error(
+        "Couldn't open that cluster",
+        contextsError
+          ? "The kube contexts could not be listed."
+          : "It is not among the listed kube contexts.",
+      );
+      return;
+    }
+    openView(match.name, "overview");
   }, [contexts]);
 
   // Routed only once the contexts are known: a link that arrives during a cold
