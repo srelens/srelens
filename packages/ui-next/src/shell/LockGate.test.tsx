@@ -919,6 +919,34 @@ describe("LockGate, reporting that the vault is usable", () => {
     await waitFor(() => expect(screen.getByTestId("body")).toBeTruthy());
     expect(onReady).toHaveBeenCalledTimes(1);
   });
+
+  it("ignores a stale unlock status that resolves after vault-locked", async () => {
+    const onReady = vi.fn();
+    core.vaultStatus.mockResolvedValue(SEALED);
+    paint({ onReady });
+    expect(await screen.findByRole("heading", { name: "Workspace locked" })).toBeTruthy();
+
+    let resolveUnlock!: (s: VaultStatus) => void;
+    core.vaultStatus.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUnlock = resolve;
+        }),
+    );
+    act(() => {
+      listeners["vault-unlocked"]?.();
+    });
+    act(() => {
+      listeners["vault-locked"]?.();
+    });
+    core.vaultStatus.mockResolvedValue(SEALED);
+    await act(async () => {
+      resolveUnlock(OPEN);
+    });
+    await act(async () => {});
+    expect(screen.getByRole("heading", { name: "Workspace locked" })).toBeTruthy();
+    expect(onReady).not.toHaveBeenCalled();
+  });
 });
 
 /**

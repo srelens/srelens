@@ -175,6 +175,36 @@ describe("VaultGate", () => {
     expect(screen.queryByRole("heading", { name: /unlock srelens/i })).toBeNull();
   });
 
+  it("ignores a stale unlock status that resolves after vault-locked", async () => {
+    mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "locked" }));
+    const onReady = vi.fn();
+    render(<VaultGate onReady={onReady} />);
+    expect(await screen.findByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
+
+    const resolvers: Array<(s: ReturnType<typeof status>) => void> = [];
+    mcpSecurity.vaultStatus.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    act(() => {
+      listeners["vault-unlocked"]?.();
+    });
+    act(() => {
+      listeners["vault-locked"]?.();
+    });
+    expect(resolvers).toHaveLength(2);
+    await act(async () => {
+      resolvers[0](status({ mode: "unlocked", keySource: "password" }));
+    });
+    await act(async () => {
+      resolvers[1](status({ mode: "locked" }));
+    });
+    expect(screen.getByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
+    expect(onReady).not.toHaveBeenCalled();
+  });
+
   it("keeps one vault-locked subscription across onLocked identity changes", async () => {
     mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "unlocked", keySource: "password" }));
     const first = vi.fn();

@@ -42,6 +42,10 @@ export function VaultGate({ onReady, onLocked }: { onReady?: () => void; onLocke
   // a gap where a `vault-locked` broadcast is missed.
   const onLockedRef = useRef(onLocked);
   onLockedRef.current = onLocked;
+  // Bumped before each refresh kicked off by a lock/unlock broadcast so a
+  // slower earlier `vaultStatus` cannot overwrite newer state or call
+  // `notifyReady` over a vault that has since locked.
+  const statusGeneration = useRef(0);
 
   function notifyReady() {
     if (!readyNotified.current) {
@@ -55,13 +59,16 @@ export function VaultGate({ onReady, onLocked }: { onReady?: () => void; onLocke
   }
 
   async function refresh(): Promise<VaultStatus | null> {
+    const generation = statusGeneration.current;
     try {
       const s = await vaultStatus();
+      if (generation !== statusGeneration.current) return null;
       setStatus(s);
       setStatusFailed(false);
       if (s.mode === "unlocked") notifyReady();
       return s;
     } catch {
+      if (generation !== statusGeneration.current) return null;
       // Only reachable in a Tauri window (the mount effect never calls this
       // in web mode): the backend genuinely failed — e.g. the config dir
       // didn't resolve and the vault state was never managed. The gate must
@@ -90,6 +97,7 @@ export function VaultGate({ onReady, onLocked }: { onReady?: () => void; onLocke
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
     const off = on("vault-locked", () => {
+      statusGeneration.current += 1;
       readyNotified.current = false;
       setPassword("");
       setConfirm("");
@@ -112,6 +120,7 @@ export function VaultGate({ onReady, onLocked }: { onReady?: () => void; onLocke
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
     return on("vault-unlocked", () => {
+      statusGeneration.current += 1;
       void refresh();
     });
   }, []);
