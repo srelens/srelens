@@ -552,13 +552,22 @@ export function LockGate({ children, brandMarkSrc, onReady }: LockGateProps) {
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
 
-  // Sync locks across multiple context windows. When one window calls lockWorkspace(),
-  // the backend vault_lock command emits this event.
+  // Sync lock/unlock across context windows. The vault is process-wide; the
+  // local `srelens:vault-unlocked` DOM event never leaves the webview that
+  // unlocked, so both sides listen on the backend broadcast.
   useEffect(() => {
     if (!desktop) return;
-    return on("vault-locked", () => {
+    const offLocked = on("vault-locked", () => {
+      readyNotified.current = false;
       lockWorkspace();
     });
+    const offUnlocked = on("vault-unlocked", () => {
+      void read({ mayOpen: true });
+    });
+    return () => {
+      offLocked();
+      offUnlocked();
+    };
   }, [desktop]);
 
   const covered = raised || checking;

@@ -31,6 +31,7 @@ import { VaultGate } from "./VaultGate";
 beforeEach(() => {
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
   Object.values(mcpSecurity).forEach((m) => m.mockReset());
+  for (const key of Object.keys(listeners)) delete listeners[key];
   mcpSecurity.vaultSetupPassword.mockResolvedValue(undefined);
   mcpSecurity.vaultUnlockPassword.mockResolvedValue(undefined);
   mcpSecurity.vaultBiometricUnlock.mockResolvedValue(undefined);
@@ -158,6 +159,20 @@ describe("VaultGate", () => {
       resolveStatus();
     });
     expect(screen.getByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
+  });
+
+  it("lowers the gate when vault-unlocked fires from another window", async () => {
+    mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "locked" }));
+    const onReady = vi.fn();
+    render(<VaultGate onReady={onReady} />);
+    expect(await screen.findByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
+
+    mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "unlocked", keySource: "password" }));
+    await act(async () => {
+      listeners["vault-unlocked"]?.();
+    });
+    await waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("heading", { name: /unlock srelens/i })).toBeNull();
   });
 
   it("keeps one vault-locked subscription across onLocked identity changes", async () => {

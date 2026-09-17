@@ -5,14 +5,26 @@ import type { UserEvent } from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const core = vi.hoisted(() => ({
-  isTauri: vi.fn(() => true),
-  vaultStatus: vi.fn(),
-  vaultUnlockPassword: vi.fn(),
-  vaultSetupPassword: vi.fn(),
-  vaultRecoverPassword: vi.fn(),
-  vaultBiometricUnlock: vi.fn(),
-}));
+const { core, listeners } = vi.hoisted(() => {
+  const listeners: Record<string, () => void> = {};
+  return {
+    listeners,
+    core: {
+      isTauri: vi.fn(() => true),
+      vaultStatus: vi.fn(),
+      vaultUnlockPassword: vi.fn(),
+      vaultSetupPassword: vi.fn(),
+      vaultRecoverPassword: vi.fn(),
+      vaultBiometricUnlock: vi.fn(),
+      on: vi.fn((channel: string, handler: () => void) => {
+        listeners[channel] = handler;
+        return () => {
+          delete listeners[channel];
+        };
+      }),
+    },
+  };
+});
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   ...core,
@@ -145,6 +157,7 @@ async function failOnce(user: UserEvent) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  for (const key of Object.keys(listeners)) delete listeners[key];
   core.isTauri.mockReturnValue(true);
   core.vaultStatus.mockResolvedValue(SEALED);
   core.vaultUnlockPassword.mockRejectedValue(new Error("that is not the passphrase"));
@@ -888,6 +901,21 @@ describe("LockGate, reporting that the vault is usable", () => {
     core.vaultStatus.mockResolvedValue(OPEN);
     await user.type(field(), TYPED);
     await user.click(screen.getByRole("button", { name: "Unlock workspace" }));
+    await waitFor(() => expect(screen.getByTestId("body")).toBeTruthy());
+    expect(onReady).toHaveBeenCalledTimes(1);
+  });
+
+  it("lowers the cover when vault-unlocked fires from another window", async () => {
+    const onReady = vi.fn();
+    core.vaultStatus.mockResolvedValue(SEALED);
+    paint({ onReady });
+    expect(await screen.findByRole("heading", { name: "Workspace locked" })).toBeTruthy();
+    expect(listeners["vault-unlocked"]).toBeDefined();
+
+    core.vaultStatus.mockResolvedValue(OPEN);
+    await act(async () => {
+      listeners["vault-unlocked"]?.();
+    });
     await waitFor(() => expect(screen.getByTestId("body")).toBeTruthy());
     expect(onReady).toHaveBeenCalledTimes(1);
   });

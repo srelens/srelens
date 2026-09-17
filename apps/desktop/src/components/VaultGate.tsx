@@ -107,6 +107,15 @@ export function VaultGate({ onReady, onLocked }: { onReady?: () => void; onLocke
     return () => off();
   }, []);
 
+  // Another window unlocked the shared vault — refresh so this gate lowers
+  // without asking for the passphrase again.
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    return on("vault-unlocked", () => {
+      void refresh();
+    });
+  }, []);
+
   if (statusFailed) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-background">

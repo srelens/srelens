@@ -95,7 +95,7 @@ pub async fn vault_setup_password(
     // the user re-enables the skip afterwards (it then stores the new key).
     // Plugin-bound, so it stays on the command side of the #28 seam.
     vault_biometric::purge(&app);
-    Ok(())
+    emit_vault_unlocked(&app)
 }
 
 /// The whole setup transaction minus the Tauri-plugin step (#28 seam):
@@ -193,7 +193,8 @@ pub async fn vault_unlock_password(
 ) -> Result<(), String> {
     let dir = vault_biometric::vault_dir(&app)?;
     // Also recovers an interrupted password transition (staged `.next` meta).
-    vault::unlock_with_master_password(&vault, &dir, &password)
+    vault::unlock_with_master_password(&vault, &dir, &password)?;
+    emit_vault_unlocked(&app)
 }
 
 /// The explicit "Forgot password?" flow: read the opt-in keychain recovery
@@ -205,7 +206,9 @@ pub async fn vault_recover_password(
     vault: tauri::State<'_, Arc<Vault>>,
 ) -> Result<String, String> {
     let dir = vault_biometric::vault_dir(&app)?;
-    recover_password_core(&vault, &dir, &vault::KeyringRecovery)
+    let password = recover_password_core(&vault, &dir, &vault::KeyringRecovery)?;
+    emit_vault_unlocked(&app)?;
+    Ok(password)
 }
 
 /// The recover flow behind the #28 seam — see `vault_recover_password`.
@@ -362,9 +365,23 @@ fn change_password_core(
 #[tauri::command]
 pub async fn vault_lock(app: tauri::AppHandle, vault: tauri::State<'_, Arc<Vault>>) -> Result<(), String> {
     lock_core(&vault)?;
+    emit_vault_locked(&app)
+}
+
+/// Tell every webview the process-wide vault is locked. Context windows share
+/// one `Vault`; without this broadcast, only the window that pressed Lock
+/// would raise its cover.
+fn emit_vault_locked(app: &tauri::AppHandle) -> Result<(), String> {
     use tauri::Emitter;
-    app.emit("vault-locked", ()).map_err(|e| e.to_string())?;
-    Ok(())
+    app.emit("vault-locked", ()).map_err(|e| e.to_string())
+}
+
+/// Tell every webview the process-wide vault is usable again. Unlock, setup,
+/// recover, and biometric success in one window must lower the cover in the
+/// others — the local `srelens:vault-unlocked` DOM event never crosses them.
+pub(crate) fn emit_vault_unlocked(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+    app.emit("vault-unlocked", ()).map_err(|e| e.to_string())
 }
 
 /// The lock behind the #28 seam — no AppHandle needed, since locking touches
