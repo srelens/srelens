@@ -57,7 +57,10 @@ impl McpHttpManager {
     /// it grants only the loopback MCP surface, never cluster credentials.
     pub fn session_token(&self) -> Option<String> {
         let running = self.running.lock().unwrap();
-        running.as_ref().map(|r| r.token.as_str().to_string())
+        running
+            .as_ref()
+            .filter(|r| !r.handle.is_finished())
+            .map(|r| r.token.as_str().to_string())
     }
 
     /// The running loopback MCP server's URL (already including the `/mcp`
@@ -65,7 +68,10 @@ impl McpHttpManager {
     /// `chat_send` passes this straight into the agent's MCP config.
     pub fn status_url(&self) -> Option<String> {
         let running = self.running.lock().unwrap();
-        running.as_ref().map(|r| url_for(r.addr))
+        running
+            .as_ref()
+            .filter(|r| !r.handle.is_finished())
+            .map(|r| url_for(r.addr))
     }
 
     /// Build an `McpServer` wired with the same registry, consent policy, audit,
@@ -156,7 +162,10 @@ async fn start_server(
 ) -> Result<String, String> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     if let Some(r) = manager.running.lock().unwrap().as_ref() {
-        if r.addr == addr && r.token.matches(token.as_str()) {
+        // A finished task is not a live listener: the record can outlive a
+        // panic or serve error. Treat that as "not running" so we tear down
+        // the stale entry and bind again instead of returning a dead URL.
+        if r.addr == addr && r.token.matches(token.as_str()) && !r.handle.is_finished() {
             return Ok(url_for(addr));
         }
     }
@@ -247,12 +256,7 @@ pub async fn mcp_http_stop(
 /// The MCP HTTP server's URL if it's currently running.
 #[tauri::command]
 pub fn mcp_http_status(manager: State<'_, McpHttpManager>) -> Option<String> {
-    manager
-        .running
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|running| url_for(running.addr))
+    manager.status_url()
 }
 
 /// Resolve a pending MCP confirm dialog. `approved` decides whether the
@@ -854,5 +858,32 @@ mod tests {
         });
 
         assert_eq!(mgr.session_token(), Some(t.as_str().to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_finished_server_task_is_not_treated_as_live() {
+        let cache = srelens_kube::client_cache::ClientCache::new(std::path::PathBuf::from("/dev/null"));
+        let mgr = McpHttpManager::new(cache);
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 9));
+        let handle = tokio::spawn(async {});
+        while !handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        *mgr.running.lock().unwrap() = Some(Running {
+            addr,
+            shutdown: None,
+            handle,
+            token: srelens_mcp::auth::Token::generate(),
+        });
+        // `start_server` and `mcp_http_status` both require `!is_finished()`;
+        // a panic/serve exit must not keep returning a URL as if listening.
+        let live = mgr
+            .running
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|r| !r.handle.is_finished())
+            .map(|r| url_for(r.addr));
+        assert!(live.is_none());
     }
 }

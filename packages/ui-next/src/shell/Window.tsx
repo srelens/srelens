@@ -17,7 +17,7 @@ import {
 } from "@srelens/core";
 import { Button, Checkbox, Drawer, LoadingState, TabStrip, TextInput, type ContextMenuItem, type StripTab } from "@srelens/ui-kit";
 import { contextLabelFor } from "../lib/agentSuggestions";
-import { setContexts, setKubeconfigFiles, useContexts, useContextsError } from "../lib/clusters";
+import { setContexts, setKubeconfigFiles, useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
 import { getMark, getContextLabel, loadMarks, useMark } from "../lib/marks";
@@ -142,8 +142,10 @@ export function Window({
   // — and a screen receives only `{ route }`, so a copy held here can never
   // reach one. See `NoClusterScreen`.
   const contextsError = useContextsError();
+  const contextsStatus = useContextsStatus();
   // Deep-link `?context=` for a context window that booted before the listing
-  // answered. Cleared once a later successful `setContexts` can open it.
+  // answered. Cleared once a later successful `setContexts` can open it — or
+  // once a successful listing proves the context is genuinely absent.
   const pendingCtxQuery = useRef<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
@@ -252,59 +254,68 @@ export function Window({
         let saved = usableTabsState(loadTabsState(undefined, undefined, windowLabel));
 
         if (!saved && ctxQuery && windowLabel !== "main") {
-          let mainSaved = usableTabsState(loadTabsState(undefined, undefined, "main"));
-          if (!mainSaved) {
-            mainSaved = defaultState(found);
-          }
-          if (mainSaved) {
+          // Classic Sidebar puts a display name in `?context=`; Rail puts a
+          // `stableId`. Workspaces key clusters on stable ids, so resolve the
+          // query first — looking up `clusters.includes(ctxQuery)` with a name
+          // misses the right workspace and then seeds the wrong one.
+          const targetContext = found.find(
+            (context) => context.stableId === ctxQuery || context.name === ctxQuery,
+          );
+          if (targetContext) {
+            let mainSaved = usableTabsState(loadTabsState(undefined, undefined, "main"));
+            if (!mainSaved) {
+              mainSaved = defaultState(found);
+            }
             saved = JSON.parse(JSON.stringify(mainSaved));
             if (saved) {
-              // Classic Sidebar puts a display name in `?context=`; Rail puts a
-              // `stableId`. Workspaces key clusters on stable ids, so resolve
-              // the query first — looking up `clusters.includes(ctxQuery)` with
-              // a name misses the right workspace and then seeds the wrong one.
               const seeded = saved;
-              const targetContext = found.find(
-                (context) => context.stableId === ctxQuery || context.name === ctxQuery,
-              );
-              if (targetContext) {
-                const contextId = targetContext.stableId;
-                let targetWorkspace = seeded.workspaces.find((w) => w.clusters.includes(contextId));
-                if (!targetWorkspace && seeded.currentId) {
-                  targetWorkspace = seeded.workspaces.find((w) => w.id === seeded.currentId);
-                  if (targetWorkspace && !targetWorkspace.clusters.includes(contextId)) {
-                    targetWorkspace.clusters.push(contextId);
-                  }
-                }
-                const contextName = targetContext.name;
-                for (const w of seeded.workspaces) {
-                  const home = makeTab("/");
-                  w.tabs = [home];
-                  w.activeId = home.id;
-                  w.closed = [];
-                  if (w === targetWorkspace) {
-                    w.activeCluster = contextId;
-                    const ot = makeTab("/overview", { clusterName: contextName });
-                    w.tabs.push(ot);
-                    w.activeId = ot.id;
-                  }
-                }
-                if (targetWorkspace) {
-                  seeded.currentId = targetWorkspace.id;
+              const contextId = targetContext.stableId;
+              let targetWorkspace = seeded.workspaces.find((w) => w.clusters.includes(contextId));
+              if (!targetWorkspace && seeded.currentId) {
+                targetWorkspace = seeded.workspaces.find((w) => w.id === seeded.currentId);
+                if (targetWorkspace && !targetWorkspace.clusters.includes(contextId)) {
+                  targetWorkspace.clusters.push(contextId);
                 }
               }
+              const contextName = targetContext.name;
+              for (const w of seeded.workspaces) {
+                const home = makeTab("/");
+                w.tabs = [home];
+                w.activeId = home.id;
+                w.closed = [];
+                if (w === targetWorkspace) {
+                  w.activeCluster = contextId;
+                  const ot = makeTab("/overview", { clusterName: contextName });
+                  w.tabs.push(ot);
+                  w.activeId = ot.id;
+                }
+              }
+              if (targetWorkspace) {
+                seeded.currentId = targetWorkspace.id;
+              }
             }
+          } else if (failure !== "") {
+            // Listing failed — keep the query for a later Connections reload
+            // rather than activating whatever Default would pick first.
+            pendingCtxQuery.current = ctxQuery;
+            const mainSaved = usableTabsState(loadTabsState(undefined, undefined, "main"));
+            saved = mainSaved
+              ? (JSON.parse(JSON.stringify(mainSaved)) as typeof mainSaved)
+              : defaultState(found);
+          } else {
+            // Listing answered: the requested context is not there. An empty
+            // workspace says that; cloning Default would silently open another
+            // cluster under this deep link.
+            saved = defaultState([]);
           }
-        }
-
-        // A context window whose listing missed the requested cluster must keep
-        // the query: Connections' later successful reload only writes contexts,
-        // it does not re-run this boot pass.
-        if (
+        } else if (
           ctxQuery &&
           windowLabel !== "main" &&
+          failure !== "" &&
           !found.some((context) => context.stableId === ctxQuery || context.name === ctxQuery)
         ) {
+          // Own saved state already existed; still retain the query across a
+          // failed listing so a retry can focus the requested cluster.
           pendingCtxQuery.current = ctxQuery;
         }
 
@@ -326,6 +337,11 @@ export function Window({
         if (cancelled) return;
         if (!listed) failure = cleanErrorMessage(error);
         console.error(listed ? "could not restore the workspaces" : "could not list the contexts", error);
+        const ctxQuery =
+          typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("context") : null;
+        if (!listed && ctxQuery && windowLabel !== "main") {
+          pendingCtxQuery.current = ctxQuery;
+        }
         setState(defaultState(found));
       }
       setContexts(found, failure);
@@ -364,14 +380,21 @@ export function Window({
   // Connections' reload writes through `setContexts`, which wakes this effect.
   useEffect(() => {
     const query = pendingCtxQuery.current;
-    if (!booted || !query || contexts.length === 0) return;
+    if (!booted || !query) return;
     const target = contexts.find(
       (context) => context.stableId === query || context.name === query,
     );
-    if (!target) return;
-    pendingCtxQuery.current = null;
-    openCluster(target);
-  }, [booted, contexts]);
+    if (target) {
+      pendingCtxQuery.current = null;
+      openCluster(target);
+      return;
+    }
+    // A successful listing without the requested context is an answer, not a
+    // reason to wait forever for a Connections retry.
+    if (contextsStatus === "loaded") {
+      pendingCtxQuery.current = null;
+    }
+  }, [booted, contexts, contextsStatus]);
 
 
   /**
