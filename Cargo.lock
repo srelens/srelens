@@ -6549,6 +6549,7 @@ version = "0.14.0"
 dependencies = [
  "dirs",
  "libc",
+ "log",
  "proptest",
  "reqwest 0.13.4",
  "ring",

@@ -3,10 +3,25 @@
 //! The extension inventory, the extension catalog cache and the settings
 //! document all save through [`replace`], so a save behaves the same wherever it
 //! happens: a reader, a concurrent writer or a crash sees the old file or the new
-//! one, never a torn one, and a save that returned `Ok` survives a power loss.
+//! one, never a torn one, and a save that returned `Ok` survives a power loss
+//! unless a warning said otherwise.
+//!
+//! The contract callers rely on:
+//! - `Err` means the target is unchanged, so reporting a failed save is true.
+//! - `Ok` means the new contents are in place. They are durable across a power
+//!   loss unless the directory sync after the rename failed, in which case a
+//!   warning names the path and the error. That failure is not an error: the
+//!   save has happened, and reporting it as failed would make a caller retry a
+//!   change that is already applied.
 
 use std::io::{self, Write};
 use std::path::Path;
+
+/// A directory handle opened before a change to it, synced after.
+#[cfg(unix)]
+type Directory = std::fs::File;
+#[cfg(not(unix))]
+type Directory = UnsyncedDirectory;
 
 /// Atomically and durably replace `path` with `contents`.
 ///
@@ -27,21 +42,33 @@ use std::path::Path;
 ///      administrator rights, so on NTFS this relies on the file system's
 ///      metadata journal for the rename, which is the platform's limit.
 ///
-/// The parent directory is opened before the rename, so everything that can
-/// fail for an ordinary reason (permissions, a missing directory, a full disk)
-/// fails while `path` still holds its old contents; the temporary file is then
-/// removed and `path` is left as it was.
+/// Everything that can fail for an ordinary reason (permissions, a missing
+/// directory, a full disk) happens before or at the rename, including opening
+/// the parent directory. Any such failure returns `Err`, removes the temporary
+/// file and leaves `path` as it was.
 ///
-/// The one error that can follow the rename is the directory sync itself. It
-/// means the new contents **are** in place, and later reads see them, but that
-/// the save may not survive a power loss. A caller must not treat that error as
-/// "nothing changed". The parent directory must already exist; create it with
-/// [`create_dir_all`] so that it, too, survives a power loss.
+/// Once the rename has succeeded the save has happened, so a failure of the
+/// directory sync after it is logged as a warning, naming the path and the
+/// error, and `replace` still returns `Ok`: the new contents are in place, but
+/// that save is not guaranteed to survive a power loss.
+///
+/// The parent directory must already exist; create it with [`create_dir_all`]
+/// so that it, too, survives a power loss.
 ///
 /// On Windows `path` is first made absolute and extended-length (`\\?\`), so
 /// the raw Win32 calls here and in tempfile accept a path longer than
 /// `MAX_PATH`, as `std::fs` does.
 pub(crate) fn replace(path: &Path, contents: &[u8]) -> io::Result<()> {
+    replace_with(path, contents, sync_opened)
+}
+
+/// [`replace`], with the post-rename directory sync supplied by the caller so a
+/// test can make it fail.
+fn replace_with(
+    path: &Path,
+    contents: &[u8],
+    sync: impl FnOnce(Directory) -> io::Result<()>,
+) -> io::Result<()> {
     #[cfg(windows)]
     let path = &extended_length(path)?;
     let parent = parent_of(path);
@@ -50,7 +77,14 @@ pub(crate) fn replace(path: &Path, contents: &[u8]) -> io::Result<()> {
     file.as_file().sync_all()?;
     let directory = open_directory(parent)?;
     rename_over(file, path)?;
-    sync_opened(directory)
+    if let Err(error) = sync(directory) {
+        log::warn!(
+            "saved {} but could not sync {}: {error}; this save may not survive a power loss",
+            path.display(),
+            parent.display(),
+        );
+    }
+    Ok(())
 }
 
 /// `std::fs::create_dir_all`, but durable: every directory it creates has its
@@ -61,18 +95,36 @@ pub(crate) fn replace(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// another process created in the meantime is accepted, and its parent is
 /// synced all the same, because that process may not have synced it yet.
 /// Directories that already existed are left alone.
+///
+/// The same contract as [`replace`]: the parent is opened before a directory is
+/// created, and a failure to sync it afterwards is logged as a warning rather
+/// than returned, because the directory exists and a save into it can go on.
 pub(crate) fn create_dir_all(dir: &Path) -> io::Result<()> {
+    create_dir_all_with(dir, &sync_opened)
+}
+
+/// [`create_dir_all`], with the post-create directory sync supplied by the
+/// caller so a test can make it fail.
+fn create_dir_all_with(dir: &Path, sync: &dyn Fn(Directory) -> io::Result<()>) -> io::Result<()> {
     if dir.as_os_str().is_empty() || dir.is_dir() {
         return Ok(());
     }
     let parent = parent_of(dir);
-    create_dir_all(parent)?;
+    create_dir_all_with(parent, sync)?;
+    let directory = open_directory(parent)?;
     match std::fs::create_dir(dir) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => {}
         Err(error) => return Err(error),
     }
-    sync_opened(open_directory(parent)?)
+    if let Err(error) = sync(directory) {
+        log::warn!(
+            "created {} but could not sync {}: {error}; it may not survive a power loss",
+            dir.display(),
+            parent.display(),
+        );
+    }
+    Ok(())
 }
 
 /// The directory a rename of `path` changes. A bare file name lives in the
@@ -165,12 +217,12 @@ fn rename_over(file: tempfile::NamedTempFile, path: &Path) -> io::Result<()> {
 
 /// A handle on a directory, opened so that it can be synced later.
 #[cfg(unix)]
-fn open_directory(dir: &Path) -> io::Result<std::fs::File> {
+fn open_directory(dir: &Path) -> io::Result<Directory> {
     std::fs::File::open(dir)
 }
 
 #[cfg(unix)]
-fn sync_opened(directory: std::fs::File) -> io::Result<()> {
+fn sync_opened(directory: Directory) -> io::Result<()> {
     directory.sync_all()
 }
 
@@ -258,7 +310,7 @@ mod tests {
     }
 
     /// The step that makes the rename durable on Unix: the parent directory is
-    /// opened and synced, and a failure to do so is reported rather than ignored.
+    /// opened and synced, and a directory that cannot be opened is an error.
     #[cfg(unix)]
     #[test]
     fn the_parent_directory_is_synced_on_unix() {
@@ -307,6 +359,34 @@ mod tests {
 
         replace(&nested.join("store.json"), b"first").unwrap();
         assert_eq!(fs::read(nested.join("store.json")).unwrap(), b"first");
+    }
+
+    fn failing_sync(_: Directory) -> io::Result<()> {
+        Err(io::Error::other("injected directory sync failure"))
+    }
+
+    /// The rename has happened, so a failed directory sync must not report the
+    /// save as failed: a caller would show an error for a change that is applied.
+    #[test]
+    fn a_failed_directory_sync_after_the_rename_still_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        fs::write(&path, b"old").unwrap();
+
+        replace_with(&path, b"new", failing_sync).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(entries(dir.path()), ["store.json"]);
+    }
+
+    #[test]
+    fn a_failed_directory_sync_after_creating_a_directory_still_creates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b");
+
+        create_dir_all_with(&nested, &failing_sync).unwrap();
+
+        assert!(nested.is_dir());
     }
 
     #[test]

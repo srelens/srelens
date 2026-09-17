@@ -26,6 +26,8 @@ dirs = "6"
 # CryptoProvider" panic. Mirrors apps/desktop/src-tauri/Cargo.toml.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
 libc = "0.2"
+# `durable` warns when a save could not be made durable; the desktop app routes `log`.
+log = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["rt"] }
 
