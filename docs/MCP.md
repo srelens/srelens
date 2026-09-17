@@ -62,7 +62,7 @@ exactly that.
 Both transports refuse a request over **4 MiB** (4,194,304 bytes,
 `MAX_REQUEST_BYTES` in `crates/mcp/src/lib.rs`) before handing it to a tool:
 
-- **stdio** counts the bytes of one line, without its newline. A longer line
+- **stdio** counts the bytes of one line, without its `\n` or `\r\n` ending. A longer line
   is read and dropped as it arrives, never buffered whole, and answered with
   a JSON-RPC error whose `id` is `null`, since the request was never parsed:
   `{"code": -32600, "message": "request exceeds the 4194304-byte limit on one
