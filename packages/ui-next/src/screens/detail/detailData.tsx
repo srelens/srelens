@@ -27,6 +27,7 @@ import { useObject } from "../../lib/useObject";
 import { ConfigDetailsBody } from "./ConfigBody";
 import { CronJobDetailsBody } from "./CronJobBody";
 import { GenericBody, identityFacts } from "./GenericBody";
+import { IngressDetailsBody } from "./IngressBody";
 import { JobDetailsBody } from "./JobBody";
 import { NodeDetailsBody } from "./NodeBody";
 import { PodContainersBody, PodContainersTable, PodDetailsBody, podFacts } from "./PodBody";
@@ -113,6 +114,7 @@ export const DETAILS_BODY: Record<string, PaneBody> = {
   DaemonSet: WorkloadDetailsBody,
   ReplicaSet: WorkloadDetailsBody,
   Service: ServiceDetailsBody,
+  Ingress: IngressDetailsBody,
   Node: NodeDetailsBody,
   Job: JobDetailsBody,
   CronJob: CronJobDetailsBody,
