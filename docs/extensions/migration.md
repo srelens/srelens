@@ -46,8 +46,12 @@ Since #528, IDs under `org.srelens.` install only with the srelens signature:
 
 - Pasting an example manifest unchanged is refused. Give a local copy its own ID, such
   as `org.example.argocd`.
-- Unsigned `org.srelens.` apps installed before the rule keep working, still labelled
-  unsigned. Reinstall them from the catalog to get the signed release.
+- Unsigned `org.srelens.` apps installed before the rule are quarantined when the
+  inventory loads (#602): disabled, and refused if you try to enable them. **Settings →
+  Apps** shows the reason. Reinstall the app from the Catalog to get the signed release,
+  which lifts the quarantine and keeps the app's settings, or remove it. An unsigned
+  kept version under such an ID cannot be restored either. There is no transition
+  period.
 
 ## Developer mode
 
