@@ -546,7 +546,10 @@ reviews:
           a capability's input/output schema or safety annotations (look for
           changes to `*_capability` functions, `*In`/`*Out` structs, or
           registrations in crates/registry/src/lib.rs). Otherwise pass.
-          Pass only if ALL hold:
+          Treat a rename as removing the old id and adding the new one, and apply
+          both sets of conditions.
+
+          For each capability ADDED or CHANGED, pass only if ALL hold:
           1. It is registered in crates/registry/src/lib.rs (not only in
              apps/desktop/src-tauri).
           2. packages/core/src/lib/capability-catalog.json is updated in the same PR.
@@ -558,7 +561,15 @@ reviews:
              `sensitive` where applicable).
           6. If it touches the host (shell, filesystem, toolbox, helm repo/plugin),
              it is added to the web-host denial list in crates/server.
-          Name each condition that fails.
+
+          For each capability REMOVED, pass only if ALL hold:
+          1. Its registration is gone from crates/registry/src/lib.rs.
+          2. Its entry is gone from packages/core/src/lib/capability-catalog.json.
+          3. apps/desktop/src-tauri/tests/e2e.rs no longer exercises or excludes it.
+          4. No @srelens/core wrapper, UI caller, MCP prompt, or web-host denial
+             list entry still names its id.
+
+          Name each condition that fails and the capability it fails for.
       - name: Tests accompany behaviour changes
         mode: warning
         instructions: |
