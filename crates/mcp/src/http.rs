@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderName, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -579,6 +579,10 @@ fn router_inner_with_push(
         .route("/mcp", post(rpc).get(sse))
         .route_layer(middleware::from_fn_with_state(token, token_guard))
         .route("/healthz", get(|| async { "ok" }))
+        // Set rather than inherited from axum's default, so the documented
+        // limit is the one in force: a larger body is refused with 413 before
+        // it is buffered past the limit.
+        .layer(DefaultBodyLimit::max(crate::MAX_REQUEST_BYTES))
         .layer(middleware::from_fn_with_state(exposure, host_guard))
         .with_state(state);
     (router, push)
@@ -1138,6 +1142,34 @@ mod tests {
         let body = axum::body::to_bytes(resub.into_body(), 64 * 1024).await.unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert!(v.get("error").is_none(), "resubscribe on the new stream must succeed: {v}");
+    }
+
+    #[tokio::test]
+    async fn the_request_body_limit_is_the_documented_one() {
+        let post = |padding: usize| {
+            let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"ping","arguments":"x".repeat(padding)}})
+            .to_string();
+            let request = Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("host", "127.0.0.1:8765")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            router(test_server()).oneshot(request)
+        };
+        // Over axum's 2 MiB default, within ours: answered.
+        let resp = post(3 * 1024 * 1024).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["result"]["isError"], false);
+        // Over ours: refused before the handler runs.
+        let resp = post(crate::MAX_REQUEST_BYTES).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

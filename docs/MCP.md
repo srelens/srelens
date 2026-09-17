@@ -57,6 +57,30 @@ automation where you deliberately pre-authorise gated calls with the flags
 above; it is not a way to reach a human reviewer, since headless means
 exactly that.
 
+### Request size limits
+
+Both transports refuse a request over **4 MiB** (4,194,304 bytes,
+`MAX_REQUEST_BYTES` in `crates/mcp/src/lib.rs`) before handing it to a tool:
+
+- **stdio** counts the bytes of one line, without its `\n` or `\r\n` ending. A longer line
+  is read and dropped as it arrives, never buffered whole, and answered with
+  a JSON-RPC error whose `id` is `null`, since the request was never parsed:
+  `{"code": -32600, "message": "request exceeds the 4194304-byte limit on one
+  stdio line", "data": {"field": "request", "limit": 4194304}}`. The session
+  carries on with the next line.
+- **HTTP** counts the request body. A larger body is refused with
+  `413 Payload Too Large` before the JSON-RPC handler runs.
+
+Within that, some tool arguments have limits of their own, checked while the
+arguments are decoded and refused as invalid input naming the field and its
+limit. On `extensions.validate` and `extensions.configure`, a `signature` must
+be exactly 64 bytes, a `manifest` at most 256 KiB, and a `settings` object at
+most 64 KiB as compact JSON.
+
+The desktop app's own WebView calls capabilities through a Tauri command, not
+through MCP, so the 4 MiB transport limit does not apply there; the per-field
+limits do.
+
 ## Security model
 
 - **HTTP requires a bearer token.** The transport never serves

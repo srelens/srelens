@@ -2,6 +2,7 @@
 mod catalog;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
+mod limits;
 mod resource;
 mod signing;
 use schemars::JsonSchema;
@@ -163,8 +164,13 @@ impl Default for Inventory {
 enum Configure {
     #[serde(rename = "install")]
     Install {
-        #[serde(default)]
+        /// An Ed25519 signature: exactly 64 bytes.
+        #[serde(default, deserialize_with = "limits::signature")]
+        #[schemars(length(equal = 64))]
         signature: Option<Vec<u8>>,
+        /// The manifest text: at most 256 KiB.
+        #[serde(deserialize_with = "limits::manifest")]
+        #[schemars(length(max = 262144))]
         manifest: String,
         grants: Vec<String>,
     },
@@ -175,6 +181,8 @@ enum Configure {
     #[serde(rename = "settings")]
     Settings {
         id: String,
+        /// At most 64 KiB as compact JSON.
+        #[serde(deserialize_with = "limits::settings")]
         settings: serde_json::Map<String, Value>,
     },
     /// Restores a kept version. Its permissions are granted again, so `grants` is the
@@ -219,12 +227,19 @@ struct Read {
 struct Empty {}
 
 fn read(path: &Path) -> Result<Inventory, String> {
-    let raw = match fs::read(path) {
-        Ok(v) => v,
+    // One byte past the limit is enough to refuse it, so an oversized file is never loaded whole.
+    let mut raw = Vec::new();
+    match fs::File::open(path).and_then(|file| {
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(file, MAX_INVENTORY_BYTES as u64 + 1),
+            &mut raw,
+        )
+    }) {
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Inventory::default()),
         Err(e) => return Err(format!("read extension inventory: {e}")),
     };
-    if raw.len() > 1024 * 1024 {
+    if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
     }
     let mut stored: Value =
@@ -801,10 +816,15 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ValidateIn {
+    /// The manifest text: at most 256 KiB.
+    #[serde(deserialize_with = "limits::manifest")]
+    #[schemars(length(max = 262144))]
     manifest: String,
     #[serde(default)]
     grants: Vec<String>,
-    #[serde(default)]
+    /// An Ed25519 signature: exactly 64 bytes.
+    #[serde(default, deserialize_with = "limits::signature")]
+    #[schemars(length(equal = 64))]
     signature: Option<Vec<u8>>,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -1114,6 +1134,113 @@ mod tests {
                 ("EXTENSION_INVALID_VALUE".to_owned(), "name".to_owned()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_caller_inputs_are_refused_with_the_field_and_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = setup(&dir.path().join("extensions.json"));
+        let grants = json!(["k8s.listCustomResource"]);
+        let refused = |capability: &'static str, input: Value| {
+            let reg = &reg;
+            async move {
+                match reg.invoke(capability, input).await {
+                    Err(CapabilityError::InvalidInput(message)) => message,
+                    other => panic!("{capability} was not refused as invalid input: {other:?}"),
+                }
+            }
+        };
+
+        let huge_signature = vec![0u8; 1024 * 1024];
+        let message = refused(
+            "extensions.validate",
+            json!({"manifest": manifest(), "grants": grants, "signature": huge_signature}),
+        )
+        .await;
+        assert!(
+            message.contains("signature must be exactly 64 bytes"),
+            "{message}"
+        );
+        let message = refused(
+            "extensions.configure",
+            json!({"action": "install", "manifest": manifest(), "grants": grants, "signature": huge_signature}),
+        )
+        .await;
+        assert!(
+            message.contains("signature must be exactly 64 bytes"),
+            "{message}"
+        );
+        let message = refused(
+            "extensions.validate",
+            json!({"manifest": manifest(), "grants": grants, "signature": [1, 2, 3]}),
+        )
+        .await;
+        assert!(
+            message.contains("signature must be exactly 64 bytes"),
+            "{message}"
+        );
+
+        let huge_manifest = " ".repeat(srelens_plugin_host::MAX_MANIFEST_BYTES + 1);
+        for (capability, input) in [
+            (
+                "extensions.validate",
+                json!({"manifest": huge_manifest, "grants": grants}),
+            ),
+            (
+                "extensions.configure",
+                json!({"action": "install", "manifest": huge_manifest, "grants": grants}),
+            ),
+        ] {
+            let message = refused(capability, input).await;
+            assert!(message.contains("manifest exceeds 256 KiB"), "{message}");
+        }
+
+        // Within the limits, the calls behave as before.
+        assert_eq!(
+            reg.invoke(
+                "extensions.validate",
+                json!({"manifest": manifest(), "grants": grants})
+            )
+            .await
+            .unwrap(),
+            json!({"errors": []})
+        );
+        reg.invoke(
+            "extensions.configure",
+            json!({"action": "install", "manifest": manifest(), "grants": grants}),
+        )
+        .await
+        .unwrap();
+        let message = refused(
+            "extensions.configure",
+            json!({"action": "settings", "id": "org.example.argocd",
+                   "settings": {"note": "x".repeat(64 * 1024)}}),
+        )
+        .await;
+        assert!(message.contains("settings exceed 64 KiB"), "{message}");
+        let listed = reg.invoke("extensions.list", json!({})).await.unwrap();
+        assert_eq!(listed["plugins"][0]["settings"], json!({}));
+        reg.invoke(
+            "extensions.configure",
+            json!({"action": "settings", "id": "org.example.argocd", "settings": {"team": "platform"}}),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn an_oversized_inventory_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        fs::write(&path, vec![b' '; MAX_INVENTORY_BYTES + 1]).unwrap();
+        assert_eq!(
+            read(&path).err().as_deref(),
+            Some("extension inventory exceeds 1 MiB")
+        );
+        // Exactly at the limit it is parsed, so the refusal above is about size alone.
+        fs::write(&path, vec![b' '; MAX_INVENTORY_BYTES]).unwrap();
+        let parsed = read(&path).err().unwrap_or_default();
+        assert!(parsed.starts_with("parse extension inventory"), "{parsed}");
     }
 
     fn setup(path: &std::path::Path) -> Registry {

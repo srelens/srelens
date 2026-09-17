@@ -676,7 +676,7 @@ where
     R: AsyncBufReadExt + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut lines = reader.lines();
+    let mut lines = BoundedLines::new(reader, crate::MAX_REQUEST_BYTES);
 
     loop {
         tokio::select! {
@@ -701,6 +701,15 @@ where
                     // token is needed here — the dirty set is read directly.
                     drain_notifications(writer, dirty).await?;
                     return Ok(());
+                };
+                let line = match line {
+                    Line::Text(line) => line,
+                    Line::TooLong => {
+                        // The request was discarded unread, so its id is unknown.
+                        write_line(writer, &request_too_large(lines.max)).await?;
+                        drain_notifications(writer, dirty).await?;
+                        continue;
+                    }
                 };
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
@@ -768,6 +777,109 @@ where
         write_line(writer, &subscription_notification(&uri)).await?;
     }
     Ok(())
+}
+
+/// One line read by [`BoundedLines`].
+#[derive(Debug, PartialEq)]
+enum Line {
+    /// A line of at most `max` bytes, without its line ending.
+    Text(String),
+    /// A line over `max` bytes. Everything past the limit was discarded as it
+    /// was read, never held.
+    TooLong,
+}
+
+/// Newline-delimited lines of at most `max` bytes each, not counting the line
+/// ending (`\n` or `\r\n`). Unlike
+/// `AsyncBufReadExt::lines`, a client cannot make it buffer a line of any
+/// length: once a line passes the limit, the rest of it is consumed and
+/// dropped chunk by chunk, and the line is reported as [`Line::TooLong`].
+///
+/// `next_line` is cancel-safe, which `serve_loop`'s `select!` needs: the
+/// partial line and the discarding flag live in the struct, and bytes are
+/// consumed from the reader only after they have been recorded.
+struct BoundedLines<R> {
+    reader: R,
+    max: usize,
+    buf: Vec<u8>,
+    discarding: bool,
+}
+
+impl<R: AsyncBufReadExt + Unpin> BoundedLines<R> {
+    fn new(reader: R, max: usize) -> Self {
+        Self {
+            reader,
+            max,
+            buf: Vec::new(),
+            discarding: false,
+        }
+    }
+
+    /// The next line, or `None` at end of input. A line that is not UTF-8 is an
+    /// `InvalidData` error, as with `AsyncBufReadExt::lines`.
+    async fn next_line(&mut self) -> std::io::Result<Option<Line>> {
+        loop {
+            let available = self.reader.fill_buf().await?;
+            if available.is_empty() {
+                if std::mem::take(&mut self.discarding) {
+                    return Ok(Some(Line::TooLong));
+                }
+                if self.buf.is_empty() {
+                    return Ok(None);
+                }
+                return self.finish().map(Some);
+            }
+            let (chunk, used, ends) = match available.iter().position(|&b| b == b'\n') {
+                Some(i) => (&available[..i], i + 1, true),
+                None => (available, available.len(), false),
+            };
+            if !self.discarding {
+                // One byte of headroom for a `\r` ending the line, which is
+                // framing, not request: `finish` refuses the line if that
+                // byte turns out to be anything else.
+                if self.buf.len() + chunk.len() > self.max + 1 {
+                    self.discarding = true;
+                    self.buf = Vec::new();
+                } else {
+                    self.buf.extend_from_slice(chunk);
+                }
+            }
+            self.reader.consume(used);
+            if ends {
+                if std::mem::take(&mut self.discarding) {
+                    return Ok(Some(Line::TooLong));
+                }
+                return self.finish().map(Some);
+            }
+        }
+    }
+
+    fn finish(&mut self) -> std::io::Result<Line> {
+        let mut raw = std::mem::take(&mut self.buf);
+        if raw.last() == Some(&b'\r') {
+            raw.pop();
+        }
+        if raw.len() > self.max {
+            return Ok(Line::TooLong);
+        }
+        String::from_utf8(raw)
+            .map(Line::Text)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
+/// The error answering a request line over the limit. JSON-RPC's "Invalid
+/// Request", with a null id because the request was never parsed.
+fn request_too_large(max: usize) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": {
+            "code": -32600,
+            "message": format!("request exceeds the {max}-byte limit on one stdio line"),
+            "data": {"field": "request", "limit": max},
+        }
+    })
 }
 
 async fn write_line<W>(writer: &mut W, value: &Value) -> std::io::Result<()>
@@ -1270,6 +1382,127 @@ mod tests {
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
         assert_eq!(seen[0].0, "readit");
         assert_eq!(seen[0].1, "auto");
+    }
+
+    #[tokio::test]
+    async fn bounded_lines_refuse_a_long_line_without_holding_it() {
+        // A 1-byte read buffer makes every line arrive in many chunks.
+        let input: &[u8] = b"short\r\n0123456789abc\nexactly10!\n\nlast";
+        let mut lines = BoundedLines::new(BufReader::with_capacity(1, input), 10);
+        let mut seen = Vec::new();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            // Past the limit, nothing more is kept.
+            let held = lines.buf.capacity();
+            assert!(held <= 16, "held {held} bytes");
+            seen.push(line);
+        }
+        assert_eq!(
+            seen,
+            [
+                Line::Text("short".into()),
+                Line::TooLong,
+                Line::Text("exactly10!".into()),
+                Line::Text(String::new()),
+                Line::Text("last".into()),
+            ]
+        );
+
+        let mut unterminated = BoundedLines::new(&b"0123456789abc"[..], 10);
+        assert_eq!(unterminated.next_line().await.unwrap(), Some(Line::TooLong));
+        assert_eq!(unterminated.next_line().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn bounded_lines_do_not_count_a_crlf_ending_toward_the_limit() {
+        let input: &[u8] =
+            b"exactly10!\r\nexactly10!\n0123456789a\r\n0123456789a\n0123456789\r\r\n";
+        let mut lines = BoundedLines::new(BufReader::with_capacity(1, input), 10);
+        let mut seen = Vec::new();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            let held = lines.buf.capacity();
+            assert!(held <= 16, "held {held} bytes");
+            seen.push(line);
+        }
+        assert_eq!(
+            seen,
+            [
+                Line::Text("exactly10!".into()),
+                Line::Text("exactly10!".into()),
+                Line::TooLong,
+                Line::TooLong,
+                // Only the one `\r` before the newline is framing.
+                Line::TooLong,
+            ]
+        );
+    }
+
+    /// A `tools/call` request whose JSON is exactly `len` bytes.
+    fn request_of_len(len: usize) -> String {
+        let frame = |padding: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"ping","arguments":"{padding}"}}}}"#
+            )
+        };
+        let request = frame(&"x".repeat(len - frame("").len()));
+        assert_eq!(request.len(), len);
+        request
+    }
+
+    #[tokio::test]
+    async fn serve_accepts_a_request_of_exactly_the_limit_in_either_framing() {
+        let max = crate::MAX_REQUEST_BYTES;
+        for ending in ["\n", "\r\n"] {
+            for (len, accepted) in [(max, true), (max + 1, false)] {
+                let input = format!("{}{ending}", request_of_len(len));
+                let mut out: Vec<u8> = Vec::new();
+                let reader = BufReader::new(input.as_bytes());
+                serve(server_with_ping(), reader, &mut out).await.unwrap();
+                let text = String::from_utf8(out).unwrap();
+                let lines: Vec<Value> = text
+                    .lines()
+                    .map(|l| serde_json::from_str(l).unwrap())
+                    .collect();
+                assert_eq!(lines.len(), 1, "{ending:?} {len}");
+                if accepted {
+                    assert_eq!(lines[0]["id"], 7, "{ending:?} {len}");
+                    assert!(lines[0].get("result").is_some(), "{ending:?} {len}");
+                } else {
+                    assert_eq!(lines[0]["id"], Value::Null, "{ending:?} {len}");
+                    assert_eq!(lines[0]["error"]["code"], -32600, "{ending:?} {len}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn serve_refuses_an_oversized_request_line_and_keeps_serving() {
+        let oversized = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"ping","arguments":"{}"}}}}"#,
+            "x".repeat(crate::MAX_REQUEST_BYTES)
+        );
+        let input = format!(
+            "{oversized}\n{}\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ping","arguments":"yo"}}"#
+        );
+        let mut out: Vec<u8> = Vec::new();
+        let reader = BufReader::new(input.as_bytes());
+        serve(server_with_ping(), reader, &mut out).await.unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2, "{text}");
+        assert_eq!(lines[0]["id"], Value::Null);
+        assert_eq!(lines[0]["error"]["code"], -32600);
+        let limit = crate::MAX_REQUEST_BYTES;
+        assert_eq!(
+            lines[0]["error"]["data"],
+            json!({"field": "request", "limit": limit})
+        );
+        assert_eq!(lines[1]["id"], 2);
+        let answered = lines[1]["result"].to_string();
+        assert!(answered.contains("echo"), "{answered}");
     }
 
     #[tokio::test]
