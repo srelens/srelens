@@ -311,9 +311,12 @@ export function App() {
   const contextParamListFailedNotified = useRef(false);
   useEffect(() => {
     if (!contexts || contextParamConsumed.current) return;
-    // A restored session, and a design switch that has already picked this
-    // window's first view, both outrank the query.
-    if (!contextParam || handoffOpened.current || restored?.tabs?.length) {
+    // A design switch that has already picked this window's first view
+    // outranks the query. A restored session does NOT — the query is the
+    // window's identity, and reconciling a save whose target is gone would
+    // silently promote another surviving cluster (ClusterHotbar can open
+    // others into this window).
+    if (!contextParam || handoffOpened.current) {
       contextParamConsumed.current = true;
       return;
     }
@@ -323,11 +326,12 @@ export function App() {
     const match = contexts.find((c) => c.stableId === contextParam);
     if (match) {
       contextParamConsumed.current = true;
-      openView(match.name, "overview");
+      if (!restored?.tabs?.length) openView(match.name, "overview");
       return;
     }
-    // Target absent. Listing failed: keep the request for a later refresh.
-    // Listing answered: it is gone.
+    // Target absent. Listing failed: keep the request (and any restored tabs)
+    // for a later refresh. Listing answered: it is gone — clear the save so
+    // prune cannot leave another cluster active in this dedicated window.
     if (contextsError) {
       if (!contextParamListFailedNotified.current) {
         contextParamListFailedNotified.current = true;
@@ -339,6 +343,8 @@ export function App() {
       return;
     }
     contextParamConsumed.current = true;
+    setTabs([]);
+    setActiveTabId(null);
     notify.error(
       "Couldn't open that cluster",
       "It is not among the listed kube contexts.",

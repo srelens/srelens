@@ -77,7 +77,9 @@ describe("toolbox lib wrappers", () => {
   it("startToolInstall reports progress as a percent and unsubscribes", async () => {
     const dispose = vi.fn();
     let emit: ((payload: unknown) => void) | undefined;
-    subscribeMock.mockImplementation(async (_ch: string, handler: (p: unknown) => void) => {
+    let channel = "";
+    subscribeMock.mockImplementation(async (ch: string, handler: (p: unknown) => void) => {
+      channel = ch;
       emit = handler;
       return dispose;
     });
@@ -91,7 +93,11 @@ describe("toolbox lib wrappers", () => {
     const seen: Array<number | null> = [];
     const r = await startToolInstall("kubectl", (p) => seen.push(p));
 
-    expect(invokeCommandMock).toHaveBeenCalledWith("start_tool_install", { tool: "kubectl" });
+    expect(channel).toMatch(/^toolbox:\/\/progress\/\d+-[a-z0-9]+$/);
+    expect(invokeCommandMock).toHaveBeenCalledWith("start_tool_install", {
+      tool: "kubectl",
+      channel,
+    });
     expect(seen).toEqual([25, 100]);
     expect(r.data?.version).toBe("v1.30.2");
     expect(dispose).toHaveBeenCalled();

@@ -730,6 +730,28 @@ describe("App", () => {
     expect(vi.mocked(notify.error)).not.toHaveBeenCalled();
   });
 
+  it("clears a restored session when the window's ?context= target is gone", async () => {
+    // ClusterHotbar can leave other clusters' tabs in a context window's save.
+    // When the requested target is cleanly absent, those must not stay active.
+    listContextsMock.mockResolvedValue({ contexts: [context("prod")] });
+    withContextQuery("/k/config#gone");
+    localStorage.setItem(
+      "srelens.openTabs",
+      JSON.stringify({
+        tabs: [{ id: 1, cluster: "prod", kind: "overview", namespace: "default" }],
+        activeTabId: 1,
+      }),
+    );
+    render(<App />);
+    await waitFor(() =>
+      expect(vi.mocked(notify.error)).toHaveBeenCalledWith(
+        "Couldn't open that cluster",
+        "It is not among the listed kube contexts.",
+      ),
+    );
+    expect(screen.queryByTestId("overview")).toBeNull();
+  });
+
   it("opens the overview once a failed context list later succeeds", async () => {
     (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
     listContextsMock.mockResolvedValue({ contexts: [], error: "kubeconfig unreadable" });

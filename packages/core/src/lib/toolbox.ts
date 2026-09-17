@@ -111,6 +111,14 @@ interface RawInstallProgress {
   total: number | null;
 }
 
+// Monotonic within this window, with a random half: two webviews installing
+// the same tool used to share `toolbox://progress`, so each bar ate both
+// downloads. Per-request channels match watch/exec.
+let installSeq = 0;
+function nextInstallChannel(): string {
+  return `toolbox://progress/${++installSeq}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 /**
  * Install a managed tool (kubectl / helm / krew) via the streaming
  * `start_tool_install` command, reporting download progress as a whole percent
@@ -121,13 +129,14 @@ export async function startToolInstall(
   tool: "kubectl" | "helm" | "krew",
   onProgress?: (percent: number | null) => void,
 ): Promise<Result<InstallResult>> {
-  const dispose = await subscribe("toolbox://progress", (payload) => {
+  const channel = nextInstallChannel();
+  const dispose = await subscribe(channel, (payload) => {
     const p = payload as RawInstallProgress;
     if (p.tool !== tool) return;
     onProgress?.(p.total ? Math.min(100, Math.round((p.received / p.total) * 100)) : null);
   });
   try {
-    return { data: await invokeCommand<InstallResult>("start_tool_install", { tool }) };
+    return { data: await invokeCommand<InstallResult>("start_tool_install", { tool, channel }) };
   } catch (e) {
     return { error: String(e) };
   } finally {
