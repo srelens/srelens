@@ -1,5 +1,5 @@
 import { describe } from "./routes";
-import { loadRestoreSession, settingsStorage } from "@srelens/core";
+import { loadRestoreSession, scopedSettingsKey, settingsStorage } from "@srelens/core";
 import type { TableSort } from "@srelens/ui-kit";
 import type { Tab, TabsState, Workspace } from "./tabs";
 
@@ -12,8 +12,12 @@ import type { Tab, TabsState, Workspace } from "./tabs";
  * this can be tested with a Map and no platform at all, the way core's
  * `listContexts` takes its invoker.
  */
-export const STORAGE_KEY = "srelens.next.workspaces";
+export const BASE_STORAGE_KEY = "srelens.next.workspaces";
 export const STORAGE_VERSION = 1;
+
+export function getStorageKey(windowLabel?: string): string {
+  return scopedSettingsKey(BASE_STORAGE_KEY, windowLabel);
+}
 
 export interface Storage {
   getItem(key: string): string | null;
@@ -128,19 +132,19 @@ export function parseStoredState(raw: string | null): TabsState | null {
  * write escaped a `setTimeout` and the `beforeunload` listener, where nothing
  * can catch it.
  */
-export function loadTabsState(storage: Storage = settingsStorage, restore: () => boolean = loadRestoreSession): TabsState | null {
+export function loadTabsState(storage: Storage = settingsStorage, restore: () => boolean = loadRestoreSession, windowLabel?: string): TabsState | null {
   if (!restore()) return null;
   try {
-    return parseStoredState(storage.getItem(STORAGE_KEY));
+    return parseStoredState(storage.getItem(getStorageKey(windowLabel)));
   } catch (error) {
     console.error("could not read the saved workspaces", error);
     return null;
   }
 }
 
-export function saveTabsState(state: TabsState, storage: Storage = settingsStorage): void {
+export function saveTabsState(state: TabsState, storage: Storage = settingsStorage, windowLabel?: string): void {
   try {
-    storage.setItem(STORAGE_KEY, JSON.stringify({ version: STORAGE_VERSION, ...state }));
+    storage.setItem(getStorageKey(windowLabel), JSON.stringify({ version: STORAGE_VERSION, ...state }));
   } catch (error) {
     // Best-effort, as `settingsStorage` itself is: losing the tabs of a
     // session is a great deal better than losing the session.
@@ -148,12 +152,12 @@ export function saveTabsState(state: TabsState, storage: Storage = settingsStora
   }
 }
 
-let pending: { state: TabsState; storage: Storage } | null = null;
+let pending: { state: TabsState; storage: Storage; windowLabel?: string } | null = null;
 let timer: ReturnType<typeof setTimeout> | null = null;
 
 /** Save soon, coalescing a burst of changes into one write of the latest. */
-export function scheduleSave(state: TabsState, storage: Storage = settingsStorage, delayMs = 300): void {
-  pending = { state, storage };
+export function scheduleSave(state: TabsState, storage: Storage = settingsStorage, delayMs = 300, windowLabel?: string): void {
+  pending = { state, storage, windowLabel };
   if (timer) clearTimeout(timer);
   timer = setTimeout(flushSave, delayMs);
 }
@@ -165,9 +169,9 @@ export function flushSave(): void {
     timer = null;
   }
   if (!pending) return;
-  const { state, storage } = pending;
+  const { state, storage, windowLabel } = pending;
   pending = null;
-  saveTabsState(state, storage);
+  saveTabsState(state, storage, windowLabel);
 }
 
 /** A debounced save must not lose the last change to a window closing. */

@@ -19,6 +19,7 @@ import { openCluster, pauseCluster, reconnectCluster } from "../lib/openCluster"
 import { useInfos } from "../lib/probe";
 import { openTab, setWorkspaceClusters, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { useWorkspaceView } from "../lib/workspace";
+import { describeError, invokeCommand, isTauri, notify } from "@srelens/core";
 
 export interface RailProps {
   contexts: ClusterContext[];
@@ -170,7 +171,19 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
   function menuFor(item: ClusterRailItem): ContextMenuItem[] {
     return [
       { label: `Open ${item.name}`, onPick: () => select(item.id) },
-      // The ellipsis is the promise that this one asks something more before
+      ...(isTauri()
+        ? [
+            {
+              label: "Open in new window",
+              icon: Icons.openTab,
+              onPick: () => {
+                void invokeCommand("open_context_window", { contextId: item.id }).catch((e) => {
+                  notify.error(`Couldn't open window for ${item.name}`, describeError(e).detail);
+                });
+              },
+            } as ContextMenuItem,
+          ]
+        : []),
       // anything happens — it opens the dialog below.
       { label: "Customise…", icon: Icons.edit, onPick: () => setEditing(item.id) },
       { kind: "sep" },

@@ -3,8 +3,11 @@
 //! The `toolbox.install*` capabilities install synchronously (one await, for
 //! MCP). The GUI wants a progress bar, so `start_tool_install` runs the *same*
 //! install core (`srelens_kube::toolbox::run_*_install`) but with a fetch that
-//! streams the download and emits `toolbox://progress` as bytes arrive. One
-//! implementation, two surfaces (spec §4).
+//! streams the download and emits on a caller-supplied channel as bytes arrive.
+//! One implementation, two surfaces (spec §4).
+//!
+//! The channel is per request — two webviews installing the same tool must not
+//! share one application-wide `toolbox://progress` stream.
 
 use std::io::Read;
 
@@ -25,9 +28,14 @@ struct ToolInstallProgress {
     total: Option<u64>,
 }
 
-/// Blocking GET that streams the body, emitting `toolbox://progress` for large
+/// Blocking GET that streams the body, emitting on `channel` for large
 /// downloads. Returns the full bytes so the install core is unchanged.
-fn fetch_with_progress(url: &str, app: &AppHandle, tool: &str) -> Result<Vec<u8>, InstallError> {
+fn fetch_with_progress(
+    url: &str,
+    app: &AppHandle,
+    tool: &str,
+    channel: &str,
+) -> Result<Vec<u8>, InstallError> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("srelens/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -66,20 +74,41 @@ fn fetch_with_progress(url: &str, app: &AppHandle, tool: &str) -> Result<Vec<u8>
         received += n as u64;
         if report {
             let _ = app.emit(
-                "toolbox://progress",
-                ToolInstallProgress { tool: tool.to_string(), received, total },
+                channel,
+                ToolInstallProgress {
+                    tool: tool.to_string(),
+                    received,
+                    total,
+                },
             );
         }
     }
     Ok(buf)
 }
 
+fn validate_progress_channel(channel: &str) -> Result<(), String> {
+    // Frontend mints `toolbox://progress/<seq>-<random>`; reject anything else
+    // so a caller cannot emit onto an unrelated app channel.
+    if channel.len() > 128
+        || !channel.starts_with("toolbox://progress/")
+        || channel.chars().any(|c| c.is_control() || c == ' ')
+    {
+        return Err("invalid toolbox progress channel".into());
+    }
+    Ok(())
+}
+
 /// Install a managed tool (`kubectl` / `helm` / `krew`) with streaming download
-/// progress on `toolbox://progress`. Same verified install as the capability.
+/// progress on the caller-supplied channel. Same verified install as the capability.
 #[tauri::command]
-pub async fn start_tool_install(app: AppHandle, tool: String) -> Result<InstallToolOut, String> {
+pub async fn start_tool_install(
+    app: AppHandle,
+    tool: String,
+    channel: String,
+) -> Result<InstallToolOut, String> {
+    validate_progress_channel(&channel)?;
     tokio::task::spawn_blocking(move || {
-        let fetch = |url: &str| fetch_with_progress(url, &app, &tool);
+        let fetch = |url: &str| fetch_with_progress(url, &app, &tool, &channel);
         let result = match tool.as_str() {
             "kubectl" => run_kubectl_install(&srelens_bin_dir(), &fetch),
             "helm" => run_helm_install(&srelens_bin_dir(), &fetch),
@@ -91,4 +120,3 @@ pub async fn start_tool_install(app: AppHandle, tool: String) -> Result<InstallT
     .await
     .map_err(|e| e.to_string())?
 }
-

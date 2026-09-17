@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ClusterContext } from "@srelens/core";
 import { defaultState, makeTab, type TabsState } from "./tabs";
 import {
-  STORAGE_KEY, STORAGE_VERSION, flushSave, loadTabsState, parseStoredState, saveTabsState, scheduleSave,
+  BASE_STORAGE_KEY, STORAGE_VERSION, flushSave, getStorageKey, loadTabsState, parseStoredState, saveTabsState, scheduleSave,
   installFlushOnUnload, type Storage,
 } from "./tabsPersist";
 
@@ -75,7 +75,7 @@ describe("parseStoredState", () => {
     const storage = memory();
     const state = valid();
     saveTabsState(state, storage);
-    expect(parseStoredState(storage.getItem(STORAGE_KEY))).toEqual(state);
+    expect(parseStoredState(storage.getItem(BASE_STORAGE_KEY))).toEqual(state);
   });
 
   it("returns null for nothing, for garbage, and for the wrong shape", () => {
@@ -88,7 +88,7 @@ describe("parseStoredState", () => {
   it("refuses a document from a future version rather than half-applying it", () => {
     const storage = memory();
     saveTabsState(valid(), storage);
-    const doc = JSON.parse(storage.getItem(STORAGE_KEY)!);
+    const doc = JSON.parse(storage.getItem(BASE_STORAGE_KEY)!);
     doc.version = STORAGE_VERSION + 1;
     expect(parseStoredState(JSON.stringify(doc))).toBeNull();
   });
@@ -99,7 +99,7 @@ describe("parseStoredState", () => {
     const storage = memory();
     const state = valid();
     saveTabsState(state, storage);
-    const doc = JSON.parse(storage.getItem(STORAGE_KEY)!);
+    const doc = JSON.parse(storage.getItem(BASE_STORAGE_KEY)!);
     doc.version = 0;
     expect(parseStoredState(JSON.stringify(doc))).toEqual(state);
   });
@@ -107,7 +107,7 @@ describe("parseStoredState", () => {
   it("refuses a document with no version at all", () => {
     const storage = memory();
     saveTabsState(valid(), storage);
-    const doc = JSON.parse(storage.getItem(STORAGE_KEY)!);
+    const doc = JSON.parse(storage.getItem(BASE_STORAGE_KEY)!);
     delete doc.version;
     expect(parseStoredState(JSON.stringify(doc))).toBeNull();
     expect(parseStoredState(JSON.stringify({ ...doc, version: "1" }))).toBeNull();
@@ -145,7 +145,7 @@ describe("parseStoredState", () => {
     };
     const storage = memory();
     saveTabsState(s, storage);
-    const parsed = parseStoredState(storage.getItem(STORAGE_KEY));
+    const parsed = parseStoredState(storage.getItem(BASE_STORAGE_KEY));
     expect(parsed!.workspaces[0].tabs[1].view).toEqual({
       sort: { key: "restarts", direction: "desc" },
       filter: "crash",
@@ -212,7 +212,7 @@ describe("parseStoredState", () => {
     s.workspaces[0].tabs[1].view = { sort: null, filterKey: null };
     const storage = memory();
     saveTabsState(s, storage);
-    const parsed = parseStoredState(storage.getItem(STORAGE_KEY));
+    const parsed = parseStoredState(storage.getItem(BASE_STORAGE_KEY));
     expect(parsed!.workspaces[0].tabs[1].view).toEqual({ sort: null, filterKey: null });
   });
 
@@ -277,7 +277,7 @@ describe("scheduleSave / flushSave", () => {
     scheduleSave(a, storage, 300);
     scheduleSave(b, storage, 300);
     vi.advanceTimersByTime(300);
-    expect(parseStoredState(storage.getItem(STORAGE_KEY))?.workspaces[0].name).toBe("Later");
+    expect(parseStoredState(storage.getItem(BASE_STORAGE_KEY))?.workspaces[0].name).toBe("Later");
   });
 
   it("flush writes immediately and cancels the timer", () => {
@@ -313,5 +313,19 @@ describe("installFlushOnUnload", () => {
     expect(spy).toHaveBeenCalledTimes(1);
     off();
     expect(handlers.has("beforeunload")).toBe(false);
+  });
+});
+
+describe("getStorageKey", () => {
+  it("hashes an over-long context window label before writing", () => {
+    const storage = memory();
+    const label = `ctx-${"61".repeat(120)}`;
+    const state = valid();
+    saveTabsState(state, storage, label);
+    const key = getStorageKey(label);
+    expect(key.length).toBeLessThanOrEqual(256);
+    expect(storage.getItem(key)).not.toBeNull();
+    expect(storage.getItem(`${BASE_STORAGE_KEY}-${label}`)).toBeNull();
+    expect(loadTabsState(storage, () => true, label)).toEqual(state);
   });
 });

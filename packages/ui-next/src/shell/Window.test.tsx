@@ -186,7 +186,7 @@ import { resetProbes } from "../lib/probe";
 import { EXPANDED_KEY, resetView } from "../lib/workspace";
 import { defaultState, makeTab } from "../lib/tabs";
 import { defaultMark, getMark, setMark, MARKS_KEY } from "../lib/marks";
-import { contextFor, getContextsError, getContextsStatus, resetContexts } from "../lib/clusters";
+import { contextFor, getContextsError, getContextsStatus, resetContexts, setContexts } from "../lib/clusters";
 import { resetLock } from "./LockGate";
 import { mcpAutoStartPhase, resetMcpAutoStart } from "../lib/mcpAutoStart";
 import { openCluster } from "../lib/openCluster";
@@ -403,6 +403,84 @@ describe("Window boot", () => {
     expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined();
   });
 
+  it("treats an empty saved main state as missing when seeding a context window", async () => {
+    window.history.replaceState({}, "", "/?context=stage");
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    loadTabsState.mockImplementation((_a?: unknown, _b?: unknown, label?: string) => {
+      if (label === "main") return { workspaces: [], currentId: "gone" };
+      return null;
+    });
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel="ctx-stage" />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    expect(store.activeCluster()).toBe("stage");
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("applies a pending ?context= after a later successful listing", async () => {
+    window.history.replaceState({}, "", "/?context=stage");
+    listContexts.mockResolvedValue({ error: "kubeconfig unreadable" });
+    const main = defaultState([ctx("prod"), ctx("stage")]);
+    const stray = makeTab("/workloads", { clusterName: "prod" });
+    main.workspaces[0].tabs.push(stray);
+    main.workspaces[0].activeId = stray.id;
+    loadTabsState.mockImplementation((_a?: unknown, _b?: unknown, label?: string) => {
+      if (label === "main") return main;
+      return null;
+    });
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel="ctx-stage" />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    expect(store.activeCluster()).not.toBe("stage");
+    expect(store.activeCluster()).toBeNull();
+    expect(store.getState().workspaces[0].clusters).toEqual([]);
+    expect(store.getState().workspaces[0].tabs.map((t) => t.route)).toEqual(["/"]);
+    await act(async () => {
+      setContexts([ctx("prod"), ctx("stage")]);
+    });
+    await waitFor(() => expect(store.activeCluster()).toBe("stage"));
+    expect(store.getState().workspaces[0].tabs.map((t) => t.route)).toEqual(["/", "/overview"]);
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("does not activate another cluster when ?context= is absent from a successful listing", async () => {
+    window.history.replaceState({}, "", "/?context=gone");
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    loadTabsState.mockReturnValue(null);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel="ctx-gone" />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    expect(store.activeCluster()).toBeNull();
+    expect(store.getState().workspaces[0].clusters).toEqual([]);
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("does not promote another cluster when saved state loses its ?context= target", async () => {
+    window.history.replaceState({}, "", "/?context=gone");
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    const saved = defaultState([ctx("gone"), ctx("prod")]);
+    saved.workspaces[0].activeCluster = "gone";
+    loadTabsState.mockReturnValue(saved);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel="ctx-gone" />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    expect(store.activeCluster()).toBeNull();
+    expect(store.getState().workspaces[0].clusters).toEqual([]);
+    window.history.replaceState({}, "", "/");
+  });
+
   it("boots to a live window when the saved currentId names a workspace that did not parse and the cluster list also errors", async () => {
     // The sibling of the case above, and the one that branch is a condition
     // short of: `parseStoredState` drops a malformed workspace on its own and
@@ -449,7 +527,7 @@ describe("Window boot", () => {
     await booted();
     expect(installFlushOnUnload).toHaveBeenCalled();
     act(() => store.openTab("/k/pods"));
-    expect(scheduleSave).toHaveBeenCalledWith(store.getState());
+    expect(scheduleSave).toHaveBeenCalledWith(store.getState(), undefined, undefined, "main");
   });
 
   it("flushes the debounced save when it unmounts", async () => {
@@ -1305,6 +1383,17 @@ describe("Window, and an agent asking to change something", () => {
     // By name, not by role: the cover itself is a `role="dialog"`.
     expect(screen.queryByRole("dialog", { name: /agent wants to run/i })).toBeNull();
     expect(screen.queryByText(/k8s_deletePod/)).toBeNull();
+  });
+
+  it("does not mount AgentConsent in a context window", async () => {
+    bus.clear();
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel="ctx-sec" />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    expect(bus.has("mcp://confirm-request")).toBe(false);
   });
 });
 

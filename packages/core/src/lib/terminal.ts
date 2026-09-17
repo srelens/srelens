@@ -26,7 +26,7 @@ export async function startLocalTerminal(
 ): Promise<TerminalSession> {
   // Unique channel so we can subscribe BEFORE the backend spawns and emits —
   // otherwise the first prompt can race ahead of the listener.
-  const channel = `term-${terminalSeq++}`;
+  const channel = `term-${terminalSeq++}-${Math.random().toString(36).slice(2, 10)}`;
   const disposeOut = await subscribe(`term:out:${channel}`, (p) => onData(p as string));
   const disposeExit = await subscribe(`term:exit:${channel}`, () => onExit());
   let session: number;

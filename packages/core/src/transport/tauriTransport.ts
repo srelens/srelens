@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { parseClusterLoginRequired, requestClusterLogin } from "../lib/clusterLogin";
 
@@ -63,3 +64,78 @@ export async function appVersion(): Promise<string> {
 export async function setWebviewZoom(factor: number): Promise<void> {
   await getCurrentWebview().setZoom(factor);
 }
+
+/**
+ * Intercept window close request, run an async cleanup handler (e.g. flushing
+ * state writes to disk), then destroy the window.
+ *
+ * The timeout is a *stall* guard, not a success: if the handler has not settled
+ * by then, the window stays up and a later close can retry. Destroying over an
+ * in-flight flush drops the settings write with the webview.
+ */
+export function onWindowCloseRequested(
+  handler: () => Promise<void> | void,
+  timeoutMs = 500,
+): () => void {
+  const win = getCurrentWindow();
+  if (typeof win?.onCloseRequested !== "function") return () => {};
+  let unlisten: (() => void) | undefined;
+  let disposed = false;
+  let closing = false;
+  // Only the intentional `win.close()` fallback may proceed without our
+  // preventDefault — a second user click while a flush is in flight must not.
+  let allowClose = false;
+  void win
+    .onCloseRequested(async (event) => {
+      if (allowClose) return;
+      event.preventDefault();
+      if (closing) return;
+      closing = true;
+      let settled = false;
+      try {
+        await Promise.race([
+          Promise.resolve(handler()).then(() => {
+            settled = true;
+          }),
+          new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+        ]);
+      } catch {
+        closing = false;
+        return;
+      }
+      if (!settled) {
+        closing = false;
+        return;
+      }
+      try {
+        await win.destroy();
+      } catch {
+        allowClose = true;
+        try {
+          await win.close();
+        } finally {
+          allowClose = false;
+          closing = false;
+        }
+      }
+    })
+    .then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    })
+    .catch(() => {});
+  return () => {
+    disposed = true;
+    unlisten?.();
+  };
+}
+
+/** The window label assigned by Tauri ("main", "ctx-...", etc.). */
+export function currentWindowLabel(): string {
+  try {
+    return getCurrentWindow().label;
+  } catch {
+    return "main";
+  }
+}
+

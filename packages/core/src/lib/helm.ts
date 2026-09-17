@@ -178,7 +178,7 @@ export async function startHelmOp(
   extraKubeconfigs: string[] = [],
   values: string = "",
 ): Promise<{ close: () => void }> {
-  const channel = `helm-${helmSeq++}`;
+  const channel = `helm-${helmSeq++}-${Math.random().toString(36).slice(2, 10)}`;
   const disposeOut = await subscribe(`helm:out:${channel}`, (p) => onData(String(p)));
   const disposeExit = await subscribe(`helm:exit:${channel}`, (p) => onExit((p as string | null) ?? null));
   let session: number;
