@@ -1,5 +1,6 @@
 //! Durable, native declarative extensions for desktop hosts.
 mod catalog;
+pub(crate) mod crd;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 mod resource;
@@ -282,6 +283,7 @@ fn read(path: &Path) -> Result<Inventory, String> {
 }
 fn reverify(plugin: &Installed) -> Result<(), String> {
     plugin.manifest.validate()?;
+    crd::group_problems(&plugin.manifest).into_result()?;
     if let Some(proof) = &plugin.signature_proof {
         verify_proof(proof, &plugin.manifest)?;
     }
@@ -447,6 +449,13 @@ fn validate_app(
             ),
         }
     }
+    // Built-in groups such as apps are not custom resources, whatever their syntax.
+    let groups: Vec<_> = crd::group_problems(manifest)
+        .0
+        .into_iter()
+        .filter(|found| !problems.0.iter().any(|p| p.path == found.path))
+        .collect();
+    problems.0.extend(groups);
     // Table surfaces have a resource-row contract; event readers are only valid
     // in the explicitly typed dashboard event slot.
     let contributions: [(&str, Vec<&String>); 3] = [
@@ -911,14 +920,21 @@ pub fn register(
                             .insert("useCrdColumns".into(), json!(true));
                     }
                 }
-                let mut registry = Registry::new();
-                let _registration = PluginHost::new(c)
-                    .register(&mut registry, manifest, &plugin.grants)
-                    .map_err(CapabilityError::Handler)?;
                 let context = resolved
                     .ok()
                     .and_then(|context| context.pinned_id())
                     .unwrap_or(input.context);
+                if let Some(binding) =
+                    plugin.manifest.capabilities.iter().find(|b| {
+                        b.name == input.capability && b.target == "k8s.listCustomResource"
+                    })
+                {
+                    crd::require(&c, &context, binding).await?;
+                }
+                let mut registry = Registry::new();
+                let _registration = PluginHost::new(c)
+                    .register(&mut registry, manifest, &plugin.grants)
+                    .map_err(CapabilityError::Handler)?;
                 let mut args = json!({ "context": context });
                 if plugin
                     .manifest
@@ -1155,7 +1171,7 @@ mod tests {
             .contains("does not match"));
     }
     /// The example manifest under an unreserved ID, as a local author would install it.
-    fn manifest() -> String {
+    pub(super) fn manifest() -> String {
         include_str!("../tests/fixtures/argocd-manifest.json")
             .replace("\"org.srelens.argocd\"", "\"org.example.argocd\"")
     }
@@ -1809,6 +1825,161 @@ mod tests {
             json!([])
         );
     }
+    /// The reader binding of `manifest()` retargeted at a built-in API.
+    fn bind_builtin(source: &mut Value, group: &str, plural: &str, kind: &str) {
+        let arguments = &mut source["capabilities"][0]["arguments"];
+        arguments["group"] = json!(group);
+        arguments["version"] = json!("v1");
+        arguments["plural"] = json!(plural);
+        arguments["kind"] = json!(kind);
+    }
+    #[tokio::test]
+    async fn built_in_api_groups_cannot_be_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = setup(&dir.path().join("extensions.json"));
+        for (group, plural, kind) in [
+            ("apps", "deployments", "Deployment"),
+            ("batch", "jobs", "Job"),
+            ("networking.k8s.io", "ingresses", "Ingress"),
+        ] {
+            let mut source: Value = serde_json::from_str(&manifest()).unwrap();
+            bind_builtin(&mut source, group, plural, kind);
+            let manifest = source.to_string();
+            let grants = json!(["k8s.listCustomResource"]);
+            let report = reg
+                .invoke(
+                    "extensions.validate",
+                    json!({"manifest": manifest, "grants": grants}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                report["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| (e["code"].as_str().unwrap(), e["path"].as_str().unwrap()))
+                    .collect::<Vec<_>>(),
+                [(
+                    "EXTENSION_INVALID_BINDING",
+                    "capabilities[0].arguments.group"
+                )],
+                "{group}"
+            );
+            let refused = reg
+                .invoke(
+                    "extensions.configure",
+                    json!({"action":"install","manifest": manifest,"grants": grants}),
+                )
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                refused.contains("capabilities[0].arguments.group"),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            reg.invoke("extensions.list", json!({})).await.unwrap()["plugins"],
+            json!([])
+        );
+    }
+    #[tokio::test]
+    async fn a_stored_app_binding_a_built_in_group_is_quarantined_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let core = fake_core();
+        let revision = install(&path, core.clone());
+        let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        bind_builtin(
+            &mut stored["plugins"][0]["manifest"],
+            "apps",
+            "deployments",
+            "Deployment",
+        );
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let state = read(&path).unwrap();
+        let app = &state.plugins[0];
+        assert!(!app.enabled);
+        let reason = app.quarantined.as_deref().unwrap();
+        assert!(
+            reason.contains("capabilities[0].arguments.group"),
+            "{reason}"
+        );
+
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            path.clone(),
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        assert!(reg
+            .invoke(
+                "extensions.read",
+                json!({"id":"org.example.argocd","revision":revision,
+                    "capability":"applications","context":"staging","namespace":""}),
+            )
+            .await
+            .is_err());
+    }
+    #[tokio::test]
+    async fn a_read_is_refused_unless_the_cluster_has_the_bound_crd() {
+        static LISTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let revision = install(&path, fake_core());
+        let read_on = |crds: &'static [&'static str], failing: bool| {
+            let mut core = (*fake_core()).clone();
+            let mut cap = core.get("k8s.listCustomResource").unwrap().clone();
+            cap.handler = Arc::new(|args| {
+                LISTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move { Ok(args) })
+            });
+            core.register(cap);
+            serve_crds(&mut core, crds);
+            if failing {
+                let mut cap = core.get(crd::CHECK).unwrap().clone();
+                cap.handler = Arc::new(|_| {
+                    Box::pin(async { Err(CapabilityError::Handler("forbidden".into())) })
+                });
+                core.register(cap);
+            }
+            let mut reg = Registry::new();
+            register(
+                &mut reg,
+                path.clone(),
+                Arc::new(core),
+                srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            );
+            async move {
+                reg.invoke(
+                    "extensions.read",
+                    json!({"id":"org.example.argocd","revision":revision,
+                        "capability":"applications","context":"staging","namespace":""}),
+                )
+                .await
+            }
+        };
+        // A dotted group served by an aggregated API, or a CRD this cluster lacks.
+        let absent = read_on(&[], false).await.unwrap_err().to_string();
+        assert!(
+            absent.contains("applications.argoproj.io is not a CustomResourceDefinition"),
+            "{absent}"
+        );
+        // A lookup that failed says so, and is not reported as an absence.
+        let failed = read_on(&["applications.argoproj.io"], true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(failed.contains("Could not confirm"), "{failed}");
+        assert!(failed.contains("forbidden"), "{failed}");
+        assert_eq!(LISTED.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        assert!(read_on(&["applications.argoproj.io"], false).await.is_ok());
+        assert_eq!(LISTED.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
     pub(super) fn fake_core() -> Arc<Registry> {
         let mut core = crate::build_registry_with_paths(
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
@@ -1817,7 +1988,24 @@ mod tests {
         let mut cap = core.get("k8s.listCustomResource").unwrap().clone();
         cap.handler = Arc::new(|args| Box::pin(async move { Ok(args) }));
         core.register(cap);
+        serve_crds(&mut core, &["applications.argoproj.io"]);
         Arc::new(core)
+    }
+    /// Answers the broker's CRD check as a cluster serving exactly these CRDs would.
+    pub(super) fn serve_crds(core: &mut Registry, names: &'static [&'static str]) {
+        let mut cap =
+            crd::check_capability(srelens_kube::client_cache::ClientCache::new_many(vec![]));
+        cap.handler = Arc::new(move |args| {
+            Box::pin(async move {
+                let name = format!(
+                    "{}.{}",
+                    args["plural"].as_str().unwrap_or_default(),
+                    args["group"].as_str().unwrap_or_default()
+                );
+                Ok(json!(names.contains(&name.as_str())))
+            })
+        });
+        core.register(cap);
     }
     pub(super) fn install(path: &Path, core: Arc<Registry>) -> u64 {
         mutate(

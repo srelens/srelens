@@ -8,7 +8,7 @@ Consent rules are in [permissions.md](permissions.md).
 | Capability | Kind | Purpose |
 |---|---|---|
 | `extensions.list` | Read-only | The installed apps, with revision, grants, settings, source, install time, up to three replaced versions and any quarantine reason. |
-| `extensions.read` | Read-only | Run one of an installed app's declared readers, given its ID, revision, operation and context. Refused with "App is not enabled for this cluster" on a cluster the app is not enabled for; so are `extensions.resource` and `extensions.action`. |
+| `extensions.read` | Read-only | Run one of an installed app's declared readers, given its ID, revision, operation and context. Refused with "App is not enabled for this cluster" on a cluster the app is not enabled for; so are `extensions.resource` and `extensions.action`. All three also refuse a custom-resource reader whose `{plural}.{group}` is not a CustomResourceDefinition on the cluster. |
 | `extensions.resource` | Read-only | Inspect one resource of an enabled app, with its events and supported actions. |
 | `extensions.catalog` | Read-only | Browse the catalog, from a 24-hour cache. Reports the host's supported API versions as `hostApiVersions`; the deprecated `hostApiVersion` still gives the newest. |
 | `extensions.catalogManifest` | Read-only | Download and verify one catalog release for review. Does not install it. |

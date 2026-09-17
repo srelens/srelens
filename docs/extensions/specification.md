@@ -287,3 +287,8 @@ update.
   - A catalog entry's `repository` is matched against the trusted-publisher table case-insensitively, as GitHub resolves owner and repository names. An entry whose repository is `https://github.com/SRELENS/…` must carry the srelens signature, exactly as the lowercase form must.
   - A lookalike owner such as `srelensx` is a different repository, and its entries stay ordinary unsigned third-party apps.
   - The release asset URL must still equal the pinned repository's `v<version>/manifest.json`, so an official entry writes it in the pinned form.
+- **#601:** security fix.
+  - A `k8s.listCustomResource` binding's `group` must be one a CustomResourceDefinition can declare. A group without a dot (`apps`, `batch`, `policy`) or equal to or under `k8s.io` is refused with `EXTENSION_INVALID_BINDING` at `capabilities[i].arguments.group`, by `extensions.validate`, install and rollback.
+  - An installed app whose binding breaks the rule fails re-verification and is quarantined.
+  - `extensions.read`, `extensions.resource` and `extensions.action` confirm that the bound `{plural}.{group}` is a CustomResourceDefinition on the cluster before dispatching, and refuse the call when it is not, which also covers a dotted group served by an aggregated API. A lookup that fails refuses the call with the reason, not as a missing CRD. `k8s.listCustomResource` itself is unchanged.
+  - This narrows accepted values within API 0.1, which [Compatibility rules](#compatibility-rules) classify as breaking. The exception is made because such a binding exposed built-in objects, such as a Deployment's environment, under a permission that reads as custom resources only. The Flux and Argo CD releases are unaffected.
