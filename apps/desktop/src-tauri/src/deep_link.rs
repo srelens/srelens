@@ -53,6 +53,11 @@ pub fn take_pending_deep_links(pending: tauri::State<'_, PendingDeepLink>) -> Ve
 /// single-instance focus path still need a consumer that drains
 /// `take_pending_deep_links` (only classic `App` on `main` registers that
 /// listener), so recreate `main` rather than nudging into the void.
+///
+/// Creation is scheduled on a worker thread: `WebviewWindowBuilder::build`
+/// deadlocks on Windows when called from a synchronous event handler (the
+/// deep-link / single-instance callbacks), which is exactly how this function
+/// is reached when `main` is missing.
 pub fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
     if let Some(window) = app.get_webview_window("main") {
@@ -61,12 +66,18 @@ pub fn focus_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         let _ = window.set_focus();
         return;
     }
-    let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        .title("srelens")
-        .inner_size(1440.0, 900.0)
-        .min_inner_size(960.0, 640.0)
-        .center()
-        .build();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if app.get_webview_window("main").is_some() {
+            return;
+        }
+        let _ = WebviewWindowBuilder::new(&app, "main", WebviewUrl::App("index.html".into()))
+            .title("srelens")
+            .inner_size(1440.0, 900.0)
+            .min_inner_size(960.0, 640.0)
+            .center()
+            .build();
+    });
 }
 
 /// Whether the window-state plugin has a saved geometry to restore.
@@ -137,9 +148,13 @@ mod tests {
             "precondition: no main window"
         );
         focus_main_window(&handle);
-        assert!(
-            handle.get_webview_window("main").is_some(),
-            "focus_main_window must recreate main when it is gone"
-        );
+        // Creation is off-thread; wait briefly for the MockRuntime to seat it.
+        for _ in 0..50 {
+            if handle.get_webview_window("main").is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("focus_main_window must recreate main when it is gone");
     }
 }

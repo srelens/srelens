@@ -82,6 +82,7 @@ import { startMcpHttp } from "@srelens/core";
 import { checkForUpdateAndNotify } from "@srelens/core";
 import { currentWindowLabel } from "@srelens/core";
 import { notify } from "@srelens/core";
+import { describeError } from "@srelens/core";
 import { isTauri, isWeb } from "@srelens/core/platform";
 import type { SettingsSection } from "./components/SettingsView";
 import { listContexts, deleteContext, type ClusterContext } from "@srelens/core";
@@ -310,12 +311,29 @@ export function App() {
     [],
   );
   const contextParamConsumed = useRef(false);
+  const contextParamListFailedNotified = useRef(false);
   useEffect(() => {
     if (!contexts || contextParamConsumed.current) return;
-    contextParamConsumed.current = true;
     // A restored session, and a design switch that has already picked this
     // window's first view, both outrank the query.
-    if (!contextParam || handoffOpened.current || restored?.tabs?.length) return;
+    if (!contextParam || handoffOpened.current || restored?.tabs?.length) {
+      contextParamConsumed.current = true;
+      return;
+    }
+    // Listing failed: keep the request. Marking it consumed here left an empty
+    // window that a later successful refresh could not fill, and "Open in new
+    // window" again only focused that empty shell.
+    if (contextsError) {
+      if (!contextParamListFailedNotified.current) {
+        contextParamListFailedNotified.current = true;
+        notify.error(
+          "Couldn't open that cluster",
+          describeError(contextsError).detail || "The kube contexts could not be listed.",
+        );
+      }
+      return;
+    }
+    contextParamConsumed.current = true;
     const match = contexts.find((c) => c.stableId === contextParam || c.name === contextParam);
     if (!match) {
       // Not a silent empty window. And which of the two facts this is — the
@@ -323,14 +341,12 @@ export function App() {
       // the difference between "try again" and "it is gone".
       notify.error(
         "Couldn't open that cluster",
-        contextsError
-          ? "The kube contexts could not be listed."
-          : "It is not among the listed kube contexts.",
+        "It is not among the listed kube contexts.",
       );
       return;
     }
     openView(match.name, "overview");
-  }, [contexts]);
+  }, [contexts, contextsError]);
 
   // Routed only once the contexts are known: a link that arrives during a cold
   // start would otherwise be judged against an empty context list and

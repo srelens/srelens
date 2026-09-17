@@ -704,9 +704,30 @@ describe("App", () => {
     await waitFor(() =>
       expect(vi.mocked(notify.error)).toHaveBeenCalledWith(
         "Couldn't open that cluster",
-        "The kube contexts could not be listed.",
+        "kubeconfig unreadable",
       ),
     );
+  });
+
+  it("opens the overview once a failed context list later succeeds", async () => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    listContextsMock.mockResolvedValue({ contexts: [], error: "kubeconfig unreadable" });
+    withContextQuery("/k/config#prod");
+    render(<App />);
+    await waitFor(() => expect(vi.mocked(notify.error)).toHaveBeenCalled());
+    expect(screen.queryByTestId("overview")).toBeNull();
+
+    listContextsMock.mockResolvedValue({
+      contexts: [
+        { name: "prod", stableId: "/k/config#prod", cluster: "prod", server: "", isCurrent: false },
+      ],
+    });
+    await waitFor(() => expect(tauri.handlers.has("kubeconfig-changed")).toBe(true));
+    act(() => {
+      tauri.handlers.get("kubeconfig-changed")?.({ payload: null });
+    });
+    expect((await screen.findByTestId("overview")).textContent).toBe("prod");
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   });
 });
 

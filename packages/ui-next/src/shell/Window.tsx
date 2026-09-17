@@ -248,28 +248,38 @@ export function Window({
           if (mainSaved) {
             saved = JSON.parse(JSON.stringify(mainSaved));
             if (saved) {
-              let targetWorkspace = saved.workspaces.find((w: any) => w.clusters.includes(ctxQuery));
-              if (!targetWorkspace && saved!.currentId) {
-                targetWorkspace = saved.workspaces.find((w: any) => w.id === saved!.currentId);
-                if (targetWorkspace && !targetWorkspace.clusters.includes(ctxQuery)) {
-                  targetWorkspace.clusters.push(ctxQuery);
+              // Classic Sidebar puts a display name in `?context=`; Rail puts a
+              // `stableId`. Workspaces key clusters on stable ids, so resolve
+              // the query first — looking up `clusters.includes(ctxQuery)` with
+              // a name misses the right workspace and then seeds the wrong one.
+              const targetContext = found.find(
+                (context) => context.stableId === ctxQuery || context.name === ctxQuery,
+              );
+              if (targetContext) {
+                const contextId = targetContext.stableId;
+                let targetWorkspace = saved.workspaces.find((w) => w.clusters.includes(contextId));
+                if (!targetWorkspace && saved.currentId) {
+                  targetWorkspace = saved.workspaces.find((w) => w.id === saved.currentId);
+                  if (targetWorkspace && !targetWorkspace.clusters.includes(contextId)) {
+                    targetWorkspace.clusters.push(contextId);
+                  }
                 }
-              }
-              const contextName = found.find(c => c.stableId === ctxQuery || c.name === ctxQuery)?.name || ctxQuery;
-              for (const w of saved.workspaces) {
-                const home = makeTab("/");
-                w.tabs = [home];
-                w.activeId = home.id;
-                w.closed = [];
-                if (w === targetWorkspace) {
-                  w.activeCluster = ctxQuery;
-                  const ot = makeTab("/overview", { clusterName: contextName });
-                  w.tabs.push(ot);
-                  w.activeId = ot.id;
+                const contextName = targetContext.name;
+                for (const w of saved.workspaces) {
+                  const home = makeTab("/");
+                  w.tabs = [home];
+                  w.activeId = home.id;
+                  w.closed = [];
+                  if (w === targetWorkspace) {
+                    w.activeCluster = contextId;
+                    const ot = makeTab("/overview", { clusterName: contextName });
+                    w.tabs.push(ot);
+                    w.activeId = ot.id;
+                  }
                 }
-              }
-              if (targetWorkspace) {
-                saved.currentId = targetWorkspace.id;
+                if (targetWorkspace) {
+                  saved.currentId = targetWorkspace.id;
+                }
               }
             }
           }
