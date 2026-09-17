@@ -281,6 +281,11 @@ fn read(path: &Path) -> Result<Inventory, String> {
     Ok(state)
 }
 fn reverify(plugin: &Installed) -> Result<(), String> {
+    // An entry stored before the namespace was reserved, or added by hand, gets no more
+    // trust from the file than an install would give it.
+    if let Some(reason) = unsigned_reserved(&plugin.manifest.id, plugin.signature_proof.is_some()) {
+        return Err(reason);
+    }
     plugin.manifest.validate()?;
     if let Some(proof) = &plugin.signature_proof {
         verify_proof(proof, &plugin.manifest)?;
@@ -552,6 +557,13 @@ fn validate_app(
     }
     problems.into_result()
 }
+/// Why an app under `id` cannot be trusted without a publisher signature, when it has none
+/// and `id` is in a trusted publisher's namespace. Install refuses it; loading quarantines
+/// a stored one, which `enable` then refuses; rollback refuses to restore one.
+fn unsigned_reserved(id: &str, signed: bool) -> Option<String> {
+    (!signed && signing::reserved(id))
+        .then(|| format!("App ID {id} is reserved for signed srelens releases"))
+}
 /// Every reason installing `source` with these grants and signature would be refused.
 fn check_install(
     source: &str,
@@ -563,24 +575,21 @@ fn check_install(
     let mut problems = validate_app(&manifest, grants, core)
         .err()
         .unwrap_or_default();
-    match signature {
-        // Without this, a pasted manifest could replace a signed app, or take an
-        // official ID and its logo, differing from the real one only by a label.
-        None if signing::reserved(&manifest.id) => problems.push(
+    // Without this, a pasted manifest could replace a signed app, or take an
+    // official ID and its logo, differing from the real one only by a label.
+    if let Some(reason) = unsigned_reserved(&manifest.id, signature.is_some()) {
+        problems.push(
             Code::ReservedId,
             "id",
             format!(
-                "App ID {} is reserved for signed srelens releases. Install it from the Catalog, or give your local manifest its own ID.",
-                manifest.id
+                "{reason}. Install it from the Catalog, or give your local manifest its own ID."
             ),
-        ),
-        None => {}
-        // The signature covers the exact bytes, so it is checked whatever else is wrong.
-        Some(signature) => {
-            if let Err(reason) = signing::verify_for(&manifest.id, source.as_bytes(), signature)
-            {
-                problems.push(Code::InvalidSignature, "", reason);
-            }
+        );
+    }
+    // The signature covers the exact bytes, so it is checked whatever else is wrong.
+    if let Some(signature) = signature {
+        if let Err(reason) = signing::verify_for(&manifest.id, source.as_bytes(), signature) {
+            problems.push(Code::InvalidSignature, "", reason);
         }
     }
     problems.into_result()?;
@@ -711,6 +720,11 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             let target = app.history[index].clone();
             // A restored version is checked as installing it now would be: against its
             // publisher signature, and against this host's rules with the grants given now.
+            if let Some(reason) =
+                unsigned_reserved(&target.manifest.id, target.signature_proof.is_some())
+            {
+                return Err(format!("{reason}. Reinstall it from the Catalog."));
+            }
             if let Some(proof) = &target.signature_proof {
                 verify_proof(proof, &target.manifest)?;
             }
@@ -2210,6 +2224,100 @@ mod tests {
 
         let lookalike = official.replace("\"org.srelens.argocd\"", "\"org.srelensx.argocd\"");
         assert!(mutate(&path, core, unsigned(&lookalike)).is_ok());
+    }
+    /// The saved inventory with the signature proof stripped from the app at `pointer`.
+    fn strip_proof(path: &Path, pointer: &str) {
+        let mut stored: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let removed = stored
+            .pointer_mut(pointer)
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .remove("signatureProof");
+        assert!(removed.is_some(), "{pointer} had no signature proof");
+        fs::write(path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    }
+    #[test]
+    fn a_stored_unsigned_app_under_a_reserved_id_is_quarantined_and_cannot_be_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let core = fake_core();
+        mutate(&path, core.clone(), signed_argocd()).unwrap();
+        install(&path, core.clone());
+        // Signed and unsigned-elsewhere apps load as they were saved.
+        let state = read(&path).unwrap();
+        for id in ["org.srelens.argocd", "org.example.argocd"] {
+            let app = find(&state, id);
+            assert!(app.enabled && app.quarantined.is_none(), "{id}");
+        }
+        // As an entry saved before the namespace was reserved would be.
+        let official = state
+            .plugins
+            .iter()
+            .position(|p| p.manifest.id == "org.srelens.argocd")
+            .unwrap();
+        strip_proof(&path, &format!("/plugins/{official}"));
+
+        let state = read(&path).unwrap();
+        let stored = find(&state, "org.srelens.argocd");
+        assert!(!stored.enabled);
+        let reason = stored.quarantined.clone().unwrap();
+        assert_eq!(
+            reason,
+            "App ID org.srelens.argocd is reserved for signed srelens releases"
+        );
+        let local = find(&state, "org.example.argocd");
+        assert!(local.enabled && local.quarantined.is_none());
+
+        let refused = mutate(
+            &path,
+            core.clone(),
+            Configure::Enable {
+                id: "org.srelens.argocd".into(),
+                enabled: true,
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(refused.contains(&reason), "{refused}");
+        assert!(
+            refused.contains("reinstall it from the Catalog"),
+            "{refused}"
+        );
+
+        // Reinstalling the signed release lifts it.
+        mutate(&path, core, signed_argocd()).unwrap();
+        let restored = read(&path).unwrap();
+        let restored = find(&restored, "org.srelens.argocd");
+        assert!(restored.enabled && restored.quarantined.is_none());
+    }
+    #[test]
+    fn rollback_refuses_an_unsigned_version_under_a_reserved_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let core = fake_core();
+        mutate(&path, core.clone(), signed_argocd()).unwrap();
+        mutate(&path, core.clone(), signed_argocd()).unwrap();
+        strip_proof(&path, "/plugins/0/history/0");
+        let state = read(&path).unwrap();
+        let app = find(&state, "org.srelens.argocd");
+        assert!(app.enabled && app.quarantined.is_none());
+        let before = fs::read(&path).unwrap();
+        let refused = mutate(
+            &path,
+            core,
+            Configure::Rollback {
+                id: "org.srelens.argocd".into(),
+                revision: app.history[0].revision,
+                grants: vec!["k8s.listCustomResource".into()],
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(
+            refused.contains("reserved for signed srelens releases"),
+            "{refused}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
     #[test]
     fn facade_refuses_a_host_reader_that_requires_stronger_consent() {

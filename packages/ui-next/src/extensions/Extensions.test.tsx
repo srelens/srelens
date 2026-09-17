@@ -96,6 +96,31 @@ it("says why an app was quarantined and does not offer to re-enable it", async (
   expect(toggle.disabled).toBe(true);
   expect(screen.getByText("Remove")).toBeTruthy();
 });
+it("sends an unsigned app under a reserved ID to the Catalog for the signed release", async () => {
+  // Stored before org.srelens. was reserved: the host quarantines it on load (#602).
+  const reason = "App ID org.srelens.gitops is reserved for signed srelens releases";
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [
+      {
+        ...plugin,
+        manifest: { ...plugin.manifest, id: "org.srelens.gitops" },
+        source: "local",
+        enabled: false,
+        quarantined: reason,
+      },
+    ],
+  } as any);
+  render(<ExtensionManager />);
+  expect((await screen.findByText(new RegExp(reason))).textContent).toBe(
+    `Disabled: ${reason}. Remove it or reinstall it from the Catalog.`,
+  );
+  expect(screen.getByText(/Unsigned local/)).toBeTruthy();
+  const toggle = screen.getByLabelText("Enable org.srelens.gitops") as HTMLInputElement;
+  expect(toggle.checked).toBe(false);
+  expect(toggle.disabled).toBe(true);
+});
 it("refreshes an open list only when an action on one of its own resources is accepted", async () => {
   const { EXTENSION_RESOURCE_CHANGED } = await import("@srelens/core");
   vi.mocked(readExtension).mockResolvedValue({ items: [] } as any);
