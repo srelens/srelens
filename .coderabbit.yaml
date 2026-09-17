@@ -194,10 +194,14 @@ reviews:
       instructions: |
         The single place capabilities are registered; it must stay Tauri-free
         (no `tauri` dependency or import, directly or through a new crate).
-        Every capability change must update
-        packages/core/src/lib/capability-catalog.json (regenerated with
-        `UPDATE_CATALOG=1 cargo test -p srelens-registry`). Beyond that, it depends
-        on the change (a rename is both a removal and an addition):
+        packages/core/src/lib/capability-catalog.json holds only each
+        capability's id and its read_only / destructive / requires_confirm /
+        sensitive flags (`CatalogEntry`). It must be regenerated (with
+        `UPDATE_CATALOG=1 cargo test -p srelens-registry`) when a capability is
+        added, removed or renamed, or its safety annotations change. A schema-only
+        or handler-only change leaves it unchanged; do not ask for a catalog diff
+        then. Beyond the catalog, it depends on the change (a rename is both a
+        removal and an addition):
         - Added or changed: add or explicitly exclude an e2e case in
           apps/desktop/src-tauri/tests/e2e.rs, and consume it in the UI only
           through a wrapper in @srelens/core.
@@ -561,7 +565,10 @@ reviews:
           For each capability ADDED or CHANGED, pass only if ALL hold:
           1. It is registered in crates/registry/src/lib.rs (not only in
              apps/desktop/src-tauri).
-          2. packages/core/src/lib/capability-catalog.json is updated in the same PR.
+          2. If it is added, or its safety annotations changed,
+             packages/core/src/lib/capability-catalog.json is updated in the same
+             PR. The catalog holds only ids and annotation flags, so this
+             condition passes for a schema-only or handler-only change.
           3. apps/desktop/src-tauri/tests/e2e.rs exercises it or excludes it with a
              concrete reason.
           4. Every multi-word input field's serialized name matches the JSON the
