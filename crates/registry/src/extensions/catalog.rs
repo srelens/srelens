@@ -288,14 +288,8 @@ fn load_with(
         host_api_version: newest_api_version(),
         host_api_versions: host_api_versions(),
     };
-    let mut file =
-        tempfile::NamedTempFile::new_in(path.parent().ok_or("Catalog cache has no parent")?)
-            .map_err(|e| e.to_string())?;
-    file.write_all(&serde_json::to_vec(&state).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    file.as_file().sync_all().map_err(|e| e.to_string())?;
-    file.persist(path)
-        .map_err(|e| format!("Save extension catalog: {e}"))?;
+    let raw = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
+    crate::durable::replace(path, &raw).map_err(|e| format!("Save extension catalog: {e}"))?;
     Ok(state)
 }
 fn load(path: &Path, refresh: bool) -> Result<Snapshot, String> {

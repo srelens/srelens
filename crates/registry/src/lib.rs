@@ -12,6 +12,7 @@ use srelens_capability::{Capability, Registry};
 use srelens_kube::client_cache::ClientCache;
 
 mod catalog;
+mod durable;
 pub use catalog::{catalog_of, CatalogEntry};
 mod settings;
 mod extensions;

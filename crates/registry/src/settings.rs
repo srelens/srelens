@@ -3,11 +3,12 @@
 //!
 //! The frontend keeps a synchronous in-memory mirror, but this file is the
 //! source of truth. Each mutation writes a complete, schema-versioned document
-//! to a sibling temporary file and renames it into place.
+//! to a sibling temporary file and renames it into place through
+//! `durable::replace`, which also syncs the directory so the save survives a
+//! power loss.
 
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -243,8 +244,6 @@ fn write_document(path: &Path, document: &SettingsDocument) -> Result<(), String
         .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
     fs::create_dir_all(parent).map_err(|error| format!("create {}: {error}", parent.display()))?;
 
-    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("settings.json");
-    let temp = parent.join(format!(".{file_name}.tmp-{}", std::process::id()));
     let raw = serde_json::to_vec_pretty(document).map_err(|error| error.to_string())?;
     // The write below appends a trailing newline, so the on-disk file is one
     // byte longer than `raw`. Checking `raw` alone would accept a document of
@@ -255,30 +254,10 @@ fn write_document(path: &Path, document: &SettingsDocument) -> Result<(), String
         return Err("settings document exceeds the 1 MB limit".into());
     }
 
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&temp)
-        .map_err(|error| format!("create {}: {error}", temp.display()))?;
-    if let Err(error) = file
-        .write_all(&raw)
-        .and_then(|_| file.write_all(b"\n"))
-        .and_then(|_| file.sync_all())
-    {
-        let _ = fs::remove_file(&temp);
-        return Err(format!("write {}: {error}", temp.display()));
-    }
-    drop(file);
-    if let Err(error) = fs::rename(&temp, path) {
-        let _ = fs::remove_file(&temp);
-        return Err(format!("replace {}: {error}", path.display()));
-    }
-    Ok(())
+    let mut contents = raw;
+    contents.push(b'\n');
+    crate::durable::replace(path, &contents)
+        .map_err(|error| format!("save {}: {error}", path.display()))
 }
 
 /// The stable settings path shared by GUI and headless MCP launches. It is
@@ -394,7 +373,16 @@ mod tests {
         assert!(reopened.local_storage_migrated);
         assert_eq!(reopened.values["scale"], json!(120));
         assert_eq!(reopened.values["theme"], json!({"mode": "dark"}));
-        assert!(!dir.path().join(format!(".settings.json.tmp-{}", std::process::id())).exists());
+        let mut names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["settings.json", "settings.json.lock"],
+            "no temporary file is left behind"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

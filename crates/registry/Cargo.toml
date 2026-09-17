@@ -34,6 +34,11 @@ sha2 = "0.10"
 ring = "0.17"
 semver = "1"
 
+# Windows: `durable::replace` renames with `MoveFileExW` and `MOVEFILE_WRITE_THROUGH`.
+# Already in the lockfile through tempfile and others; no new crate is built.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [features]
 # Exposes `srelens_registry::fuzzing`, the extension readers' fuzz entry points,
 # to the targets in `fuzz/`. Test support, not an API.

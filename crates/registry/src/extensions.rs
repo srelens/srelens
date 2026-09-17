@@ -13,7 +13,6 @@ use srelens_plugin_host::{
 };
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -317,17 +316,7 @@ fn write(path: &Path, state: &Inventory) -> Result<(), String> {
     if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
     }
-    let parent = path
-        .parent()
-        .ok_or("extension inventory has no parent directory")?;
-    let result = (|| -> Result<(), std::io::Error> {
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        file.write_all(&raw)?;
-        file.as_file().sync_all()?;
-        file.persist(path).map_err(|e| e.error)?;
-        Ok(())
-    })();
-    result.map_err(|e| format!("save extension inventory: {e}"))
+    crate::durable::replace(path, &raw).map_err(|e| format!("save extension inventory: {e}"))
 }
 /// The manifest's own rules and this app's narrower ones, reporting every violation.
 fn validate_app(
