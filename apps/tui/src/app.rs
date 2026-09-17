@@ -6585,37 +6585,43 @@ impl App {
                     bgp_view::BgpTab::IpPools => {
                         if let Some(pool) = bgp.selected_pool() {
                             let p_name = pool.name.clone();
-                            self.open_describe_view(p_name, "CiliumLoadBalancerIPPool".to_string(), None).await;
+                            let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "IPAddressPool".to_string(),
+                                Some(srelens_kube::bgp::BgpEngineType::Calico) => "IPPool".to_string(),
+                                _ => "CiliumLoadBalancerIPPool".to_string(),
+                            };
+                            self.open_describe_view(p_name, p_kind, None).await;
                         }
                     }
                 },
                 KeyCode::Char('d') => match bgp.active_tab {
                     bgp_view::BgpTab::Peers => {
                         if let Some(peer) = bgp.selected_peer() {
-                            let pol_name = if !peer.policy_name.is_empty()
+                            let (target_name, target_kind) = if !peer.policy_name.is_empty()
+                                && !peer.policy_kind.is_empty()
+                                && peer.policy_name != "cilium-node-status"
+                            {
+                                (peer.policy_name.clone(), peer.policy_kind.clone())
+                            } else if !peer.policy_name.is_empty()
                                 && peer.policy_name != "cilium-node-status"
                                 && peer.policy_name != "cilium-bgp-node-config"
+                                && peer.policy_name != "cilium-bgp-peering-policy"
                             {
-                                peer.policy_name.clone()
+                                let fallback_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => "CiliumBGPClusterConfig".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => "CiliumBGPPeeringPolicy".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "BGPPeer".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => "BGPPeer".to_string(),
+                                    _ => "CiliumBGPClusterConfig".to_string(),
+                                };
+                                (peer.policy_name.clone(), fallback_kind)
                             } else if !peer.node_name.is_empty() {
-                                peer.node_name.clone()
+                                (peer.node_name.clone(), "Node".to_string())
                             } else {
-                                peer.policy_name.clone()
+                                (peer.policy_name.clone(), "CiliumBGPClusterConfig".to_string())
                             };
 
-                            if !pol_name.is_empty() {
-                                let kind_str = match bgp.summary.as_ref().map(|s| &s.engine) {
-                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => "CiliumBGPNodeConfig".to_string(),
-                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => "CiliumBGPPeeringPolicy".to_string(),
-                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "BGPSession".to_string(),
-                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => "BGPPeer".to_string(),
-                                    _ => "CiliumBGPPeeringPolicy".to_string(),
-                                };
-                                self.open_describe_view(pol_name, kind_str, None).await;
-                            } else {
-                                let n_name = peer.node_name.clone();
-                                self.open_describe_view(n_name, "Node".to_string(), None).await;
-                            }
+                            self.open_describe_view(target_name, target_kind, None).await;
                         }
                     }
                     bgp_view::BgpTab::Services => {
@@ -6628,37 +6634,43 @@ impl App {
                     bgp_view::BgpTab::IpPools => {
                         if let Some(pool) = bgp.selected_pool() {
                             let p_name = pool.name.clone();
-                            self.open_describe_view(p_name, "CiliumLoadBalancerIPPool".to_string(), None).await;
+                            let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "IPAddressPool".to_string(),
+                                Some(srelens_kube::bgp::BgpEngineType::Calico) => "IPPool".to_string(),
+                                _ => "CiliumLoadBalancerIPPool".to_string(),
+                            };
+                            self.open_describe_view(p_name, p_kind, None).await;
                         }
                     }
                 },
                 KeyCode::Char('y') => match bgp.active_tab {
                     bgp_view::BgpTab::Peers => {
                         if let Some(peer) = bgp.selected_peer() {
-                            let pol_name = if !peer.policy_name.is_empty()
+                            let (target_name, target_kind) = if !peer.policy_name.is_empty()
+                                && !peer.policy_kind.is_empty()
+                                && peer.policy_name != "cilium-node-status"
+                            {
+                                (peer.policy_name.clone(), peer.policy_kind.clone())
+                            } else if !peer.policy_name.is_empty()
                                 && peer.policy_name != "cilium-node-status"
                                 && peer.policy_name != "cilium-bgp-node-config"
+                                && peer.policy_name != "cilium-bgp-peering-policy"
                             {
-                                peer.policy_name.clone()
+                                let fallback_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => "CiliumBGPClusterConfig".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => "CiliumBGPPeeringPolicy".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "BGPPeer".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => "BGPPeer".to_string(),
+                                    _ => "CiliumBGPClusterConfig".to_string(),
+                                };
+                                (peer.policy_name.clone(), fallback_kind)
                             } else if !peer.node_name.is_empty() {
-                                peer.node_name.clone()
+                                (peer.node_name.clone(), "Node".to_string())
                             } else {
-                                peer.policy_name.clone()
+                                (peer.policy_name.clone(), "CiliumBGPClusterConfig".to_string())
                             };
 
-                            if !pol_name.is_empty() {
-                                let kind_str = match bgp.summary.as_ref().map(|s| &s.engine) {
-                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => "CiliumBGPNodeConfig".to_string(),
-                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => "CiliumBGPPeeringPolicy".to_string(),
-                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "BGPSession".to_string(),
-                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => "BGPPeer".to_string(),
-                                    _ => "CiliumBGPPeeringPolicy".to_string(),
-                                };
-                                self.open_yaml_view(pol_name, kind_str, None).await;
-                            } else {
-                                let n_name = peer.node_name.clone();
-                                self.open_yaml_view(n_name, "Node".to_string(), None).await;
-                            }
+                            self.open_yaml_view(target_name, target_kind, None).await;
                         }
                     }
                     bgp_view::BgpTab::Services => {
@@ -6671,7 +6683,12 @@ impl App {
                     bgp_view::BgpTab::IpPools => {
                         if let Some(pool) = bgp.selected_pool() {
                             let p_name = pool.name.clone();
-                            self.open_yaml_view(p_name, "CiliumLoadBalancerIPPool".to_string(), None).await;
+                            let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "IPAddressPool".to_string(),
+                                Some(srelens_kube::bgp::BgpEngineType::Calico) => "IPPool".to_string(),
+                                _ => "CiliumLoadBalancerIPPool".to_string(),
+                            };
+                            self.open_yaml_view(p_name, p_kind, None).await;
                         }
                     }
                 },
@@ -9069,9 +9086,9 @@ impl App {
                         plural: crd.plural,
                     };
                     let api: kube::Api<kube::core::DynamicObject> = if crd.namespaced {
-                        kube::Api::namespaced_with(client, ns.as_deref().unwrap_or("default"), &ar)
+                        kube::Api::namespaced_with(client.clone(), ns.as_deref().unwrap_or("default"), &ar)
                     } else {
-                        kube::Api::all_with(client, &ar)
+                        kube::Api::all_with(client.clone(), &ar)
                     };
                     if let Ok(mut obj) = api.get(&n).await {
                         obj.metadata.managed_fields = None;
@@ -9079,12 +9096,14 @@ impl App {
                             return y;
                         }
                     }
-                } else if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
+                }
+
+                if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
                     let ar = kube::core::ApiResource::from_gvk(&gvk);
                     let api: kube::Api<kube::core::DynamicObject> = if namespaced {
-                        kube::Api::namespaced_with(client, ns.as_deref().unwrap_or("default"), &ar)
+                        kube::Api::namespaced_with(client.clone(), ns.as_deref().unwrap_or("default"), &ar)
                     } else {
-                        kube::Api::all_with(client, &ar)
+                        kube::Api::all_with(client.clone(), &ar)
                     };
                     if let Ok(mut obj) = api.get(&n).await {
                         obj.metadata.managed_fields = None;
@@ -9092,12 +9111,41 @@ impl App {
                             return y;
                         }
                     }
-                } else if k.eq_ignore_ascii_case("application")
+                }
+
+                if k.starts_with("CiliumBGP") || k.starts_with("ciliumbgp") || k.starts_with("CiliumLoadBalancer") {
+                    let k_lower = k.to_lowercase();
+                    let plural = if k_lower.ends_with('y') {
+                        format!("{}ies", &k_lower[..k_lower.len() - 1])
+                    } else if k_lower.ends_with('s') {
+                        k_lower.clone()
+                    } else {
+                        format!("{}s", k_lower)
+                    };
+                    for v in ["v2", "v2alpha1"] {
+                        let ar = kube::core::ApiResource {
+                            group: "cilium.io".to_string(),
+                            version: v.to_string(),
+                            api_version: format!("cilium.io/{}", v),
+                            kind: k.clone(),
+                            plural: plural.clone(),
+                        };
+                        let api: kube::Api<kube::core::DynamicObject> = kube::Api::all_with(client.clone(), &ar);
+                        if let Ok(mut obj) = api.get(&n).await {
+                            obj.metadata.managed_fields = None;
+                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                                return y;
+                            }
+                        }
+                    }
+                }
+
+                if k.eq_ignore_ascii_case("application")
                     || k.eq_ignore_ascii_case("applications")
                 {
                     let ar = srelens_kube::argo::argo_application_resource();
                     let api: kube::Api<kube::core::DynamicObject> =
-                        kube::Api::namespaced_with(client, ns.as_deref().unwrap_or("argocd"), &ar);
+                        kube::Api::namespaced_with(client.clone(), ns.as_deref().unwrap_or("argocd"), &ar);
                     if let Ok(mut obj) = api.get(&n).await {
                         obj.metadata.managed_fields = None;
                         if let Ok(y) = serde_yaml::to_string(&obj) {

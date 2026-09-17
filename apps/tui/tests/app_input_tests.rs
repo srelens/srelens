@@ -4400,6 +4400,97 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
 }
 
 #[tokio::test]
+async fn bgp_view_keys_open_yaml_and_describe_with_correct_crd_kind() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    // Navigate to :bgp
+    common::type_str(&mut app, ":bgp").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    if let ActiveView::Bgp(ref mut bgp) = app.active_view {
+        let summary = srelens_kube::bgp::BgpClusterSummary {
+            engine: srelens_kube::bgp::BgpEngineType::CiliumV2,
+            total_nodes: 2,
+            bgp_nodes: 2,
+            total_peers: 1,
+            established_peers: 1,
+            degraded_peers: 0,
+            peers: vec![srelens_kube::bgp::BgpNeighbor {
+                node_name: "data-processing-stage-master-1".to_string(),
+                peer_address: "10.128.12.2".to_string(),
+                peer_asn: 65101,
+                local_asn: 65101,
+                session_state: srelens_kube::bgp::BgpSessionState::Established,
+                policy_name: "cilium-bgp-fabric-peering".to_string(),
+                policy_kind: "CiliumBGPClusterConfig".to_string(),
+                export_pod_cidr: true,
+                hold_time_seconds: Some(90),
+                keepalive_time_seconds: Some(30),
+                connect_retry_seconds: Some(120),
+                multihop_ttl: Some(64),
+                graceful_restart: true,
+                advertised_prefixes: vec!["10.244.0.0/24".to_string()],
+                routes_count: 1,
+                routes_received: 316,
+                uptime_or_last_change: Some("344h".to_string()),
+            }],
+            advertised_services: vec![],
+            ip_pools: vec![srelens_kube::bgp::BgpIpPool {
+                name: "default-lb-pool".to_string(),
+                cidrs: vec!["10.0.0.0/24".to_string()],
+                service_selector: String::new(),
+                disabled: false,
+            }],
+            error: None,
+        };
+        bgp.set_summary(summary);
+    }
+
+    // Press 'y' -> opens YAML view with CiliumBGPClusterConfig (not CiliumBGPNodeConfig)
+    press(&mut app, ch('y')).await;
+    match &app.active_view {
+        ActiveView::Yaml(y) => {
+            assert_eq!(y.resource_name, "cilium-bgp-fabric-peering");
+            assert_eq!(y.resource_kind, "CiliumBGPClusterConfig");
+        }
+        _ => panic!("expected ActiveView::Yaml"),
+    }
+
+    // Press 'Esc' -> returns to Bgp view
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    // Press 'd' -> opens Describe view with CiliumBGPClusterConfig
+    press(&mut app, ch('d')).await;
+    match &app.active_view {
+        ActiveView::Describe(d) => {
+            assert_eq!(d.resource_name, "cilium-bgp-fabric-peering");
+            assert_eq!(d.resource_kind, "CiliumBGPClusterConfig");
+        }
+        _ => panic!("expected ActiveView::Describe"),
+    }
+
+    // Press 'Esc' -> returns to Bgp view
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    // Switch to IP Pools tab (Tab twice: Peers -> Services -> IpPools)
+    press(&mut app, key(KeyCode::Tab)).await;
+    press(&mut app, key(KeyCode::Tab)).await;
+
+    // Press 'y' on IP pool -> opens YAML view with CiliumLoadBalancerIPPool
+    press(&mut app, ch('y')).await;
+    match &app.active_view {
+        ActiveView::Yaml(y) => {
+            assert_eq!(y.resource_name, "default-lb-pool");
+            assert_eq!(y.resource_kind, "CiliumLoadBalancerIPPool");
+        }
+        _ => panic!("expected ActiveView::Yaml"),
+    }
+}
+
+#[tokio::test]
 async fn tui_config_hub_dialog_left_right_cursor_and_paste() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg_path = tmp.path().join("tui.json");

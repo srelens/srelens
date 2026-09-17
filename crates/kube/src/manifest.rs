@@ -350,6 +350,15 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
             ("cilium.io", "v2", "CiliumEndpoint", true)
         }
         "ciliumidentity" | "ciliumidentities" => ("cilium.io", "v2", "CiliumIdentity", false),
+        "bgppeer" | "bgppeers" => ("crd.projectcalico.org", "v1", "BGPPeer", false),
+        "bgpconfiguration" | "bgpconfigurations" => {
+            ("crd.projectcalico.org", "v1", "BGPConfiguration", false)
+        }
+        "ippool" | "ippools" => ("crd.projectcalico.org", "v1", "IPPool", false),
+        "ipaddresspool" | "ipaddresspools" => ("metallb.io", "v1beta1", "IPAddressPool", true),
+        "bgpadvertisement" | "bgpadvertisements" => {
+            ("metallb.io", "v1beta1", "BGPAdvertisement", true)
+        }
         _ => return None,
     };
     Some((GroupVersionKind::gvk(group, version, k), namespaced))

@@ -88,6 +88,8 @@ pub struct BgpNeighbor {
     pub local_asn: u32,
     pub session_state: BgpSessionState,
     pub policy_name: String,
+    #[serde(default)]
+    pub policy_kind: String,
     pub export_pod_cidr: bool,
     pub hold_time_seconds: Option<u64>,
     pub keepalive_time_seconds: Option<u64>,
@@ -670,6 +672,7 @@ async fn discover_cilium_bgp(
                                 local_asn,
                                 session_state: BgpSessionState::Configured,
                                 policy_name: pol_name.clone(),
+                                policy_kind: "CiliumBGPClusterConfig".to_string(),
                                 export_pod_cidr: export_pod_cidr_default,
                                 hold_time_seconds: peer_cfg.hold_time,
                                 keepalive_time_seconds: peer_cfg.keepalive,
@@ -702,7 +705,7 @@ async fn discover_cilium_bgp(
             let live_peers = extract_live_bgp_peers(status, 0);
             for live in live_peers {
                 bgp_node_set.insert(node_name.clone());
-                update_or_insert_neighbor(&mut neighbors, &node_name, live, "cilium-bgp-node-config", export_pod_cidr_default, node_pod_cidrs, lb_services);
+                update_or_insert_neighbor(&mut neighbors, &node_name, live, &node_name, "CiliumBGPNodeConfig", export_pod_cidr_default, node_pod_cidrs, lb_services);
             }
         }
     }
@@ -758,6 +761,7 @@ async fn discover_cilium_bgp(
                                             local_asn,
                                             session_state: BgpSessionState::Configured,
                                             policy_name: pol_name.clone(),
+                                            policy_kind: "CiliumBGPPeeringPolicy".to_string(),
                                             export_pod_cidr,
                                             hold_time_seconds: hold_time,
                                             keepalive_time_seconds: keepalive,
@@ -789,7 +793,7 @@ async fn discover_cilium_bgp(
                     let live_peers = extract_live_bgp_peers(status, 0);
                     for live in live_peers {
                         bgp_node_set.insert(n_name.clone());
-                        update_or_insert_neighbor(&mut neighbors, &n_name, live, "cilium-node-status", export_pod_cidr_default, node_pod_cidrs, lb_services);
+                        update_or_insert_neighbor(&mut neighbors, &n_name, live, &n_name, "CiliumNode", export_pod_cidr_default, node_pod_cidrs, lb_services);
                     }
                 }
             }
@@ -843,6 +847,7 @@ fn update_or_insert_neighbor(
     node_name: &str,
     live: LiveBgpPeerInfo,
     default_policy: &str,
+    default_policy_kind: &str,
     export_pod_cidr: bool,
     node_pod_cidrs: &HashMap<String, Vec<String>>,
     lb_services: &[(String, String, String, Option<String>)],
@@ -880,6 +885,7 @@ fn update_or_insert_neighbor(
             local_asn: live.local_asn,
             session_state: live.session_state,
             policy_name: if !live.peer_name.is_empty() { live.peer_name } else { default_policy.to_string() },
+            policy_kind: default_policy_kind.to_string(),
             export_pod_cidr,
             hold_time_seconds: None,
             keepalive_time_seconds: None,
@@ -1046,6 +1052,7 @@ async fn discover_metallb_bgp(
                 local_asn,
                 session_state: BgpSessionState::Configured,
                 policy_name: p_name.clone(),
+                policy_kind: "BGPPeer".to_string(),
                 export_pod_cidr: false,
                 hold_time_seconds: hold_time,
                 keepalive_time_seconds: None,
@@ -1143,6 +1150,7 @@ async fn discover_calico_bgp(
                 local_asn: 0,
                 session_state: BgpSessionState::Configured,
                 policy_name: p_name.clone(),
+                policy_kind: "BGPPeer".to_string(),
                 export_pod_cidr: true,
                 hold_time_seconds: None,
                 keepalive_time_seconds: None,
