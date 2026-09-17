@@ -6332,6 +6332,9 @@ impl App {
                             is_destructive: target_unsched,
                         });
                     }
+                    KeyCode::Char('b') | KeyCode::Char('B') => {
+                        self.switch_view_to_kind(ResourceKind::BgpPeers).await;
+                    }
                     _ => {}
                 }
             }
@@ -6585,12 +6588,13 @@ impl App {
                     bgp_view::BgpTab::IpPools => {
                         if let Some(pool) = bgp.selected_pool() {
                             let p_name = pool.name.clone();
+                            let p_ns = pool.namespace.clone();
                             let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
                                 Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "IPAddressPool".to_string(),
                                 Some(srelens_kube::bgp::BgpEngineType::Calico) => "IPPool".to_string(),
                                 _ => "CiliumLoadBalancerIPPool".to_string(),
                             };
-                            self.open_describe_view(p_name, p_kind, None).await;
+                            self.open_describe_view(p_name, p_kind, p_ns).await;
                         }
                     }
                 },
@@ -6620,8 +6624,9 @@ impl App {
                             } else {
                                 (peer.policy_name.clone(), "CiliumBGPClusterConfig".to_string())
                             };
+                            let target_ns = peer.namespace.clone();
 
-                            self.open_describe_view(target_name, target_kind, None).await;
+                            self.open_describe_view(target_name, target_kind, target_ns).await;
                         }
                     }
                     bgp_view::BgpTab::Services => {
@@ -6634,12 +6639,13 @@ impl App {
                     bgp_view::BgpTab::IpPools => {
                         if let Some(pool) = bgp.selected_pool() {
                             let p_name = pool.name.clone();
+                            let p_ns = pool.namespace.clone();
                             let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
                                 Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "IPAddressPool".to_string(),
                                 Some(srelens_kube::bgp::BgpEngineType::Calico) => "IPPool".to_string(),
                                 _ => "CiliumLoadBalancerIPPool".to_string(),
                             };
-                            self.open_describe_view(p_name, p_kind, None).await;
+                            self.open_describe_view(p_name, p_kind, p_ns).await;
                         }
                     }
                 },
@@ -6669,8 +6675,9 @@ impl App {
                             } else {
                                 (peer.policy_name.clone(), "CiliumBGPClusterConfig".to_string())
                             };
+                            let target_ns = peer.namespace.clone();
 
-                            self.open_yaml_view(target_name, target_kind, None).await;
+                            self.open_yaml_view(target_name, target_kind, target_ns).await;
                         }
                     }
                     bgp_view::BgpTab::Services => {
@@ -6683,12 +6690,13 @@ impl App {
                     bgp_view::BgpTab::IpPools => {
                         if let Some(pool) = bgp.selected_pool() {
                             let p_name = pool.name.clone();
+                            let p_ns = pool.namespace.clone();
                             let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
                                 Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "IPAddressPool".to_string(),
                                 Some(srelens_kube::bgp::BgpEngineType::Calico) => "IPPool".to_string(),
                                 _ => "CiliumLoadBalancerIPPool".to_string(),
                             };
-                            self.open_yaml_view(p_name, p_kind, None).await;
+                            self.open_yaml_view(p_name, p_kind, p_ns).await;
                         }
                     }
                 },
@@ -9056,13 +9064,30 @@ impl App {
             .find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k))
             .cloned();
 
-        let is_cluster_scoped = match srelens_kube::manifest::gvk_for(&k) {
-            Some((_, namespaced)) => !namespaced,
-            None => {
-                if let Some(ref crd) = crd_opt {
-                    !crd.namespaced
-                } else {
-                    namespace.is_none()
+        let is_cluster_scoped = if namespace.is_some() {
+            match srelens_kube::manifest::gvk_for(&k) {
+                Some((gvk, false))
+                    if gvk.group.is_empty()
+                        || gvk.group == "rbac.authorization.k8s.io"
+                        || gvk.group == "storage.k8s.io"
+                        || gvk.group == "apiextensions.k8s.io"
+                        || gvk.group == "admissionregistration.k8s.io"
+                        || gvk.group == "scheduling.k8s.io"
+                        || gvk.group == "node.k8s.io" =>
+                {
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            match srelens_kube::manifest::gvk_for(&k) {
+                Some((_, namespaced)) => !namespaced,
+                None => {
+                    if let Some(ref crd) = crd_opt {
+                        !crd.namespaced
+                    } else {
+                        true
+                    }
                 }
             }
         };
@@ -9227,13 +9252,30 @@ impl App {
             .find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k))
             .cloned();
 
-        let is_cluster_scoped = match srelens_kube::manifest::gvk_for(&k) {
-            Some((_, namespaced)) => !namespaced,
-            None => {
-                if let Some(ref crd) = crd_opt {
-                    !crd.namespaced
-                } else {
-                    namespace.is_none()
+        let is_cluster_scoped = if namespace.is_some() {
+            match srelens_kube::manifest::gvk_for(&k) {
+                Some((gvk, false))
+                    if gvk.group.is_empty()
+                        || gvk.group == "rbac.authorization.k8s.io"
+                        || gvk.group == "storage.k8s.io"
+                        || gvk.group == "apiextensions.k8s.io"
+                        || gvk.group == "admissionregistration.k8s.io"
+                        || gvk.group == "scheduling.k8s.io"
+                        || gvk.group == "node.k8s.io" =>
+                {
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            match srelens_kube::manifest::gvk_for(&k) {
+                Some((_, namespaced)) => !namespaced,
+                None => {
+                    if let Some(ref crd) = crd_opt {
+                        !crd.namespaced
+                    } else {
+                        true
+                    }
                 }
             }
         };

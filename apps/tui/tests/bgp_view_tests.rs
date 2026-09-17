@@ -11,8 +11,7 @@ use ratatui::backend::TestBackend;
 use ratatui::{Frame, Terminal};
 
 use srelens_kube::bgp::{
-    BgpAdvertisedService, BgpClusterSummary, BgpEngineType, BgpIpPool, BgpNeighbor,
-    BgpSessionState,
+    BgpAdvertisedService, BgpClusterSummary, BgpEngineType, BgpIpPool, BgpNeighbor, BgpSessionState,
 };
 use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
 use srelens_tui::deep_link::DeepLink;
@@ -53,13 +52,17 @@ fn sample_bgp_summary() -> BgpClusterSummary {
                 session_state: BgpSessionState::Established,
                 policy_name: "tor-spine-a".to_string(),
                 policy_kind: "CiliumBGPClusterConfig".to_string(),
+                namespace: None,
                 export_pod_cidr: true,
                 hold_time_seconds: Some(90),
                 keepalive_time_seconds: Some(30),
                 connect_retry_seconds: Some(120),
                 multihop_ttl: Some(64),
                 graceful_restart: true,
-                advertised_prefixes: vec!["10.244.0.0/24".to_string(), "192.168.100.1/32".to_string()],
+                advertised_prefixes: vec![
+                    "10.244.0.0/24".to_string(),
+                    "192.168.100.1/32".to_string(),
+                ],
                 routes_count: 8,
                 routes_received: 316,
                 uptime_or_last_change: Some("4d 12h".to_string()),
@@ -72,6 +75,7 @@ fn sample_bgp_summary() -> BgpClusterSummary {
                 session_state: BgpSessionState::Established,
                 policy_name: "tor-spine-b".to_string(),
                 policy_kind: "CiliumBGPClusterConfig".to_string(),
+                namespace: None,
                 export_pod_cidr: true,
                 hold_time_seconds: Some(90),
                 keepalive_time_seconds: Some(30),
@@ -91,6 +95,7 @@ fn sample_bgp_summary() -> BgpClusterSummary {
                 session_state: BgpSessionState::Active,
                 policy_name: "tor-backup".to_string(),
                 policy_kind: "CiliumBGPClusterConfig".to_string(),
+                namespace: None,
                 export_pod_cidr: false,
                 hold_time_seconds: Some(180),
                 keepalive_time_seconds: Some(60),
@@ -126,12 +131,14 @@ fn sample_bgp_summary() -> BgpClusterSummary {
         ip_pools: vec![
             BgpIpPool {
                 name: "public-pool".to_string(),
+                namespace: None,
                 cidrs: vec!["192.168.100.0/24".to_string()],
                 disabled: false,
                 service_selector: "tier=public".to_string(),
             },
             BgpIpPool {
                 name: "internal-pool".to_string(),
+                namespace: None,
                 cidrs: vec!["10.200.0.0/16".to_string()],
                 disabled: true,
                 service_selector: "tier=internal".to_string(),
@@ -215,16 +222,25 @@ fn bgp_view_tab_cycling_and_row_navigation() {
     // Initial state: Tab is Peers, selected index is 0
     assert_eq!(state.active_tab, BgpTab::Peers);
     assert_eq!(state.selected_peer_idx, 0);
-    assert_eq!(state.selected_peer().map(|p| p.node_name.as_str()), Some("node-worker-01"));
+    assert_eq!(
+        state.selected_peer().map(|p| p.node_name.as_str()),
+        Some("node-worker-01")
+    );
 
     // Navigate rows down
     state.select_next();
     assert_eq!(state.selected_peer_idx, 1);
-    assert_eq!(state.selected_peer().map(|p| p.node_name.as_str()), Some("node-worker-02"));
+    assert_eq!(
+        state.selected_peer().map(|p| p.node_name.as_str()),
+        Some("node-worker-02")
+    );
 
     state.select_next();
     assert_eq!(state.selected_peer_idx, 2);
-    assert_eq!(state.selected_peer().map(|p| p.node_name.as_str()), Some("node-worker-03"));
+    assert_eq!(
+        state.selected_peer().map(|p| p.node_name.as_str()),
+        Some("node-worker-03")
+    );
 
     // Clamped at end
     state.select_next();
@@ -243,11 +259,17 @@ fn bgp_view_tab_cycling_and_row_navigation() {
     // Cycle tabs
     state.next_tab();
     assert_eq!(state.active_tab, BgpTab::Services);
-    assert_eq!(state.selected_service().map(|s| s.service_name.as_str()), Some("ingress-nginx-lb"));
+    assert_eq!(
+        state.selected_service().map(|s| s.service_name.as_str()),
+        Some("ingress-nginx-lb")
+    );
 
     state.next_tab();
     assert_eq!(state.active_tab, BgpTab::IpPools);
-    assert_eq!(state.selected_pool().map(|p| p.name.as_str()), Some("public-pool"));
+    assert_eq!(
+        state.selected_pool().map(|p| p.name.as_str()),
+        Some("public-pool")
+    );
 
     state.next_tab();
     assert_eq!(state.active_tab, BgpTab::Peers);
@@ -351,7 +373,11 @@ fn bgp_command_resolution_and_deep_links() {
     // Check deep link parsing and generation
     let link = DeepLink::parse("srelens://view/prod-cluster/_/bgp").expect("parse deep link");
     match &link {
-        DeepLink::View { context, namespace, target } => {
+        DeepLink::View {
+            context,
+            namespace,
+            target,
+        } => {
             assert_eq!(context.as_deref(), Some("prod-cluster"));
             assert_eq!(namespace, &None);
             assert_eq!(target, &CommandTarget::Resource(ResourceKind::BgpPeers));
@@ -458,7 +484,7 @@ fn bgp_view_dynamic_column_widths_and_uptime_formatting() {
 fn bgp_view_groups_neighbors_by_node_and_suppresses_duplicate_node_name() {
     let mut state = BgpViewState::new();
     let mut summary = sample_bgp_summary();
-    
+
     // Add two neighbors to node-worker-01
     summary.peers = vec![
         BgpNeighbor {
@@ -469,6 +495,7 @@ fn bgp_view_groups_neighbors_by_node_and_suppresses_duplicate_node_name() {
             session_state: BgpSessionState::Established,
             policy_name: "tor-spine-a".to_string(),
             policy_kind: "CiliumBGPClusterConfig".to_string(),
+            namespace: None,
             export_pod_cidr: true,
             hold_time_seconds: Some(90),
             keepalive_time_seconds: Some(30),
@@ -488,6 +515,7 @@ fn bgp_view_groups_neighbors_by_node_and_suppresses_duplicate_node_name() {
             session_state: BgpSessionState::Established,
             policy_name: "tor-spine-b".to_string(),
             policy_kind: "CiliumBGPClusterConfig".to_string(),
+            namespace: None,
             export_pod_cidr: true,
             hold_time_seconds: Some(90),
             keepalive_time_seconds: Some(30),
@@ -507,6 +535,7 @@ fn bgp_view_groups_neighbors_by_node_and_suppresses_duplicate_node_name() {
             session_state: BgpSessionState::Established,
             policy_name: "tor-spine-a".to_string(),
             policy_kind: "CiliumBGPClusterConfig".to_string(),
+            namespace: None,
             export_pod_cidr: true,
             hold_time_seconds: Some(90),
             keepalive_time_seconds: Some(30),
@@ -527,9 +556,18 @@ fn bgp_view_groups_neighbors_by_node_and_suppresses_duplicate_node_name() {
     });
 
     // Find the lines containing the peer IPs
-    let line_peer1 = lines.iter().find(|l| l.contains("10.0.0.1")).expect("peer 1 rendered");
-    let line_peer2 = lines.iter().find(|l| l.contains("10.0.0.2")).expect("peer 2 rendered");
-    let line_peer3 = lines.iter().find(|l| l.contains("10.0.0.3")).expect("peer 3 rendered");
+    let line_peer1 = lines
+        .iter()
+        .find(|l| l.contains("10.0.0.1"))
+        .expect("peer 1 rendered");
+    let line_peer2 = lines
+        .iter()
+        .find(|l| l.contains("10.0.0.2"))
+        .expect("peer 2 rendered");
+    let line_peer3 = lines
+        .iter()
+        .find(|l| l.contains("10.0.0.3"))
+        .expect("peer 3 rendered");
 
     // Peer 1 (first neighbor of node-worker-01) must show the node name
     assert!(line_peer1.contains("node-worker-01"));
@@ -552,5 +590,3 @@ fn bgp_view_groups_neighbors_by_node_and_suppresses_duplicate_node_name() {
     let text_sel2 = lines_sel2.join("\n");
     assert!(text_sel2.contains("Selected Peer: 10.0.0.2 (Node: node-worker-01)"));
 }
-
-

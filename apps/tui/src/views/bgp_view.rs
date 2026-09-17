@@ -1,15 +1,14 @@
-use std::cell::Cell;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
+use std::cell::Cell;
 
-use srelens_kube::bgp::{
-    BgpAdvertisedService, BgpClusterSummary, BgpEngineType, BgpIpPool, BgpNeighbor,
-    BgpSessionState,
-};
 use crate::theme::Theme;
+use srelens_kube::bgp::{
+    BgpAdvertisedService, BgpClusterSummary, BgpEngineType, BgpIpPool, BgpNeighbor, BgpSessionState,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BgpTab {
@@ -79,16 +78,8 @@ impl BgpViewState {
     pub fn set_summary(&mut self, summary: BgpClusterSummary) {
         self.is_loading = false;
         self.error = None;
-        if self.selected_peer_idx >= summary.peers.len() && !summary.peers.is_empty() {
-            self.selected_peer_idx = summary.peers.len() - 1;
-        }
-        if self.selected_svc_idx >= summary.advertised_services.len() && !summary.advertised_services.is_empty() {
-            self.selected_svc_idx = summary.advertised_services.len() - 1;
-        }
-        if self.selected_pool_idx >= summary.ip_pools.len() && !summary.ip_pools.is_empty() {
-            self.selected_pool_idx = summary.ip_pools.len() - 1;
-        }
         self.summary = Some(summary);
+        self.clamp_selection();
     }
 
     pub fn set_error(&mut self, err: String) {
@@ -116,24 +107,35 @@ impl BgpViewState {
     }
 
     pub fn filtered_services(&self) -> Vec<&BgpAdvertisedService> {
-        let svcs = self.summary.as_ref().map(|s| &s.advertised_services[..]).unwrap_or(&[]);
+        let svcs = self
+            .summary
+            .as_ref()
+            .map(|s| &s.advertised_services[..])
+            .unwrap_or(&[]);
         if self.search_query.trim().is_empty() {
             return svcs.iter().collect();
         }
         let q = self.search_query.to_lowercase();
-        svcs
-            .iter()
+        svcs.iter()
             .filter(|s| {
                 s.service_name.to_lowercase().contains(&q)
                     || s.namespace.to_lowercase().contains(&q)
                     || s.load_balancer_ip.to_lowercase().contains(&q)
-                    || s.ip_pool.as_deref().unwrap_or("").to_lowercase().contains(&q)
+                    || s.ip_pool
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&q)
             })
             .collect()
     }
 
     pub fn filtered_pools(&self) -> Vec<&BgpIpPool> {
-        let pools = self.summary.as_ref().map(|s| &s.ip_pools[..]).unwrap_or(&[]);
+        let pools = self
+            .summary
+            .as_ref()
+            .map(|s| &s.ip_pools[..])
+            .unwrap_or(&[]);
         if self.search_query.trim().is_empty() {
             return pools.iter().collect();
         }
@@ -264,7 +266,7 @@ pub fn render_bgp_view(f: &mut Frame, area: Rect, state: &BgpViewState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4), // Top BGP summary stats card
-            Constraint::Min(8),   // Main Tab & Data table
+            Constraint::Min(8),    // Main Tab & Data table
             Constraint::Length(7), // Bottom Peer details / Timers inspector
         ])
         .split(area);
@@ -276,7 +278,9 @@ pub fn render_bgp_view(f: &mut Frame, area: Rect, state: &BgpViewState) {
 
 fn render_summary_header(f: &mut Frame, area: Rect, state: &BgpViewState) {
     let summary = state.summary.as_ref();
-    let engine_str = summary.map(|s| s.engine.to_string()).unwrap_or_else(|| "Scanning...".to_string());
+    let engine_str = summary
+        .map(|s| s.engine.to_string())
+        .unwrap_or_else(|| "Scanning...".to_string());
     let engine_color = match summary.map(|s| &s.engine) {
         Some(BgpEngineType::CiliumV2 | BgpEngineType::CiliumV2Alpha1) => Theme::cyan(),
         Some(BgpEngineType::MetalLB | BgpEngineType::Calico) => Theme::accent(),
@@ -294,21 +298,49 @@ fn render_summary_header(f: &mut Frame, area: Rect, state: &BgpViewState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::border()))
-        .title(Span::styled(" 🌐 BGP CONTROL PLANE & PEERING TOPOLOGY ", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(
+            " 🌐 BGP CONTROL PLANE & PEERING TOPOLOGY ",
+            Style::default()
+                .fg(Theme::cyan())
+                .add_modifier(Modifier::BOLD),
+        ));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     let l1 = Line::from(vec![
         Span::styled(" Engine: ", Theme::header_label()),
-        Span::styled(format!(" {} ", engine_str), Style::default().fg(engine_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!(" {} ", engine_str),
+            Style::default()
+                .fg(engine_color)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" │ Nodes: ", Theme::header_label()),
-        Span::styled(format!("{}/{} active BGP nodes", bgp_nodes, total_nodes), Style::default().fg(Theme::fg())),
+        Span::styled(
+            format!("{}/{} active BGP nodes", bgp_nodes, total_nodes),
+            Style::default().fg(Theme::fg()),
+        ),
         Span::styled(" │ Peering Sessions: ", Theme::header_label()),
-        Span::styled(format!("{} Total", total_peers), Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("  ● {} Established", established), Style::default().fg(Theme::green()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{} Total", total_peers),
+            Style::default()
+                .fg(Theme::fg())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  ● {} Established", established),
+            Style::default()
+                .fg(Theme::green())
+                .add_modifier(Modifier::BOLD),
+        ),
         if degraded > 0 {
-            Span::styled(format!("  ▲ {} Degraded/Down", degraded), Style::default().fg(Theme::red()).add_modifier(Modifier::BOLD))
+            Span::styled(
+                format!("  ▲ {} Degraded/Down", degraded),
+                Style::default()
+                    .fg(Theme::red())
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
             Span::styled("  ▲ 0 Degraded", Style::default().fg(Theme::dim()))
         },
@@ -316,11 +348,22 @@ fn render_summary_header(f: &mut Frame, area: Rect, state: &BgpViewState) {
 
     let l2 = Line::from(vec![
         Span::styled(" Advertised VIPs: ", Theme::header_label()),
-        Span::styled(format!("{} LoadBalancer Services", vips_count), Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{} LoadBalancer Services", vips_count),
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" │ IP Pools: ", Theme::header_label()),
-        Span::styled(format!("{} CIDR Pools", pools_count), Style::default().fg(Theme::accent())),
+        Span::styled(
+            format!("{} CIDR Pools", pools_count),
+            Style::default().fg(Theme::accent()),
+        ),
         Span::styled(" │ Hotkeys: ", Theme::header_label()),
-        Span::styled("<Tab/1-3> Switch Tab  </> Filter  <r> Refresh  <Esc> Back", Style::default().fg(Theme::dim())),
+        Span::styled(
+            "<Tab/1-3> Switch Tab  </> Filter  <r> Refresh  <Esc> Back",
+            Style::default().fg(Theme::dim()),
+        ),
     ]);
 
     let p = Paragraph::new(vec![l1, l2]);
@@ -328,9 +371,27 @@ fn render_summary_header(f: &mut Frame, area: Rect, state: &BgpViewState) {
 }
 
 fn render_tab_content(f: &mut Frame, area: Rect, state: &BgpViewState) {
-    let t1_style = if state.active_tab == BgpTab::Peers { Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD | Modifier::UNDERLINED) } else { Style::default().fg(Theme::dim()) };
-    let t2_style = if state.active_tab == BgpTab::Services { Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD | Modifier::UNDERLINED) } else { Style::default().fg(Theme::dim()) };
-    let t3_style = if state.active_tab == BgpTab::IpPools { Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD | Modifier::UNDERLINED) } else { Style::default().fg(Theme::dim()) };
+    let t1_style = if state.active_tab == BgpTab::Peers {
+        Style::default()
+            .fg(Theme::cyan())
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default().fg(Theme::dim())
+    };
+    let t2_style = if state.active_tab == BgpTab::Services {
+        Style::default()
+            .fg(Theme::cyan())
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default().fg(Theme::dim())
+    };
+    let t3_style = if state.active_tab == BgpTab::IpPools {
+        Style::default()
+            .fg(Theme::cyan())
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default().fg(Theme::dim())
+    };
 
     let p_count = state.filtered_peers().len();
     let s_count = state.filtered_services().len();
@@ -343,7 +404,10 @@ fn render_tab_content(f: &mut Frame, area: Rect, state: &BgpViewState) {
         Span::styled(" │ ", Style::default().fg(Theme::border())),
         Span::styled(format!(" [3] IP Pools ({}) ", pool_count), t3_style),
         if !state.search_query.is_empty() {
-            Span::styled(format!(" [Filter: \"{}\"]", state.search_query), Style::default().fg(Theme::yellow()))
+            Span::styled(
+                format!(" [Filter: \"{}\"]", state.search_query),
+                Style::default().fg(Theme::yellow()),
+            )
         } else {
             Span::raw("")
         },
@@ -360,7 +424,10 @@ fn render_tab_content(f: &mut Frame, area: Rect, state: &BgpViewState) {
     if state.is_loading {
         let p = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled("  ⚡ Querying BGP control plane & peering topology...", Style::default().fg(Theme::cyan()))),
+            Line::from(Span::styled(
+                "  ⚡ Querying BGP control plane & peering topology...",
+                Style::default().fg(Theme::cyan()),
+            )),
         ]);
         f.render_widget(p, inner);
         return;
@@ -369,8 +436,14 @@ fn render_tab_content(f: &mut Frame, area: Rect, state: &BgpViewState) {
     if let Some(err) = &state.error {
         let p = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled(format!("  ✖ BGP Error: {}", err), Style::default().fg(Theme::red()))),
-            Line::from(Span::styled("  Press 'r' to retry query.", Style::default().fg(Theme::dim()))),
+            Line::from(Span::styled(
+                format!("  ✖ BGP Error: {}", err),
+                Style::default().fg(Theme::red()),
+            )),
+            Line::from(Span::styled(
+                "  Press 'r' to retry query.",
+                Style::default().fg(Theme::dim()),
+            )),
         ]);
         f.render_widget(p, inner);
         return;
@@ -388,10 +461,19 @@ fn render_peers_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
     if peers.is_empty() {
         let p = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled("  ⊘ No BGP peering sessions detected in cluster.", Style::default().fg(Theme::yellow()))),
+            Line::from(Span::styled(
+                "  ⊘ No BGP peering sessions detected in cluster.",
+                Style::default().fg(Theme::yellow()),
+            )),
             Line::from(""),
-            Line::from(Span::styled("  Deploy CiliumBGPPeeringPolicy, CiliumBGPNodeConfig, or MetalLB BGPPeer", Style::default().fg(Theme::dim()))),
-            Line::from(Span::styled("  to establish BGP peering with upstream Top-of-Rack (ToR) switches.", Style::default().fg(Theme::dim()))),
+            Line::from(Span::styled(
+                "  Deploy CiliumBGPPeeringPolicy, CiliumBGPNodeConfig, or MetalLB BGPPeer",
+                Style::default().fg(Theme::dim()),
+            )),
+            Line::from(Span::styled(
+                "  to establish BGP peering with upstream Top-of-Rack (ToR) switches.",
+                Style::default().fg(Theme::dim()),
+            )),
         ]);
         f.render_widget(p, area);
         return;
@@ -427,7 +509,11 @@ fn render_peers_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
         max_pasn = max_pasn.max(n.peer_asn.to_string().len());
         max_lasn = max_lasn.max(n.local_asn.to_string().len());
         max_pol = max_pol.max(n.policy_name.len());
-        let pod_str = if n.export_pod_cidr { "Enabled" } else { "Disabled" };
+        let pod_str = if n.export_pod_cidr {
+            "Enabled"
+        } else {
+            "Disabled"
+        };
         max_pod = max_pod.max(pod_str.len());
         let routes_str = if n.routes_received > 0 || n.routes_count > 0 {
             format!("{} in / {} out", n.routes_received, n.routes_count)
@@ -450,7 +536,20 @@ fn render_peers_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
     let mut col_uptime = max_uptime.max(8);
 
     // Total fixed column spacing: 1 leading space + col_node + 1 space + col_ip + 1 space + ...
-    let fixed_width = 1 + col_ip + 1 + col_pasn + 1 + col_lasn + 1 + col_state + 1 + col_pod + 1 + col_routes + 1 + col_uptime;
+    let fixed_width = 1
+        + col_ip
+        + 1
+        + col_pasn
+        + 1
+        + col_lasn
+        + 1
+        + col_state
+        + 1
+        + col_pod
+        + 1
+        + col_routes
+        + 1
+        + col_uptime;
     let avail_w = area.width as usize;
 
     if avail_w > fixed_width + col_node + 1 + col_pol {
@@ -470,43 +569,85 @@ fn render_peers_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
         Span::styled(format!(" {:<col_node$} ", "NODE"), Theme::table_header()),
-        Span::styled(format!("{:<col_ip$} ", "NEIGHBOR IP"), Theme::table_header()),
+        Span::styled(
+            format!("{:<col_ip$} ", "NEIGHBOR IP"),
+            Theme::table_header(),
+        ),
         Span::styled(format!("{:<col_pasn$} ", "PEER ASN"), Theme::table_header()),
-        Span::styled(format!("{:<col_lasn$} ", "LOCAL ASN"), Theme::table_header()),
-        Span::styled(format!("{:<col_state$} ", "SESSION STATE"), Theme::table_header()),
-        Span::styled(format!("{:<col_pol$} ", "POLICY / CONFIG"), Theme::table_header()),
+        Span::styled(
+            format!("{:<col_lasn$} ", "LOCAL ASN"),
+            Theme::table_header(),
+        ),
+        Span::styled(
+            format!("{:<col_state$} ", "SESSION STATE"),
+            Theme::table_header(),
+        ),
+        Span::styled(
+            format!("{:<col_pol$} ", "POLICY / CONFIG"),
+            Theme::table_header(),
+        ),
         Span::styled(format!("{:<col_pod$} ", "POD CIDR"), Theme::table_header()),
-        Span::styled(format!("{:<col_routes$} ", "ROUTES (IN/OUT)"), Theme::table_header()),
+        Span::styled(
+            format!("{:<col_routes$} ", "ROUTES (IN/OUT)"),
+            Theme::table_header(),
+        ),
         Span::styled(format!("{:<col_uptime$}", "UPTIME"), Theme::table_header()),
     ]));
-    lines.push(Line::from(Span::styled("─".repeat(area.width as usize), Style::default().fg(Theme::border()))));
+    lines.push(Line::from(Span::styled(
+        "─".repeat(area.width as usize),
+        Style::default().fg(Theme::border()),
+    )));
 
     let end_idx = (start_idx + visible_rows).min(peers.len());
     for i in start_idx..end_idx {
         let n = peers[i];
         let is_sel = i == selected;
         let row_style = if is_sel {
-            Style::default().bg(Theme::sel_bg()).fg(Theme::fg()).add_modifier(Modifier::BOLD)
+            Style::default()
+                .bg(Theme::sel_bg())
+                .fg(Theme::fg())
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Theme::fg())
         };
 
         let state_badge = match n.session_state {
-            BgpSessionState::Established => Span::styled(format!("{:<col_state$} ", "● Established"), Style::default().fg(Theme::green()).add_modifier(Modifier::BOLD)),
-            BgpSessionState::Configured => Span::styled(format!("{:<col_state$} ", "● Configured"), Style::default().fg(Theme::cyan())),
-            BgpSessionState::Active | BgpSessionState::Connect => Span::styled(format!("{:<col_state$} ", format!("▲ {}", n.session_state)), Style::default().fg(Theme::yellow())),
-            BgpSessionState::Idle | BgpSessionState::Unknown => Span::styled(format!("{:<col_state$} ", format!("✖ {}", n.session_state)), Style::default().fg(Theme::red())),
-            _ => Span::styled(format!("{:<col_state$} ", format!("○ {}", n.session_state)), Style::default().fg(Theme::accent())),
+            BgpSessionState::Established => Span::styled(
+                format!("{:<col_state$} ", "● Established"),
+                Style::default()
+                    .fg(Theme::green())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            BgpSessionState::Configured => Span::styled(
+                format!("{:<col_state$} ", "● Configured"),
+                Style::default().fg(Theme::cyan()),
+            ),
+            BgpSessionState::Active | BgpSessionState::Connect => Span::styled(
+                format!("{:<col_state$} ", format!("▲ {}", n.session_state)),
+                Style::default().fg(Theme::yellow()),
+            ),
+            BgpSessionState::Idle | BgpSessionState::Unknown => Span::styled(
+                format!("{:<col_state$} ", format!("✖ {}", n.session_state)),
+                Style::default().fg(Theme::red()),
+            ),
+            _ => Span::styled(
+                format!("{:<col_state$} ", format!("○ {}", n.session_state)),
+                Style::default().fg(Theme::accent()),
+            ),
         };
 
-        let pod_cidr_str = if n.export_pod_cidr { "Enabled" } else { "Disabled" };
+        let pod_cidr_str = if n.export_pod_cidr {
+            "Enabled"
+        } else {
+            "Disabled"
+        };
         let routes_str = if n.routes_received > 0 || n.routes_count > 0 {
             format!("{} in / {} out", n.routes_received, n.routes_count)
         } else {
             "0 / 0".to_string()
         };
         let uptime_str = format_uptime_display(n.uptime_or_last_change.as_deref());
-        let show_node_name = i == 0 || peers[i - 1].node_name != n.node_name;
+        let show_node_name = i == start_idx || (i > 0 && peers[i - 1].node_name != n.node_name);
         let node_text = if show_node_name {
             truncate_str(&n.node_name, col_node)
         } else {
@@ -515,14 +656,39 @@ fn render_peers_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
 
         let spans = vec![
             Span::styled(format!(" {:<col_node$} ", node_text), row_style),
-            Span::styled(format!("{:<col_ip$} ", truncate_str(&n.peer_address, col_ip)), Style::default().fg(Theme::cyan())),
-            Span::styled(format!("{:<col_pasn$} ", n.peer_asn), Style::default().fg(Theme::fg())),
-            Span::styled(format!("{:<col_lasn$} ", n.local_asn), Style::default().fg(Theme::dim())),
+            Span::styled(
+                format!("{:<col_ip$} ", truncate_str(&n.peer_address, col_ip)),
+                Style::default().fg(Theme::cyan()),
+            ),
+            Span::styled(
+                format!("{:<col_pasn$} ", n.peer_asn),
+                Style::default().fg(Theme::fg()),
+            ),
+            Span::styled(
+                format!("{:<col_lasn$} ", n.local_asn),
+                Style::default().fg(Theme::dim()),
+            ),
             state_badge,
-            Span::styled(format!("{:<col_pol$} ", truncate_str(&n.policy_name, col_pol)), Style::default().fg(Theme::dim())),
-            Span::styled(format!("{:<col_pod$} ", pod_cidr_str), Style::default().fg(if n.export_pod_cidr { Theme::green() } else { Theme::dim() })),
-            Span::styled(format!("{:<col_routes$} ", routes_str), Style::default().fg(Theme::yellow())),
-            Span::styled(format!("{:<col_uptime$}", truncate_str(&uptime_str, col_uptime)), Style::default().fg(Theme::dim())),
+            Span::styled(
+                format!("{:<col_pol$} ", truncate_str(&n.policy_name, col_pol)),
+                Style::default().fg(Theme::dim()),
+            ),
+            Span::styled(
+                format!("{:<col_pod$} ", pod_cidr_str),
+                Style::default().fg(if n.export_pod_cidr {
+                    Theme::green()
+                } else {
+                    Theme::dim()
+                }),
+            ),
+            Span::styled(
+                format!("{:<col_routes$} ", routes_str),
+                Style::default().fg(Theme::yellow()),
+            ),
+            Span::styled(
+                format!("{:<col_uptime$}", truncate_str(&uptime_str, col_uptime)),
+                Style::default().fg(Theme::dim()),
+            ),
         ];
 
         lines.push(Line::from(spans));
@@ -537,7 +703,10 @@ fn render_services_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
     if svcs.is_empty() {
         let p = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled("  ⊘ No LoadBalancer VIPs currently advertised via BGP.", Style::default().fg(Theme::yellow()))),
+            Line::from(Span::styled(
+                "  ⊘ No LoadBalancer VIPs currently advertised via BGP.",
+                Style::default().fg(Theme::yellow()),
+            )),
         ]);
         f.render_widget(p, area);
         return;
@@ -600,18 +769,30 @@ fn render_services_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
     lines.push(Line::from(vec![
         Span::styled(format!(" {:<col_svc$} ", "SERVICE"), Theme::table_header()),
         Span::styled(format!("{:<col_ns$} ", "NAMESPACE"), Theme::table_header()),
-        Span::styled(format!("{:<col_ip$} ", "LOADBALANCER IP"), Theme::table_header()),
+        Span::styled(
+            format!("{:<col_ip$} ", "LOADBALANCER IP"),
+            Theme::table_header(),
+        ),
         Span::styled(format!("{:<col_pool$} ", "IP POOL"), Theme::table_header()),
-        Span::styled(format!("{:<col_nodes$}", "ANNOUNCING NODES"), Theme::table_header()),
+        Span::styled(
+            format!("{:<col_nodes$}", "ANNOUNCING NODES"),
+            Theme::table_header(),
+        ),
     ]));
-    lines.push(Line::from(Span::styled("─".repeat(area.width as usize), Style::default().fg(Theme::border()))));
+    lines.push(Line::from(Span::styled(
+        "─".repeat(area.width as usize),
+        Style::default().fg(Theme::border()),
+    )));
 
     let end_idx = (start_idx + visible_rows).min(svcs.len());
     for i in start_idx..end_idx {
         let s = svcs[i];
         let is_sel = i == selected;
         let row_style = if is_sel {
-            Style::default().bg(Theme::sel_bg()).fg(Theme::fg()).add_modifier(Modifier::BOLD)
+            Style::default()
+                .bg(Theme::sel_bg())
+                .fg(Theme::fg())
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Theme::fg())
         };
@@ -624,11 +805,28 @@ fn render_services_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
         };
 
         let spans = vec![
-            Span::styled(format!(" {:<col_svc$} ", truncate_str(&s.service_name, col_svc)), row_style),
-            Span::styled(format!("{:<col_ns$} ", truncate_str(&s.namespace, col_ns)), Style::default().fg(Theme::dim())),
-            Span::styled(format!("{:<col_ip$} ", s.load_balancer_ip), Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{:<col_pool$} ", truncate_str(pool_str, col_pool)), Style::default().fg(Theme::accent())),
-            Span::styled(format!("{:<col_nodes$}", truncate_str(&nodes_str, col_nodes)), Style::default().fg(Theme::cyan())),
+            Span::styled(
+                format!(" {:<col_svc$} ", truncate_str(&s.service_name, col_svc)),
+                row_style,
+            ),
+            Span::styled(
+                format!("{:<col_ns$} ", truncate_str(&s.namespace, col_ns)),
+                Style::default().fg(Theme::dim()),
+            ),
+            Span::styled(
+                format!("{:<col_ip$} ", s.load_balancer_ip),
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<col_pool$} ", truncate_str(pool_str, col_pool)),
+                Style::default().fg(Theme::accent()),
+            ),
+            Span::styled(
+                format!("{:<col_nodes$}", truncate_str(&nodes_str, col_nodes)),
+                Style::default().fg(Theme::cyan()),
+            ),
         ];
         lines.push(Line::from(spans));
     }
@@ -642,7 +840,10 @@ fn render_pools_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
     if pools.is_empty() {
         let p = Paragraph::new(vec![
             Line::from(""),
-            Line::from(Span::styled("  ⊘ No Cilium/MetalLB IP Pools found.", Style::default().fg(Theme::yellow()))),
+            Line::from(Span::styled(
+                "  ⊘ No Cilium/MetalLB IP Pools found.",
+                Style::default().fg(Theme::yellow()),
+            )),
         ]);
         f.render_widget(p, area);
         return;
@@ -695,32 +896,65 @@ fn render_pools_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
 
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled(format!(" {:<col_pool$} ", "POOL NAME"), Theme::table_header()),
-        Span::styled(format!("{:<col_cidrs$} ", "CIDRS / ADDRESS RANGES"), Theme::table_header()),
+        Span::styled(
+            format!(" {:<col_pool$} ", "POOL NAME"),
+            Theme::table_header(),
+        ),
+        Span::styled(
+            format!("{:<col_cidrs$} ", "CIDRS / ADDRESS RANGES"),
+            Theme::table_header(),
+        ),
         Span::styled(format!("{:<col_status$} ", "STATUS"), Theme::table_header()),
-        Span::styled(format!("{:<col_sel$}", "SERVICE SELECTOR"), Theme::table_header()),
+        Span::styled(
+            format!("{:<col_sel$}", "SERVICE SELECTOR"),
+            Theme::table_header(),
+        ),
     ]));
-    lines.push(Line::from(Span::styled("─".repeat(area.width as usize), Style::default().fg(Theme::border()))));
+    lines.push(Line::from(Span::styled(
+        "─".repeat(area.width as usize),
+        Style::default().fg(Theme::border()),
+    )));
 
     let end_idx = (start_idx + visible_rows).min(pools.len());
     for i in start_idx..end_idx {
         let pool = pools[i];
         let is_sel = i == selected;
         let row_style = if is_sel {
-            Style::default().bg(Theme::sel_bg()).fg(Theme::fg()).add_modifier(Modifier::BOLD)
+            Style::default()
+                .bg(Theme::sel_bg())
+                .fg(Theme::fg())
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Theme::fg())
         };
 
         let cidrs_str = pool.cidrs.join(", ");
         let status_str = if pool.disabled { "Disabled" } else { "Active" };
-        let status_style = if pool.disabled { Style::default().fg(Theme::dim()) } else { Style::default().fg(Theme::green()).add_modifier(Modifier::BOLD) };
+        let status_style = if pool.disabled {
+            Style::default().fg(Theme::dim())
+        } else {
+            Style::default()
+                .fg(Theme::green())
+                .add_modifier(Modifier::BOLD)
+        };
 
         let spans = vec![
-            Span::styled(format!(" {:<col_pool$} ", truncate_str(&pool.name, col_pool)), row_style),
-            Span::styled(format!("{:<col_cidrs$} ", truncate_str(&cidrs_str, col_cidrs)), Style::default().fg(Theme::cyan())),
+            Span::styled(
+                format!(" {:<col_pool$} ", truncate_str(&pool.name, col_pool)),
+                row_style,
+            ),
+            Span::styled(
+                format!("{:<col_cidrs$} ", truncate_str(&cidrs_str, col_cidrs)),
+                Style::default().fg(Theme::cyan()),
+            ),
             Span::styled(format!("{:<col_status$} ", status_str), status_style),
-            Span::styled(format!("{:<col_sel$}", truncate_str(&pool.service_selector, col_sel)), Style::default().fg(Theme::dim())),
+            Span::styled(
+                format!(
+                    "{:<col_sel$}",
+                    truncate_str(&pool.service_selector, col_sel)
+                ),
+                Style::default().fg(Theme::dim()),
+            ),
         ];
         lines.push(Line::from(spans));
     }
@@ -733,29 +967,65 @@ fn render_detail_footer(f: &mut Frame, area: Rect, state: &BgpViewState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Theme::border()))
-        .title(Span::styled(" 🔍 PEER TIMERS & POLICY INSPECTOR ", Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)));
+        .title(Span::styled(
+            " 🔍 PEER TIMERS & POLICY INSPECTOR ",
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        ));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if let Some(peer) = state.selected_peer() {
-        let hold = peer.hold_time_seconds.map(|s| format!("{}s", s)).unwrap_or_else(|| "90s (default)".to_string());
-        let keepalive = peer.keepalive_time_seconds.map(|s| format!("{}s", s)).unwrap_or_else(|| "30s (default)".to_string());
-        let connect_retry = peer.connect_retry_seconds.map(|s| format!("{}s", s)).unwrap_or_else(|| "120s".to_string());
-        let multihop = peer.multihop_ttl.map(|t| format!("TTL {}", t)).unwrap_or_else(|| "Disabled (direct L2)".to_string());
-        let graceful = if peer.graceful_restart { "Enabled" } else { "Disabled" };
+        let hold = peer
+            .hold_time_seconds
+            .map(|s| format!("{}s", s))
+            .unwrap_or_else(|| "90s (default)".to_string());
+        let keepalive = peer
+            .keepalive_time_seconds
+            .map(|s| format!("{}s", s))
+            .unwrap_or_else(|| "30s (default)".to_string());
+        let connect_retry = peer
+            .connect_retry_seconds
+            .map(|s| format!("{}s", s))
+            .unwrap_or_else(|| "120s".to_string());
+        let multihop = peer
+            .multihop_ttl
+            .map(|t| format!("TTL {}", t))
+            .unwrap_or_else(|| "Disabled (direct L2)".to_string());
+        let graceful = if peer.graceful_restart {
+            "Enabled"
+        } else {
+            "Disabled"
+        };
 
         let uptime_display = format_uptime_display(peer.uptime_or_last_change.as_deref());
 
         let l1 = Line::from(vec![
             Span::styled(" Selected Peer: ", Theme::header_label()),
-            Span::styled(format!("{} (Node: {})", peer.peer_address, peer.node_name), Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{} (Node: {})", peer.peer_address, peer.node_name),
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" │ Policy: ", Theme::header_label()),
             Span::styled(&peer.policy_name, Style::default().fg(Theme::fg())),
             Span::styled(" │ ASNs: ", Theme::header_label()),
-            Span::styled(format!("Local {} ➔ Peer {}", peer.local_asn, peer.peer_asn), Style::default().fg(Theme::yellow())),
+            Span::styled(
+                format!("Local {} ➔ Peer {}", peer.local_asn, peer.peer_asn),
+                Style::default().fg(Theme::yellow()),
+            ),
             Span::styled(" │ Uptime: ", Theme::header_label()),
-            Span::styled(uptime_display, Style::default().fg(if peer.uptime_or_last_change.is_some() { Theme::green() } else { Theme::dim() })),
+            Span::styled(
+                uptime_display,
+                Style::default().fg(if peer.uptime_or_last_change.is_some() {
+                    Theme::green()
+                } else {
+                    Theme::dim()
+                }),
+            ),
         ]);
 
         let l2 = Line::from(vec![
@@ -768,7 +1038,14 @@ fn render_detail_footer(f: &mut Frame, area: Rect, state: &BgpViewState) {
             Span::styled(" │ MultiHop: ", Theme::header_label()),
             Span::styled(multihop, Style::default().fg(Theme::fg())),
             Span::styled(" │ Graceful Restart: ", Theme::header_label()),
-            Span::styled(graceful, Style::default().fg(if peer.graceful_restart { Theme::green() } else { Theme::dim() })),
+            Span::styled(
+                graceful,
+                Style::default().fg(if peer.graceful_restart {
+                    Theme::green()
+                } else {
+                    Theme::dim()
+                }),
+            ),
         ]);
 
         let prefixes_summary = if peer.advertised_prefixes.is_empty() {
@@ -779,9 +1056,20 @@ fn render_detail_footer(f: &mut Frame, area: Rect, state: &BgpViewState) {
 
         let l3 = Line::from(vec![
             Span::styled(" Routes: ", Theme::header_label()),
-            Span::styled(format!("{} Received │ {} Advertised", peer.routes_received, peer.routes_count), Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(
+                    "{} Received │ {} Advertised",
+                    peer.routes_received, peer.routes_count
+                ),
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" │ Advertised Prefixes: ", Theme::header_label()),
-            Span::styled(truncate_str(&prefixes_summary, area.width.saturating_sub(45) as usize), Style::default().fg(Theme::dim())),
+            Span::styled(
+                truncate_str(&prefixes_summary, area.width.saturating_sub(45) as usize),
+                Style::default().fg(Theme::dim()),
+            ),
         ]);
 
         let p = Paragraph::new(vec![l1, l2, l3]);
@@ -809,9 +1097,12 @@ pub fn format_uptime_display(uptime: Option<&str>) -> String {
 }
 
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() > max_len && max_len > 3 {
-        format!("{}...", &s[..max_len - 3])
+    let clean = crate::views::sanitize_span_text(s);
+    let char_count = clean.chars().count();
+    if char_count > max_len && max_len > 3 {
+        let prefix: String = clean.chars().take(max_len - 3).collect();
+        format!("{}...", prefix)
     } else {
-        s.to_string()
+        clean
     }
 }

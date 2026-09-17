@@ -4424,6 +4424,7 @@ async fn bgp_view_keys_open_yaml_and_describe_with_correct_crd_kind() {
                 session_state: srelens_kube::bgp::BgpSessionState::Established,
                 policy_name: "cilium-bgp-fabric-peering".to_string(),
                 policy_kind: "CiliumBGPClusterConfig".to_string(),
+                namespace: None,
                 export_pod_cidr: true,
                 hold_time_seconds: Some(90),
                 keepalive_time_seconds: Some(30),
@@ -4438,6 +4439,7 @@ async fn bgp_view_keys_open_yaml_and_describe_with_correct_crd_kind() {
             advertised_services: vec![],
             ip_pools: vec![srelens_kube::bgp::BgpIpPool {
                 name: "default-lb-pool".to_string(),
+                namespace: None,
                 cidrs: vec!["10.0.0.0/24".to_string()],
                 service_selector: String::new(),
                 disabled: false,
@@ -4488,6 +4490,97 @@ async fn bgp_view_keys_open_yaml_and_describe_with_correct_crd_kind() {
         }
         _ => panic!("expected ActiveView::Yaml"),
     }
+}
+
+#[tokio::test]
+async fn bgp_view_namespaced_metallb_peer_and_pool_drilldown() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    // Open BGP view directly
+    app.switch_view_to_kind(ResourceKind::BgpPeers).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    if let ActiveView::Bgp(ref mut bgp) = app.active_view {
+        let summary = srelens_kube::bgp::BgpClusterSummary {
+            engine: srelens_kube::bgp::BgpEngineType::MetalLB,
+            total_nodes: 2,
+            bgp_nodes: 2,
+            total_peers: 1,
+            established_peers: 0,
+            degraded_peers: 0,
+            peers: vec![srelens_kube::bgp::BgpNeighbor {
+                node_name: "node-1".to_string(),
+                peer_address: "10.0.0.1".to_string(),
+                peer_asn: 64512,
+                local_asn: 64512,
+                session_state: srelens_kube::bgp::BgpSessionState::Configured,
+                policy_name: "metallb-peer-1".to_string(),
+                policy_kind: "BGPPeer".to_string(),
+                namespace: Some("metallb-system".to_string()),
+                export_pod_cidr: false,
+                hold_time_seconds: None,
+                keepalive_time_seconds: None,
+                connect_retry_seconds: None,
+                multihop_ttl: None,
+                graceful_restart: false,
+                advertised_prefixes: vec![],
+                routes_count: 0,
+                routes_received: 0,
+                uptime_or_last_change: None,
+            }],
+            advertised_services: vec![],
+            ip_pools: vec![srelens_kube::bgp::BgpIpPool {
+                name: "metallb-pool-1".to_string(),
+                namespace: Some("metallb-system".to_string()),
+                cidrs: vec!["192.168.1.0/24".to_string()],
+                service_selector: String::new(),
+                disabled: false,
+            }],
+            error: None,
+        };
+        bgp.set_summary(summary);
+    }
+
+    // Press 'd' -> opens describe view with namespace "metallb-system"
+    press(&mut app, ch('d')).await;
+    match &app.active_view {
+        ActiveView::Describe(d) => {
+            assert_eq!(d.resource_name, "metallb-peer-1");
+            assert_eq!(d.resource_kind, "BGPPeer");
+            assert_eq!(d.namespace.as_deref(), Some("metallb-system"));
+        }
+        _ => panic!("expected ActiveView::Describe"),
+    }
+
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    // Switch to IP Pools tab
+    press(&mut app, key(KeyCode::Tab)).await;
+    press(&mut app, key(KeyCode::Tab)).await;
+
+    // Press 'd' on pool -> opens describe with namespace "metallb-system" and kind "IPAddressPool"
+    press(&mut app, ch('d')).await;
+    match &app.active_view {
+        ActiveView::Describe(d) => {
+            assert_eq!(d.resource_name, "metallb-pool-1");
+            assert_eq!(d.resource_kind, "IPAddressPool");
+            assert_eq!(d.namespace.as_deref(), Some("metallb-system"));
+        }
+        _ => panic!("expected ActiveView::Describe"),
+    }
+}
+
+#[tokio::test]
+async fn node_inspector_press_b_jumps_to_bgp_dashboard() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    app.open_node_inspector("node-1".to_string());
+    assert!(matches!(app.active_view, ActiveView::NodeInspector(_)));
+
+    // Press 'b' -> navigates to BgpPeers
+    press(&mut app, ch('b')).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
 }
 
 #[tokio::test]
