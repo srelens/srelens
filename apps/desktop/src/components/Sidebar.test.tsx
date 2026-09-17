@@ -122,11 +122,18 @@ describe("Sidebar", () => {
     coreMock.invokeCommand.mockRejectedValueOnce(new Error("Window creation failed"));
 
     try {
-      render(<Sidebar {...base} />);
+      render(
+        <Sidebar
+          {...base}
+          clusterId={(name) => (name === "kind-dev" ? "/k/config#kind-dev" : undefined)}
+        />,
+      );
       const btn = screen.getByRole("button", { name: "Open in new window" });
       fireEvent.click(btn);
 
-      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", { contextId: "kind-dev" });
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
+        contextId: "/k/config#kind-dev",
+      });
       await waitFor(() => {
         expect(errorSpy).toHaveBeenCalledWith("Couldn't open window for kind-dev", "Window creation failed");
       });

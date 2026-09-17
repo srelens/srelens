@@ -98,6 +98,7 @@ export function Sidebar({
   width = 200,
   onResize,
   contextProfiles = {},
+  clusterId,
 }: {
   clusters: string[];
   activeCluster?: string | null;
@@ -109,6 +110,8 @@ export function Sidebar({
   width?: number;
   onResize?: (width: number) => void;
   contextProfiles?: ContextProfiles;
+  /** Display name → `stableId`. Window labels and `?context=` key on the id. */
+  clusterId?: (name: string) => string | undefined;
 }) {
   const handleRef = useRef<HTMLDivElement>(null);
   const startX = useRef(0);
@@ -181,7 +184,10 @@ export function Sidebar({
                   title="Open in new window"
                   onClick={(e) => {
                     e.stopPropagation();
-                    void invokeCommand("open_context_window", { contextId: cluster }).catch((err) => {
+                    // Same key Rail writes: a display name that equals another
+                    // cluster's stableId must not share that window's label.
+                    const contextId = clusterId?.(cluster) ?? cluster;
+                    void invokeCommand("open_context_window", { contextId }).catch((err) => {
                       notify.error(`Couldn't open window for ${cluster}`, describeError(err).detail);
                     });
                   }}

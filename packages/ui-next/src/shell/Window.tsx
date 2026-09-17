@@ -269,7 +269,7 @@ export function Window({
           // query first — looking up `clusters.includes(ctxQuery)` with a name
           // misses the right workspace and then seeds the wrong one.
           const targetContext = found.find(
-            (context) => context.stableId === ctxQuery || context.name === ctxQuery,
+            (context) => context.stableId === ctxQuery,
           );
           if (targetContext) {
             let mainSaved = usableTabsState(loadTabsState(undefined, undefined, "main"));
@@ -326,7 +326,7 @@ export function Window({
           ctxQuery &&
           windowLabel !== "main" &&
           failure !== "" &&
-          !found.some((context) => context.stableId === ctxQuery || context.name === ctxQuery)
+          !found.some((context) => context.stableId === ctxQuery)
         ) {
           // Own saved state already existed; still retain the query across a
           // failed listing so a retry can focus the requested cluster.
@@ -396,7 +396,7 @@ export function Window({
     const query = pendingCtxQuery.current;
     if (!booted || !query) return;
     const target = contexts.find(
-      (context) => context.stableId === query || context.name === query,
+      (context) => context.stableId === query,
     );
     if (target) {
       pendingCtxQuery.current = null;

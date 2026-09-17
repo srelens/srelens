@@ -295,17 +295,10 @@ export function App() {
     }
   }, [contexts]);
 
-  // A context window's first tab, from the `?context=` in its URL. Resolved
-  // here and not in the tab initializers because WHICH identifier that query
-  // carries depends on the design that asked for the window: the next design's
-  // Rail keys its clusters on `stableId` and so writes that, while the classic
-  // Sidebar writes the display name. Classic tabs are keyed by display name
-  // (#265), so a tab seeded straight from the query is pointed at a cluster
-  // that does not exist — its overview call fails, and `refreshContexts` then
-  // prunes it, because `resolveStoredKey` matches names and never ids. That
-  // drops the window's only tab and leaves it empty with nothing saying why.
-  // Going through `openView` also fills in `clusterId`, which is what lets the
-  // tab follow a later rename instead of being pruned by it.
+  // A context window's first tab, from the `?context=` in its URL. Both
+  // designs write a `stableId` into that query (Rail always did; classic's
+  // Sidebar now does too): matching by display name as well would collide
+  // when one cluster's name equals another's id, and open the wrong overview.
   const contextParam = useMemo(
     () => new URLSearchParams(window.location.search).get("context"),
     [],
@@ -323,7 +316,7 @@ export function App() {
     // Partial listings can return readable contexts alongside an unrelated
     // kubeconfig error. Resolve a present match first — treating any error as
     // "keep waiting" left a valid target unopened forever.
-    const match = contexts.find((c) => c.stableId === contextParam || c.name === contextParam);
+    const match = contexts.find((c) => c.stableId === contextParam);
     if (match) {
       contextParamConsumed.current = true;
       openView(match.name, "overview");
@@ -1118,6 +1111,7 @@ export function App() {
           onSelectCrd={(c, crd) => openCrdView(c, crd)}
           onOpenApp={openAppPage}
           contextProfiles={contextProfiles}
+          clusterId={stableIdOf}
           width={sidebarWidth}
           onResize={setSidebarWidth}
         />

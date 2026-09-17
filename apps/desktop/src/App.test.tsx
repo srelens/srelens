@@ -669,17 +669,25 @@ describe("App", () => {
   });
 
   it("opens the overview for the context a window's stable-id query names", async () => {
-    // `/k/config#prod` is `context("prod")`'s stableId — what Rail puts in the
-    // query when it opens a window for prod.
+    // `/k/config#prod` is `context("prod")`'s stableId — what both Rail and
+    // classic Sidebar put in the query when they open a window for prod.
     withContextQuery("/k/config#prod");
     render(<App />);
     expect((await screen.findByTestId("overview")).textContent).toBe("prod");
   });
 
-  it("opens the overview for a display-name query, the classic Sidebar's spelling", async () => {
+  it("does not treat a display name as a window identity", async () => {
+    // A name that equals another cluster's stableId must not open that other
+    // cluster. The query is an id only; a bare display name is "not listed".
     withContextQuery("prod");
     render(<App />);
-    expect((await screen.findByTestId("overview")).textContent).toBe("prod");
+    await waitFor(() =>
+      expect(vi.mocked(notify.error)).toHaveBeenCalledWith(
+        "Couldn't open that cluster",
+        "It is not among the listed kube contexts.",
+      ),
+    );
+    expect(screen.queryByTestId("overview")).toBeNull();
   });
 
   it("says the cluster could not be opened when the query names no listed context", async () => {
