@@ -87,6 +87,39 @@ describe("IngressDetailsBody", () => {
       expect(screen.getByText("web:80")).toBeDefined();
     });
 
+    it("shows a resource backend as kind/name instead of a bare :", () => {
+      // networking.k8s.io/v1 backends are service XOR resource. Classic's
+      // cell only formats the service form, which leaves resource backends
+      // as ":"; show kind/name when service is absent.
+      render(
+        <IngressDetailsBody
+          object={ingress({
+            rules: [
+              {
+                host: "app.example.com",
+                http: {
+                  paths: [
+                    {
+                      path: "/",
+                      backend: {
+                        resource: {
+                          apiGroup: "gateway.networking.k8s.io",
+                          kind: "ServiceImport",
+                          name: "web",
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          })}
+        />,
+      );
+      expect(screen.getByText("ServiceImport/web")).toBeDefined();
+      expect(screen.queryByText(":")).toBeNull();
+    });
+
     it("omits the Rules section when there are no path mappings", () => {
       render(<IngressDetailsBody object={ingress({ ingressClassName: "nginx" })} />);
       expect(screen.queryByText("Rules")).toBeNull();
