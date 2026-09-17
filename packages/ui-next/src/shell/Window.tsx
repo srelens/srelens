@@ -325,12 +325,17 @@ export function Window({
         } else if (
           ctxQuery &&
           windowLabel !== "main" &&
-          failure !== "" &&
           !found.some((context) => context.stableId === ctxQuery)
         ) {
-          // Own saved state already existed; still retain the query across a
-          // failed listing so a retry can focus the requested cluster.
-          pendingCtxQuery.current = ctxQuery;
+          if (failure !== "") {
+            // Own saved state already existed; still retain the query across a
+            // failed listing so a retry can focus the requested cluster.
+            pendingCtxQuery.current = ctxQuery;
+          } else {
+            // Listing answered and the target is gone. Reconciling the saved
+            // state would promote another remaining cluster to activeCluster.
+            saved = defaultState([]);
+          }
         }
 
         if (saved && failure !== "") {
@@ -385,7 +390,9 @@ export function Window({
   useEffect(() => {
     return onWindowCloseRequested(async () => {
       flushSave();
-      await flushSettingsWrites();
+      // throwOnError: a silent resolve after a failed write would destroy the
+      // webview and lose the latest workspace snapshot with it.
+      await flushSettingsWrites({ throwOnError: true });
     });
   }, []);
 

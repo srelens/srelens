@@ -567,6 +567,7 @@ export function LockGate({ children, brandMarkSrc, onReady }: LockGateProps) {
       lockWorkspace();
     });
     const offUnlocked = on("vault-unlocked", () => {
+      lockGeneration.current += 1;
       void read({ mayOpen: true });
     });
     return () => {

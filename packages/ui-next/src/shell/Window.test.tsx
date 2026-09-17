@@ -464,6 +464,23 @@ describe("Window boot", () => {
     window.history.replaceState({}, "", "/");
   });
 
+  it("does not promote another cluster when saved state loses its ?context= target", async () => {
+    window.history.replaceState({}, "", "/?context=gone");
+    listContexts.mockResolvedValue({ contexts: [ctx("prod"), ctx("stage")] });
+    const saved = defaultState([ctx("gone"), ctx("prod")]);
+    saved.workspaces[0].activeCluster = "gone";
+    loadTabsState.mockReturnValue(saved);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel="ctx-gone" />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    expect(store.activeCluster()).toBeNull();
+    expect(store.getState().workspaces[0].clusters).toEqual([]);
+    window.history.replaceState({}, "", "/");
+  });
+
   it("boots to a live window when the saved currentId names a workspace that did not parse and the cluster list also errors", async () => {
     // The sibling of the case above, and the one that branch is a condition
     // short of: `parseStoredState` drops a malformed workspace on its own and
