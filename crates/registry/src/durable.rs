@@ -37,7 +37,13 @@ use std::path::Path;
 /// the save may not survive a power loss. A caller must not treat that error as
 /// "nothing changed". The parent directory must already exist; create it with
 /// [`create_dir_all`] so that it, too, survives a power loss.
+///
+/// On Windows `path` is first made absolute and extended-length (`\\?\`), so
+/// the raw Win32 calls here and in tempfile accept a path longer than
+/// `MAX_PATH`, as `std::fs` does.
 pub(crate) fn replace(path: &Path, contents: &[u8]) -> io::Result<()> {
+    #[cfg(windows)]
+    let path = &extended_length(path)?;
     let parent = parent_of(path);
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(contents)?;
@@ -76,6 +82,49 @@ fn parent_of(path: &Path) -> &Path {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     }
+}
+
+/// `path` as an absolute, extended-length (`\\?\`) path.
+///
+/// `std::fs` adds this prefix itself before every Win32 call; `MoveFileExW`,
+/// and the `SetFileAttributesW` tempfile calls when a file is kept, take the
+/// path as given and fail beyond `MAX_PATH` (260 characters) without it. A
+/// verbatim path is passed to the file system untouched, so it must already be
+/// absolute, use backslashes and hold no `.` or `..` components, which is
+/// exactly what `std::path::absolute` produces.
+#[cfg(windows)]
+fn extended_length(path: &Path) -> io::Result<std::path::PathBuf> {
+    Ok(verbatim(&std::path::absolute(path)?))
+}
+
+/// An absolute path with the extended-length prefix for its kind: `\\?\C:\…`
+/// for a drive path, `\\?\UNC\server\share\…` for a UNC path. A path that is
+/// already verbatim, or a device path (`\\.\…`), is returned unchanged.
+#[cfg(windows)]
+fn verbatim(absolute: &Path) -> std::path::PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::{Component, Prefix};
+
+    let prefix: &[u16] = match absolute.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(_) => &[],
+            // `\\server\share\…` becomes `\\?\UNC\server\share\…`: drop one leading backslash.
+            Prefix::UNC(..) => &[b'U' as u16, b'N' as u16, b'C' as u16],
+            _ => return absolute.to_path_buf(),
+        },
+        _ => return absolute.to_path_buf(),
+    };
+    let wide: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+    let rest = if prefix.is_empty() {
+        &wide[..]
+    } else {
+        &wide[1..]
+    };
+    let mut out: Vec<u16> = r"\\?\".encode_utf16().collect();
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(rest);
+    OsString::from_wide(&out).into()
 }
 
 #[cfg(not(windows))]
@@ -267,6 +316,60 @@ mod tests {
 
         assert!(create_dir_all(&dir.path().join("a")).is_err());
         assert!(create_dir_all(&dir.path().join("a").join("b")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_prefixes_drive_and_unc_paths_and_leaves_verbatim_ones_alone() {
+        let cases = [
+            (r"C:\Users\me\store.json", r"\\?\C:\Users\me\store.json"),
+            (
+                r"\\server\share\dir\store.json",
+                r"\\?\UNC\server\share\dir\store.json",
+            ),
+            (r"\\?\C:\Users\me\store.json", r"\\?\C:\Users\me\store.json"),
+            (
+                r"\\?\UNC\server\share\store.json",
+                r"\\?\UNC\server\share\store.json",
+            ),
+            (r"\\.\pipe\store", r"\\.\pipe\store"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(verbatim(Path::new(input)), Path::new(expected), "{input}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extended_length_normalizes_before_prefixing() {
+        let absolute = extended_length(Path::new(r"C:/Users/me/./dir/../store.json")).unwrap();
+        assert_eq!(absolute, Path::new(r"\\?\C:\Users\me\store.json"));
+
+        let relative = extended_length(Path::new("store.json")).unwrap();
+        let expected = verbatim(&std::env::current_dir().unwrap().join("store.json"));
+        assert_eq!(relative, expected);
+    }
+
+    /// `std::fs` accepts paths longer than `MAX_PATH`; the raw Win32 calls in
+    /// the Windows rename must too, or a store under a deep profile directory
+    /// could never be saved.
+    #[cfg(windows)]
+    #[test]
+    fn a_path_longer_than_max_path_is_replaced_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut deep = dir.path().to_path_buf();
+        while deep.as_os_str().len() <= 300 {
+            deep.push("a-directory-name-of-forty-characters-xx");
+        }
+        create_dir_all(&deep).unwrap();
+        let path = deep.join("store.json");
+        assert!(path.as_os_str().len() > 260);
+
+        replace(&path, b"first").unwrap();
+        replace(&path, b"second").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        assert_eq!(entries(&deep), ["store.json"]);
     }
 
     #[cfg(windows)]
