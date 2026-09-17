@@ -782,7 +782,11 @@ fn every_modal_still_draws_its_frame_on_a_cramped_terminal() {
         for (w, h) in [(30u16, 8u16), (24, 6)] {
             let text = modal_text(w, h, &modal);
             assert!(
-                text.contains('┌') || text.contains('─'),
+                text.contains('┌')
+                    || text.contains('─')
+                    || text.contains('┏')
+                    || text.contains('━')
+                    || text.contains('╭'),
                 "{w}x{h} {modal:?}: {text:?}"
             );
         }
@@ -882,7 +886,9 @@ fn the_help_modal_truncates_from_the_bottom_when_the_terminal_is_short() {
 fn the_help_modal_degrades_to_a_border_on_a_tiny_terminal() {
     let text = common::render_text(20, 6, |f| render_help_modal(f, f.area()));
     assert!(
-        (text.contains('┌') && text.contains('┘')) || (text.contains('╭') && text.contains('╰')),
+        (text.contains('┌') && text.contains('┘'))
+            || (text.contains('╭') && text.contains('╰'))
+            || (text.contains('┏') && text.contains('┛')),
         "{text:?}"
     );
 }

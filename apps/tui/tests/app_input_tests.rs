@@ -5473,6 +5473,7 @@ async fn node_ssh_modal_keys_and_submit() {
 #[tokio::test]
 async fn tui_config_view_key_interactions() {
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    app.tui_config = srelens_tui::tui_config::TuiConfig::default();
 
     let cfg = srelens_tui::views::TuiConfigViewState::new();
     app.active_view = ActiveView::TuiConfig(cfg);
