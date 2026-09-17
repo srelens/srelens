@@ -83,6 +83,41 @@ describe("transport", () => {
     expect(unlisten).toHaveBeenCalled();
   });
 
+  it("onWindowCloseRequested destroys only after the handler settles", async () => {
+    let closeHandler: ((event: { preventDefault: () => void }) => Promise<void>) | undefined;
+    onCloseRequestedMock.mockImplementation(async (fn) => {
+      closeHandler = fn;
+      return vi.fn();
+    });
+    windowDestroyMock.mockResolvedValue(undefined);
+    let resolveFlush!: () => void;
+    const flush = new Promise<void>((r) => {
+      resolveFlush = r;
+    });
+    onWindowCloseRequested(() => flush, 200);
+    await Promise.resolve();
+    expect(closeHandler).toBeDefined();
+    const close = closeHandler!({ preventDefault: vi.fn() });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(windowDestroyMock).not.toHaveBeenCalled();
+    resolveFlush();
+    await close;
+    expect(windowDestroyMock).toHaveBeenCalled();
+  });
+
+  it("onWindowCloseRequested leaves the window up when the flush times out", async () => {
+    let closeHandler: ((event: { preventDefault: () => void }) => Promise<void>) | undefined;
+    onCloseRequestedMock.mockImplementation(async (fn) => {
+      closeHandler = fn;
+      return vi.fn();
+    });
+    windowDestroyMock.mockResolvedValue(undefined);
+    onWindowCloseRequested(() => new Promise(() => {}), 20);
+    await Promise.resolve();
+    await closeHandler!({ preventDefault: vi.fn() });
+    expect(windowDestroyMock).not.toHaveBeenCalled();
+  });
+
   it("currentWindowLabel returns the label of the current window or main on web", () => {
     expect(currentWindowLabel()).toBe("ctx-test");
     expect(webWindowLabel()).toBe("main");

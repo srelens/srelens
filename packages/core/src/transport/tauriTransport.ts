@@ -68,6 +68,10 @@ export async function setWebviewZoom(factor: number): Promise<void> {
 /**
  * Intercept window close request, run an async cleanup handler (e.g. flushing
  * state writes to disk), then destroy the window.
+ *
+ * The timeout is a *stall* guard, not a success: if the handler has not settled
+ * by then, the window stays up and a later close can retry. Destroying over an
+ * in-flight flush drops the settings write with the webview.
  */
 export function onWindowCloseRequested(
   handler: () => Promise<void> | void,
@@ -83,14 +87,23 @@ export function onWindowCloseRequested(
       if (closing) return;
       event.preventDefault();
       closing = true;
+      let settled = false;
       try {
         await Promise.race([
-          Promise.resolve(handler()),
-          new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+          Promise.resolve(handler()).then(() => {
+            settled = true;
+          }),
+          new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
         ]);
-      } finally {
-        await win.destroy().catch(() => win.close());
+      } catch {
+        closing = false;
+        return;
       }
+      if (!settled) {
+        closing = false;
+        return;
+      }
+      await win.destroy().catch(() => win.close());
     })
     .then((fn) => {
       if (disposed) fn();

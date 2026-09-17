@@ -23,11 +23,12 @@ import { loadRecentLogSubjects } from "../lib/logRecents";
 import { getMark, getContextLabel, loadMarks, useMark } from "../lib/marks";
 import { useContextLabel } from "../lib/contextLabel";
 import { mcpAutoStartSettled, mcpAutoStartStarting } from "../lib/mcpAutoStart";
+import { openCluster } from "../lib/openCluster";
 import { loadPeekWidth } from "../lib/peekWidth";
 import { loadSectionFolds } from "../lib/sectionFolds";
 import { loadExpanded, loadNamespaces } from "../lib/workspace";
 import { getInfo, probeCluster } from "../lib/probe";
-import { defaultState, makeTab, reconcile } from "../lib/tabs";
+import { defaultState, makeTab, reconcile, type TabsState } from "../lib/tabs";
 import { parseEditRoute, parseNewRoute } from "../lib/detailRoute";
 import { isClusterScopedRoute, keepsManagementWhenPaused, tabDetail } from "../lib/routes";
 import { flushSave, installFlushOnUnload, loadTabsState, scheduleSave } from "../lib/tabsPersist";
@@ -54,6 +55,11 @@ import {
   useActiveCluster,
   useTabs,
 } from "../lib/tabsStore";
+
+/** `null` or a document with no workspaces is the same for seeding: unusable. */
+function usableTabsState(saved: TabsState | null | undefined): TabsState | null {
+  return saved && saved.workspaces.length > 0 ? saved : null;
+}
 import { useConsole } from "../console";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
@@ -136,6 +142,9 @@ export function Window({
   // — and a screen receives only `{ route }`, so a copy held here can never
   // reach one. See `NoClusterScreen`.
   const contextsError = useContextsError();
+  // Deep-link `?context=` for a context window that booted before the listing
+  // answered. Cleared once a later successful `setContexts` can open it.
+  const pendingCtxQuery = useRef<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -238,10 +247,12 @@ export function Window({
         failure = outcome.error ?? "";
         listed = true;
         const ctxQuery = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("context") : null;
-        let saved = loadTabsState(undefined, undefined, windowLabel);
-        
+        // Empty workspaces from a parse that kept the document shell are the
+        // same as no save: seeding against them cannot pick a target workspace.
+        let saved = usableTabsState(loadTabsState(undefined, undefined, windowLabel));
+
         if (!saved && ctxQuery && windowLabel !== "main") {
-          let mainSaved = loadTabsState(undefined, undefined, "main");
+          let mainSaved = usableTabsState(loadTabsState(undefined, undefined, "main"));
           if (!mainSaved) {
             mainSaved = defaultState(found);
           }
@@ -284,6 +295,17 @@ export function Window({
               }
             }
           }
+        }
+
+        // A context window whose listing missed the requested cluster must keep
+        // the query: Connections' later successful reload only writes contexts,
+        // it does not re-run this boot pass.
+        if (
+          ctxQuery &&
+          windowLabel !== "main" &&
+          !found.some((context) => context.stableId === ctxQuery || context.name === ctxQuery)
+        ) {
+          pendingCtxQuery.current = ctxQuery;
         }
 
         if (saved && failure !== "") {
@@ -336,6 +358,20 @@ export function Window({
       await flushSettingsWrites();
     });
   }, []);
+
+  // Boot only runs once; a context window that missed its `?context=` match
+  // because `listContexts` failed still has the query in `pendingCtxQuery`.
+  // Connections' reload writes through `setContexts`, which wakes this effect.
+  useEffect(() => {
+    const query = pendingCtxQuery.current;
+    if (!booted || !query || contexts.length === 0) return;
+    const target = contexts.find(
+      (context) => context.stableId === query || context.name === query,
+    );
+    if (!target) return;
+    pendingCtxQuery.current = null;
+    openCluster(target);
+  }, [booted, contexts]);
 
 
   /**
