@@ -777,11 +777,12 @@ export function Window({
         (`isCovered`). Subscribed always; asking only where the window is
         genuinely open.
 
-        ONE mount, here. Not one per branch of the boot check: two listeners on
-        `mcp://confirm-request` are two prompts and two answers to a request
-        that has a single `oneshot::Sender` waiting on it.
+        ONE mount, here, and ONLY in the main window. Context windows must not
+        mount AgentConsent: mcp_confirm.rs broadcasts every request
+        application-wide, and mounting in secondary windows produces duplicate
+        prompts and automatic denials while those windows are covered/booting.
       */}
-      <AgentConsent />
+      {windowLabel === "main" && <AgentConsent />}
     </>
   );
 }

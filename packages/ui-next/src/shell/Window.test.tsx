@@ -1306,6 +1306,17 @@ describe("Window, and an agent asking to change something", () => {
     expect(screen.queryByRole("dialog", { name: /agent wants to run/i })).toBeNull();
     expect(screen.queryByText(/k8s_deletePod/)).toBeNull();
   });
+
+  it("does not mount AgentConsent in a context window", async () => {
+    bus.clear();
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel="ctx-sec" />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    expect(bus.has("mcp://confirm-request")).toBe(false);
+  });
 });
 
 /**
