@@ -102,3 +102,13 @@ export function onWindowCloseRequested(
     unlisten?.();
   };
 }
+
+/** The window label assigned by Tauri ("main", "ctx-...", etc.). */
+export function currentWindowLabel(): string {
+  try {
+    return getCurrentWindow().label;
+  } catch {
+    return "main";
+  }
+}
+

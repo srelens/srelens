@@ -85,6 +85,16 @@ export function VaultGate({ onReady, onLocked }: { onReady?: () => void; onLocke
     if (!("__TAURI_INTERNALS__" in window)) return;
     const off = on("vault-locked", () => {
       readyNotified.current = false;
+      setPassword("");
+      setConfirm("");
+      setError("");
+      setBusy(false);
+      setRecovered(null);
+      setStatus((prev) =>
+        prev
+          ? { ...prev, mode: "locked" }
+          : { mode: "locked", keySource: "password", biometricAvailable: false, biometricEnrolled: false },
+      );
       onLocked?.();
       void refresh();
     });

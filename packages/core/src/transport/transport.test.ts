@@ -14,12 +14,14 @@ vi.mock("@tauri-apps/api/app", () => ({ getVersion: getVersionMock }));
 vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: relaunchMock }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
+    label: "ctx-test",
     onCloseRequested: onCloseRequestedMock,
     destroy: windowDestroyMock,
   }),
 }));
 
-import { invokeCapability, invokeCommand, on, relaunchApp, appVersion, onWindowCloseRequested } from "./tauriTransport";
+import { invokeCapability, invokeCommand, on, relaunchApp, appVersion, onWindowCloseRequested, currentWindowLabel } from "./tauriTransport";
+import { currentWindowLabel as webWindowLabel } from "./webTransport";
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -79,5 +81,10 @@ describe("transport", () => {
     await flush();
     dispose();
     expect(unlisten).toHaveBeenCalled();
+  });
+
+  it("currentWindowLabel returns the label of the current window or main on web", () => {
+    expect(currentWindowLabel()).toBe("ctx-test");
+    expect(webWindowLabel()).toBe("main");
   });
 });

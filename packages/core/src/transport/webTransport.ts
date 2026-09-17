@@ -96,3 +96,9 @@ export function onWindowCloseRequested(
 ): () => void {
   return () => {};
 }
+
+/** Web has a single window context labelled "main". */
+export function currentWindowLabel(): string {
+  return "main";
+}
+

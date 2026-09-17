@@ -80,6 +80,7 @@ import {
 import { flushSettingsWrites } from "@srelens/core";
 import { startMcpHttp } from "@srelens/core";
 import { checkForUpdateAndNotify } from "@srelens/core";
+import { currentWindowLabel } from "@srelens/core";
 import { notify } from "@srelens/core";
 import { isTauri, isWeb } from "@srelens/core/platform";
 import type { SettingsSection } from "./components/SettingsView";
@@ -97,7 +98,7 @@ export function App() {
   // the open tabs are restored from a prior session (a browser reload otherwise
   // wipes them); desktop starts empty. Computed once so tabs/activeTabId/the id
   // counter all agree on the same restored snapshot.
-  const windowLabel = useMemo(() => isTauri() ? getCurrentWindow().label : "main", []);
+  const windowLabel = useMemo(() => currentWindowLabel(), []);
   const [restored] = useState(() => loadOpenTabs(windowLabel));
   const [tabs, setTabs] = useState<ViewTab[]>(() => {
     if (restored?.tabs?.length) return restored.tabs;

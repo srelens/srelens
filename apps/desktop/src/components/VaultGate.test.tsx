@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 
-const { mcpSecurity } = vi.hoisted(() => ({
+const { mcpSecurity, listeners } = vi.hoisted(() => ({
   mcpSecurity: {
     vaultStatus: vi.fn(),
     vaultSetupPassword: vi.fn(),
@@ -9,8 +9,21 @@ const { mcpSecurity } = vi.hoisted(() => ({
     vaultRecoverPassword: vi.fn(),
     vaultBiometricUnlock: vi.fn(),
   },
+  listeners: {} as Record<string, (payload?: unknown) => void>,
 }));
 vi.mock("@srelens/core/lib/mcpSecurity", () => mcpSecurity);
+vi.mock("@srelens/core", async (orig) => {
+  const actual = await orig<typeof import("@srelens/core")>();
+  return {
+    ...actual,
+    on: (channel: string, handler: (payload?: unknown) => void) => {
+      listeners[channel] = handler;
+      return () => {
+        delete listeners[channel];
+      };
+    },
+  };
+});
 
 import { VaultGate } from "./VaultGate";
 
@@ -113,5 +126,37 @@ describe("VaultGate", () => {
     mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "unlocked", keySource: "password" }));
     fireEvent.click(screen.getByRole("button", { name: /continue/i }));
     await waitFor(() => expect(screen.queryByText("recovered-pass-123")).toBeFalsy());
+  });
+
+  it("covers classic window immediately when vault-locked fires, before refresh resolves", async () => {
+    mcpSecurity.vaultStatus.mockResolvedValue(status({ mode: "unlocked", keySource: "password" }));
+    const onLocked = vi.fn();
+    const { container } = render(<VaultGate onLocked={onLocked} />);
+    await waitFor(() => expect(mcpSecurity.vaultStatus).toHaveBeenCalledTimes(1));
+    expect(container.textContent).toBe("");
+
+    // Simulate an in-flight status call that has not yet resolved
+    let resolveStatus: () => void = () => {};
+    mcpSecurity.vaultStatus.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveStatus = () => resolve(status({ mode: "locked" }));
+        }),
+    );
+
+    // Trigger vault-locked event
+    act(() => {
+      listeners["vault-locked"]?.();
+    });
+
+    // Synchronously covered with the unlock screen
+    expect(screen.getByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
+    expect(onLocked).toHaveBeenCalledTimes(1);
+
+    // After refresh completes, remains covered
+    act(() => {
+      resolveStatus();
+    });
+    expect(screen.getByRole("heading", { name: /unlock srelens/i })).toBeTruthy();
   });
 });
