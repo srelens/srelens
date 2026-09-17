@@ -1,13 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ChevronRight, ExternalLink } from "lucide-react";
-import { invokeCommand } from "@srelens/core/transport";
 import { RESOURCE_LABELS, type ResourceKind } from "@srelens/core";
 import { ClassicAppsNav } from "./Extensions";
 import { CustomResourceGroup } from "./CustomResourceGroup";
 import { iconForResourceKind, NavIcon } from "../ui/NavIcon";
 import { cn } from "@/ui/utils";
 import type { CrdRef } from "@srelens/core";
-import { contextDisplayName, type ContextProfiles, isTauri } from "@srelens/core";
+import { contextDisplayName, describeError, invokeCommand, isTauri, notify, type ContextProfiles } from "@srelens/core";
 
 const NAV_SECTIONS: Array<{ heading: string; kinds: ResourceKind[] }> = [
   { heading: "Cluster", kinds: ["overview", "nodes", "namespaces", "events"] },
@@ -182,7 +181,9 @@ export function Sidebar({
                   title="Open in new window"
                   onClick={(e) => {
                     e.stopPropagation();
-                    void invokeCommand("open_context_window", { contextId: cluster });
+                    void invokeCommand("open_context_window", { contextId: cluster }).catch((err) => {
+                      notify.error(`Couldn't open window for ${cluster}`, describeError(err).detail);
+                    });
                   }}
                 >
                   <ExternalLink className="size-3.5 text-muted-foreground" />

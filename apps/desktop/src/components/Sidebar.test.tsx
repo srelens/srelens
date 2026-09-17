@@ -1,6 +1,20 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import React from "react";
+import { notify } from "@srelens/core";
+
+const coreMock = vi.hoisted(() => ({
+  invokeCommand: vi.fn(),
+}));
+
+vi.mock("@srelens/core", async (orig) => {
+  const actual = await orig<typeof import("@srelens/core")>();
+  return {
+    ...actual,
+    invokeCommand: coreMock.invokeCommand,
+  };
+});
+
 import { Sidebar } from "./Sidebar";
 
 const base = {
@@ -100,5 +114,25 @@ describe("Sidebar", () => {
     expect(onResize).toHaveBeenLastCalledWith(168);
     fireEvent.mouseMove(window, { clientX: 900 });
     expect(onResize).toHaveBeenLastCalledWith(480);
+  });
+
+  it("opens a context window on desktop and notifies on failure", async () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    const errorSpy = vi.spyOn(notify, "error").mockImplementation(() => {});
+    coreMock.invokeCommand.mockRejectedValueOnce(new Error("Window creation failed"));
+
+    try {
+      render(<Sidebar {...base} />);
+      const btn = screen.getByRole("button", { name: "Open in new window" });
+      fireEvent.click(btn);
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", { contextId: "kind-dev" });
+      await waitFor(() => {
+        expect(errorSpy).toHaveBeenCalledWith("Couldn't open window for kind-dev", "Window creation failed");
+      });
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+      errorSpy.mockRestore();
+    }
   });
 });

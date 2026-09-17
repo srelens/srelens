@@ -2,6 +2,19 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext } from "@srelens/core";
+import { notify } from "@srelens/core";
+
+const coreMock = vi.hoisted(() => ({
+  invokeCommand: vi.fn(),
+}));
+
+vi.mock("@srelens/core", async (orig) => {
+  const actual = await orig<typeof import("@srelens/core")>();
+  return {
+    ...actual,
+    invokeCommand: coreMock.invokeCommand,
+  };
+});
 import { Rail } from "./Rail";
 import { activeCluster, activeRoute, currentWorkspace, openTab, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
@@ -305,6 +318,25 @@ describe("Rail draws a symbol mark", () => {
     const { container } = setup();
     expect(container.querySelector('[data-slot="chip-mark"] svg')).toBeNull();
     expect(screen.getByText("PE")).toBeDefined();
+  });
+
+  it("opens context window from the menu in desktop mode and notifies on failure", async () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    const errorSpy = vi.spyOn(notify, "error").mockImplementation(() => {});
+    coreMock.invokeCommand.mockRejectedValueOnce(new Error("OS refused window"));
+
+    try {
+      setup();
+      await pick("prod-eu", "Open in new window");
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", { contextId: "prod-eu" });
+      await waitFor(() => {
+        expect(errorSpy).toHaveBeenCalledWith("Couldn't open window for prod-eu", "OS refused window");
+      });
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+      errorSpy.mockRestore();
+    }
   });
 });
 
