@@ -252,20 +252,21 @@ export function Window({
               // `stableId`. Workspaces key clusters on stable ids, so resolve
               // the query first — looking up `clusters.includes(ctxQuery)` with
               // a name misses the right workspace and then seeds the wrong one.
+              const seeded = saved;
               const targetContext = found.find(
                 (context) => context.stableId === ctxQuery || context.name === ctxQuery,
               );
               if (targetContext) {
                 const contextId = targetContext.stableId;
-                let targetWorkspace = saved.workspaces.find((w) => w.clusters.includes(contextId));
-                if (!targetWorkspace && saved.currentId) {
-                  targetWorkspace = saved.workspaces.find((w) => w.id === saved.currentId);
+                let targetWorkspace = seeded.workspaces.find((w) => w.clusters.includes(contextId));
+                if (!targetWorkspace && seeded.currentId) {
+                  targetWorkspace = seeded.workspaces.find((w) => w.id === seeded.currentId);
                   if (targetWorkspace && !targetWorkspace.clusters.includes(contextId)) {
                     targetWorkspace.clusters.push(contextId);
                   }
                 }
                 const contextName = targetContext.name;
-                for (const w of saved.workspaces) {
+                for (const w of seeded.workspaces) {
                   const home = makeTab("/");
                   w.tabs = [home];
                   w.activeId = home.id;
@@ -278,7 +279,7 @@ export function Window({
                   }
                 }
                 if (targetWorkspace) {
-                  saved.currentId = targetWorkspace.id;
+                  seeded.currentId = targetWorkspace.id;
                 }
               }
             }
