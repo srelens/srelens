@@ -27,15 +27,46 @@ use std::path::Path;
 ///      administrator rights, so on NTFS this relies on the file system's
 ///      metadata journal for the rename, which is the platform's limit.
 ///
-/// On failure the temporary file is removed and `path` is left as it was. The
-/// parent directory must already exist.
+/// The parent directory is opened before the rename, so everything that can
+/// fail for an ordinary reason (permissions, a missing directory, a full disk)
+/// fails while `path` still holds its old contents; the temporary file is then
+/// removed and `path` is left as it was.
+///
+/// The one error that can follow the rename is the directory sync itself. It
+/// means the new contents **are** in place, and later reads see them, but that
+/// the save may not survive a power loss. A caller must not treat that error as
+/// "nothing changed". The parent directory must already exist; create it with
+/// [`create_dir_all`] so that it, too, survives a power loss.
 pub(crate) fn replace(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = parent_of(path);
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(contents)?;
     file.as_file().sync_all()?;
+    let directory = open_directory(parent)?;
     rename_over(file, path)?;
-    sync_directory(parent)
+    sync_opened(directory)
+}
+
+/// `std::fs::create_dir_all`, but durable: every directory it creates has its
+/// own entry synced into its parent, so a store's first save cannot vanish
+/// with the directory it was saved in after a power loss.
+///
+/// Missing ancestors are created one at a time, outermost first. A directory
+/// another process created in the meantime is accepted, and its parent is
+/// synced all the same, because that process may not have synced it yet.
+/// Directories that already existed are left alone.
+pub(crate) fn create_dir_all(dir: &Path) -> io::Result<()> {
+    if dir.as_os_str().is_empty() || dir.is_dir() {
+        return Ok(());
+    }
+    let parent = parent_of(dir);
+    create_dir_all(parent)?;
+    match std::fs::create_dir(dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+        Err(error) => return Err(error),
+    }
+    sync_opened(open_directory(parent)?)
 }
 
 /// The directory a rename of `path` changes. A bare file name lives in the
@@ -83,15 +114,29 @@ fn rename_over(file: tempfile::NamedTempFile, path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// A handle on a directory, opened so that it can be synced later.
 #[cfg(unix)]
-fn sync_directory(dir: &Path) -> io::Result<()> {
-    std::fs::File::open(dir)?.sync_all()
+fn open_directory(dir: &Path) -> io::Result<std::fs::File> {
+    std::fs::File::open(dir)
+}
+
+#[cfg(unix)]
+fn sync_opened(directory: std::fs::File) -> io::Result<()> {
+    directory.sync_all()
 }
 
 /// Windows cannot open a directory for flushing without administrator rights;
 /// `MOVEFILE_WRITE_THROUGH` in `rename_over` is the durability available there.
 #[cfg(not(unix))]
-fn sync_directory(_dir: &Path) -> io::Result<()> {
+struct UnsyncedDirectory;
+
+#[cfg(not(unix))]
+fn open_directory(_dir: &Path) -> io::Result<UnsyncedDirectory> {
+    Ok(UnsyncedDirectory)
+}
+
+#[cfg(not(unix))]
+fn sync_opened(_directory: UnsyncedDirectory) -> io::Result<()> {
     Ok(())
 }
 
@@ -169,8 +214,59 @@ mod tests {
     #[test]
     fn the_parent_directory_is_synced_on_unix() {
         let dir = tempfile::tempdir().unwrap();
-        sync_directory(dir.path()).unwrap();
-        assert!(sync_directory(&dir.path().join("missing")).is_err());
+        sync_opened(open_directory(dir.path()).unwrap()).unwrap();
+        assert!(open_directory(&dir.path().join("missing")).is_err());
+    }
+
+    /// A directory that can be written but not read cannot be opened for the
+    /// sync. That must fail the save before the rename, while the store still
+    /// holds its old contents, not after it has already been replaced.
+    #[cfg(unix)]
+    #[test]
+    fn a_parent_that_cannot_be_opened_fails_before_the_rename() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: root reads any directory regardless of its mode");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        fs::create_dir(&store).unwrap();
+        let path = store.join("store.json");
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&store, fs::Permissions::from_mode(0o300)).unwrap();
+
+        let result = replace(&path, b"new");
+
+        fs::set_permissions(&store, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+        assert_eq!(entries(&store), ["store.json"]);
+    }
+
+    #[test]
+    fn create_dir_all_creates_every_missing_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b").join("c");
+
+        create_dir_all(&nested).unwrap();
+        assert!(nested.is_dir());
+        // Existing directories, including the whole chain, are accepted as they are.
+        create_dir_all(&nested).unwrap();
+        create_dir_all(dir.path()).unwrap();
+
+        replace(&nested.join("store.json"), b"first").unwrap();
+        assert_eq!(fs::read(nested.join("store.json")).unwrap(), b"first");
+    }
+
+    #[test]
+    fn create_dir_all_refuses_a_file_in_the_way() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a"), b"not a directory").unwrap();
+
+        assert!(create_dir_all(&dir.path().join("a")).is_err());
+        assert!(create_dir_all(&dir.path().join("a").join("b")).is_err());
     }
 
     #[cfg(windows)]

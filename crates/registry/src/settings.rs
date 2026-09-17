@@ -137,7 +137,8 @@ pub(crate) fn write_lock(path: &Path) -> Result<fs::File, String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
-    fs::create_dir_all(parent).map_err(|error| format!("create {}: {error}", parent.display()))?;
+    crate::durable::create_dir_all(parent)
+        .map_err(|error| format!("create {}: {error}", parent.display()))?;
     let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("settings.json");
     let lock_path = parent.join(format!("{file_name}.lock"));
     let lock = fs::File::create(&lock_path)
@@ -242,7 +243,8 @@ fn write_document(path: &Path, document: &SettingsDocument) -> Result<(), String
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
-    fs::create_dir_all(parent).map_err(|error| format!("create {}: {error}", parent.display()))?;
+    crate::durable::create_dir_all(parent)
+        .map_err(|error| format!("create {}: {error}", parent.display()))?;
 
     let raw = serde_json::to_vec_pretty(document).map_err(|error| error.to_string())?;
     // The write below appends a trailing newline, so the on-disk file is one
