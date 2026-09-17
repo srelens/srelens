@@ -320,9 +320,17 @@ export function App() {
       contextParamConsumed.current = true;
       return;
     }
-    // Listing failed: keep the request. Marking it consumed here left an empty
-    // window that a later successful refresh could not fill, and "Open in new
-    // window" again only focused that empty shell.
+    // Partial listings can return readable contexts alongside an unrelated
+    // kubeconfig error. Resolve a present match first — treating any error as
+    // "keep waiting" left a valid target unopened forever.
+    const match = contexts.find((c) => c.stableId === contextParam || c.name === contextParam);
+    if (match) {
+      contextParamConsumed.current = true;
+      openView(match.name, "overview");
+      return;
+    }
+    // Target absent. Listing failed: keep the request for a later refresh.
+    // Listing answered: it is gone.
     if (contextsError) {
       if (!contextParamListFailedNotified.current) {
         contextParamListFailedNotified.current = true;
@@ -334,18 +342,10 @@ export function App() {
       return;
     }
     contextParamConsumed.current = true;
-    const match = contexts.find((c) => c.stableId === contextParam || c.name === contextParam);
-    if (!match) {
-      // Not a silent empty window. And which of the two facts this is — the
-      // list failed, or the list answered and the context is not in it — is
-      // the difference between "try again" and "it is gone".
-      notify.error(
-        "Couldn't open that cluster",
-        "It is not among the listed kube contexts.",
-      );
-      return;
-    }
-    openView(match.name, "overview");
+    notify.error(
+      "Couldn't open that cluster",
+      "It is not among the listed kube contexts.",
+    );
   }, [contexts, contextsError]);
 
   // Routed only once the contexts are known: a link that arrives during a cold

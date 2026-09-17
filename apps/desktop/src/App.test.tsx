@@ -709,6 +709,19 @@ describe("App", () => {
     );
   });
 
+  it("opens a readable context even when another kubeconfig failed to list", async () => {
+    listContextsMock.mockResolvedValue({
+      contexts: [
+        { name: "prod", stableId: "/k/config#prod", cluster: "prod", server: "", isCurrent: false },
+      ],
+      error: "other kubeconfig unreadable",
+    });
+    withContextQuery("/k/config#prod");
+    render(<App />);
+    expect((await screen.findByTestId("overview")).textContent).toBe("prod");
+    expect(vi.mocked(notify.error)).not.toHaveBeenCalled();
+  });
+
   it("opens the overview once a failed context list later succeeds", async () => {
     (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
     listContextsMock.mockResolvedValue({ contexts: [], error: "kubeconfig unreadable" });

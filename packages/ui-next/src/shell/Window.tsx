@@ -300,14 +300,22 @@ export function Window({
           } else if (failure !== "") {
             // Listing failed — keep the query for a later Connections reload
             // rather than activating whatever Default would pick first. Reset
-            // tabs now: deferred `openCluster` only adds overview and would
-            // otherwise leave every cloned main-window tab in this window.
+            // tabs and clear inherited focus: deferred `openCluster` only adds
+            // overview, and leaving main's activeCluster intact would focus a
+            // different readable cluster from a partial listing.
             pendingCtxQuery.current = ctxQuery;
             const mainSaved = usableTabsState(loadTabsState(undefined, undefined, "main"));
             saved = mainSaved
               ? (JSON.parse(JSON.stringify(mainSaved)) as typeof mainSaved)
               : defaultState(found);
-            if (saved) resetWorkspacesToHome(saved);
+            if (saved) {
+              resetWorkspacesToHome(saved);
+              for (const w of saved.workspaces) {
+                delete w.activeCluster;
+                w.clusters = [];
+                w.pausedClusters = [];
+              }
+            }
           } else {
             // Listing answered: the requested context is not there. An empty
             // workspace says that; cloning Default would silently open another

@@ -66,6 +66,9 @@ pub async fn open_context_window<R: Runtime>(
         .inner_size(1024.0, 768.0)
         .min_inner_size(640.0, 480.0)
         .center()
+        // Match `tauri.conf.json`'s `dragDropEnabled: false` — without this,
+        // Windows' native handler swallows the HTML5 drag events TabStrip uses.
+        .disable_drag_drop_handler()
         .build()
         .map_err(|e| format!("could not open a window for that cluster: {e}"))?;
 

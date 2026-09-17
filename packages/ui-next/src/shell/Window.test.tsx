@@ -438,6 +438,8 @@ describe("Window boot", () => {
     );
     await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
     expect(store.activeCluster()).not.toBe("stage");
+    expect(store.activeCluster()).toBeNull();
+    expect(store.getState().workspaces[0].clusters).toEqual([]);
     expect(store.getState().workspaces[0].tabs.map((t) => t.route)).toEqual(["/"]);
     await act(async () => {
       setContexts([ctx("prod"), ctx("stage")]);
