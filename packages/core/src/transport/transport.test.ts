@@ -118,6 +118,23 @@ describe("transport", () => {
     expect(windowDestroyMock).not.toHaveBeenCalled();
   });
 
+  it("onWindowCloseRequested still preventsDefault while a flush is in flight", async () => {
+    let closeHandler: ((event: { preventDefault: () => void }) => Promise<void>) | undefined;
+    onCloseRequestedMock.mockImplementation(async (fn) => {
+      closeHandler = fn;
+      return vi.fn();
+    });
+    onWindowCloseRequested(() => new Promise(() => {}), 50);
+    await Promise.resolve();
+    const first = { preventDefault: vi.fn() };
+    const second = { preventDefault: vi.fn() };
+    const pending = closeHandler!(first);
+    await closeHandler!(second);
+    expect(first.preventDefault).toHaveBeenCalled();
+    expect(second.preventDefault).toHaveBeenCalled();
+    await Promise.race([pending, new Promise((r) => setTimeout(r, 80))]);
+  });
+
   it("currentWindowLabel returns the label of the current window or main on web", () => {
     expect(currentWindowLabel()).toBe("ctx-test");
     expect(webWindowLabel()).toBe("main");

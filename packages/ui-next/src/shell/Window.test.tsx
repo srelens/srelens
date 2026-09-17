@@ -423,7 +423,14 @@ describe("Window boot", () => {
   it("applies a pending ?context= after a later successful listing", async () => {
     window.history.replaceState({}, "", "/?context=stage");
     listContexts.mockResolvedValue({ error: "kubeconfig unreadable" });
-    loadTabsState.mockReturnValue(null);
+    const main = defaultState([ctx("prod"), ctx("stage")]);
+    const stray = makeTab("/workloads", { clusterName: "prod" });
+    main.workspaces[0].tabs.push(stray);
+    main.workspaces[0].activeId = stray.id;
+    loadTabsState.mockImplementation((_a?: unknown, _b?: unknown, label?: string) => {
+      if (label === "main") return main;
+      return null;
+    });
     render(
       <ConsoleProvider>
         <Window ported={[]} onOpenInClassic={() => {}} windowLabel="ctx-stage" />
@@ -431,10 +438,12 @@ describe("Window boot", () => {
     );
     await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
     expect(store.activeCluster()).not.toBe("stage");
+    expect(store.getState().workspaces[0].tabs.map((t) => t.route)).toEqual(["/"]);
     await act(async () => {
       setContexts([ctx("prod"), ctx("stage")]);
     });
     await waitFor(() => expect(store.activeCluster()).toBe("stage"));
+    expect(store.getState().workspaces[0].tabs.map((t) => t.route)).toEqual(["/", "/overview"]);
     window.history.replaceState({}, "", "/");
   });
 

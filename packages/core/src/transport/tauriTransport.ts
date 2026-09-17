@@ -82,10 +82,14 @@ export function onWindowCloseRequested(
   let unlisten: (() => void) | undefined;
   let disposed = false;
   let closing = false;
+  // Only the intentional `win.close()` fallback may proceed without our
+  // preventDefault — a second user click while a flush is in flight must not.
+  let allowClose = false;
   void win
     .onCloseRequested(async (event) => {
-      if (closing) return;
+      if (allowClose) return;
       event.preventDefault();
+      if (closing) return;
       closing = true;
       let settled = false;
       try {
@@ -103,7 +107,17 @@ export function onWindowCloseRequested(
         closing = false;
         return;
       }
-      await win.destroy().catch(() => win.close());
+      try {
+        await win.destroy();
+      } catch {
+        allowClose = true;
+        try {
+          await win.close();
+        } finally {
+          allowClose = false;
+          closing = false;
+        }
+      }
     })
     .then((fn) => {
       if (disposed) fn();

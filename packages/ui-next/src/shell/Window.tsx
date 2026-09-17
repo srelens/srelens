@@ -60,6 +60,16 @@ import {
 function usableTabsState(saved: TabsState | null | undefined): TabsState | null {
   return saved && saved.workspaces.length > 0 ? saved : null;
 }
+
+/** Strip cloned main-window tabs down to a fresh home tab per workspace. */
+function resetWorkspacesToHome(state: TabsState): void {
+  for (const w of state.workspaces) {
+    const home = makeTab("/");
+    w.tabs = [home];
+    w.activeId = home.id;
+    w.closed = [];
+  }
+}
 import { useConsole } from "../console";
 import { hint, matchWindowKey, type WindowAction } from "../lib/shortcuts";
 import { AgentConsent } from "./AgentConsent";
@@ -269,6 +279,7 @@ export function Window({
             saved = JSON.parse(JSON.stringify(mainSaved));
             if (saved) {
               const seeded = saved;
+              resetWorkspacesToHome(seeded);
               const contextId = targetContext.stableId;
               let targetWorkspace = seeded.workspaces.find((w) => w.clusters.includes(contextId));
               if (!targetWorkspace && seeded.currentId) {
@@ -278,30 +289,25 @@ export function Window({
                 }
               }
               const contextName = targetContext.name;
-              for (const w of seeded.workspaces) {
-                const home = makeTab("/");
-                w.tabs = [home];
-                w.activeId = home.id;
-                w.closed = [];
-                if (w === targetWorkspace) {
-                  w.activeCluster = contextId;
-                  const ot = makeTab("/overview", { clusterName: contextName });
-                  w.tabs.push(ot);
-                  w.activeId = ot.id;
-                }
-              }
               if (targetWorkspace) {
+                targetWorkspace.activeCluster = contextId;
+                const ot = makeTab("/overview", { clusterName: contextName });
+                targetWorkspace.tabs.push(ot);
+                targetWorkspace.activeId = ot.id;
                 seeded.currentId = targetWorkspace.id;
               }
             }
           } else if (failure !== "") {
             // Listing failed — keep the query for a later Connections reload
-            // rather than activating whatever Default would pick first.
+            // rather than activating whatever Default would pick first. Reset
+            // tabs now: deferred `openCluster` only adds overview and would
+            // otherwise leave every cloned main-window tab in this window.
             pendingCtxQuery.current = ctxQuery;
             const mainSaved = usableTabsState(loadTabsState(undefined, undefined, "main"));
             saved = mainSaved
               ? (JSON.parse(JSON.stringify(mainSaved)) as typeof mainSaved)
               : defaultState(found);
+            if (saved) resetWorkspacesToHome(saved);
           } else {
             // Listing answered: the requested context is not there. An empty
             // workspace says that; cloning Default would silently open another
