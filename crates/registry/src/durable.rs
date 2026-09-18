@@ -40,7 +40,9 @@ type Directory = UnsyncedDirectory;
 ///      | MOVEFILE_WRITE_THROUGH`, which does not return until the move is
 ///      flushed. Windows offers no way to flush a directory without
 ///      administrator rights, so on NTFS this relies on the file system's
-///      metadata journal for the rename, which is the platform's limit.
+///      metadata journal for the rename, which is the platform's limit. The
+///      same limit applies to newly created parent directories (see
+///      [`create_dir_all`]): their entries are not flushed here either.
 ///
 /// Everything that can fail for an ordinary reason (permissions, a missing
 /// directory, a full disk) happens before or at the rename, including opening
@@ -87,9 +89,9 @@ fn replace_with(
     Ok(())
 }
 
-/// `std::fs::create_dir_all`, but durable: every directory it creates has its
-/// own entry synced into its parent, so a store's first save cannot vanish
-/// with the directory it was saved in after a power loss.
+/// `std::fs::create_dir_all`, but durable on Unix: every directory it creates
+/// has its own entry synced into its parent, so a store's first save cannot
+/// vanish with the directory it was saved in after a power loss.
 ///
 /// Missing ancestors are created one at a time, outermost first. A directory
 /// another process created in the meantime is accepted, and its parent is
@@ -99,6 +101,12 @@ fn replace_with(
 /// The same contract as [`replace`]: the parent is opened before a directory is
 /// created, and a failure to sync it afterwards is logged as a warning rather
 /// than returned, because the directory exists and a save into it can go on.
+///
+/// **Windows**: `open_directory` / `sync_opened` are no-ops. A first save that
+/// creates missing parents therefore returns success without making those
+/// directory entries durable across power loss; only the file rename itself is
+/// flushed via `MOVEFILE_WRITE_THROUGH`. That is the same platform limit as the
+/// rename path — not a separate hole.
 pub(crate) fn create_dir_all(dir: &Path) -> io::Result<()> {
     create_dir_all_with(dir, &sync_opened)
 }
@@ -227,7 +235,11 @@ fn sync_opened(directory: Directory) -> io::Result<()> {
 }
 
 /// Windows cannot open a directory for flushing without administrator rights;
-/// `MOVEFILE_WRITE_THROUGH` in `rename_over` is the durability available there.
+/// `MOVEFILE_WRITE_THROUGH` in `rename_over` is the durability available for
+/// the rename itself. Newly created parent directories (`create_dir_all`) share
+/// that limit: these open/sync helpers are no-ops, so a first save that creates
+/// missing parents is not guaranteed to keep those directory entries across
+/// power loss.
 #[cfg(not(unix))]
 struct UnsyncedDirectory;
 

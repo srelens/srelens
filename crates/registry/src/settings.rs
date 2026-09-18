@@ -4,8 +4,10 @@
 //! The frontend keeps a synchronous in-memory mirror, but this file is the
 //! source of truth. Each mutation writes a complete, schema-versioned document
 //! to a sibling temporary file and renames it into place through
-//! `durable::replace`, which also syncs the directory so the save survives a
-//! power loss.
+//! `durable::replace`, which also syncs the directory on Unix so the save
+//! survives a power loss. On Windows the rename is flushed
+//! (`MOVEFILE_WRITE_THROUGH`) but parent directories created for a first save
+//! are not — see `durable::create_dir_all`.
 
 use std::collections::BTreeMap;
 use std::fs;
