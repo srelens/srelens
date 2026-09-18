@@ -50,6 +50,7 @@ pub enum ActiveView {
     NodeInspector(node_inspector_view::NodeInspectorState),
     Topology(topology_view::TopologyViewState),
     GpuInfo(gpu_view::GpuViewState),
+    Bgp(bgp_view::BgpViewState),
     Top(top_view::TopViewState),
 }
 
@@ -1256,17 +1257,11 @@ impl App {
             return;
         }
         let ctx = self.active_context.clone();
-        let candidate_namespaces = [
-            ns.to_string(),
-            self.active_namespace.clone(),
-            String::new(),
-        ];
+        let candidate_namespaces = [ns.to_string(), self.active_namespace.clone(), String::new()];
         let crd_match = self
             .crds
             .iter()
-            .find(|c| {
-                c.kind.eq_ignore_ascii_case(kind) || c.plural.eq_ignore_ascii_case(kind)
-            })
+            .find(|c| c.kind.eq_ignore_ascii_case(kind) || c.plural.eq_ignore_ascii_case(kind))
             .cloned();
 
         for c_ns in &candidate_namespaces {
@@ -1360,7 +1355,11 @@ impl App {
 
     pub fn handle_update_available(&mut self, version: &str) {
         self.tui_config.update_available = Some(version.to_string());
-        if let Some(Modal::FeatureBanner { ref mut update_available, .. }) = self.modal {
+        if let Some(Modal::FeatureBanner {
+            ref mut update_available,
+            ..
+        }) = self.modal
+        {
             *update_available = Some(version.to_string());
         }
         self.set_toast(
@@ -2199,6 +2198,10 @@ impl App {
                             self.modal = None;
                             self.switch_view_to_kind(ResourceKind::Nodes).await;
                         }
+                        KeyCode::Char('b') | KeyCode::Char('B') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::BgpPeers).await;
+                        }
                         KeyCode::Char('u') | KeyCode::Char('U') => {
                             if let Some(ref ver) = self.tui_config.update_available {
                                 self.set_toast(
@@ -2209,7 +2212,10 @@ impl App {
                                     Theme::status_warn(),
                                 );
                             } else {
-                                self.set_toast("Checking for updates...".to_string(), Theme::status_ok());
+                                self.set_toast(
+                                    "Checking for updates...".to_string(),
+                                    Theme::status_ok(),
+                                );
                                 self.spawn_update_check();
                             }
                         }
@@ -3720,6 +3726,7 @@ impl App {
                     ActiveView::ArgoDetail(detail) => {
                         self.filter_buffer = detail.search_query.clone()
                     }
+                    ActiveView::Bgp(bgp) => self.filter_buffer = bgp.search_query.clone(),
                     _ => {}
                 }
             }
@@ -3881,6 +3888,10 @@ impl App {
                     gpu.toggle_pane();
                     return;
                 }
+                if let ActiveView::Bgp(ref mut bgp) = self.active_view {
+                    bgp.next_tab();
+                    return;
+                }
                 if let ActiveView::Topology(ref mut topo) = self.active_view {
                     topo.select_next_lane();
                     return;
@@ -4000,8 +4011,58 @@ impl App {
                         table.page_down(10);
                     }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        // Ctrl+d -> Delete resource confirmation
-                        if let Some(name) = sel_name {
+                        // Ctrl+d -> Delete resource confirmation (single or bulk marked)
+                        if !table.marked_indices.is_empty() {
+                            let mut targets: Vec<(String, String, String)> = Vec::new();
+                            let mut sorted_indices: Vec<usize> =
+                                table.marked_indices.iter().copied().collect();
+                            sorted_indices.sort_unstable();
+                            for idx in sorted_indices {
+                                if let Some(item) = table.raw_items.get(idx) {
+                                    let item_name = crate::views::resource_table::extract_field_str(
+                                        item, "name",
+                                    );
+                                    let mut item_ns =
+                                        crate::views::resource_table::extract_field_str(
+                                            item,
+                                            "namespace",
+                                        );
+                                    if item_ns.is_empty() {
+                                        item_ns = if self.active_namespace.is_empty() {
+                                            "default".to_string()
+                                        } else {
+                                            self.active_namespace.clone()
+                                        };
+                                    }
+                                    let item_kind = item
+                                        .get("kind")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(&kind_str)
+                                        .to_string();
+                                    if !item_name.is_empty() {
+                                        targets.push((item_kind, item_ns, item_name));
+                                    }
+                                }
+                            }
+                            if !targets.is_empty() {
+                                let count = targets.len();
+                                let title = format!("Delete {} Marked Resources", count);
+                                let message = format!(
+                                    "Are you sure you want to delete {} marked resources?",
+                                    count
+                                );
+                                let action_name = format!(
+                                    "bulk_delete:{}",
+                                    serde_json::to_string(&targets).unwrap_or_default()
+                                );
+                                self.modal = Some(Modal::Confirm {
+                                    title,
+                                    message,
+                                    action_name,
+                                    is_destructive: true,
+                                });
+                            }
+                        } else if let Some(name) = sel_name {
                             let ns = sel_ns
                                 .clone()
                                 .unwrap_or_else(|| self.active_namespace.clone());
@@ -6199,7 +6260,24 @@ impl App {
                     KeyCode::Char('g') | KeyCode::Home => inspector.select_first(),
                     KeyCode::Char('G') | KeyCode::End => inspector.select_last(),
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        inspector.page_down(10)
+                        if let Some((p_name, p_ns)) = sel_pod {
+                            let query_ns = if p_ns.is_empty() {
+                                "default".to_string()
+                            } else {
+                                p_ns.clone()
+                            };
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Delete Pod [{}]", p_name),
+                                message: format!(
+                                    "Are you sure you want to delete Pod '{}' in namespace '{}'?",
+                                    p_name, query_ns
+                                ),
+                                action_name: format!("delete:Pod:{}:{}", query_ns, p_name),
+                                is_destructive: true,
+                            });
+                        } else {
+                            inspector.page_down(10);
+                        }
                     }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         inspector.page_up(10)
@@ -6321,6 +6399,9 @@ impl App {
                             current_input: String::new(),
                             is_destructive: target_unsched,
                         });
+                    }
+                    KeyCode::Char('b') | KeyCode::Char('B') => {
+                        self.switch_view_to_kind(ResourceKind::BgpPeers).await;
                     }
                     _ => {}
                 }
@@ -6518,6 +6599,214 @@ impl App {
                         self.open_yaml_view(n_name, "Node".to_string(), None).await;
                     }
                 }
+                _ => {}
+            },
+            ActiveView::Bgp(bgp) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    if let Some(prev) = self.nav_stack.pop() {
+                        self.active_view = prev;
+                    } else {
+                        self.switch_view_to_kind(ResourceKind::Nodes).await;
+                    }
+                }
+                KeyCode::Tab | KeyCode::Right => {
+                    bgp.next_tab();
+                }
+                KeyCode::BackTab | KeyCode::Left => {
+                    bgp.prev_tab();
+                }
+                KeyCode::Char('1') => {
+                    bgp.active_tab = bgp_view::BgpTab::Peers;
+                }
+                KeyCode::Char('2') => {
+                    bgp.active_tab = bgp_view::BgpTab::Services;
+                }
+                KeyCode::Char('3') => {
+                    bgp.active_tab = bgp_view::BgpTab::IpPools;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    bgp.select_prev();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    bgp.select_next();
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    bgp.select_first();
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    bgp.select_last();
+                }
+                KeyCode::Char('r') => {
+                    self.reload_bgp_view();
+                }
+                KeyCode::Enter => match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => {
+                        if let Some(peer) = bgp.selected_peer() {
+                            let n_name = peer.node_name.clone();
+                            self.open_node_inspector(n_name);
+                        }
+                    }
+                    bgp_view::BgpTab::Services => {
+                        if let Some(svc) = bgp.selected_service() {
+                            let s_name = svc.service_name.clone();
+                            let s_ns = svc.namespace.clone();
+                            self.open_describe_view(s_name, "Service".to_string(), Some(s_ns))
+                                .await;
+                        }
+                    }
+                    bgp_view::BgpTab::IpPools => {
+                        if let Some(pool) = bgp.selected_pool() {
+                            let p_name = pool.name.clone();
+                            let p_ns = pool.namespace.clone();
+                            let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                    "IPAddressPool".to_string()
+                                }
+                                Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                    "IPPool".to_string()
+                                }
+                                _ => "CiliumLoadBalancerIPPool".to_string(),
+                            };
+                            self.open_describe_view(p_name, p_kind, p_ns).await;
+                        }
+                    }
+                },
+                KeyCode::Char('d') => match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => {
+                        if let Some(peer) = bgp.selected_peer() {
+                            let (target_name, target_kind) = if !peer.policy_name.is_empty()
+                                && !peer.policy_kind.is_empty()
+                                && peer.policy_name != "cilium-node-status"
+                            {
+                                (peer.policy_name.clone(), peer.policy_kind.clone())
+                            } else if !peer.policy_name.is_empty()
+                                && peer.policy_name != "cilium-node-status"
+                                && peer.policy_name != "cilium-bgp-node-config"
+                                && peer.policy_name != "cilium-bgp-peering-policy"
+                            {
+                                let fallback_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => {
+                                        "CiliumBGPClusterConfig".to_string()
+                                    }
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => {
+                                        "CiliumBGPPeeringPolicy".to_string()
+                                    }
+                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                        "BGPPeer".to_string()
+                                    }
+                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                        "BGPPeer".to_string()
+                                    }
+                                    _ => "CiliumBGPClusterConfig".to_string(),
+                                };
+                                (peer.policy_name.clone(), fallback_kind)
+                            } else if !peer.node_name.is_empty() {
+                                (peer.node_name.clone(), "Node".to_string())
+                            } else {
+                                (
+                                    peer.policy_name.clone(),
+                                    "CiliumBGPClusterConfig".to_string(),
+                                )
+                            };
+                            let target_ns = peer.namespace.clone();
+
+                            self.open_describe_view(target_name, target_kind, target_ns)
+                                .await;
+                        }
+                    }
+                    bgp_view::BgpTab::Services => {
+                        if let Some(svc) = bgp.selected_service() {
+                            let s_name = svc.service_name.clone();
+                            let s_ns = svc.namespace.clone();
+                            self.open_describe_view(s_name, "Service".to_string(), Some(s_ns))
+                                .await;
+                        }
+                    }
+                    bgp_view::BgpTab::IpPools => {
+                        if let Some(pool) = bgp.selected_pool() {
+                            let p_name = pool.name.clone();
+                            let p_ns = pool.namespace.clone();
+                            let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                    "IPAddressPool".to_string()
+                                }
+                                Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                    "IPPool".to_string()
+                                }
+                                _ => "CiliumLoadBalancerIPPool".to_string(),
+                            };
+                            self.open_describe_view(p_name, p_kind, p_ns).await;
+                        }
+                    }
+                },
+                KeyCode::Char('y') => match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => {
+                        if let Some(peer) = bgp.selected_peer() {
+                            let (target_name, target_kind) = if !peer.policy_name.is_empty()
+                                && !peer.policy_kind.is_empty()
+                                && peer.policy_name != "cilium-node-status"
+                            {
+                                (peer.policy_name.clone(), peer.policy_kind.clone())
+                            } else if !peer.policy_name.is_empty()
+                                && peer.policy_name != "cilium-node-status"
+                                && peer.policy_name != "cilium-bgp-node-config"
+                                && peer.policy_name != "cilium-bgp-peering-policy"
+                            {
+                                let fallback_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => {
+                                        "CiliumBGPClusterConfig".to_string()
+                                    }
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => {
+                                        "CiliumBGPPeeringPolicy".to_string()
+                                    }
+                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                        "BGPPeer".to_string()
+                                    }
+                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                        "BGPPeer".to_string()
+                                    }
+                                    _ => "CiliumBGPClusterConfig".to_string(),
+                                };
+                                (peer.policy_name.clone(), fallback_kind)
+                            } else if !peer.node_name.is_empty() {
+                                (peer.node_name.clone(), "Node".to_string())
+                            } else {
+                                (
+                                    peer.policy_name.clone(),
+                                    "CiliumBGPClusterConfig".to_string(),
+                                )
+                            };
+                            let target_ns = peer.namespace.clone();
+
+                            self.open_yaml_view(target_name, target_kind, target_ns)
+                                .await;
+                        }
+                    }
+                    bgp_view::BgpTab::Services => {
+                        if let Some(svc) = bgp.selected_service() {
+                            let s_name = svc.service_name.clone();
+                            let s_ns = svc.namespace.clone();
+                            self.open_yaml_view(s_name, "Service".to_string(), Some(s_ns))
+                                .await;
+                        }
+                    }
+                    bgp_view::BgpTab::IpPools => {
+                        if let Some(pool) = bgp.selected_pool() {
+                            let p_name = pool.name.clone();
+                            let p_ns = pool.namespace.clone();
+                            let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                    "IPAddressPool".to_string()
+                                }
+                                Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                    "IPPool".to_string()
+                                }
+                                _ => "CiliumLoadBalancerIPPool".to_string(),
+                            };
+                            self.open_yaml_view(p_name, p_kind, p_ns).await;
+                        }
+                    }
+                },
                 _ => {}
             },
             ActiveView::Top(top) => match key.code {
@@ -7524,6 +7813,10 @@ impl App {
             ActiveView::ArgoDetail(detail) => {
                 detail.search_query = filter;
             }
+            ActiveView::Bgp(bgp) => {
+                bgp.search_query = filter;
+                bgp.clamp_selection();
+            }
             _ => {}
         }
     }
@@ -7559,6 +7852,10 @@ impl App {
             }
             ActiveView::ArgoDetail(detail) => {
                 detail.search_query.clear();
+            }
+            ActiveView::Bgp(bgp) => {
+                bgp.search_query.clear();
+                bgp.clamp_selection();
             }
             _ => {}
         }
@@ -8245,6 +8542,25 @@ impl App {
 
                 ActiveView::GpuInfo(gpu_state)
             }
+            ResourceKind::BgpPeers => {
+                let bgp_state = bgp_view::BgpViewState::new();
+                let ctx = self.active_context.clone();
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+
+                tokio::spawn(async move {
+                    let res = match cache.get(&ctx).await {
+                        Ok(client) => srelens_kube::bgp::fetch_bgp_summary(&client).await,
+                        Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
+                    };
+                    let _ = event_tx.send(crate::event::AppEvent::BgpResult {
+                        context: ctx,
+                        result: res,
+                    });
+                });
+
+                ActiveView::Bgp(bgp_state)
+            }
             ResourceKind::TopPods => {
                 self.refresh_pod_metrics();
                 self.refresh_node_metrics();
@@ -8846,7 +9162,6 @@ impl App {
     pub async fn open_yaml_view(&mut self, name: String, kind: String, namespace: Option<String>) {
         let ctx = self.active_context.clone();
         let cache = self.client_cache.clone();
-        let ns = namespace.clone();
         let k = kind.clone();
         let n = name.clone();
         let kubeconfig_paths = self.kubeconfig_paths.clone();
@@ -8856,7 +9171,42 @@ impl App {
             .find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k))
             .cloned();
 
+        let is_cluster_scoped = if namespace.is_some() {
+            match srelens_kube::manifest::gvk_for(&k) {
+                Some((gvk, false))
+                    if gvk.group.is_empty()
+                        || gvk.group == "rbac.authorization.k8s.io"
+                        || gvk.group == "storage.k8s.io"
+                        || gvk.group == "apiextensions.k8s.io"
+                        || gvk.group == "admissionregistration.k8s.io"
+                        || gvk.group == "scheduling.k8s.io"
+                        || gvk.group == "node.k8s.io" =>
+                {
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            match srelens_kube::manifest::gvk_for(&k) {
+                Some((_, namespaced)) => !namespaced,
+                None => {
+                    if let Some(ref crd) = crd_opt {
+                        !crd.namespaced
+                    } else {
+                        true
+                    }
+                }
+            }
+        };
+        let ns = if is_cluster_scoped {
+            None
+        } else {
+            namespace.clone()
+        };
+        let ns_task = ns.clone();
+
         let yaml_text = tokio::task::spawn(async move {
+            let ns = ns_task;
             if let Ok(client) = cache.get(&ctx).await {
                 if let Some(crd) = crd_opt {
                     let api_version = if crd.group.is_empty() {
@@ -8872,9 +9222,13 @@ impl App {
                         plural: crd.plural,
                     };
                     let api: kube::Api<kube::core::DynamicObject> = if crd.namespaced {
-                        kube::Api::namespaced_with(client, ns.as_deref().unwrap_or("default"), &ar)
+                        kube::Api::namespaced_with(
+                            client.clone(),
+                            ns.as_deref().unwrap_or("default"),
+                            &ar,
+                        )
                     } else {
-                        kube::Api::all_with(client, &ar)
+                        kube::Api::all_with(client.clone(), &ar)
                     };
                     if let Ok(mut obj) = api.get(&n).await {
                         obj.metadata.managed_fields = None;
@@ -8882,12 +9236,18 @@ impl App {
                             return y;
                         }
                     }
-                } else if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
+                }
+
+                if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
                     let ar = kube::core::ApiResource::from_gvk(&gvk);
                     let api: kube::Api<kube::core::DynamicObject> = if namespaced {
-                        kube::Api::namespaced_with(client, ns.as_deref().unwrap_or("default"), &ar)
+                        kube::Api::namespaced_with(
+                            client.clone(),
+                            ns.as_deref().unwrap_or("default"),
+                            &ar,
+                        )
                     } else {
-                        kube::Api::all_with(client, &ar)
+                        kube::Api::all_with(client.clone(), &ar)
                     };
                     if let Ok(mut obj) = api.get(&n).await {
                         obj.metadata.managed_fields = None;
@@ -8895,12 +9255,46 @@ impl App {
                             return y;
                         }
                     }
-                } else if k.eq_ignore_ascii_case("application")
-                    || k.eq_ignore_ascii_case("applications")
+                }
+
+                if k.starts_with("CiliumBGP")
+                    || k.starts_with("ciliumbgp")
+                    || k.starts_with("CiliumLoadBalancer")
                 {
+                    let k_lower = k.to_lowercase();
+                    let plural = if k_lower.ends_with('y') {
+                        format!("{}ies", &k_lower[..k_lower.len() - 1])
+                    } else if k_lower.ends_with('s') {
+                        k_lower.clone()
+                    } else {
+                        format!("{}s", k_lower)
+                    };
+                    for v in ["v2", "v2alpha1"] {
+                        let ar = kube::core::ApiResource {
+                            group: "cilium.io".to_string(),
+                            version: v.to_string(),
+                            api_version: format!("cilium.io/{}", v),
+                            kind: k.clone(),
+                            plural: plural.clone(),
+                        };
+                        let api: kube::Api<kube::core::DynamicObject> =
+                            kube::Api::all_with(client.clone(), &ar);
+                        if let Ok(mut obj) = api.get(&n).await {
+                            obj.metadata.managed_fields = None;
+                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                                return y;
+                            }
+                        }
+                    }
+                }
+
+                if k.eq_ignore_ascii_case("application") || k.eq_ignore_ascii_case("applications") {
                     let ar = srelens_kube::argo::argo_application_resource();
-                    let api: kube::Api<kube::core::DynamicObject> =
-                        kube::Api::namespaced_with(client, ns.as_deref().unwrap_or("argocd"), &ar);
+                    let api: kube::Api<kube::core::DynamicObject> = kube::Api::namespaced_with(
+                        client.clone(),
+                        ns.as_deref().unwrap_or("argocd"),
+                        &ar,
+                    );
                     if let Ok(mut obj) = api.get(&n).await {
                         obj.metadata.managed_fields = None;
                         if let Ok(y) = serde_yaml::to_string(&obj) {
@@ -8943,17 +9337,21 @@ impl App {
                 }
             }
 
-            format!(
-                "# Error: Unable to fetch live manifest for {}/{} in namespace {}\n",
-                k,
-                n,
-                ns.as_deref().unwrap_or("default")
-            )
+            if is_cluster_scoped || ns.is_none() {
+                format!("# Error: Unable to fetch live manifest for {}/{}\n", k, n)
+            } else {
+                format!(
+                    "# Error: Unable to fetch live manifest for {}/{} in namespace {}\n",
+                    k,
+                    n,
+                    ns.as_deref().unwrap_or("default")
+                )
+            }
         })
         .await
         .unwrap_or_default();
 
-        let yaml_state = YamlViewState::new(name, kind, namespace, yaml_text);
+        let yaml_state = YamlViewState::new(name, kind, ns, yaml_text);
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Yaml(yaml_state));
         self.nav_stack.push(old_view);
     }
@@ -8966,12 +9364,51 @@ impl App {
     ) {
         let ctx = self.active_context.clone();
         let cache = self.client_cache.clone();
-        let ns = namespace.clone();
         let k = kind.clone();
         let n = name.clone();
         let kubeconfig_paths = self.kubeconfig_paths.clone();
+        let crd_opt = self
+            .crds
+            .iter()
+            .find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k))
+            .cloned();
+
+        let is_cluster_scoped = if namespace.is_some() {
+            match srelens_kube::manifest::gvk_for(&k) {
+                Some((gvk, false))
+                    if gvk.group.is_empty()
+                        || gvk.group == "rbac.authorization.k8s.io"
+                        || gvk.group == "storage.k8s.io"
+                        || gvk.group == "apiextensions.k8s.io"
+                        || gvk.group == "admissionregistration.k8s.io"
+                        || gvk.group == "scheduling.k8s.io"
+                        || gvk.group == "node.k8s.io" =>
+                {
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            match srelens_kube::manifest::gvk_for(&k) {
+                Some((_, namespaced)) => !namespaced,
+                None => {
+                    if let Some(ref crd) = crd_opt {
+                        !crd.namespaced
+                    } else {
+                        true
+                    }
+                }
+            }
+        };
+        let ns = if is_cluster_scoped {
+            None
+        } else {
+            namespace.clone()
+        };
+        let ns_task = ns.clone();
 
         let desc_text = tokio::task::spawn(async move {
+            let ns = ns_task;
             // 1. Try kubectl describe for exact 100% fidelity
             let mut cmd = tokio::process::Command::new("kubectl");
             cmd.arg("describe");
@@ -9005,8 +9442,21 @@ impl App {
 
             // 2. Pure Rust native describe fallback
             if let Ok(client) = cache.get(&ctx).await {
-                let maybe_ar = if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k)
-                {
+                let maybe_ar = if let Some(ref crd) = crd_opt {
+                    let api_version = if crd.group.is_empty() {
+                        crd.version.clone()
+                    } else {
+                        format!("{}/{}", crd.group, crd.version)
+                    };
+                    let ar = kube::core::ApiResource {
+                        group: crd.group.clone(),
+                        version: crd.version.clone(),
+                        api_version,
+                        kind: crd.kind.clone(),
+                        plural: crd.plural.clone(),
+                    };
+                    Some((ar, crd.namespaced))
+                } else if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
                     Some((kube::core::ApiResource::from_gvk(&gvk), namespaced))
                 } else if k.eq_ignore_ascii_case("application")
                     || k.eq_ignore_ascii_case("applications")
@@ -9148,17 +9598,21 @@ impl App {
                 }
             }
 
-            format!(
-                "Error: Unable to describe {}/{} in namespace {}\n",
-                k,
-                n,
-                ns.as_deref().unwrap_or("default")
-            )
+            if is_cluster_scoped || ns.is_none() {
+                format!("Error: Unable to describe {}/{}\n", k, n)
+            } else {
+                format!(
+                    "Error: Unable to describe {}/{} in namespace {}\n",
+                    k,
+                    n,
+                    ns.as_deref().unwrap_or("default")
+                )
+            }
         })
         .await
         .unwrap_or_default();
 
-        let desc_state = DescribeViewState::new(name, kind, namespace, desc_text);
+        let desc_state = DescribeViewState::new(name, kind, ns, desc_text);
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Describe(desc_state));
         self.nav_stack.push(old_view);
     }
@@ -9330,6 +9784,42 @@ impl App {
                 match result {
                     Ok(info) => gpu.set_info(info),
                     Err(err) => gpu.set_error(err),
+                }
+            }
+        }
+    }
+
+    pub fn reload_bgp_view(&mut self) {
+        if let ActiveView::Bgp(bgp) = &mut self.active_view {
+            bgp.is_loading = true;
+            bgp.error = None;
+            let ctx = self.active_context.clone();
+            let cache = self.client_cache.clone();
+            let event_tx = self.event_tx.clone();
+
+            tokio::spawn(async move {
+                let res = match cache.get(&ctx).await {
+                    Ok(client) => srelens_kube::bgp::fetch_bgp_summary(&client).await,
+                    Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
+                };
+                let _ = event_tx.send(crate::event::AppEvent::BgpResult {
+                    context: ctx,
+                    result: res,
+                });
+            });
+        }
+    }
+
+    pub fn handle_bgp_result(
+        &mut self,
+        context: &str,
+        result: Result<srelens_kube::bgp::BgpClusterSummary, String>,
+    ) {
+        if let ActiveView::Bgp(bgp) = &mut self.active_view {
+            if self.active_context == context {
+                match result {
+                    Ok(summary) => bgp.set_summary(summary),
+                    Err(err) => bgp.set_error(err),
                 }
             }
         }
@@ -10776,6 +11266,132 @@ impl App {
     }
 
     pub async fn execute_modal_confirm(&mut self, action_name: String) {
+        if action_name.starts_with("bulk_delete:") {
+            let payload = &action_name["bulk_delete:".len()..];
+            if let Ok(targets) = serde_json::from_str::<Vec<(String, String, String)>>(payload) {
+                let total = targets.len();
+                let mut succeeded: Vec<(String, String)> = Vec::new();
+                let mut fail_count = 0;
+                let mut last_err = String::new();
+
+                let ctx = self.active_context.clone();
+                let cache = self.client_cache.clone();
+
+                match cache.get(&ctx).await {
+                    Ok(client) => {
+                        for (kind, ns, name) in &targets {
+                            let maybe_ar = if let Some((gvk, namespaced)) =
+                                srelens_kube::manifest::gvk_for(kind)
+                            {
+                                Some((kube::core::ApiResource::from_gvk(&gvk), namespaced))
+                            } else if let Some(crd) = self.crds.iter().find(|c| {
+                                c.kind.eq_ignore_ascii_case(kind)
+                                    || c.plural.eq_ignore_ascii_case(kind)
+                            }) {
+                                let api_version = if crd.group.is_empty() {
+                                    crd.version.clone()
+                                } else {
+                                    format!("{}/{}", crd.group, crd.version)
+                                };
+                                Some((
+                                    kube::core::ApiResource {
+                                        group: crd.group.clone(),
+                                        version: crd.version.clone(),
+                                        api_version,
+                                        kind: crd.kind.clone(),
+                                        plural: crd.plural.clone(),
+                                    },
+                                    crd.namespaced,
+                                ))
+                            } else if kind.eq_ignore_ascii_case("application")
+                                || kind.eq_ignore_ascii_case("applications")
+                            {
+                                Some((srelens_kube::argo::argo_application_resource(), true))
+                            } else {
+                                None
+                            };
+
+                            if let Some((ar, namespaced)) = maybe_ar {
+                                let api: kube::Api<kube::core::DynamicObject> =
+                                    if namespaced && !ns.is_empty() {
+                                        kube::Api::namespaced_with(client.clone(), ns, &ar)
+                                    } else {
+                                        kube::Api::all_with(client.clone(), &ar)
+                                    };
+
+                                match api.delete(name, &kube::api::DeleteParams::default()).await {
+                                    Ok(_) => {
+                                        succeeded.push((ns.clone(), name.clone()));
+                                    }
+                                    Err(err) => {
+                                        fail_count += 1;
+                                        last_err = err.to_string();
+                                    }
+                                }
+                            } else {
+                                fail_count += 1;
+                                last_err = format!("Unknown kind '{}'", kind);
+                            }
+                        }
+
+                        if let ActiveView::Table(table) = &mut self.active_view {
+                            if !succeeded.is_empty() {
+                                table.raw_items.retain(|item| {
+                                    let item_name = crate::views::resource_table::extract_field_str(
+                                        item, "name",
+                                    );
+                                    let item_ns = crate::views::resource_table::extract_field_str(
+                                        item,
+                                        "namespace",
+                                    );
+                                    !succeeded.iter().any(|(s_ns, s_name)| {
+                                        s_name == &item_name
+                                            && (s_ns == &item_ns
+                                                || s_ns.is_empty()
+                                                || item_ns.is_empty())
+                                    })
+                                });
+                                table.marked_indices.clear();
+                                let filter = self.filter_buffer.clone();
+                                table.apply_filter(&filter);
+                            }
+                        }
+
+                        if let ActiveView::Argo(_) = &self.active_view {
+                            self.refresh_argo_applications_ext(true);
+                        }
+
+                        if fail_count == 0 {
+                            self.set_toast(
+                                format!("✓ Deleted {} resources", succeeded.len()),
+                                Theme::status_ok(),
+                            );
+                        } else if !succeeded.is_empty() {
+                            self.set_toast(
+                                format!(
+                                    "Deleted {}/{} resources ({} failed: {})",
+                                    succeeded.len(),
+                                    total,
+                                    fail_count,
+                                    last_err
+                                ),
+                                Theme::status_warn(),
+                            );
+                        } else {
+                            self.set_toast(
+                                format!("Delete failed: {}", last_err),
+                                Theme::status_error(),
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        self.set_toast(format!("Connection error: {}", err), Theme::status_error());
+                    }
+                }
+            }
+            return;
+        }
+
         if action_name.starts_with("delete:") {
             // Format: "delete:<kind>:<namespace>:<name>"
             let parts: Vec<&str> = action_name.splitn(4, ':').collect();
@@ -10854,6 +11470,23 @@ impl App {
                                         });
                                         let filter = self.filter_buffer.clone();
                                         table.apply_filter(&filter);
+                                    }
+                                    if let ActiveView::NodeInspector(ref mut ni) =
+                                        &mut self.active_view
+                                    {
+                                        if let Some(ref mut details) = ni.details {
+                                            details.pods.retain(|p| {
+                                                !(p.name == name
+                                                    && (p.namespace == ns
+                                                        || ns.is_empty()
+                                                        || p.namespace.is_empty()))
+                                            });
+                                            if ni.selected_pod_idx >= details.pods.len()
+                                                && !details.pods.is_empty()
+                                            {
+                                                ni.selected_pod_idx = details.pods.len() - 1;
+                                            }
+                                        }
                                     }
                                     if let ActiveView::Argo(_) = &self.active_view {
                                         self.refresh_argo_applications_ext(true);
@@ -11753,6 +12386,7 @@ impl App {
             ActiveView::NodeInspector(_) => "Node & GPU Hardware Inspector",
             ActiveView::Topology(_) => "Workload & Traffic Topology Flow",
             ActiveView::GpuInfo(_) => "GPU Info & VRAM Allocation",
+            ActiveView::Bgp(_) => "BGP Peering & Route Advertisements",
             ActiveView::Top(top) => match top.active_tab {
                 top_view::TopTab::Pods => "Top Pods Hotspots",
                 top_view::TopTab::Nodes => "Top Nodes Hotspots",
@@ -11842,6 +12476,7 @@ impl App {
             ActiveView::NodeInspector(ni) => render_node_inspector_view(f, chunks[1], ni),
             ActiveView::Topology(topo) => topology_view::render_topology_view(f, chunks[1], topo),
             ActiveView::GpuInfo(gpu) => gpu_view::render(f, chunks[1], gpu),
+            ActiveView::Bgp(bgp) => render_bgp_view(f, chunks[1], bgp),
             ActiveView::Top(top) => top_view::render_top_view(f, chunks[1], top),
         }
 
@@ -11857,6 +12492,27 @@ impl App {
                 argo.applications.len(),
                 false,
             ),
+            ActiveView::Bgp(bgp) => {
+                let count = match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => bgp.filtered_peers().len(),
+                    bgp_view::BgpTab::Services => bgp.filtered_services().len(),
+                    bgp_view::BgpTab::IpPools => bgp.filtered_pools().len(),
+                };
+                let total = match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => {
+                        bgp.summary.as_ref().map(|s| s.peers.len()).unwrap_or(0)
+                    }
+                    bgp_view::BgpTab::Services => bgp
+                        .summary
+                        .as_ref()
+                        .map(|s| s.advertised_services.len())
+                        .unwrap_or(0),
+                    bgp_view::BgpTab::IpPools => {
+                        bgp.summary.as_ref().map(|s| s.ip_pools.len()).unwrap_or(0)
+                    }
+                };
+                (count, total, false)
+            }
             ActiveView::Top(top) => (
                 top.visible_count(),
                 if top.active_tab == top_view::TopTab::Pods {
@@ -12009,6 +12665,20 @@ impl App {
                     ("<Tab>", "Pane"),
                     ("<Enter>", "Inspect"),
                     ("<l>", "Logs"),
+                    ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<r>", "Refresh"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            ActiveView::Bgp(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<1-3/Tab>", "Tab"),
+                    ("<↑/↓/j/k>", "Select"),
+                    ("</>", "Filter"),
+                    ("<Enter>", "Inspect Node/Svc"),
                     ("<d>", "Describe"),
                     ("<y>", "YAML"),
                     ("<r>", "Refresh"),

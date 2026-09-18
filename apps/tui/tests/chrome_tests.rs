@@ -782,7 +782,11 @@ fn every_modal_still_draws_its_frame_on_a_cramped_terminal() {
         for (w, h) in [(30u16, 8u16), (24, 6)] {
             let text = modal_text(w, h, &modal);
             assert!(
-                text.contains('┌') || text.contains('─'),
+                text.contains('┌')
+                    || text.contains('─')
+                    || text.contains('┏')
+                    || text.contains('━')
+                    || text.contains('╭'),
                 "{w}x{h} {modal:?}: {text:?}"
             );
         }
@@ -882,7 +886,9 @@ fn the_help_modal_truncates_from_the_bottom_when_the_terminal_is_short() {
 fn the_help_modal_degrades_to_a_border_on_a_tiny_terminal() {
     let text = common::render_text(20, 6, |f| render_help_modal(f, f.area()));
     assert!(
-        (text.contains('┌') && text.contains('┘')) || (text.contains('╭') && text.contains('╰')),
+        (text.contains('┌') && text.contains('┘'))
+            || (text.contains('╭') && text.contains('╰'))
+            || (text.contains('┏') && text.contains('┛')),
         "{text:?}"
     );
 }
@@ -1299,6 +1305,21 @@ fn header_renders_update_available_badge() {
         text.contains("Update: v0.14.0"),
         "expected update badge in header, got: {text}"
     );
+}
+
+#[test]
+fn header_renders_full_update_badge_even_with_long_cluster_version() {
+    let mut props = header_props(&[]);
+    props.version = "v1.35.7-gke.1222000";
+    props.node_count = 45;
+    props.pod_count = 840;
+    props.update_available = Some("v0.14.0");
+    let text = header_text(160, 3, props);
+    assert!(
+        text.contains("Update: v0.14.0"),
+        "expected complete update badge without truncation for long version, got: {text}"
+    );
+    assert!(text.contains("v1.35.7-gke.1222000"), "{text}");
 }
 
 #[test]
@@ -2562,7 +2583,9 @@ fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
     assert!(text_enabled.contains(":config"), "shows config command");
     assert!(text_enabled.contains(":banner"), "shows banner command");
     assert!(text_enabled.contains(":nodes"), "shows nodes command");
+    assert!(text_enabled.contains(":bgp"), "shows bgp command");
     assert!(text_enabled.contains(":update"), "shows update command");
+    assert!(text_enabled.contains("[b]"), "shows bgp shortcut key");
     assert!(text_enabled.contains("[u]"), "shows update shortcut key");
     assert!(text_enabled.contains("[0]"), "shows jump key 0");
     assert!(text_enabled.contains("[9]"), "shows jump key 9");

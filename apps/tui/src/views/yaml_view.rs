@@ -370,10 +370,17 @@ pub fn render_yaml_view(f: &mut Frame, area: Rect, state: &YamlViewState) {
 
             if trimmed.starts_with('#') {
                 // Comment
-                spans.push(Span::styled(
-                    trimmed.to_string(),
-                    Style::default().fg(Theme::DIM),
-                ));
+                if trimmed.starts_with("# Error") || trimmed.starts_with("# error") {
+                    spans.push(Span::styled(
+                        trimmed.to_string(),
+                        Style::default().fg(Theme::DIM).add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        trimmed.to_string(),
+                        Style::default().fg(Theme::DIM),
+                    ));
+                }
             } else if trimmed.starts_with("---") {
                 // Document separator
                 spans.push(Span::styled(

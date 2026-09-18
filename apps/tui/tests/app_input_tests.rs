@@ -4387,7 +4387,200 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
     assert!(app.modal.is_none());
     assert!(matches!(&app.active_view, ActiveView::Table(t) if t.kind == ResourceKind::Nodes));
 
+    // Re-open via :features and test 'b' jumps to BGP Peering view
+    common::type_str(&mut app, ":features").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    press(&mut app, ch('b')).await;
+    assert!(app.modal.is_none());
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
     std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
+}
+
+#[tokio::test]
+async fn bgp_view_keys_open_yaml_and_describe_with_correct_crd_kind() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    // Navigate to :bgp
+    common::type_str(&mut app, ":bgp").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    if let ActiveView::Bgp(ref mut bgp) = app.active_view {
+        let summary = srelens_kube::bgp::BgpClusterSummary {
+            engine: srelens_kube::bgp::BgpEngineType::CiliumV2,
+            total_nodes: 2,
+            bgp_nodes: 2,
+            total_peers: 1,
+            established_peers: 1,
+            degraded_peers: 0,
+            peers: vec![srelens_kube::bgp::BgpNeighbor {
+                node_name: "data-processing-stage-master-1".to_string(),
+                peer_address: "10.128.12.2".to_string(),
+                peer_asn: 65101,
+                local_asn: 65101,
+                session_state: srelens_kube::bgp::BgpSessionState::Established,
+                policy_name: "cilium-bgp-fabric-peering".to_string(),
+                policy_kind: "CiliumBGPClusterConfig".to_string(),
+                namespace: None,
+                export_pod_cidr: true,
+                hold_time_seconds: Some(90),
+                keepalive_time_seconds: Some(30),
+                connect_retry_seconds: Some(120),
+                multihop_ttl: Some(64),
+                graceful_restart: true,
+                advertised_prefixes: vec!["10.244.0.0/24".to_string()],
+                routes_count: 1,
+                routes_received: 316,
+                uptime_or_last_change: Some("344h".to_string()),
+            }],
+            advertised_services: vec![],
+            ip_pools: vec![srelens_kube::bgp::BgpIpPool {
+                name: "default-lb-pool".to_string(),
+                namespace: None,
+                cidrs: vec!["10.0.0.0/24".to_string()],
+                service_selector: String::new(),
+                disabled: false,
+            }],
+            error: None,
+        };
+        bgp.set_summary(summary);
+    }
+
+    // Press 'y' -> opens YAML view with CiliumBGPClusterConfig (not CiliumBGPNodeConfig)
+    press(&mut app, ch('y')).await;
+    match &app.active_view {
+        ActiveView::Yaml(y) => {
+            assert_eq!(y.resource_name, "cilium-bgp-fabric-peering");
+            assert_eq!(y.resource_kind, "CiliumBGPClusterConfig");
+        }
+        _ => panic!("expected ActiveView::Yaml"),
+    }
+
+    // Press 'Esc' -> returns to Bgp view
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    // Press 'd' -> opens Describe view with CiliumBGPClusterConfig
+    press(&mut app, ch('d')).await;
+    match &app.active_view {
+        ActiveView::Describe(d) => {
+            assert_eq!(d.resource_name, "cilium-bgp-fabric-peering");
+            assert_eq!(d.resource_kind, "CiliumBGPClusterConfig");
+        }
+        _ => panic!("expected ActiveView::Describe"),
+    }
+
+    // Press 'Esc' -> returns to Bgp view
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    // Switch to IP Pools tab (Tab twice: Peers -> Services -> IpPools)
+    press(&mut app, key(KeyCode::Tab)).await;
+    press(&mut app, key(KeyCode::Tab)).await;
+
+    // Press 'y' on IP pool -> opens YAML view with CiliumLoadBalancerIPPool
+    press(&mut app, ch('y')).await;
+    match &app.active_view {
+        ActiveView::Yaml(y) => {
+            assert_eq!(y.resource_name, "default-lb-pool");
+            assert_eq!(y.resource_kind, "CiliumLoadBalancerIPPool");
+        }
+        _ => panic!("expected ActiveView::Yaml"),
+    }
+}
+
+#[tokio::test]
+async fn bgp_view_namespaced_metallb_peer_and_pool_drilldown() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    // Open BGP view directly
+    app.switch_view_to_kind(ResourceKind::BgpPeers).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    if let ActiveView::Bgp(ref mut bgp) = app.active_view {
+        let summary = srelens_kube::bgp::BgpClusterSummary {
+            engine: srelens_kube::bgp::BgpEngineType::MetalLB,
+            total_nodes: 2,
+            bgp_nodes: 2,
+            total_peers: 1,
+            established_peers: 0,
+            degraded_peers: 0,
+            peers: vec![srelens_kube::bgp::BgpNeighbor {
+                node_name: "node-1".to_string(),
+                peer_address: "10.0.0.1".to_string(),
+                peer_asn: 64512,
+                local_asn: 64512,
+                session_state: srelens_kube::bgp::BgpSessionState::Configured,
+                policy_name: "metallb-peer-1".to_string(),
+                policy_kind: "BGPPeer".to_string(),
+                namespace: Some("metallb-system".to_string()),
+                export_pod_cidr: false,
+                hold_time_seconds: None,
+                keepalive_time_seconds: None,
+                connect_retry_seconds: None,
+                multihop_ttl: None,
+                graceful_restart: false,
+                advertised_prefixes: vec![],
+                routes_count: 0,
+                routes_received: 0,
+                uptime_or_last_change: None,
+            }],
+            advertised_services: vec![],
+            ip_pools: vec![srelens_kube::bgp::BgpIpPool {
+                name: "metallb-pool-1".to_string(),
+                namespace: Some("metallb-system".to_string()),
+                cidrs: vec!["192.168.1.0/24".to_string()],
+                service_selector: String::new(),
+                disabled: false,
+            }],
+            error: None,
+        };
+        bgp.set_summary(summary);
+    }
+
+    // Press 'd' -> opens describe view with namespace "metallb-system"
+    press(&mut app, ch('d')).await;
+    match &app.active_view {
+        ActiveView::Describe(d) => {
+            assert_eq!(d.resource_name, "metallb-peer-1");
+            assert_eq!(d.resource_kind, "BGPPeer");
+            assert_eq!(d.namespace.as_deref(), Some("metallb-system"));
+        }
+        _ => panic!("expected ActiveView::Describe"),
+    }
+
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    // Switch to IP Pools tab
+    press(&mut app, key(KeyCode::Tab)).await;
+    press(&mut app, key(KeyCode::Tab)).await;
+
+    // Press 'd' on pool -> opens describe with namespace "metallb-system" and kind "IPAddressPool"
+    press(&mut app, ch('d')).await;
+    match &app.active_view {
+        ActiveView::Describe(d) => {
+            assert_eq!(d.resource_name, "metallb-pool-1");
+            assert_eq!(d.resource_kind, "IPAddressPool");
+            assert_eq!(d.namespace.as_deref(), Some("metallb-system"));
+        }
+        _ => panic!("expected ActiveView::Describe"),
+    }
+}
+
+#[tokio::test]
+async fn node_inspector_press_b_jumps_to_bgp_dashboard() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    app.open_node_inspector("node-1".to_string());
+    assert!(matches!(app.active_view, ActiveView::NodeInspector(_)));
+
+    // Press 'b' -> navigates to BgpPeers
+    press(&mut app, ch('b')).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
 }
 
 #[tokio::test]
@@ -5373,6 +5566,7 @@ async fn node_ssh_modal_keys_and_submit() {
 #[tokio::test]
 async fn tui_config_view_key_interactions() {
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    app.tui_config = srelens_tui::tui_config::TuiConfig::default();
 
     let cfg = srelens_tui::views::TuiConfigViewState::new();
     app.active_view = ActiveView::TuiConfig(cfg);
@@ -5447,4 +5641,155 @@ async fn tui_config_view_key_interactions() {
     // 4. Exit config view with 'q'
     press(&mut app, ch('q')).await;
     assert!(matches!(app.active_view, ActiveView::Table(_)));
+}
+
+#[tokio::test]
+async fn test_node_inspector_ctrl_d_deletes_selected_pod_and_updates_view() {
+    let (mut app, _rx) = common::app().await;
+    let mut ni = NodeInspectorState::new("node-1".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-1".into(),
+        status: "Ready".into(),
+        pods: vec![
+            srelens_kube::node_inspector::NodePodItem {
+                name: "pod-1".into(),
+                namespace: "default".into(),
+                phase: "Running".into(),
+                ready_containers: "1/1".into(),
+                restarts: 0,
+                age: "5m".into(),
+                cpu_requests_millicores: 100,
+                mem_requests_mib: 128,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.0.1".into(),
+            },
+            srelens_kube::node_inspector::NodePodItem {
+                name: "pod-2".into(),
+                namespace: "default".into(),
+                phase: "Running".into(),
+                ready_containers: "1/1".into(),
+                restarts: 0,
+                age: "10m".into(),
+                cpu_requests_millicores: 200,
+                mem_requests_mib: 256,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.0.2".into(),
+            },
+        ],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    // Press Ctrl+d on pod-1
+    press(&mut app, ctrl('d')).await;
+
+    // Verify confirmation modal is opened
+    match &app.modal {
+        Some(Modal::Confirm {
+            title,
+            action_name,
+            is_destructive,
+            ..
+        }) => {
+            assert!(title.contains("pod-1"));
+            assert_eq!(action_name, "delete:Pod:default:pod-1");
+            assert!(is_destructive);
+        }
+        _ => panic!(
+            "expected Modal::Confirm for pod-1 deletion, got {:?}",
+            app.modal
+        ),
+    }
+
+    // Cancel with 'n'
+    press(&mut app, ch('n')).await;
+    assert!(app.modal.is_none());
+
+    // Press Ctrl+d again and confirm with Enter
+    press(&mut app, ctrl('d')).await;
+    assert!(app.modal.is_some());
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn test_node_inspector_ctrl_d_when_no_pods_safely_noops() {
+    let (mut app, _rx) = common::app().await;
+    let mut ni = NodeInspectorState::new("node-empty".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-empty".into(),
+        status: "Ready".into(),
+        pods: vec![],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    press(&mut app, ctrl('d')).await;
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn test_table_ctrl_d_bulk_delete_tagged_pods_opens_confirm_modal() {
+    let (mut app, _rx) = common::app().await;
+    set_table(
+        &mut app,
+        ResourceKind::Pods,
+        pods(&["pod-a", "pod-b", "pod-c"]),
+    );
+
+    // Mark pod-a (idx 0) and pod-c (idx 2)
+    press(&mut app, ch(' ')).await; // mark pod-a
+    press(&mut app, ch('j')).await; // move to pod-b
+    press(&mut app, ch('j')).await; // move to pod-c
+    press(&mut app, ch(' ')).await; // mark pod-c
+
+    if let ActiveView::Table(ref t) = app.active_view {
+        assert_eq!(t.marked_indices.len(), 2);
+    }
+
+    // Press Ctrl+d to trigger bulk deletion modal
+    press(&mut app, ctrl('d')).await;
+
+    match &app.modal {
+        Some(Modal::Confirm {
+            title,
+            message,
+            action_name,
+            is_destructive,
+        }) => {
+            assert!(title.contains("2"), "title should show count: {}", title);
+            assert!(
+                message.contains("2"),
+                "message should show count: {}",
+                message
+            );
+            assert!(
+                action_name.starts_with("bulk_delete:"),
+                "action_name: {}",
+                action_name
+            );
+            assert!(action_name.contains("pod-a") && action_name.contains("pod-c"));
+            assert!(is_destructive);
+        }
+        other => panic!("expected Modal::Confirm for bulk delete, got {:?}", other),
+    }
+
+    // Dismiss with 'n'
+    press(&mut app, ch('n')).await;
+    assert!(app.modal.is_none());
+
+    // Marked indices remain intact after cancel
+    if let ActiveView::Table(ref t) = app.active_view {
+        assert_eq!(t.marked_indices.len(), 2);
+    }
+
+    // Press Ctrl+d again and confirm with Enter
+    press(&mut app, ctrl('d')).await;
+    assert!(app.modal.is_some());
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.modal.is_none());
 }

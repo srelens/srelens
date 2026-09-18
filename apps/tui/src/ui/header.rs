@@ -59,7 +59,12 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
             crate::theme::HeaderStyle::FinoTime => {
                 let mut s = vec![
                     Span::styled("╭─[ ", Style::default().fg(Theme::dim())),
-                    Span::styled("SRELENS", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "SRELENS",
+                        Style::default()
+                            .fg(Theme::accent())
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(" ]", Style::default().fg(Theme::dim())),
                 ];
                 if Theme::show_live_clock() {
@@ -70,24 +75,44 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
                 }
                 s
             }
-            crate::theme::HeaderStyle::Minimal => vec![
-                Span::styled("SRELENS", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
-            ],
+            crate::theme::HeaderStyle::Minimal => vec![Span::styled(
+                "SRELENS",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            )],
             crate::theme::HeaderStyle::Standard => vec![
                 Span::styled(Theme::brand_icon(), Style::default().fg(Theme::yellow())),
-                Span::styled("SRELENS", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "SRELENS",
+                    Style::default()
+                        .fg(Theme::accent())
+                        .add_modifier(Modifier::BOLD),
+                ),
             ],
         };
 
         let brand_line = Line::from(brand_spans);
-        let brand_w = (unicode_width::UnicodeWidthStr::width(brand_line.to_string().as_str()) as u16).max(9);
-        let base_stats_w = if header_style == crate::theme::HeaderStyle::FinoTime { 44 } else { 34 };
+        let brand_w =
+            (unicode_width::UnicodeWidthStr::width(brand_line.to_string().as_str()) as u16).max(9);
+        let stats_line = build_stats_line(&props);
+        let stats_line_w =
+            unicode_width::UnicodeWidthStr::width(stats_line.to_string().as_str()) as u16;
+        let base_stats_w = if header_style == crate::theme::HeaderStyle::FinoTime {
+            44
+        } else {
+            34
+        };
         let update_extra = if props.update_available.is_some() {
-            if header_style == crate::theme::HeaderStyle::FinoTime { 24 } else { 20 }
+            if header_style == crate::theme::HeaderStyle::FinoTime {
+                24
+            } else {
+                20
+            }
         } else {
             0
         };
-        let stats_w = base_stats_w + update_extra;
+        let stats_w = stats_line_w.max(base_stats_w + update_extra);
 
         // Row 0:
         let r0_chunks = Layout::default()
@@ -105,7 +130,7 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
         render_context_chips(f, r0_chunks[1], props.contexts, props.context_chip_rects);
 
         // Stats
-        render_stats(f, r0_chunks[2], &props);
+        render_stats(f, r0_chunks[2], stats_line);
 
         // Row 1: Active context details & navigation hints
         let r1_chunks = Layout::default()
@@ -122,56 +147,134 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
             props.namespace
         };
 
-        let active_ctx_color = Theme::context_color(props.context, props.contexts.iter().find(|c| c.name == props.context).map(|c| c.is_local).unwrap_or(false));
+        let active_ctx_color = Theme::context_color(
+            props.context,
+            props
+                .contexts
+                .iter()
+                .find(|c| c.name == props.context)
+                .map(|c| c.is_local)
+                .unwrap_or(false),
+        );
 
         let active_line = match header_style {
             crate::theme::HeaderStyle::FinoTime => Line::from(vec![
                 Span::styled("╰─[ ", Style::default().fg(Theme::dim())),
                 Span::styled("ctx: ", Theme::header_label()),
-                Span::styled(props.context, Style::default().fg(active_ctx_color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    props.context,
+                    Style::default()
+                        .fg(active_ctx_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" ]──[ ", Style::default().fg(Theme::dim())),
                 Span::styled("ns: ", Theme::header_label()),
-                Span::styled(ns_display, Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    ns_display,
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" ]──[ ", Style::default().fg(Theme::dim())),
                 Span::styled("view: ", Theme::header_label()),
-                Span::styled(props.active_view_name, Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    props.active_view_name,
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" ]", Style::default().fg(Theme::dim())),
             ]),
             crate::theme::HeaderStyle::Minimal => Line::from(vec![
                 Span::styled("ctx: ", Theme::header_label()),
-                Span::styled(props.context, Style::default().fg(active_ctx_color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    props.context,
+                    Style::default()
+                        .fg(active_ctx_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("  "),
                 Span::styled("ns: ", Theme::header_label()),
-                Span::styled(format!("[{}]", ns_display), Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("[{}]", ns_display),
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("  "),
                 Span::styled("view: ", Theme::header_label()),
-                Span::styled(props.active_view_name, Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    props.active_view_name,
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]),
             crate::theme::HeaderStyle::Standard => Line::from(vec![
                 Span::styled("Ctx: ", Theme::header_label()),
-                Span::styled(props.context, Style::default().fg(active_ctx_color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    props.context,
+                    Style::default()
+                        .fg(active_ctx_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("  "),
                 Span::styled("NS: ", Theme::header_label()),
-                Span::styled(format!("[{}]", ns_display), Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("[{}]", ns_display),
+                    Style::default()
+                        .fg(Theme::cyan())
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("  "),
                 Span::styled("View: ", Theme::header_label()),
-                Span::styled(props.active_view_name, Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    props.active_view_name,
+                    Style::default()
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]),
         };
         f.render_widget(Paragraph::new(active_line), r1_chunks[0]);
 
         let hints_line = Line::from(vec![
-            Span::styled("<:ctx>", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<:ctx>",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" All Ctx  ", Theme::header_label()),
-            Span::styled("<F1-F10>", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<F1-F10>",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Hotkeys  ", Theme::header_label()),
-            Span::styled("<?>", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "<?>",
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" Help", Theme::header_label()),
         ]);
-        f.render_widget(Paragraph::new(hints_line).alignment(ratatui::layout::Alignment::Right), r1_chunks[1]);
+        f.render_widget(
+            Paragraph::new(hints_line).alignment(ratatui::layout::Alignment::Right),
+            r1_chunks[1],
+        );
     } else {
         // Fallback for compact single-row header
-        let stats_w = if props.update_available.is_some() { 34 + 20 } else { 34 };
+        let stats_line = build_stats_line(&props);
+        let stats_line_w =
+            unicode_width::UnicodeWidthStr::width(stats_line.to_string().as_str()) as u16;
+        let stats_w = stats_line_w.max(if props.update_available.is_some() {
+            34 + 20
+        } else {
+            34
+        });
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -183,28 +286,52 @@ pub fn render_header(f: &mut Frame, area: Rect, props: HeaderProps) {
 
         let brand = Paragraph::new(Line::from(vec![
             Span::styled(Theme::brand_icon(), Style::default().fg(Theme::yellow())),
-            Span::styled("SRELENS", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "SRELENS",
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
         f.render_widget(brand, chunks[0]);
 
-        let ns_display = if props.namespace.is_empty() { "all" } else { props.namespace };
+        let ns_display = if props.namespace.is_empty() {
+            "all"
+        } else {
+            props.namespace
+        };
         let active_ctx_color = Theme::context_color(props.context, false);
         let cluster_line = Line::from(vec![
             Span::styled("Ctx: ", Theme::header_label()),
-            Span::styled(props.context, Style::default().fg(active_ctx_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                props.context,
+                Style::default()
+                    .fg(active_ctx_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
             Span::styled("NS: ", Theme::header_label()),
-            Span::styled(format!("[{}]", ns_display), Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("[{}]", ns_display),
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
             Span::styled("View: ", Theme::header_label()),
-            Span::styled(props.active_view_name, Style::default().fg(Theme::yellow()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                props.active_view_name,
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]);
         f.render_widget(Paragraph::new(cluster_line), chunks[1]);
-        render_stats(f, chunks[2], &props);
+        render_stats(f, chunks[2], stats_line);
     }
 }
 
-fn render_stats(f: &mut Frame, area: Rect, props: &HeaderProps) {
+pub fn build_stats_line(props: &HeaderProps) -> Line<'static> {
     let header_style = Theme::header_style();
     let bullet = Theme::bullet_glyph();
     let status_color = if props.is_connected {
@@ -221,7 +348,7 @@ fn render_stats(f: &mut Frame, area: Rect, props: &HeaderProps) {
         props.version.to_string()
     };
 
-    let stats_line = match header_style {
+    match header_style {
         crate::theme::HeaderStyle::FinoTime => {
             let mut spans = vec![
                 Span::styled("[ ", Style::default().fg(Theme::dim())),
@@ -318,8 +445,14 @@ fn render_stats(f: &mut Frame, area: Rect, props: &HeaderProps) {
             }
             Line::from(spans)
         }
-    };
-    f.render_widget(Paragraph::new(stats_line).alignment(ratatui::layout::Alignment::Right), area);
+    }
+}
+
+fn render_stats(f: &mut Frame, area: Rect, stats_line: Line) {
+    f.render_widget(
+        Paragraph::new(stats_line).alignment(ratatui::layout::Alignment::Right),
+        area,
+    );
 }
 
 fn render_context_chips(
@@ -352,27 +485,48 @@ fn render_context_chips(
             let overflow_w = unicode_width::UnicodeWidthStr::width(overflow_label.as_str()) as u16;
             if current_col + overflow_w <= max_x {
                 if let Some(r) = rects {
-                    r.borrow_mut().push((Rect { x: current_col, y: area.y, width: overflow_w, height: 1 }, ":ctx".to_string()));
+                    r.borrow_mut().push((
+                        Rect {
+                            x: current_col,
+                            y: area.y,
+                            width: overflow_w,
+                            height: 1,
+                        },
+                        ":ctx".to_string(),
+                    ));
                 }
-                spans.push(Span::styled(overflow_label, Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    overflow_label,
+                    Style::default()
+                        .fg(Theme::CYAN)
+                        .add_modifier(Modifier::BOLD),
+                ));
             }
             break;
         }
 
         if let Some(r) = rects {
-            r.borrow_mut().push((Rect { x: current_col, y: area.y, width: chip_w, height: 1 }, ctx.name.clone()));
+            r.borrow_mut().push((
+                Rect {
+                    x: current_col,
+                    y: area.y,
+                    width: chip_w,
+                    height: 1,
+                },
+                ctx.name.clone(),
+            ));
         }
 
         if ctx.is_current {
             spans.push(Span::styled(
                 chip_label,
-                Style::default().fg(color).bg(Color::Rgb(35, 40, 50)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(color)
+                    .bg(Color::Rgb(35, 40, 50))
+                    .add_modifier(Modifier::BOLD),
             ));
         } else {
-            spans.push(Span::styled(
-                chip_label,
-                Style::default().fg(color),
-            ));
+            spans.push(Span::styled(chip_label, Style::default().fg(color)));
         }
 
         spans.push(Span::raw(" "));
