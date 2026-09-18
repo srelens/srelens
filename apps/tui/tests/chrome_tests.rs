@@ -1308,6 +1308,21 @@ fn header_renders_update_available_badge() {
 }
 
 #[test]
+fn header_renders_full_update_badge_even_with_long_cluster_version() {
+    let mut props = header_props(&[]);
+    props.version = "v1.35.7-gke.1222000";
+    props.node_count = 45;
+    props.pod_count = 840;
+    props.update_available = Some("v0.14.0");
+    let text = header_text(160, 3, props);
+    assert!(
+        text.contains("Update: v0.14.0"),
+        "expected complete update badge without truncation for long version, got: {text}"
+    );
+    assert!(text.contains("v1.35.7-gke.1222000"), "{text}");
+}
+
+#[test]
 fn context_chips_record_their_click_rects_and_collapse_into_an_overflow_chip() {
     let contexts = vec![
         chip(1, "alpha-cluster-01", true, false),
