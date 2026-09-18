@@ -15,7 +15,7 @@ import type { KindDescriptor, ListRow } from "../../lib/kinds/types";
 const { getObject, getManifest, listEvents, listCrds, deleteResource, podsOnNode } = vi.hoisted(() => ({
   getObject: vi.fn(async (): Promise<{ object?: K8sObject; error?: string }> => ({})),
   getManifest: vi.fn(async (): Promise<{ yaml?: string; error?: string }> => ({ yaml: "" })),
-  listEvents: vi.fn(async (): Promise<{ events?: EventSummary[]; error?: string }> => ({ events: [] })),
+  listEvents: vi.fn(async (): Promise<{ events?: EventSummary[]; truncated?: boolean; error?: string }> => ({ events: [] })),
   listCrds: vi.fn(async (): Promise<{ crds?: CrdRef[]; error?: string }> => ({ crds: [] })),
   // The footer's actions are the row menu's, so the one write a test reaches
   // for is mocked here too — a confirm that is never taken must reach nothing.
