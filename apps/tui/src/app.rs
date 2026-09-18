@@ -4019,24 +4019,21 @@ impl App {
                             sorted_indices.sort_unstable();
                             for idx in sorted_indices {
                                 if let Some(item) = table.raw_items.get(idx) {
-                                    let item_name = item
-                                        .get("name")
-                                        .or_else(|| item.pointer("/metadata/name"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    let item_ns = item
-                                        .get("namespace")
-                                        .or_else(|| item.pointer("/metadata/namespace"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or_else(|| {
-                                            if self.active_namespace.is_empty() {
-                                                "default"
-                                            } else {
-                                                &self.active_namespace
-                                            }
-                                        })
-                                        .to_string();
+                                    let item_name = crate::views::resource_table::extract_field_str(
+                                        item, "name",
+                                    );
+                                    let mut item_ns =
+                                        crate::views::resource_table::extract_field_str(
+                                            item,
+                                            "namespace",
+                                        );
+                                    if item_ns.is_empty() {
+                                        item_ns = if self.active_namespace.is_empty() {
+                                            "default".to_string()
+                                        } else {
+                                            self.active_namespace.clone()
+                                        };
+                                    }
                                     let item_kind = item
                                         .get("kind")
                                         .and_then(|v| v.as_str())
@@ -11340,19 +11337,16 @@ impl App {
                         if let ActiveView::Table(table) = &mut self.active_view {
                             if !succeeded.is_empty() {
                                 table.raw_items.retain(|item| {
-                                    let item_name = item
-                                        .get("name")
-                                        .or_else(|| item.pointer("/metadata/name"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    let item_ns = item
-                                        .get("namespace")
-                                        .or_else(|| item.pointer("/metadata/namespace"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
+                                    let item_name = crate::views::resource_table::extract_field_str(
+                                        item, "name",
+                                    );
+                                    let item_ns = crate::views::resource_table::extract_field_str(
+                                        item,
+                                        "namespace",
+                                    );
                                     !succeeded.iter().any(|(s_ns, s_name)| {
-                                        s_name == item_name
-                                            && (s_ns == item_ns
+                                        s_name == &item_name
+                                            && (s_ns == &item_ns
                                                 || s_ns.is_empty()
                                                 || item_ns.is_empty())
                                     })

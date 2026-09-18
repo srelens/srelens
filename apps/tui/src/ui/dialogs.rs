@@ -170,7 +170,7 @@ pub fn format_action_display(action_name: &str) -> String {
     if action_name.starts_with("stop-pf:") {
         return "Stop Port Forward".to_string();
     }
-    if action_name.starts_with("delete:") {
+    if action_name.starts_with("delete:") || action_name.starts_with("bulk_delete:") {
         return "Delete".to_string();
     }
     if action_name.starts_with("restart:") {
