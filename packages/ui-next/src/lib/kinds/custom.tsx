@@ -11,6 +11,13 @@ import type { KindActions, KindDescriptor } from "./types";
 import { AgeCell } from "../ageCell";
 
 /**
+ * Matches `MAX_COLUMNS` in `crates/kube/src/crds.rs` / `MAX_PRINTER_COLUMNS`
+ * in plugin-host. `listCustomResource` evaluates at most this many columns per
+ * row; the table must not paint headers past that index (#609).
+ */
+const MAX_PRINTER_COLUMNS = 32;
+
+/**
  * A custom resource's table, built from the printer columns the API server
  * declares for it. Keys come from `printerColumnKeys` rather than the
  * column's index: hidden columns and the tab's sort key persist under them,
@@ -18,7 +25,7 @@ import { AgeCell } from "../ageCell";
  * upgrade inserts or reorders `additionalPrinterColumns`.
  */
 export function customColumns(crd: CrdRef): Column<CustomRow>[] {
-  const printers = crd.printerColumns ?? [];
+  const printers = (crd.printerColumns ?? []).slice(0, MAX_PRINTER_COLUMNS);
   const keys = printerColumnKeys(printers);
   const columns: Column<CustomRow>[] = [
     // The mock titles every list's identifier column "Name", never the kind
