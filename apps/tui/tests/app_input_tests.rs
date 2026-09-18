@@ -5642,3 +5642,154 @@ async fn tui_config_view_key_interactions() {
     press(&mut app, ch('q')).await;
     assert!(matches!(app.active_view, ActiveView::Table(_)));
 }
+
+#[tokio::test]
+async fn test_node_inspector_ctrl_d_deletes_selected_pod_and_updates_view() {
+    let (mut app, _rx) = common::app().await;
+    let mut ni = NodeInspectorState::new("node-1".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-1".into(),
+        status: "Ready".into(),
+        pods: vec![
+            srelens_kube::node_inspector::NodePodItem {
+                name: "pod-1".into(),
+                namespace: "default".into(),
+                phase: "Running".into(),
+                ready_containers: "1/1".into(),
+                restarts: 0,
+                age: "5m".into(),
+                cpu_requests_millicores: 100,
+                mem_requests_mib: 128,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.0.1".into(),
+            },
+            srelens_kube::node_inspector::NodePodItem {
+                name: "pod-2".into(),
+                namespace: "default".into(),
+                phase: "Running".into(),
+                ready_containers: "1/1".into(),
+                restarts: 0,
+                age: "10m".into(),
+                cpu_requests_millicores: 200,
+                mem_requests_mib: 256,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.0.2".into(),
+            },
+        ],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    // Press Ctrl+d on pod-1
+    press(&mut app, ctrl('d')).await;
+
+    // Verify confirmation modal is opened
+    match &app.modal {
+        Some(Modal::Confirm {
+            title,
+            action_name,
+            is_destructive,
+            ..
+        }) => {
+            assert!(title.contains("pod-1"));
+            assert_eq!(action_name, "delete:Pod:default:pod-1");
+            assert!(is_destructive);
+        }
+        _ => panic!(
+            "expected Modal::Confirm for pod-1 deletion, got {:?}",
+            app.modal
+        ),
+    }
+
+    // Cancel with 'n'
+    press(&mut app, ch('n')).await;
+    assert!(app.modal.is_none());
+
+    // Press Ctrl+d again and confirm with Enter
+    press(&mut app, ctrl('d')).await;
+    assert!(app.modal.is_some());
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn test_node_inspector_ctrl_d_when_no_pods_safely_noops() {
+    let (mut app, _rx) = common::app().await;
+    let mut ni = NodeInspectorState::new("node-empty".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-empty".into(),
+        status: "Ready".into(),
+        pods: vec![],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    press(&mut app, ctrl('d')).await;
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn test_table_ctrl_d_bulk_delete_tagged_pods_opens_confirm_modal() {
+    let (mut app, _rx) = common::app().await;
+    set_table(
+        &mut app,
+        ResourceKind::Pods,
+        pods(&["pod-a", "pod-b", "pod-c"]),
+    );
+
+    // Mark pod-a (idx 0) and pod-c (idx 2)
+    press(&mut app, ch(' ')).await; // mark pod-a
+    press(&mut app, ch('j')).await; // move to pod-b
+    press(&mut app, ch('j')).await; // move to pod-c
+    press(&mut app, ch(' ')).await; // mark pod-c
+
+    if let ActiveView::Table(ref t) = app.active_view {
+        assert_eq!(t.marked_indices.len(), 2);
+    }
+
+    // Press Ctrl+d to trigger bulk deletion modal
+    press(&mut app, ctrl('d')).await;
+
+    match &app.modal {
+        Some(Modal::Confirm {
+            title,
+            message,
+            action_name,
+            is_destructive,
+        }) => {
+            assert!(title.contains("2"), "title should show count: {}", title);
+            assert!(
+                message.contains("2"),
+                "message should show count: {}",
+                message
+            );
+            assert!(
+                action_name.starts_with("bulk_delete:"),
+                "action_name: {}",
+                action_name
+            );
+            assert!(action_name.contains("pod-a") && action_name.contains("pod-c"));
+            assert!(is_destructive);
+        }
+        other => panic!("expected Modal::Confirm for bulk delete, got {:?}", other),
+    }
+
+    // Dismiss with 'n'
+    press(&mut app, ch('n')).await;
+    assert!(app.modal.is_none());
+
+    // Marked indices remain intact after cancel
+    if let ActiveView::Table(ref t) = app.active_view {
+        assert_eq!(t.marked_indices.len(), 2);
+    }
+
+    // Press Ctrl+d again and confirm with Enter
+    press(&mut app, ctrl('d')).await;
+    assert!(app.modal.is_some());
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.modal.is_none());
+}

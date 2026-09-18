@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Table, Row, Cell},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table},
     Frame,
 };
 
@@ -102,7 +102,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  Space", Theme::key_hint_key())),
-            Cell::from("Mark / select item for bulk operations"),
+            Cell::from("Mark / select item for bulk operations (logs, copy, delete)"),
         ]),
         Row::new(vec![
             Cell::from(Span::styled("Resource Actions", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD))),
@@ -138,7 +138,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  Ctrl+d", Theme::key_hint_key())),
-            Cell::from("Delete selected resource (with confirmation)"),
+            Cell::from("Delete selected resource (or marked resources with confirmation)"),
         ]),
         Row::new(vec![
             Cell::from(Span::styled("  Ctrl+r", Theme::key_hint_key())),
@@ -214,8 +214,7 @@ pub fn render_help_modal(f: &mut Frame, area: Rect) {
         ]),
     ];
 
-    let table = Table::new(rows, [Constraint::Length(25), Constraint::Min(40)])
-        .column_spacing(2);
+    let table = Table::new(rows, [Constraint::Length(25), Constraint::Min(40)]).column_spacing(2);
 
     f.render_widget(table, sections[1]);
 }

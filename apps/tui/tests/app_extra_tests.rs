@@ -1239,6 +1239,146 @@ async fn confirming_a_delete_drops_the_row_and_a_rejected_delete_toasts_the_erro
 }
 
 #[tokio::test]
+async fn delete_pod_in_node_inspector_removes_pod_from_view_details() {
+    let cluster = fake_cluster(vec![route(
+        "/api/v1/namespaces/default/pods/pod-1",
+        json!({ "apiVersion": "v1", "kind": "Pod", "metadata": { "name": "pod-1" } }),
+    )])
+    .await;
+    let (mut app, _rx) = app_on(&cluster).await;
+    let mut ni = NodeInspectorState::new("node-1".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-1".into(),
+        status: "Ready".into(),
+        pods: vec![
+            srelens_kube::node_inspector::NodePodItem {
+                name: "pod-1".into(),
+                namespace: "default".into(),
+                phase: "Running".into(),
+                ready_containers: "1/1".into(),
+                restarts: 0,
+                age: "5m".into(),
+                cpu_requests_millicores: 100,
+                mem_requests_mib: 128,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.0.1".into(),
+            },
+            srelens_kube::node_inspector::NodePodItem {
+                name: "pod-2".into(),
+                namespace: "default".into(),
+                phase: "Running".into(),
+                ready_containers: "1/1".into(),
+                restarts: 0,
+                age: "10m".into(),
+                cpu_requests_millicores: 200,
+                mem_requests_mib: 256,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.0.2".into(),
+            },
+        ],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    app.execute_modal_confirm("delete:Pod:default:pod-1".into())
+        .await;
+    assert_eq!(toast(&app), "✓ Deleted Pod 'pod-1' in 'default'");
+
+    if let ActiveView::NodeInspector(ref ni) = app.active_view {
+        assert_eq!(ni.pods_len(), 1);
+        assert_eq!(ni.selected_pod().unwrap().name, "pod-2");
+    } else {
+        panic!("expected ActiveView::NodeInspector");
+    }
+}
+
+#[tokio::test]
+async fn bulk_delete_deletes_all_marked_resources_and_cleans_table() {
+    let cluster = fake_cluster(vec![
+        route(
+            "/api/v1/namespaces/default/pods/pod-1",
+            json!({ "apiVersion": "v1", "kind": "Pod", "metadata": { "name": "pod-1" } }),
+        ),
+        route(
+            "/api/v1/namespaces/default/pods/pod-2",
+            json!({ "apiVersion": "v1", "kind": "Pod", "metadata": { "name": "pod-2" } }),
+        ),
+    ])
+    .await;
+    let (mut app, _rx) = app_on(&cluster).await;
+    pods_table(&mut app, &["pod-1", "pod-2", "pod-3"]);
+
+    if let ActiveView::Table(ref mut t) = app.active_view {
+        t.marked_indices.insert(0);
+        t.marked_indices.insert(1);
+    }
+
+    let targets = vec![
+        (
+            "Pod".to_string(),
+            "default".to_string(),
+            "pod-1".to_string(),
+        ),
+        (
+            "Pod".to_string(),
+            "default".to_string(),
+            "pod-2".to_string(),
+        ),
+    ];
+    let action = format!("bulk_delete:{}", serde_json::to_string(&targets).unwrap());
+
+    app.execute_modal_confirm(action).await;
+    assert_eq!(toast(&app), "✓ Deleted 2 resources");
+    assert_eq!(table_names(&app), vec!["pod-3".to_string()]);
+    if let ActiveView::Table(ref t) = app.active_view {
+        assert!(
+            t.marked_indices.is_empty(),
+            "marked indices should be cleared after bulk delete"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bulk_delete_partial_failure_reports_and_retains_failed_rows() {
+    let cluster = fake_cluster(vec![
+        route(
+            "/api/v1/namespaces/default/pods/pod-ok",
+            json!({ "apiVersion": "v1", "kind": "Pod", "metadata": { "name": "pod-ok" } }),
+        ),
+        failing_route("/api/v1/namespaces/default/pods/pod-fail", 409),
+    ])
+    .await;
+    let (mut app, _rx) = app_on(&cluster).await;
+    pods_table(&mut app, &["pod-ok", "pod-fail"]);
+
+    if let ActiveView::Table(ref mut t) = app.active_view {
+        t.marked_indices.insert(0);
+        t.marked_indices.insert(1);
+    }
+
+    let targets = vec![
+        (
+            "Pod".to_string(),
+            "default".to_string(),
+            "pod-ok".to_string(),
+        ),
+        (
+            "Pod".to_string(),
+            "default".to_string(),
+            "pod-fail".to_string(),
+        ),
+    ];
+    let action = format!("bulk_delete:{}", serde_json::to_string(&targets).unwrap());
+
+    app.execute_modal_confirm(action).await;
+    assert!(toast(&app).starts_with("Deleted 1/2 resources (1 failed:"));
+    assert_eq!(table_names(&app), vec!["pod-fail".to_string()]);
+}
+
+#[tokio::test]
 async fn a_delete_resolves_custom_kinds_and_refuses_ones_it_cannot_place() {
     let cluster = fake_cluster(vec![
         route(

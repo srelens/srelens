@@ -1257,17 +1257,11 @@ impl App {
             return;
         }
         let ctx = self.active_context.clone();
-        let candidate_namespaces = [
-            ns.to_string(),
-            self.active_namespace.clone(),
-            String::new(),
-        ];
+        let candidate_namespaces = [ns.to_string(), self.active_namespace.clone(), String::new()];
         let crd_match = self
             .crds
             .iter()
-            .find(|c| {
-                c.kind.eq_ignore_ascii_case(kind) || c.plural.eq_ignore_ascii_case(kind)
-            })
+            .find(|c| c.kind.eq_ignore_ascii_case(kind) || c.plural.eq_ignore_ascii_case(kind))
             .cloned();
 
         for c_ns in &candidate_namespaces {
@@ -1361,7 +1355,11 @@ impl App {
 
     pub fn handle_update_available(&mut self, version: &str) {
         self.tui_config.update_available = Some(version.to_string());
-        if let Some(Modal::FeatureBanner { ref mut update_available, .. }) = self.modal {
+        if let Some(Modal::FeatureBanner {
+            ref mut update_available,
+            ..
+        }) = self.modal
+        {
             *update_available = Some(version.to_string());
         }
         self.set_toast(
@@ -2214,7 +2212,10 @@ impl App {
                                     Theme::status_warn(),
                                 );
                             } else {
-                                self.set_toast("Checking for updates...".to_string(), Theme::status_ok());
+                                self.set_toast(
+                                    "Checking for updates...".to_string(),
+                                    Theme::status_ok(),
+                                );
                                 self.spawn_update_check();
                             }
                         }
@@ -4010,8 +4011,61 @@ impl App {
                         table.page_down(10);
                     }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        // Ctrl+d -> Delete resource confirmation
-                        if let Some(name) = sel_name {
+                        // Ctrl+d -> Delete resource confirmation (single or bulk marked)
+                        if !table.marked_indices.is_empty() {
+                            let mut targets: Vec<(String, String, String)> = Vec::new();
+                            let mut sorted_indices: Vec<usize> =
+                                table.marked_indices.iter().copied().collect();
+                            sorted_indices.sort_unstable();
+                            for idx in sorted_indices {
+                                if let Some(item) = table.raw_items.get(idx) {
+                                    let item_name = item
+                                        .get("name")
+                                        .or_else(|| item.pointer("/metadata/name"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let item_ns = item
+                                        .get("namespace")
+                                        .or_else(|| item.pointer("/metadata/namespace"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_else(|| {
+                                            if self.active_namespace.is_empty() {
+                                                "default"
+                                            } else {
+                                                &self.active_namespace
+                                            }
+                                        })
+                                        .to_string();
+                                    let item_kind = item
+                                        .get("kind")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(&kind_str)
+                                        .to_string();
+                                    if !item_name.is_empty() {
+                                        targets.push((item_kind, item_ns, item_name));
+                                    }
+                                }
+                            }
+                            if !targets.is_empty() {
+                                let count = targets.len();
+                                let title = format!("Delete {} Marked Resources", count);
+                                let message = format!(
+                                    "Are you sure you want to delete {} marked resources?",
+                                    count
+                                );
+                                let action_name = format!(
+                                    "bulk_delete:{}",
+                                    serde_json::to_string(&targets).unwrap_or_default()
+                                );
+                                self.modal = Some(Modal::Confirm {
+                                    title,
+                                    message,
+                                    action_name,
+                                    is_destructive: true,
+                                });
+                            }
+                        } else if let Some(name) = sel_name {
                             let ns = sel_ns
                                 .clone()
                                 .unwrap_or_else(|| self.active_namespace.clone());
@@ -6209,7 +6263,24 @@ impl App {
                     KeyCode::Char('g') | KeyCode::Home => inspector.select_first(),
                     KeyCode::Char('G') | KeyCode::End => inspector.select_last(),
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        inspector.page_down(10)
+                        if let Some((p_name, p_ns)) = sel_pod {
+                            let query_ns = if p_ns.is_empty() {
+                                "default".to_string()
+                            } else {
+                                p_ns.clone()
+                            };
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Delete Pod [{}]", p_name),
+                                message: format!(
+                                    "Are you sure you want to delete Pod '{}' in namespace '{}'?",
+                                    p_name, query_ns
+                                ),
+                                action_name: format!("delete:Pod:{}:{}", query_ns, p_name),
+                                is_destructive: true,
+                            });
+                        } else {
+                            inspector.page_down(10);
+                        }
                     }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         inspector.page_up(10)
@@ -6582,7 +6653,8 @@ impl App {
                         if let Some(svc) = bgp.selected_service() {
                             let s_name = svc.service_name.clone();
                             let s_ns = svc.namespace.clone();
-                            self.open_describe_view(s_name, "Service".to_string(), Some(s_ns)).await;
+                            self.open_describe_view(s_name, "Service".to_string(), Some(s_ns))
+                                .await;
                         }
                     }
                     bgp_view::BgpTab::IpPools => {
@@ -6590,8 +6662,12 @@ impl App {
                             let p_name = pool.name.clone();
                             let p_ns = pool.namespace.clone();
                             let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
-                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "IPAddressPool".to_string(),
-                                Some(srelens_kube::bgp::BgpEngineType::Calico) => "IPPool".to_string(),
+                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                    "IPAddressPool".to_string()
+                                }
+                                Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                    "IPPool".to_string()
+                                }
                                 _ => "CiliumLoadBalancerIPPool".to_string(),
                             };
                             self.open_describe_view(p_name, p_kind, p_ns).await;
@@ -6612,28 +6688,41 @@ impl App {
                                 && peer.policy_name != "cilium-bgp-peering-policy"
                             {
                                 let fallback_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
-                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => "CiliumBGPClusterConfig".to_string(),
-                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => "CiliumBGPPeeringPolicy".to_string(),
-                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "BGPPeer".to_string(),
-                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => "BGPPeer".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => {
+                                        "CiliumBGPClusterConfig".to_string()
+                                    }
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => {
+                                        "CiliumBGPPeeringPolicy".to_string()
+                                    }
+                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                        "BGPPeer".to_string()
+                                    }
+                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                        "BGPPeer".to_string()
+                                    }
                                     _ => "CiliumBGPClusterConfig".to_string(),
                                 };
                                 (peer.policy_name.clone(), fallback_kind)
                             } else if !peer.node_name.is_empty() {
                                 (peer.node_name.clone(), "Node".to_string())
                             } else {
-                                (peer.policy_name.clone(), "CiliumBGPClusterConfig".to_string())
+                                (
+                                    peer.policy_name.clone(),
+                                    "CiliumBGPClusterConfig".to_string(),
+                                )
                             };
                             let target_ns = peer.namespace.clone();
 
-                            self.open_describe_view(target_name, target_kind, target_ns).await;
+                            self.open_describe_view(target_name, target_kind, target_ns)
+                                .await;
                         }
                     }
                     bgp_view::BgpTab::Services => {
                         if let Some(svc) = bgp.selected_service() {
                             let s_name = svc.service_name.clone();
                             let s_ns = svc.namespace.clone();
-                            self.open_describe_view(s_name, "Service".to_string(), Some(s_ns)).await;
+                            self.open_describe_view(s_name, "Service".to_string(), Some(s_ns))
+                                .await;
                         }
                     }
                     bgp_view::BgpTab::IpPools => {
@@ -6641,8 +6730,12 @@ impl App {
                             let p_name = pool.name.clone();
                             let p_ns = pool.namespace.clone();
                             let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
-                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "IPAddressPool".to_string(),
-                                Some(srelens_kube::bgp::BgpEngineType::Calico) => "IPPool".to_string(),
+                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                    "IPAddressPool".to_string()
+                                }
+                                Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                    "IPPool".to_string()
+                                }
                                 _ => "CiliumLoadBalancerIPPool".to_string(),
                             };
                             self.open_describe_view(p_name, p_kind, p_ns).await;
@@ -6663,28 +6756,41 @@ impl App {
                                 && peer.policy_name != "cilium-bgp-peering-policy"
                             {
                                 let fallback_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
-                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => "CiliumBGPClusterConfig".to_string(),
-                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => "CiliumBGPPeeringPolicy".to_string(),
-                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "BGPPeer".to_string(),
-                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => "BGPPeer".to_string(),
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => {
+                                        "CiliumBGPClusterConfig".to_string()
+                                    }
+                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => {
+                                        "CiliumBGPPeeringPolicy".to_string()
+                                    }
+                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                        "BGPPeer".to_string()
+                                    }
+                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                        "BGPPeer".to_string()
+                                    }
                                     _ => "CiliumBGPClusterConfig".to_string(),
                                 };
                                 (peer.policy_name.clone(), fallback_kind)
                             } else if !peer.node_name.is_empty() {
                                 (peer.node_name.clone(), "Node".to_string())
                             } else {
-                                (peer.policy_name.clone(), "CiliumBGPClusterConfig".to_string())
+                                (
+                                    peer.policy_name.clone(),
+                                    "CiliumBGPClusterConfig".to_string(),
+                                )
                             };
                             let target_ns = peer.namespace.clone();
 
-                            self.open_yaml_view(target_name, target_kind, target_ns).await;
+                            self.open_yaml_view(target_name, target_kind, target_ns)
+                                .await;
                         }
                     }
                     bgp_view::BgpTab::Services => {
                         if let Some(svc) = bgp.selected_service() {
                             let s_name = svc.service_name.clone();
                             let s_ns = svc.namespace.clone();
-                            self.open_yaml_view(s_name, "Service".to_string(), Some(s_ns)).await;
+                            self.open_yaml_view(s_name, "Service".to_string(), Some(s_ns))
+                                .await;
                         }
                     }
                     bgp_view::BgpTab::IpPools => {
@@ -6692,8 +6798,12 @@ impl App {
                             let p_name = pool.name.clone();
                             let p_ns = pool.namespace.clone();
                             let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
-                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => "IPAddressPool".to_string(),
-                                Some(srelens_kube::bgp::BgpEngineType::Calico) => "IPPool".to_string(),
+                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                    "IPAddressPool".to_string()
+                                }
+                                Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                    "IPPool".to_string()
+                                }
                                 _ => "CiliumLoadBalancerIPPool".to_string(),
                             };
                             self.open_yaml_view(p_name, p_kind, p_ns).await;
@@ -9091,7 +9201,11 @@ impl App {
                 }
             }
         };
-        let ns = if is_cluster_scoped { None } else { namespace.clone() };
+        let ns = if is_cluster_scoped {
+            None
+        } else {
+            namespace.clone()
+        };
         let ns_task = ns.clone();
 
         let yaml_text = tokio::task::spawn(async move {
@@ -9111,7 +9225,11 @@ impl App {
                         plural: crd.plural,
                     };
                     let api: kube::Api<kube::core::DynamicObject> = if crd.namespaced {
-                        kube::Api::namespaced_with(client.clone(), ns.as_deref().unwrap_or("default"), &ar)
+                        kube::Api::namespaced_with(
+                            client.clone(),
+                            ns.as_deref().unwrap_or("default"),
+                            &ar,
+                        )
                     } else {
                         kube::Api::all_with(client.clone(), &ar)
                     };
@@ -9126,7 +9244,11 @@ impl App {
                 if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
                     let ar = kube::core::ApiResource::from_gvk(&gvk);
                     let api: kube::Api<kube::core::DynamicObject> = if namespaced {
-                        kube::Api::namespaced_with(client.clone(), ns.as_deref().unwrap_or("default"), &ar)
+                        kube::Api::namespaced_with(
+                            client.clone(),
+                            ns.as_deref().unwrap_or("default"),
+                            &ar,
+                        )
                     } else {
                         kube::Api::all_with(client.clone(), &ar)
                     };
@@ -9138,7 +9260,10 @@ impl App {
                     }
                 }
 
-                if k.starts_with("CiliumBGP") || k.starts_with("ciliumbgp") || k.starts_with("CiliumLoadBalancer") {
+                if k.starts_with("CiliumBGP")
+                    || k.starts_with("ciliumbgp")
+                    || k.starts_with("CiliumLoadBalancer")
+                {
                     let k_lower = k.to_lowercase();
                     let plural = if k_lower.ends_with('y') {
                         format!("{}ies", &k_lower[..k_lower.len() - 1])
@@ -9155,7 +9280,8 @@ impl App {
                             kind: k.clone(),
                             plural: plural.clone(),
                         };
-                        let api: kube::Api<kube::core::DynamicObject> = kube::Api::all_with(client.clone(), &ar);
+                        let api: kube::Api<kube::core::DynamicObject> =
+                            kube::Api::all_with(client.clone(), &ar);
                         if let Ok(mut obj) = api.get(&n).await {
                             obj.metadata.managed_fields = None;
                             if let Ok(y) = serde_yaml::to_string(&obj) {
@@ -9165,12 +9291,13 @@ impl App {
                     }
                 }
 
-                if k.eq_ignore_ascii_case("application")
-                    || k.eq_ignore_ascii_case("applications")
-                {
+                if k.eq_ignore_ascii_case("application") || k.eq_ignore_ascii_case("applications") {
                     let ar = srelens_kube::argo::argo_application_resource();
-                    let api: kube::Api<kube::core::DynamicObject> =
-                        kube::Api::namespaced_with(client.clone(), ns.as_deref().unwrap_or("argocd"), &ar);
+                    let api: kube::Api<kube::core::DynamicObject> = kube::Api::namespaced_with(
+                        client.clone(),
+                        ns.as_deref().unwrap_or("argocd"),
+                        &ar,
+                    );
                     if let Ok(mut obj) = api.get(&n).await {
                         obj.metadata.managed_fields = None;
                         if let Ok(y) = serde_yaml::to_string(&obj) {
@@ -9214,10 +9341,7 @@ impl App {
             }
 
             if is_cluster_scoped || ns.is_none() {
-                format!(
-                    "# Error: Unable to fetch live manifest for {}/{}\n",
-                    k, n
-                )
+                format!("# Error: Unable to fetch live manifest for {}/{}\n", k, n)
             } else {
                 format!(
                     "# Error: Unable to fetch live manifest for {}/{} in namespace {}\n",
@@ -9279,7 +9403,11 @@ impl App {
                 }
             }
         };
-        let ns = if is_cluster_scoped { None } else { namespace.clone() };
+        let ns = if is_cluster_scoped {
+            None
+        } else {
+            namespace.clone()
+        };
         let ns_task = ns.clone();
 
         let desc_text = tokio::task::spawn(async move {
@@ -9474,10 +9602,7 @@ impl App {
             }
 
             if is_cluster_scoped || ns.is_none() {
-                format!(
-                    "Error: Unable to describe {}/{}\n",
-                    k, n
-                )
+                format!("Error: Unable to describe {}/{}\n", k, n)
             } else {
                 format!(
                     "Error: Unable to describe {}/{} in namespace {}\n",
@@ -11144,6 +11269,135 @@ impl App {
     }
 
     pub async fn execute_modal_confirm(&mut self, action_name: String) {
+        if action_name.starts_with("bulk_delete:") {
+            let payload = &action_name["bulk_delete:".len()..];
+            if let Ok(targets) = serde_json::from_str::<Vec<(String, String, String)>>(payload) {
+                let total = targets.len();
+                let mut succeeded: Vec<(String, String)> = Vec::new();
+                let mut fail_count = 0;
+                let mut last_err = String::new();
+
+                let ctx = self.active_context.clone();
+                let cache = self.client_cache.clone();
+
+                match cache.get(&ctx).await {
+                    Ok(client) => {
+                        for (kind, ns, name) in &targets {
+                            let maybe_ar = if let Some((gvk, namespaced)) =
+                                srelens_kube::manifest::gvk_for(kind)
+                            {
+                                Some((kube::core::ApiResource::from_gvk(&gvk), namespaced))
+                            } else if let Some(crd) = self.crds.iter().find(|c| {
+                                c.kind.eq_ignore_ascii_case(kind)
+                                    || c.plural.eq_ignore_ascii_case(kind)
+                            }) {
+                                let api_version = if crd.group.is_empty() {
+                                    crd.version.clone()
+                                } else {
+                                    format!("{}/{}", crd.group, crd.version)
+                                };
+                                Some((
+                                    kube::core::ApiResource {
+                                        group: crd.group.clone(),
+                                        version: crd.version.clone(),
+                                        api_version,
+                                        kind: crd.kind.clone(),
+                                        plural: crd.plural.clone(),
+                                    },
+                                    crd.namespaced,
+                                ))
+                            } else if kind.eq_ignore_ascii_case("application")
+                                || kind.eq_ignore_ascii_case("applications")
+                            {
+                                Some((srelens_kube::argo::argo_application_resource(), true))
+                            } else {
+                                None
+                            };
+
+                            if let Some((ar, namespaced)) = maybe_ar {
+                                let api: kube::Api<kube::core::DynamicObject> =
+                                    if namespaced && !ns.is_empty() {
+                                        kube::Api::namespaced_with(client.clone(), ns, &ar)
+                                    } else {
+                                        kube::Api::all_with(client.clone(), &ar)
+                                    };
+
+                                match api.delete(name, &kube::api::DeleteParams::default()).await {
+                                    Ok(_) => {
+                                        succeeded.push((ns.clone(), name.clone()));
+                                    }
+                                    Err(err) => {
+                                        fail_count += 1;
+                                        last_err = err.to_string();
+                                    }
+                                }
+                            } else {
+                                fail_count += 1;
+                                last_err = format!("Unknown kind '{}'", kind);
+                            }
+                        }
+
+                        if let ActiveView::Table(table) = &mut self.active_view {
+                            if !succeeded.is_empty() {
+                                table.raw_items.retain(|item| {
+                                    let item_name = item
+                                        .get("name")
+                                        .or_else(|| item.pointer("/metadata/name"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let item_ns = item
+                                        .get("namespace")
+                                        .or_else(|| item.pointer("/metadata/namespace"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    !succeeded.iter().any(|(s_ns, s_name)| {
+                                        s_name == item_name
+                                            && (s_ns == item_ns
+                                                || s_ns.is_empty()
+                                                || item_ns.is_empty())
+                                    })
+                                });
+                                table.marked_indices.clear();
+                                let filter = self.filter_buffer.clone();
+                                table.apply_filter(&filter);
+                            }
+                        }
+
+                        if let ActiveView::Argo(_) = &self.active_view {
+                            self.refresh_argo_applications_ext(true);
+                        }
+
+                        if fail_count == 0 {
+                            self.set_toast(
+                                format!("✓ Deleted {} resources", succeeded.len()),
+                                Theme::status_ok(),
+                            );
+                        } else if !succeeded.is_empty() {
+                            self.set_toast(
+                                format!(
+                                    "Deleted {}/{} resources ({} failed: {})",
+                                    succeeded.len(),
+                                    total,
+                                    fail_count,
+                                    last_err
+                                ),
+                                Theme::status_warn(),
+                            );
+                        } else {
+                            self.set_toast(
+                                format!("Delete failed: {}", last_err),
+                                Theme::status_error(),
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        self.set_toast(format!("Connection error: {}", err), Theme::status_error());
+                    }
+                }
+            }
+            return;
+        }
+
         if action_name.starts_with("delete:") {
             // Format: "delete:<kind>:<namespace>:<name>"
             let parts: Vec<&str> = action_name.splitn(4, ':').collect();
@@ -11222,6 +11476,23 @@ impl App {
                                         });
                                         let filter = self.filter_buffer.clone();
                                         table.apply_filter(&filter);
+                                    }
+                                    if let ActiveView::NodeInspector(ref mut ni) =
+                                        &mut self.active_view
+                                    {
+                                        if let Some(ref mut details) = ni.details {
+                                            details.pods.retain(|p| {
+                                                !(p.name == name
+                                                    && (p.namespace == ns
+                                                        || ns.is_empty()
+                                                        || p.namespace.is_empty()))
+                                            });
+                                            if ni.selected_pod_idx >= details.pods.len()
+                                                && !details.pods.is_empty()
+                                            {
+                                                ni.selected_pod_idx = details.pods.len() - 1;
+                                            }
+                                        }
                                     }
                                     if let ActiveView::Argo(_) = &self.active_view {
                                         self.refresh_argo_applications_ext(true);
@@ -12234,9 +12505,17 @@ impl App {
                     bgp_view::BgpTab::IpPools => bgp.filtered_pools().len(),
                 };
                 let total = match bgp.active_tab {
-                    bgp_view::BgpTab::Peers => bgp.summary.as_ref().map(|s| s.peers.len()).unwrap_or(0),
-                    bgp_view::BgpTab::Services => bgp.summary.as_ref().map(|s| s.advertised_services.len()).unwrap_or(0),
-                    bgp_view::BgpTab::IpPools => bgp.summary.as_ref().map(|s| s.ip_pools.len()).unwrap_or(0),
+                    bgp_view::BgpTab::Peers => {
+                        bgp.summary.as_ref().map(|s| s.peers.len()).unwrap_or(0)
+                    }
+                    bgp_view::BgpTab::Services => bgp
+                        .summary
+                        .as_ref()
+                        .map(|s| s.advertised_services.len())
+                        .unwrap_or(0),
+                    bgp_view::BgpTab::IpPools => {
+                        bgp.summary.as_ref().map(|s| s.ip_pools.len()).unwrap_or(0)
+                    }
                 };
                 (count, total, false)
             }
