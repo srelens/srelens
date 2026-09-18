@@ -476,16 +476,15 @@ fn cli_parses_mcp_subcommand_and_flags() {
     assert!(cli.command.is_none());
 }
 
-#[test]
-fn mcp_binary_subcommand_startup_initializes() {
+async fn run_binary_mcp_init(args: &[&str]) -> serde_json::Value {
     let binary_path = env!("CARGO_BIN_EXE_srelens-tui");
-    let mut child = std::process::Command::new(binary_path)
-        .arg("mcp")
+    let mut child = tokio::process::Command::new(binary_path)
+        .args(args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("spawn srelens-tui mcp binary");
+        .unwrap_or_else(|e| panic!("failed to spawn binary with {args:?}: {e}"));
 
     let init_req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -498,65 +497,37 @@ fn mcp_binary_subcommand_startup_initializes() {
         }
     });
 
-    use std::io::{BufRead, BufReader, Write};
     let mut stdin = child.stdin.take().expect("child stdin");
-    writeln!(stdin, "{}", init_req).expect("write initialize");
+    tokio::io::AsyncWriteExt::write_all(&mut stdin, format!("{}\n", init_req).as_bytes())
+        .await
+        .expect("write initialize");
 
     let stdout = child.stdout.take().expect("child stdout");
-    let mut reader = BufReader::new(stdout);
+    let mut reader = tokio::io::BufReader::new(stdout);
     let mut response_line = String::new();
-    reader
-        .read_line(&mut response_line)
-        .expect("read initialize response");
 
-    let resp: serde_json::Value =
-        serde_json::from_str(&response_line).expect("valid JSON response");
-    assert_eq!(resp.get("id").and_then(serde_json::Value::as_i64), Some(1));
-    let server_name = resp
-        .get("result")
-        .and_then(|r| r.get("serverInfo"))
-        .and_then(|info| info.get("name"))
-        .and_then(serde_json::Value::as_str);
-    assert_eq!(server_name, Some("srelens"));
+    let read_res = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut response_line),
+    )
+    .await;
 
-    let _ = child.kill();
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+
+    match read_res {
+        Ok(Ok(n)) if n > 0 => {}
+        Ok(Ok(_)) => panic!("child stdout closed unexpectedly for args {args:?}"),
+        Ok(Err(e)) => panic!("read error from child for args {args:?}: {e}"),
+        Err(_) => panic!("timed out waiting for MCP initialize response for args {args:?}"),
+    }
+
+    serde_json::from_str(&response_line).expect("valid JSON response")
 }
 
-#[test]
-fn mcp_binary_flag_startup_initializes() {
-    let binary_path = env!("CARGO_BIN_EXE_srelens-tui");
-    let mut child = std::process::Command::new(binary_path)
-        .arg("--mcp-stdio")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn srelens-tui --mcp-stdio binary");
-
-    let init_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "test-bin", "version": "1.0.0" }
-        }
-    });
-
-    use std::io::{BufRead, BufReader, Write};
-    let mut stdin = child.stdin.take().expect("child stdin");
-    writeln!(stdin, "{}", init_req).expect("write initialize");
-
-    let stdout = child.stdout.take().expect("child stdout");
-    let mut reader = BufReader::new(stdout);
-    let mut response_line = String::new();
-    reader
-        .read_line(&mut response_line)
-        .expect("read initialize response");
-
-    let resp: serde_json::Value =
-        serde_json::from_str(&response_line).expect("valid JSON response");
+#[tokio::test]
+async fn mcp_binary_subcommand_startup_initializes() {
+    let resp = run_binary_mcp_init(&["mcp"]).await;
     assert_eq!(resp.get("id").and_then(serde_json::Value::as_i64), Some(1));
     let server_name = resp
         .get("result")
@@ -564,6 +535,16 @@ fn mcp_binary_flag_startup_initializes() {
         .and_then(|info| info.get("name"))
         .and_then(serde_json::Value::as_str);
     assert_eq!(server_name, Some("srelens"));
+}
 
-    let _ = child.kill();
+#[tokio::test]
+async fn mcp_binary_flag_startup_initializes() {
+    let resp = run_binary_mcp_init(&["--mcp-stdio"]).await;
+    assert_eq!(resp.get("id").and_then(serde_json::Value::as_i64), Some(1));
+    let server_name = resp
+        .get("result")
+        .and_then(|r| r.get("serverInfo"))
+        .and_then(|info| info.get("name"))
+        .and_then(serde_json::Value::as_str);
+    assert_eq!(server_name, Some("srelens"));
 }
