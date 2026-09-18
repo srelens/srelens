@@ -943,8 +943,10 @@ it("resets the visible page after a refresh", async () => {
   fireEvent.click(screen.getByRole("button", { name: /Show 50 more/ }));
   expect(screen.getByText("app-100")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-  await waitFor(() => expect(screen.queryByText("app-100")).toBeNull());
-  expect(screen.getByText("app-0")).toBeTruthy();
+  await waitFor(() => {
+    expect(screen.queryByText("app-100")).toBeNull();
+    expect(screen.getByText("app-0")).toBeTruthy();
+  });
 });
 
 it("advances app resource ages without refreshing backend data", async () => {

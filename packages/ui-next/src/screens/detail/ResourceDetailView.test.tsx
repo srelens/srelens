@@ -380,6 +380,24 @@ describe("ResourceDetailView", () => {
     expect(normalPill.getAttribute("data-bad")).toBeNull();
   });
 
+  it("says when the Events pane stopped at the shared list row cap", async () => {
+    getObject.mockResolvedValue({ object: POD });
+    listEvents.mockResolvedValue({
+      events: [
+        { name: "web-1.abc", namespace: "default", type: "Warning", reason: "BackOff", object: "Pod/web-1", message: "container crashed", age: "5m", count: 1 },
+      ],
+      truncated: true,
+    });
+    const { getByRole, getByText } = render(
+      <ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />,
+    );
+    await waitFor(() => expect(getByRole("tab", { name: "Events" })).toBeDefined());
+    await userEvent.click(getByRole("tab", { name: "Events" }));
+    await waitFor(() => expect(getByText("BackOff")).toBeDefined());
+    expect(getByText(/Showing the first 1 events/i)).toBeTruthy();
+    expect(getByText(/shared list row cap/i)).toBeTruthy();
+  });
+
   it("does not query the cluster's CRDs to fetch a built-in kind's manifest", async () => {
     getObject.mockResolvedValue({ object: POD });
     const { getByRole } = render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
