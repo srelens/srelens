@@ -375,7 +375,9 @@ pub const APPLICATION_GONE: &str =
 
 /// Whether a write's error means what the operator reviewed is out of date —
 /// the Application changed, was replaced, or is gone — so the caller can reload
-/// what it shows before they try again.
+/// what it shows before they try again. Only a refusal the API server itself
+/// wrote is mapped to these messages, so an endpoint failure with the same
+/// HTTP code (a proxy's plain-text 404) is never read as one.
 pub fn is_stale_review(err: &str) -> bool {
     err.contains(APPLICATION_CHANGED) || err.contains(APPLICATION_GONE)
 }
@@ -937,16 +939,24 @@ async fn patch_reviewed_application(
     )
     .await
     .map_err(|e| match e {
+        // Each arm also requires the reason the API server itself writes. A
+        // proxy or router in front of it can answer with the same HTTP code and
+        // a plain-text body, which kube-client wraps as `Error::Api` with the
+        // reason "Failed to parse error data": that is an endpoint failure, not
+        // a fact about the Application, so it falls through as itself.
+        //
         // resourceVersion moved on (or the object was replaced, which always
         // moves it): the optimistic-concurrency precondition failed.
-        kube::Error::Api(ref s) if s.code == 409 => {
+        kube::Error::Api(ref s) if s.code == 409 && s.reason == "Conflict" => {
             format!("{failed} '{target}': {APPLICATION_CHANGED}")
         }
         // A uid that no longer matches is rejected as an immutable-field change.
-        kube::Error::Api(ref s) if s.code == 422 && s.message.contains("uid") => {
+        kube::Error::Api(ref s)
+            if s.code == 422 && s.reason == "Invalid" && s.message.contains("uid") =>
+        {
             format!("{failed} '{target}': {APPLICATION_CHANGED}")
         }
-        kube::Error::Api(ref s) if s.code == 404 => {
+        kube::Error::Api(ref s) if s.code == 404 && s.reason == "NotFound" => {
             format!("{failed} '{target}': {APPLICATION_GONE}")
         }
         e => format!("{failed} '{target}': {e}"),
@@ -1570,10 +1580,30 @@ mod tests {
     /// A client whose every request is recorded and answered with `status`
     /// (a `Status` body carrying `message` when it is an error).
     fn mock_client(status: u16, message: &'static str) -> (kube::Client, Requests) {
+        // The reason the API server itself gives for each status.
+        let reason = match status {
+            403 => "Forbidden",
+            404 => "NotFound",
+            409 => "Conflict",
+            422 => "Invalid",
+            _ => "",
+        };
+        mock_client_with_error_body(
+            status,
+            serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","code":status,"reason":reason,"message":message})
+                .to_string(),
+        )
+    }
+
+    /// A client answering every request with `status`, and, when that is an
+    /// error, with `error_body` verbatim — which need not be a `Status`.
+    fn mock_client_with_error_body(status: u16, error_body: String) -> (kube::Client, Requests) {
+        let error_body = Arc::new(error_body);
         let requests: Requests = Arc::new(std::sync::Mutex::new(vec![]));
         let captured = requests.clone();
         let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
             let captured = captured.clone();
+            let error_body = error_body.clone();
             async move {
                 let line = format!("{} {}", request.method(), request.uri());
                 let body = request.into_body().collect_bytes().await.unwrap();
@@ -1584,15 +1614,15 @@ mod tests {
                 };
                 captured.lock().unwrap().push((line, value));
                 let body = if status >= 400 {
-                    serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","code":status,"reason":"Rejected","message":message})
+                    error_body.to_string()
                 } else {
-                    serde_json::json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"name":"apps","namespace":"team","uid":"u","resourceVersion":"3"}})
+                    serde_json::json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"name":"apps","namespace":"team","uid":"u","resourceVersion":"3"}}).to_string()
                 };
                 Ok::<_, std::convert::Infallible>(
                     http::Response::builder()
                         .status(status)
                         .header("content-type", "application/json")
-                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .body(kube::client::Body::from(body.into_bytes()))
                         .unwrap(),
                 )
             }
@@ -1706,6 +1736,33 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("forbidden"), "{err}");
         assert!(!is_stale_review(&err));
+    }
+
+    #[tokio::test]
+    async fn an_error_the_api_server_did_not_write_is_not_a_stale_review() {
+        // A router or proxy in front of the API server answers with plain text;
+        // kube-client wraps it as `Error::Api` with the HTTP code and the reason
+        // "Failed to parse error data". That says the endpoint failed, not that
+        // the Application is gone or changed, so it must not claim either or
+        // make the TUI reload.
+        for status in [404, 409, 422] {
+            let (client, requests) =
+                mock_client_with_error_body(status, format!("{status} page not found uid"));
+            let err = sync_with_client(client, &reviewed("u", "2"), true, false)
+                .await
+                .unwrap_err();
+            assert!(!is_stale_review(&err), "{status}: {err}");
+            assert!(err.contains("page not found"), "{status}: {err}");
+            assert_eq!(requests.lock().unwrap().len(), 1);
+
+            let (client, _) =
+                mock_client_with_error_body(status, format!("{status} page not found uid"));
+            let err = toggle_auto_sync_with_client(client, &reviewed("u", "2"), true)
+                .await
+                .unwrap_err();
+            assert!(!is_stale_review(&err), "{status}: {err}");
+            assert!(err.contains("page not found"), "{status}: {err}");
+        }
     }
 
     #[tokio::test]

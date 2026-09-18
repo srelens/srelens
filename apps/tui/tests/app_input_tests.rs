@@ -5635,6 +5635,12 @@ async fn a_write_refused_as_stale_reloads_the_applications() {
 
     app.handle_argo_action_result("Sync 'billing'", Err("connection refused".to_string()));
     assert!(!app.argo_refreshing, "an unrelated failure reloads nothing");
+    // A proxy's plain-text 404 is an endpoint failure, not a gone Application.
+    app.handle_argo_action_result(
+        "Sync 'billing'",
+        Err("Failed to trigger sync for 'team/billing': ApiError: 404 page not found: Failed to parse error data (ErrorResponse { status: \"Failure\", message: \"404 page not found\", reason: \"Failed to parse error data\", code: 404 })".to_string()),
+    );
+    assert!(!app.argo_refreshing, "an endpoint 404 reloads nothing");
 
     let err = format!(
         "Failed to trigger sync for 'team/billing': {}",
