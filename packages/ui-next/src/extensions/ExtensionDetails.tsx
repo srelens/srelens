@@ -10,6 +10,7 @@ import {
 import { CodeEditor } from "@srelens/ui-kit";
 import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionControls } from "./ExtensionControls";
+import { escapeFormatCharacters } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
 
 const facts = new Map(CAPABILITY_CATALOG.map((capability) => [capability.id, capability]));
@@ -100,14 +101,10 @@ export function ExtensionDetails({
 
       <h3>Manifest</h3>
       {/* A stored manifest can carry a format character this host now refuses (an app
-          installed before the rule is quarantined, not rewritten). JSON escapes control
-          characters but not those, so they are written as JSON escapes here rather than drawn:
-          one `\uXXXX` per UTF-16 unit, so a code point above U+FFFF (a tag character, say)
-          becomes its surrogate pair and the text still reads back as the same manifest. */}
+          installed before the rule is quarantined, not rewritten), so they are written as
+          JSON escapes rather than drawn. The install review shows manifests the same way. */}
       <CodeEditor
-        value={JSON.stringify(manifest, null, 2).replace(/\p{Cf}/gu, (c) =>
-          c.split("").map((unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`).join(""),
-        )}
+        value={escapeFormatCharacters(JSON.stringify(manifest, null, 2))}
         readOnly
         language="none"
         ariaLabel={`${extensionLabel(plugin)} manifest`}
