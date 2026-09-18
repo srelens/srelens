@@ -88,6 +88,13 @@ describe("listEvents", () => {
     const out = await listEvents("ctx", null, undefined, invoke as never);
     expect(out.events?.map((e) => e.namespace)).toEqual(["shop", ""]);
   });
+
+  it("preserves a truncation marker from the backend", async () => {
+    const invoke = vi.fn().mockResolvedValue({ events: [], truncated: true });
+    const out = await listEvents("ctx", "ns", undefined, invoke);
+    expect(out.truncated).toBe(true);
+    expect(out.events).toEqual([]);
+  });
 });
 
 describe("applyManifest", () => {

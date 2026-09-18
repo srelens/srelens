@@ -15,6 +15,7 @@ import {
   FilterBar,
   LiveSignal,
   LoadingState,
+  Alert,
   ResizeHandle,
   Screen,
   SideRail,
@@ -559,6 +560,15 @@ function KindList({
         // anyone. The table runs flush to the panel, so the alert carries
         // its own inset rather than borrowing the container's.
         <FailureAlert title={`These ${lower} are stale`} error={list.error} className="mx-3 mt-3 mb-3" />
+      )}
+      {showRows && list.truncated && (
+        <Alert
+          tone="info"
+          title={`Showing the first ${rows.length.toLocaleString()} ${lower}`}
+          className="mx-3 mt-3 mb-3"
+        >
+          More remain on the cluster. This list stops at the shared list row cap.
+        </Alert>
       )}
       {crd ? (
         // The rail is the whole of what a custom resource's list adds. It is

@@ -185,7 +185,7 @@ function Events({
   const [visible, setVisible] = useState(PAGE);
   useEffect(() => {
     setVisible(PAGE);
-  }, [plugin.manifest.id, config.capability, context, namespace, search, refresh]);
+  }, [plugin.manifest.id, plugin.revision, config.capability, context, namespace, search, refresh]);
   if (result.status === "error")
     return <ErrorNotice cluster message={result.error} retry={result.reload} />;
   if (result.status === "loading")

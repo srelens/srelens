@@ -66,7 +66,11 @@ export function customDescriptor(crd: CrdRef): KindDescriptor<CustomRow> {
     source: "poll",
     scope: crd.namespaced ? "namespaced" : "cluster",
     load: (context, namespace) =>
-      listCustomResource(context, crd, namespace || null).then((o) => ({ rows: o.items, error: o.error })),
+      listCustomResource(context, crd, namespace || null).then((o) => ({
+        rows: o.items,
+        truncated: o.truncated,
+        error: o.error,
+      })),
     actions: CUSTOM_RESOURCE_ACTIONS,
   };
 }

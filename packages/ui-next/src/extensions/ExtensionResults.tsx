@@ -155,7 +155,7 @@ export function ExtensionResults({
   const [visible, setVisible] = useState(PAGE);
   useEffect(() => {
     setVisible(PAGE);
-  }, [scope, search]);
+  }, [scope, search, refresh, data.status]);
   if (!context)
     return (
       <p className="extension-message">
