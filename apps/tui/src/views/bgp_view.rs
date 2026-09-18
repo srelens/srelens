@@ -814,7 +814,7 @@ fn render_services_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
                 Style::default().fg(Theme::dim()),
             ),
             Span::styled(
-                format!("{:<col_ip$} ", s.load_balancer_ip),
+                format!("{:<col_ip$} ", truncate_str(&s.load_balancer_ip, col_ip)),
                 Style::default()
                     .fg(Theme::yellow())
                     .add_modifier(Modifier::BOLD),

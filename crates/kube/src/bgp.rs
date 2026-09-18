@@ -1136,10 +1136,11 @@ fn parse_single_peer_status(p: &Value, fallback_local_asn: u32) -> Option<LiveBg
         .or_else(|| p.get("state"))
         .or_else(|| p.get("session_state"))
         .or_else(|| p.get("status"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("Established");
+        .and_then(|v| v.as_str());
 
-    let state = BgpSessionState::parse(state_str);
+    let state = state_str
+        .map(BgpSessionState::parse)
+        .unwrap_or(BgpSessionState::Unknown);
 
     let uptime = p
         .get("uptime")
