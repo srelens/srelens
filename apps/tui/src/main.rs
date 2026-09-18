@@ -24,9 +24,11 @@ mod agent;
 mod ai_config;
 mod ai_skills;
 mod app;
+mod cli;
 mod commands;
 mod deep_link;
 mod event;
+mod mcp_server;
 mod sink;
 mod theme;
 mod tui_config;
@@ -36,60 +38,11 @@ mod views;
 use srelens_tui::self_update;
 
 use app::{App, SuspendAction};
+use cli::{Cli, CliCommand};
 use commands::ResourceKind;
 use deep_link::DeepLink;
 use event::{AppEvent, EventHandler};
 use srelens_kube::kube;
-
-#[derive(Parser, Debug)]
-#[command(
-    name = "srelens-tui",
-    version,
-    about = "Kubernetes control room in your terminal — built in Rust with k9s navigation"
-)]
-pub struct Cli {
-    /// Kubernetes namespace to scope the initial view
-    #[arg(short, long)]
-    pub namespace: Option<String>,
-
-    /// Scope to all namespaces on launch
-    #[arg(short = 'A', long)]
-    pub all_namespaces: bool,
-
-    /// Kubernetes context to activate
-    #[arg(short, long)]
-    pub context: Option<String>,
-
-    /// Custom kubeconfig path
-    #[arg(short, long)]
-    pub kubeconfig: Option<PathBuf>,
-
-    #[command(subcommand)]
-    pub command: Option<CliCommand>,
-
-    /// Deep link URL (srelens://...) or resource target (e.g. pods, nodes, pods/my-pod)
-    pub target: Option<String>,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum CliCommand {
-    /// Print cluster overview & reachability information
-    Info,
-    /// Check toolbox diagnostics (kubectl, helm, krew)
-    Toolbox,
-    /// Print version information
-    Version,
-    /// Update srelens-tui to the latest release
-    Update {
-        /// Report what an update would do, without changing anything
-        #[arg(long)]
-        check: bool,
-        /// Which releases to consider: stable, or the rolling dev
-        /// pre-releases. Defaults to the channel this binary came from.
-        #[arg(long, value_parser = ["stable", "dev"])]
-        channel: Option<String>,
-    },
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -134,9 +87,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => srelens_registry::all_kubeconfig_paths(),
     };
 
+    // Run headless Model Context Protocol (MCP) server over stdio if requested via --mcp-stdio flag
+    if cli.mcp_stdio {
+        let server = mcp_server::build_stdio_mcp_server(
+            kubeconfig_paths,
+            cli.mcp_allow_destructive,
+            cli.mcp_allow_sensitive_reads,
+        );
+        srelens_mcp::stdio::serve(
+            server,
+            tokio::io::BufReader::new(tokio::io::stdin()),
+            tokio::io::stdout(),
+        )
+        .await?;
+        return Ok(());
+    }
+
     // Handle non-interactive CLI subcommands if requested
     if let Some(cmd) = cli.command {
         match cmd {
+            CliCommand::Mcp {
+                allow_destructive,
+                allow_sensitive_reads,
+            } => {
+                let server = mcp_server::build_stdio_mcp_server(
+                    kubeconfig_paths,
+                    allow_destructive,
+                    allow_sensitive_reads,
+                );
+                srelens_mcp::stdio::serve(
+                    server,
+                    tokio::io::BufReader::new(tokio::io::stdin()),
+                    tokio::io::stdout(),
+                )
+                .await?;
+                return Ok(());
+            }
             CliCommand::Version => {
                 println!("srelens-tui v{}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
