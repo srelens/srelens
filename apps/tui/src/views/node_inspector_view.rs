@@ -12,6 +12,7 @@ use ratatui::{
 use crate::theme::Theme;
 use crate::views::metrics_panel_view::{compute_y_bounds, format_axis_val};
 pub use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
 pub struct NodeInspectorState {
@@ -802,6 +803,12 @@ fn render_conditions_and_taints(f: &mut Frame, area: Rect, d: &NodeInspectorDeta
     f.render_widget(p, inner);
 }
 
+fn pad_display(s: &str, target_width: usize) -> String {
+    let w = UnicodeWidthStr::width(s);
+    let pad = target_width.saturating_sub(w);
+    format!("{}{:pad$}", s, "", pad = pad)
+}
+
 fn render_pods_table(
     f: &mut Frame,
     area: Rect,
@@ -860,29 +867,29 @@ fn render_pods_table(
 
     let mut lines = Vec::new();
 
-    // Dynamically calculate column widths based on longest content: max(header, items) + 1
-    let mut max_ns = "NAMESPACE".len();
-    let mut max_name = "NAME".len();
-    let mut max_ip = "IP".len();
-    let mut max_status = "STATUS".len();
-    let mut max_ready = "READY".len();
-    let mut max_rest = "REST".len();
-    let mut max_cpu = "CPU REQ".len();
-    let mut max_mem = "MEM REQ".len();
-    let mut max_gpu = "GPU REQ".len();
-    let mut max_age = "AGE".len();
+    // Column widths dynamically computed
+    let mut max_ns = UnicodeWidthStr::width("NAMESPACE");
+    let mut max_name = UnicodeWidthStr::width("NAME");
+    let mut max_ip = UnicodeWidthStr::width("IP");
+    let mut max_status = UnicodeWidthStr::width("STATUS");
+    let mut max_ready = UnicodeWidthStr::width("READY");
+    let mut max_rest = UnicodeWidthStr::width("REST");
+    let mut max_cpu = UnicodeWidthStr::width("CPU REQ");
+    let mut max_mem = UnicodeWidthStr::width("MEM REQ");
+    let mut max_gpu = UnicodeWidthStr::width("GPU REQ");
+    let mut max_age = UnicodeWidthStr::width("AGE");
 
     for pod in &d.pods {
-        max_ns = max_ns.max(pod.namespace.len());
-        max_name = max_name.max(pod.name.len());
+        max_ns = max_ns.max(UnicodeWidthStr::width(pod.namespace.as_str()));
+        max_name = max_name.max(UnicodeWidthStr::width(pod.name.as_str()));
         let ip_len = if pod.pod_ip.is_empty() {
             1
         } else {
-            pod.pod_ip.len()
+            UnicodeWidthStr::width(pod.pod_ip.as_str())
         };
         max_ip = max_ip.max(ip_len);
-        max_status = max_status.max(pod.phase.len());
-        max_ready = max_ready.max(pod.ready_containers.len());
+        max_status = max_status.max(UnicodeWidthStr::width(pod.phase.as_str()));
+        max_ready = max_ready.max(UnicodeWidthStr::width(pod.ready_containers.as_str()));
         let rest_len = if pod.restarts >= 1000 {
             5
         } else if pod.restarts >= 100 {
@@ -893,18 +900,22 @@ fn render_pods_table(
         max_rest = max_rest.max(rest_len);
 
         let cpu_len = if pod.cpu_requests_millicores >= 1000 {
-            format!("{:.1}c", pod.cpu_requests_millicores as f64 / 1000.0).len()
+            UnicodeWidthStr::width(
+                format!("{:.1}c", pod.cpu_requests_millicores as f64 / 1000.0).as_str(),
+            )
         } else if pod.cpu_requests_millicores > 0 {
-            format!("{}m", pod.cpu_requests_millicores).len()
+            UnicodeWidthStr::width(format!("{}m", pod.cpu_requests_millicores).as_str())
         } else {
             1
         };
         max_cpu = max_cpu.max(cpu_len);
 
         let mem_len = if pod.mem_requests_mib >= 1024 {
-            format!("{:.1} GiB", pod.mem_requests_mib as f64 / 1024.0).len()
+            UnicodeWidthStr::width(
+                format!("{:.1} GiB", pod.mem_requests_mib as f64 / 1024.0).as_str(),
+            )
         } else if pod.mem_requests_mib > 0 {
-            format!("{} MiB", pod.mem_requests_mib).len()
+            UnicodeWidthStr::width(format!("{} MiB", pod.mem_requests_mib).as_str())
         } else {
             1
         };
@@ -912,21 +923,19 @@ fn render_pods_table(
 
         let gpu_len = if pod.gpu_mem_requests_mib > 0 {
             if pod.gpu_mem_requests_mib >= 1024 {
-                format!("⚡ {:.1} GiB", pod.gpu_mem_requests_mib as f64 / 1024.0)
-                    .chars()
-                    .count()
+                UnicodeWidthStr::width(
+                    format!("⚡ {:.1} GiB", pod.gpu_mem_requests_mib as f64 / 1024.0).as_str(),
+                )
             } else {
-                format!("⚡ {} MiB", pod.gpu_mem_requests_mib)
-                    .chars()
-                    .count()
+                UnicodeWidthStr::width(format!("⚡ {} MiB", pod.gpu_mem_requests_mib).as_str())
             }
         } else if pod.gpu_requests > 0 {
-            format!("⚡ {} GPU", pod.gpu_requests).chars().count()
+            UnicodeWidthStr::width(format!("⚡ {} GPU", pod.gpu_requests).as_str())
         } else {
             1
         };
         max_gpu = max_gpu.max(gpu_len);
-        max_age = max_age.max(pod.age.len());
+        max_age = max_age.max(UnicodeWidthStr::width(pod.age.as_str()));
     }
 
     let ns_w = max_ns + 1;
@@ -944,61 +953,61 @@ fn render_pods_table(
     let header_line = Line::from(vec![
         Span::styled("  ", Style::default()),
         Span::styled(
-            format!("{:<width$}", "NAMESPACE", width = ns_w),
+            pad_display("NAMESPACE", ns_w),
             Style::default()
                 .fg(Theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<width$}", "NAME", width = name_w),
+            pad_display("NAME", name_w),
             Style::default()
                 .fg(Theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<width$}", "IP", width = ip_w),
+            pad_display("IP", ip_w),
             Style::default()
                 .fg(Theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<width$}", "STATUS", width = status_w),
+            pad_display("STATUS", status_w),
             Style::default()
                 .fg(Theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<width$}", "READY", width = ready_w),
+            pad_display("READY", ready_w),
             Style::default()
                 .fg(Theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<width$}", "REST", width = rest_w),
+            pad_display("REST", rest_w),
             Style::default()
                 .fg(Theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<width$}", "CPU REQ", width = cpu_w),
+            pad_display("CPU REQ", cpu_w),
             Style::default()
                 .fg(Theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<width$}", "MEM REQ", width = mem_w),
+            pad_display("MEM REQ", mem_w),
             Style::default()
                 .fg(Theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<width$}", "GPU REQ", width = gpu_w),
+            pad_display("GPU REQ", gpu_w),
             Style::default()
                 .fg(Theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:<width$}", "AGE", width = age_w),
+            pad_display("AGE", age_w),
             Style::default()
                 .fg(Theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
@@ -1086,11 +1095,11 @@ fn render_pods_table(
         let row = Line::from(vec![
             Span::styled(marker, marker_style),
             Span::styled(
-                format!("{:<width$}", ns_clean, width = ns_w),
+                pad_display(&ns_clean, ns_w),
                 Style::default().fg(Theme::CYAN).bg(row_bg),
             ),
             Span::styled(
-                format!("{:<width$}", name_clean, width = name_w),
+                pad_display(&name_clean, name_w),
                 Style::default()
                     .fg(if is_selected {
                         Theme::ACCENT
@@ -1105,19 +1114,19 @@ fn render_pods_table(
                     }),
             ),
             Span::styled(
-                format!("{:<width$}", ip_clean, width = ip_w),
+                pad_display(&ip_clean, ip_w),
                 Style::default().fg(Theme::DIM).bg(row_bg),
             ),
             Span::styled(
-                format!("{:<width$}", pod.phase, width = status_w),
+                pad_display(&pod.phase, status_w),
                 Style::default().fg(status_color).bg(row_bg),
             ),
             Span::styled(
-                format!("{:<width$}", pod.ready_containers, width = ready_w),
+                pad_display(&pod.ready_containers, ready_w),
                 Style::default().fg(Theme::FG).bg(row_bg),
             ),
             Span::styled(
-                format!("{:<width$}", pod.restarts, width = rest_w),
+                pad_display(&pod.restarts.to_string(), rest_w),
                 Style::default()
                     .fg(if pod.restarts > 0 {
                         Theme::YELLOW
@@ -1127,16 +1136,16 @@ fn render_pods_table(
                     .bg(row_bg),
             ),
             Span::styled(
-                format!("{:<width$}", cpu_str, width = cpu_w),
+                pad_display(&cpu_str, cpu_w),
                 Style::default().fg(Theme::FG).bg(row_bg),
             ),
             Span::styled(
-                format!("{:<width$}", mem_str, width = mem_w),
+                pad_display(&mem_str, mem_w),
                 Style::default().fg(Theme::FG).bg(row_bg),
             ),
-            Span::styled(format!("{:<width$}", gpu_str, width = gpu_w), gpu_style),
+            Span::styled(pad_display(&gpu_str, gpu_w), gpu_style),
             Span::styled(
-                format!("{:<width$}", age_clean, width = age_w),
+                pad_display(&age_clean, age_w),
                 Style::default().fg(Theme::DIM).bg(row_bg),
             ),
         ]);
