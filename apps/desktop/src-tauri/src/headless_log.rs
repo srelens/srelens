@@ -8,6 +8,8 @@
 //! Stderr only: on `--mcp-stdio`, stdout is the JSON-RPC channel and must stay
 //! parseable.
 
+use std::io::Write;
+
 use log::{Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
 
 struct StderrLogger;
@@ -19,7 +21,14 @@ impl Log for StderrLogger {
 
     fn log(&self, record: &Record<'_>) {
         if self.enabled(record.metadata()) {
-            eprintln!("{}: {}", record.level(), record.args());
+            // Not `eprintln!`: it panics when stderr is closed, and a supervisor
+            // that closed it must not turn a warning into a crash.
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "{}: {}",
+                record.level(),
+                record.args()
+            );
         }
     }
 
