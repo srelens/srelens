@@ -323,6 +323,18 @@ fn newest_events(
         .collect();
     (events, truncated)
 }
+/// Pins a merge patch to the object the operator reviewed. The API server enforces a
+/// `metadata.resourceVersion` carried in a patch as an optimistic-concurrency precondition
+/// (409 Conflict when the object has moved on), and rejects a `metadata.uid` that differs
+/// from the stored object's, so the write cannot land on a replacement created under the
+/// same name, nor on a newer version the operator never saw.
+pub(crate) fn pin_to_reviewed(patch: &mut Value, uid: &str, resource_version: &str) {
+    if patch.get("metadata").is_none() {
+        patch["metadata"] = json!({});
+    }
+    patch["metadata"]["uid"] = json!(uid);
+    patch["metadata"]["resourceVersion"] = json!(resource_version);
+}
 async fn execute(client: Client, input: ActionIn) -> Result<Value, String> {
     input.resource.validate()?;
     let token = std::time::SystemTime::now()
@@ -339,11 +351,7 @@ async fn execute(client: Client, input: ActionIn) -> Result<Value, String> {
     )
     .map_err(|e| e.to_string())?;
     guard_action(&current, &input.uid, &input.resource_version, &input.action)?;
-    if patch.get("metadata").is_none() {
-        patch["metadata"] = json!({});
-    }
-    patch["metadata"]["uid"] = json!(input.uid);
-    patch["metadata"]["resourceVersion"] = json!(input.resource_version);
+    pin_to_reviewed(&mut patch, &input.uid, &input.resource_version);
     api.patch(
         &input.resource.name,
         &PatchParams::default(),

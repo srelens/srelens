@@ -204,6 +204,60 @@ pub fn is_word_delete_key(key: &KeyEvent) -> bool {
         || (key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::CONTROL))
 }
 
+/// The confirmation payload for an Argo CD write on `app`: the context to send
+/// it to, the Application as listed — namespace, name, `uid` and
+/// `resourceVersion` — and the operation's own fields from `extra`.
+///
+/// The identity and version travel with the confirmation so the write is
+/// pinned to the object the operator reviewed: if it is deleted and recreated
+/// under the same name, or changes, while the dialog is open, the API server
+/// refuses the write instead of applying it to something unreviewed (#620).
+fn argo_confirm_payload(
+    ctx: &str,
+    app: &srelens_kube::argo::ArgoApplication,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "ctx": ctx,
+        "ns": app.namespace,
+        "name": app.name,
+        "uid": app.uid,
+        "resource_version": app.resource_version,
+    });
+    if let (Some(payload), serde_json::Value::Object(extra)) = (payload.as_object_mut(), extra) {
+        payload.extend(extra);
+    }
+    payload
+}
+
+/// Reads back what [`argo_confirm_payload`] wrote: the context, and the
+/// Application the operator reviewed. `None` when the payload names no
+/// Application. A missing identity is read as empty, which the caller refuses.
+fn parse_argo_confirm_payload(
+    payload: &serde_json::Value,
+) -> Option<(String, srelens_kube::argo::ReviewedApplication)> {
+    let field = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let name = field("name");
+    if name.is_empty() {
+        return None;
+    }
+    Some((
+        field("ctx"),
+        srelens_kube::argo::ReviewedApplication {
+            namespace: field("ns"),
+            name,
+            uid: field("uid"),
+            resource_version: field("resource_version"),
+        },
+    ))
+}
+
 impl App {
     pub async fn new(
         initial_context: Option<String>,
@@ -5262,19 +5316,17 @@ impl App {
                         }
                     }
                     KeyCode::Char('s') => {
-                        if let Some(app) = sel_app {
+                        if let Some(ref app) = sel_app {
                             let hub_info = if query_ctx != self.active_context {
                                 format!(" on hub cluster '{}'", query_ctx)
                             } else {
                                 String::new()
                             };
-                            let payload = serde_json::json!({
-                                "ctx": query_ctx,
-                                "ns": app.namespace,
-                                "name": app.name,
-                                "prune": false,
-                                "dry_run": false,
-                            });
+                            let payload = argo_confirm_payload(
+                                &query_ctx,
+                                app,
+                                serde_json::json!({"prune": false, "dry_run": false}),
+                            );
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Sync ArgoCD Application [{}]", app.name),
                                 message: format!(
@@ -5287,19 +5339,17 @@ impl App {
                         }
                     }
                     KeyCode::Char('S') => {
-                        if let Some(app) = sel_app {
+                        if let Some(ref app) = sel_app {
                             let hub_info = if query_ctx != self.active_context {
                                 format!(" on hub cluster '{}'", query_ctx)
                             } else {
                                 String::new()
                             };
-                            let payload = serde_json::json!({
-                                "ctx": query_ctx,
-                                "ns": app.namespace,
-                                "name": app.name,
-                                "prune": true,
-                                "dry_run": false,
-                            });
+                            let payload = argo_confirm_payload(
+                                &query_ctx,
+                                app,
+                                serde_json::json!({"prune": true, "dry_run": false}),
+                            );
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Sync ArgoCD Application with Prune [{}]", app.name),
                                 message: format!(
@@ -5312,7 +5362,7 @@ impl App {
                         }
                     }
                     KeyCode::Char('p') => {
-                        if let Some(app) = sel_app {
+                        if let Some(ref app) = sel_app {
                             let hub_info = if query_ctx != self.active_context {
                                 format!(" on hub cluster '{}'", query_ctx)
                             } else {
@@ -5324,12 +5374,11 @@ impl App {
                             } else {
                                 "Pause Auto-Sync (Incident Lever)"
                             };
-                            let payload = serde_json::json!({
-                                "ctx": query_ctx,
-                                "ns": app.namespace,
-                                "name": app.name,
-                                "enable": enable,
-                            });
+                            let payload = argo_confirm_payload(
+                                &query_ctx,
+                                app,
+                                serde_json::json!({"enable": enable}),
+                            );
                             self.modal = Some(Modal::Confirm {
                                 title: format!("{} [{}]", label, app.name),
                                 message: format!(
@@ -7122,13 +7171,11 @@ impl App {
                             } else {
                                 String::new()
                             };
-                            let payload = serde_json::json!({
-                                "ctx": query_ctx,
-                                "ns": app.namespace,
-                                "name": app.name,
-                                "prune": false,
-                                "dry_run": false,
-                            });
+                            let payload = argo_confirm_payload(
+                                &query_ctx,
+                                app,
+                                serde_json::json!({"prune": false, "dry_run": false}),
+                            );
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Sync ArgoCD Application [{}]", app.name),
                                 message: format!(
@@ -7147,13 +7194,11 @@ impl App {
                             } else {
                                 String::new()
                             };
-                            let payload = serde_json::json!({
-                                "ctx": query_ctx,
-                                "ns": app.namespace,
-                                "name": app.name,
-                                "prune": true,
-                                "dry_run": false,
-                            });
+                            let payload = argo_confirm_payload(
+                                &query_ctx,
+                                app,
+                                serde_json::json!({"prune": true, "dry_run": false}),
+                            );
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Sync ArgoCD Application with Prune [{}]", app.name),
                                 message: format!(
@@ -7178,12 +7223,11 @@ impl App {
                             } else {
                                 "Pause Auto-Sync (Incident Lever)"
                             };
-                            let payload = serde_json::json!({
-                                "ctx": query_ctx,
-                                "ns": app.namespace,
-                                "name": app.name,
-                                "enable": enable,
-                            });
+                            let payload = argo_confirm_payload(
+                                &query_ctx,
+                                app,
+                                serde_json::json!({"enable": enable}),
+                            );
                             self.modal = Some(Modal::Confirm {
                                 title: format!("{} [{}]", label, app.name),
                                 message: format!(
@@ -10257,24 +10301,29 @@ impl App {
     }
 
     pub fn handle_argo_action_result(&mut self, action: &str, result: Result<String, String>) {
+        // A write refused because the Application changed since it was
+        // reviewed reloads it too, so "refresh and try again" has something
+        // current to try again on.
+        let reload = match &result {
+            Ok(_) => true,
+            Err(err) => srelens_kube::argo::is_stale_review(err),
+        };
         match result {
-            Ok(msg) => {
-                self.set_toast(format!("✓ {}", msg), Theme::status_ok());
-                match &self.active_view {
-                    ActiveView::Argo(_) => self.refresh_argo_applications_ext(true),
-                    ActiveView::ArgoDetail(d) => {
-                        let name = d.app_name.clone();
-                        let ns = d.app_namespace.clone();
-                        self.reload_argo_detail(&name, &ns);
-                    }
-                    _ => {}
+            Ok(msg) => self.set_toast(format!("✓ {}", msg), Theme::status_ok()),
+            Err(err) => self.set_toast(
+                format!("⚠ {} failed: {}", action, err),
+                Theme::status_error(),
+            ),
+        }
+        if reload {
+            match &self.active_view {
+                ActiveView::Argo(_) => self.refresh_argo_applications_ext(true),
+                ActiveView::ArgoDetail(d) => {
+                    let name = d.app_name.clone();
+                    let ns = d.app_namespace.clone();
+                    self.reload_argo_detail(&name, &ns);
                 }
-            }
-            Err(err) => {
-                self.set_toast(
-                    format!("⚠ {} failed: {}", action, err),
-                    Theme::status_error(),
-                );
+                _ => {}
             }
         }
     }
@@ -10955,35 +11004,60 @@ impl App {
                         }
                     }
                     QuickActionId::ArgoSync => {
-                        let hub_ctx = if let ActiveView::Argo(ref argo) = self.active_view {
-                            argo.hub_context_name.clone()
-                        } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
-                            detail.hub_context.clone()
-                        } else {
-                            None
+                        let ns = namespace.unwrap_or_else(|| "argocd".to_string());
+                        // The sync is pinned to the Application as listed, so
+                        // it is looked up by namespace and name; one that is
+                        // not on screen has no reviewed identity to pin to.
+                        let is_reviewed = |a: &&srelens_kube::argo::ArgoApplication| {
+                            a.name == resource_name && a.namespace == ns
+                        };
+                        let (app_opt, hub_ctx) =
+                            if let ActiveView::Argo(ref argo) = self.active_view {
+                                (
+                                    argo.applications
+                                        .iter()
+                                        .chain(argo.all_applications.iter())
+                                        .find(is_reviewed)
+                                        .cloned(),
+                                    argo.hub_context_name.clone(),
+                                )
+                            } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                                (
+                                    detail.application.as_ref().filter(is_reviewed).cloned(),
+                                    detail.hub_context.clone(),
+                                )
+                            } else {
+                                (None, None)
+                            };
+                        let Some(app) = app_opt else {
+                            self.set_toast(
+                                format!(
+                                    "⚠ Cannot sync '{}/{}': the Application is not loaded; refresh and try again",
+                                    ns, resource_name
+                                ),
+                                Theme::status_error(),
+                            );
+                            return;
                         };
                         let query_ctx = hub_ctx
                             .as_deref()
                             .unwrap_or(&self.active_context)
                             .to_string();
-                        let ns = namespace.unwrap_or_else(|| "argocd".to_string());
-                        let payload = serde_json::json!({
-                            "ctx": query_ctx,
-                            "ns": ns,
-                            "name": resource_name,
-                            "prune": false,
-                            "dry_run": false,
-                        });
+                        let payload = argo_confirm_payload(
+                            &query_ctx,
+                            &app,
+                            serde_json::json!({"prune": false, "dry_run": false}),
+                        );
                         let hub_info = if query_ctx != self.active_context {
                             format!(" on hub cluster '{}'", query_ctx)
                         } else {
                             String::new()
                         };
                         self.modal = Some(Modal::Confirm {
-                            title: format!("Sync ArgoCD Application [{}]", resource_name),
+                            title: format!("Sync ArgoCD Application [{}]", app.name),
                             message: format!(
                                 "Trigger sync for '{}/{}'{hub_info}? (Prune: false)",
-                                ns, resource_name
+                                app.namespace, app.name
                             ),
                             action_name: format!("argo_sync:{}", payload),
                             is_destructive: false,
@@ -11780,46 +11854,29 @@ impl App {
                 );
             }
         } else if let Some(payload) = action_name.strip_prefix("argo_sync:") {
-            let parsed: Option<(String, String, String, bool, bool)> =
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
-                    let ctx = v
-                        .get("ctx")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let ns = v
-                        .get("ns")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = v
-                        .get("name")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string();
+            // Only the JSON payload carries the reviewed Application's uid and
+            // resourceVersion; a write that cannot be pinned to them is refused
+            // here rather than sent by namespace and name alone (#620).
+            let parsed = serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .and_then(|v| {
                     let prune = v.get("prune").and_then(|b| b.as_bool()).unwrap_or(false);
                     let dry_run = v.get("dry_run").and_then(|b| b.as_bool()).unwrap_or(false);
-                    if !name.is_empty() {
-                        Some((ctx, ns, name, prune, dry_run))
-                    } else {
-                        None
-                    }
-                } else {
-                    let parts: Vec<&str> = action_name.splitn(6, ':').collect();
-                    if parts.len() >= 6 {
-                        Some((
-                            parts[1].to_string(),
-                            parts[2].to_string(),
-                            parts[3].to_string(),
-                            parts[4] == "true",
-                            parts[5] == "true",
-                        ))
-                    } else {
-                        None
-                    }
-                };
+                    parse_argo_confirm_payload(&v).map(|(ctx, app)| (ctx, app, prune, dry_run))
+                });
 
-            if let Some((ctx, ns, name, prune, dry_run)) = parsed {
+            if let Some((ctx, app, prune, dry_run)) = parsed {
+                let name = app.name.clone();
+                if app.uid.is_empty() || app.resource_version.is_empty() {
+                    self.set_toast(
+                        format!(
+                            "⚠ Sync '{}' failed: the Application's reviewed identity is unknown; refresh and try again",
+                            name
+                        ),
+                        Theme::status_error(),
+                    );
+                    return;
+                }
                 let cache = self.client_cache.clone();
                 let event_tx = self.event_tx.clone();
                 let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
@@ -11829,10 +11886,9 @@ impl App {
                     if let Some(ref path) = hub_kubeconfig {
                         cache.ensure_paths(vec![path.clone()]).await;
                     }
-                    let res = srelens_kube::argo::trigger_argo_sync(
-                        &cache, &ctx, &app_name, &ns, prune, dry_run,
-                    )
-                    .await;
+                    let res =
+                        srelens_kube::argo::trigger_argo_sync(&cache, &ctx, &app, prune, dry_run)
+                            .await;
                     let action = format!("Sync '{}'", app_name);
                     let _ = event_tx.send(crate::event::AppEvent::ArgoActionResult {
                         action,
@@ -11847,44 +11903,27 @@ impl App {
                 );
             }
         } else if let Some(payload) = action_name.strip_prefix("argo_toggle_auto:") {
-            let parsed: Option<(String, String, String, bool)> =
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
-                    let ctx = v
-                        .get("ctx")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let ns = v
-                        .get("ns")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = v
-                        .get("name")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string();
+            // Pinned like a sync: see the `argo_sync:` arm above.
+            let parsed = serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .and_then(|v| {
                     let enable = v.get("enable").and_then(|b| b.as_bool()).unwrap_or(false);
-                    if !name.is_empty() {
-                        Some((ctx, ns, name, enable))
-                    } else {
-                        None
-                    }
-                } else {
-                    let parts: Vec<&str> = action_name.splitn(5, ':').collect();
-                    if parts.len() >= 5 {
-                        Some((
-                            parts[1].to_string(),
-                            parts[2].to_string(),
-                            parts[3].to_string(),
-                            parts[4] == "true",
-                        ))
-                    } else {
-                        None
-                    }
-                };
+                    parse_argo_confirm_payload(&v).map(|(ctx, app)| (ctx, app, enable))
+                });
 
-            if let Some((ctx, ns, name, enable)) = parsed {
+            if let Some((ctx, app, enable)) = parsed {
+                let name = app.name.clone();
+                if app.uid.is_empty() || app.resource_version.is_empty() {
+                    let action = if enable { "Enable" } else { "Pause" };
+                    self.set_toast(
+                        format!(
+                            "⚠ {} Auto-Sync for '{}' failed: the Application's reviewed identity is unknown; refresh and try again",
+                            action, name
+                        ),
+                        Theme::status_error(),
+                    );
+                    return;
+                }
                 let cache = self.client_cache.clone();
                 let event_tx = self.event_tx.clone();
                 let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
@@ -11894,10 +11933,8 @@ impl App {
                     if let Some(ref path) = hub_kubeconfig {
                         cache.ensure_paths(vec![path.clone()]).await;
                     }
-                    let res = srelens_kube::argo::toggle_argo_auto_sync(
-                        &cache, &ctx, &app_name, &ns, enable,
-                    )
-                    .await;
+                    let res =
+                        srelens_kube::argo::toggle_argo_auto_sync(&cache, &ctx, &app, enable).await;
                     let action = if enable {
                         format!("Enable Auto-Sync for '{}'", app_name)
                     } else {
