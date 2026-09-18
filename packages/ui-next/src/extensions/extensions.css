@@ -21,6 +21,9 @@
 }
 .extension-install {
   display: grid;
+  /* One track that never grows past the pane: a grid column is as wide as its widest
+     line by default, and a manifest's long lines would widen the whole review with it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   padding: 12px;
   border-bottom: 1px solid var(--rule, var(--fl-color-border));
@@ -334,6 +337,7 @@
 .extension-binding-table details tr:last-child td { border-bottom: 0; }
 .extension-details {
   display: grid;
+  grid-template-columns: minmax(0, 1fr); /* As .extension-install: the manifest scrolls, not the pane. */
   gap: 8px;
   padding: 10px 12px 14px;
   border-top: 1px solid var(--rule, var(--fl-color-border));
