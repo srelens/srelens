@@ -378,6 +378,27 @@ fn an_unsupported_api_range_is_reported_with_the_other_problems() {
 }
 
 #[test]
+fn too_many_printer_columns_are_refused_at_the_field_path() {
+    use srelens_plugin_host::MAX_PRINTER_COLUMNS;
+    let mut value = manifest();
+    let columns: Vec<_> = (0..=MAX_PRINTER_COLUMNS)
+        .map(|i| json!({"name": format!("Col{i}"), "jsonPath": ".status.x"}))
+        .collect();
+    value["capabilities"][0]["arguments"]["printerColumns"] = json!(columns);
+    let errors = errors(&value);
+    assert_eq!(
+        problems(&errors),
+        expected(&[(
+            "EXTENSION_INVALID_VALUE",
+            "capabilities[0].arguments.printerColumns"
+        )])
+    );
+    assert!(errors[0]
+        .message
+        .contains(&format!("at most {MAX_PRINTER_COLUMNS}")));
+}
+
+#[test]
 fn every_code_is_documented_in_the_specification() {
     let specification = include_str!("../../../docs/extensions/specification.md");
     for &each in ValidationCode::ALL {

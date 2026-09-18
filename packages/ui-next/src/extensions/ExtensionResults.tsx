@@ -149,6 +149,13 @@ export function ExtensionResults({
   const columns = data.data?.printerColumns ?? (Array.isArray(binding?.arguments.printerColumns)
     ? (binding.arguments.printerColumns as Array<{ name: string }>)
     : []);
+  // Bound how many matching rows enter the DOM; Load more reveals the next page
+  // of the already-capped backend result (#609).
+  const PAGE = 100;
+  const [visible, setVisible] = useState(PAGE);
+  useEffect(() => {
+    setVisible(PAGE);
+  }, [scope, search]);
   if (!context)
     return (
       <p className="extension-message">
@@ -195,10 +202,17 @@ export function ExtensionResults({
       .toLowerCase()
       .includes(search.toLowerCase()),
   );
+  const shown = rows.slice(0, visible);
+  const hidden = Math.max(0, rows.length - shown.length);
   return (
     <section className="extension-results" ref={listRow.ref}>
       <div className="extension-resource-list">
       {data.data?.columnsError && <p className="extension-message" role="status">Could not load CRD columns: {data.data.columnsError}. Showing app-defined columns.</p>}
+      {data.data?.truncated && (
+        <p className="extension-message" role="status">
+          Showing the first {data.data.items.length.toLocaleString()} resources; more remain on the cluster.
+        </p>
+      )}
       {!hideToolbar && (
         <div className="extension-toolbar">
           <span>
@@ -213,7 +227,7 @@ export function ExtensionResults({
           </Button>
         </div>
       )}
-      {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <ErrorNotice cluster message={data.error} retry={data.reload}/> : rows.length ? (
+      {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <ErrorNotice cluster message={data.error} retry={data.reload}/> : shown.length ? (
         <div className="extension-table-scroll">
           <table>
             <thead>
@@ -227,7 +241,7 @@ export function ExtensionResults({
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
+              {shown.map((row) => (
                 <tr key={`${row.namespace}/${row.name}`} aria-selected={selected?.scope===scope && selected.name===row.name && selected.namespace===row.namespace} onDoubleClick={openResource && binding?.target === "k8s.listCustomResource" ? ()=>openResource({id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:row.namespace,name:row.name}):undefined} onClick={binding?.target === "k8s.listCustomResource" ? ()=>setSelected({scope,name:row.name,namespace:row.namespace}):undefined}>
                   <td>
                     {binding?.target === "k8s.listCustomResource" ? <button className="extension-resource-link" ref={node=>{const key=`${row.namespace}/${row.name}`;if(node)rowButtons.current.set(key,node);else rowButtons.current.delete(key);}} onKeyDown={e=>{if(e.key==="Enter" && openResource){e.preventDefault();openResource({id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:row.namespace,name:row.name});}}} onClick={()=>setSelected({scope,name:row.name,namespace:row.namespace})}>{row.name}</button> : <span className="extension-resource-name" title={row.name}>{row.name}</span>}
@@ -248,6 +262,14 @@ export function ExtensionResults({
               ))}
             </tbody>
           </table>
+          {hidden > 0 && (
+            <p className="extension-message">
+              <Button variant="secondary" onClick={() => setVisible((n) => n + PAGE)}>
+                Show {Math.min(PAGE, hidden).toLocaleString()} more
+              </Button>
+              <span> · {hidden.toLocaleString()} matching rows not shown</span>
+            </p>
+          )}
         </div>
       ) : (
         <p className="extension-message">
