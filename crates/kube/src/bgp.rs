@@ -519,13 +519,6 @@ async fn discover_cilium_bgp(
     node_pod_cidrs: &HashMap<String, Vec<String>>,
     lb_services: &[(String, String, String, Option<String>)],
 ) -> Result<BgpClusterSummary, String> {
-    let mut neighbors: Vec<BgpNeighbor> = Vec::new();
-    let mut ip_pools: Vec<BgpIpPool> = Vec::new();
-    let mut bgp_node_set: BTreeSet<String> = BTreeSet::new();
-    let mut is_cilium_v2 = false;
-    let mut is_cilium_v2alpha1 = false;
-
-    // A. Load CiliumLoadBalancerIPPool (v2 / v2alpha1)
     let pool_items = list_dynamic_resource(
         client,
         &cilium_load_balancer_ip_pool_v2_resource(),
@@ -533,6 +526,87 @@ async fn discover_cilium_bgp(
     )
     .await;
 
+    let peer_cfg_items = list_dynamic_resource(
+        client,
+        &cilium_bgp_peer_config_v2_resource(),
+        &cilium_bgp_peer_config_v2alpha1_resource(),
+    )
+    .await;
+
+    let adv_items = list_dynamic_resource(
+        client,
+        &cilium_bgp_advertisement_v2_resource(),
+        &cilium_bgp_advertisement_v2alpha1_resource(),
+    )
+    .await;
+
+    let cluster_cfg_items = list_dynamic_resource(
+        client,
+        &cilium_bgp_cluster_config_v2_resource(),
+        &cilium_bgp_cluster_config_v2alpha1_resource(),
+    )
+    .await;
+
+    let node_cfg_items = list_dynamic_resource(
+        client,
+        &cilium_bgp_node_config_v2_resource(),
+        &cilium_bgp_node_config_v2alpha1_resource(),
+    )
+    .await;
+
+    let policy_api: Api<DynamicObject> =
+        Api::all_with(client.clone(), &cilium_bgp_peering_policy_resource());
+    let policy_items = match tokio::time::timeout(
+        request_timeout(),
+        policy_api.list(&ListParams::default()),
+    )
+    .await
+    {
+        Ok(Ok(list)) => list.items,
+        _ => Vec::new(),
+    };
+
+    let cnode_api: Api<DynamicObject> = Api::all_with(client.clone(), &cilium_node_resource());
+    let cnode_items =
+        match tokio::time::timeout(request_timeout(), cnode_api.list(&ListParams::default())).await
+        {
+            Ok(Ok(list)) => list.items,
+            _ => Vec::new(),
+        };
+
+    Ok(build_cilium_bgp_summary(
+        pool_items,
+        peer_cfg_items,
+        adv_items,
+        cluster_cfg_items,
+        node_cfg_items,
+        policy_items,
+        cnode_items,
+        node_labels,
+        node_pod_cidrs,
+        lb_services,
+    ))
+}
+
+pub(crate) fn build_cilium_bgp_summary(
+    pool_items: Vec<DynamicObject>,
+    peer_cfg_items: Vec<DynamicObject>,
+    adv_items: Vec<DynamicObject>,
+    cluster_cfg_items: Vec<DynamicObject>,
+    node_cfg_items: Vec<DynamicObject>,
+    policy_items: Vec<DynamicObject>,
+    cnode_items: Vec<DynamicObject>,
+    node_labels: &HashMap<String, BTreeMap<String, String>>,
+    node_pod_cidrs: &HashMap<String, Vec<String>>,
+    lb_services: &[(String, String, String, Option<String>)],
+) -> BgpClusterSummary {
+    let mut neighbors: Vec<BgpNeighbor> = Vec::new();
+    let mut ip_pools: Vec<BgpIpPool> = Vec::new();
+    let mut bgp_node_set: BTreeSet<String> = BTreeSet::new();
+    let mut is_cilium_v2 = false;
+    let mut is_cilium_v2alpha1 = false;
+
+    // A. Load CiliumLoadBalancerIPPool (v2 / v2alpha1)
     for obj in pool_items {
         is_cilium_v2 = true;
         let name = obj.metadata.name.clone().unwrap_or_default();
@@ -572,13 +646,6 @@ async fn discover_cilium_bgp(
 
     // B. Load CiliumBGPPeerConfig (v2 / v2alpha1)
     let mut peer_configs: HashMap<String, CiliumPeerConfigData> = HashMap::new();
-    let peer_cfg_items = list_dynamic_resource(
-        client,
-        &cilium_bgp_peer_config_v2_resource(),
-        &cilium_bgp_peer_config_v2alpha1_resource(),
-    )
-    .await;
-
     for obj in peer_cfg_items {
         is_cilium_v2 = true;
         let name = obj.metadata.name.clone().unwrap_or_default();
@@ -607,12 +674,6 @@ async fn discover_cilium_bgp(
 
     // C. Load CiliumBGPAdvertisement (v2 / v2alpha1)
     let mut export_pod_cidr_default = true;
-    let adv_items = list_dynamic_resource(
-        client,
-        &cilium_bgp_advertisement_v2_resource(),
-        &cilium_bgp_advertisement_v2alpha1_resource(),
-    )
-    .await;
     if !adv_items.is_empty() {
         is_cilium_v2 = true;
         export_pod_cidr_default = adv_items.iter().any(|adv| {
@@ -636,13 +697,6 @@ async fn discover_cilium_bgp(
     }
 
     // D. Load CiliumBGPClusterConfig (v2 / v2alpha1)
-    let cluster_cfg_items = list_dynamic_resource(
-        client,
-        &cilium_bgp_cluster_config_v2_resource(),
-        &cilium_bgp_cluster_config_v2alpha1_resource(),
-    )
-    .await;
-
     for obj in cluster_cfg_items {
         is_cilium_v2 = true;
         let pol_name = obj
@@ -758,13 +812,6 @@ async fn discover_cilium_bgp(
     }
 
     // E. Load CiliumBGPNodeConfig and Override (v2 / v2alpha1)
-    let node_cfg_items = list_dynamic_resource(
-        client,
-        &cilium_bgp_node_config_v2_resource(),
-        &cilium_bgp_node_config_v2alpha1_resource(),
-    )
-    .await;
-
     for obj in node_cfg_items {
         is_cilium_v2 = true;
         let node_name = obj.metadata.name.clone().unwrap_or_default();
@@ -787,98 +834,85 @@ async fn discover_cilium_bgp(
     }
 
     // F. Load CiliumBGPPeeringPolicy (v2alpha1 Legacy)
-    let policy_api: Api<DynamicObject> =
-        Api::all_with(client.clone(), &cilium_bgp_peering_policy_resource());
-    if let Ok(pol_res) =
-        tokio::time::timeout(request_timeout(), policy_api.list(&ListParams::default())).await
-    {
-        if let Ok(policies) = pol_res {
-            if !policies.items.is_empty() {
-                is_cilium_v2alpha1 = true;
-                for pol in policies.items {
-                    let pol_name = pol.metadata.name.clone().unwrap_or_default();
-                    let spec = match pol.data.get("spec") {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let matching_nodes: Vec<String> =
-                        find_matching_nodes(spec.get("nodeSelectors"), node_labels);
+    if !policy_items.is_empty() {
+        is_cilium_v2alpha1 = true;
+        for pol in policy_items {
+            let pol_name = pol.metadata.name.clone().unwrap_or_default();
+            let spec = match pol.data.get("spec") {
+                Some(s) => s,
+                None => continue,
+            };
+            let matching_nodes: Vec<String> =
+                find_matching_nodes(spec.get("nodeSelectors"), node_labels);
 
-                    if let Some(routers) = spec.get("virtualRouters").and_then(|v| v.as_array()) {
-                        for router in routers {
-                            let local_asn =
-                                router.get("localASN").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                            let export_pod_cidr = router
-                                .get("exportPodCIDR")
+            if let Some(routers) = spec.get("virtualRouters").and_then(|v| v.as_array()) {
+                for router in routers {
+                    let local_asn =
+                        router.get("localASN").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                    let export_pod_cidr = router
+                        .get("exportPodCIDR")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    if let Some(nbrs) = router.get("neighbors").and_then(|v| v.as_array()) {
+                        for nbr in nbrs {
+                            let peer_addr = nbr
+                                .get("peerAddress")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let peer_asn =
+                                nbr.get("peerASN").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            let hold_time = nbr.get("holdTimeSeconds").and_then(|v| v.as_u64());
+                            let keepalive =
+                                nbr.get("keepAliveTimeSeconds").and_then(|v| v.as_u64());
+                            let connect_retry =
+                                nbr.get("connectRetryTimeSeconds").and_then(|v| v.as_u64());
+                            let multihop = nbr
+                                .get("eBGPMultihopTTL")
+                                .and_then(|v| v.as_u64())
+                                .map(|v| v as u32);
+                            let graceful = nbr
+                                .get("gracefulRestart")
+                                .and_then(|v| v.get("enabled"))
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false);
 
-                            if let Some(nbrs) = router.get("neighbors").and_then(|v| v.as_array()) {
-                                for nbr in nbrs {
-                                    let peer_addr = nbr
-                                        .get("peerAddress")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    let peer_asn =
-                                        nbr.get("peerASN").and_then(|v| v.as_u64()).unwrap_or(0)
-                                            as u32;
-                                    let hold_time =
-                                        nbr.get("holdTimeSeconds").and_then(|v| v.as_u64());
-                                    let keepalive =
-                                        nbr.get("keepAliveTimeSeconds").and_then(|v| v.as_u64());
-                                    let connect_retry =
-                                        nbr.get("connectRetryTimeSeconds").and_then(|v| v.as_u64());
-                                    let multihop = nbr
-                                        .get("eBGPMultihopTTL")
-                                        .and_then(|v| v.as_u64())
-                                        .map(|v| v as u32);
-                                    let graceful = nbr
-                                        .get("gracefulRestart")
-                                        .and_then(|v| v.get("enabled"))
-                                        .and_then(|v| v.as_bool())
-                                        .unwrap_or(false);
-
-                                    for node in &matching_nodes {
-                                        bgp_node_set.insert(node.clone());
-                                        let mut prefixes = Vec::new();
-                                        if export_pod_cidr {
-                                            if let Some(cidrs) = node_pod_cidrs.get(node) {
-                                                for c in cidrs {
-                                                    prefixes.push(format!("PodCIDR: {}", c));
-                                                }
-                                            }
+                            for node in &matching_nodes {
+                                bgp_node_set.insert(node.clone());
+                                let mut prefixes = Vec::new();
+                                if export_pod_cidr {
+                                    if let Some(cidrs) = node_pod_cidrs.get(node) {
+                                        for c in cidrs {
+                                            prefixes.push(format!("PodCIDR: {}", c));
                                         }
-                                        for (s_name, s_ns, lb_ip, _) in lb_services {
-                                            prefixes.push(format!(
-                                                "VIP: {} ({}/{})",
-                                                lb_ip, s_ns, s_name
-                                            ));
-                                        }
-
-                                        let routes_count = prefixes.len();
-                                        neighbors.push(BgpNeighbor {
-                                            node_name: node.clone(),
-                                            peer_address: peer_addr.clone(),
-                                            peer_asn,
-                                            local_asn,
-                                            session_state: BgpSessionState::Configured,
-                                            policy_name: pol_name.clone(),
-                                            policy_kind: "CiliumBGPPeeringPolicy".to_string(),
-                                            namespace: None,
-                                            export_pod_cidr,
-                                            hold_time_seconds: hold_time,
-                                            keepalive_time_seconds: keepalive,
-                                            connect_retry_seconds: connect_retry,
-                                            multihop_ttl: multihop,
-                                            graceful_restart: graceful,
-                                            advertised_prefixes: prefixes,
-                                            routes_count,
-                                            routes_received: 0,
-                                            uptime_or_last_change: None,
-                                        });
                                     }
                                 }
+                                for (s_name, s_ns, lb_ip, _) in lb_services {
+                                    prefixes.push(format!("VIP: {} ({}/{})", lb_ip, s_ns, s_name));
+                                }
+
+                                let routes_count = prefixes.len();
+                                neighbors.push(BgpNeighbor {
+                                    node_name: node.clone(),
+                                    peer_address: peer_addr.clone(),
+                                    peer_asn,
+                                    local_asn,
+                                    session_state: BgpSessionState::Configured,
+                                    policy_name: pol_name.clone(),
+                                    policy_kind: "CiliumBGPPeeringPolicy".to_string(),
+                                    namespace: None,
+                                    export_pod_cidr,
+                                    hold_time_seconds: hold_time,
+                                    keepalive_time_seconds: keepalive,
+                                    connect_retry_seconds: connect_retry,
+                                    multihop_ttl: multihop,
+                                    graceful_restart: graceful,
+                                    advertised_prefixes: prefixes,
+                                    routes_count,
+                                    routes_received: 0,
+                                    uptime_or_last_change: None,
+                                });
                             }
                         }
                     }
@@ -888,29 +922,22 @@ async fn discover_cilium_bgp(
     }
 
     // G. Load CiliumNode live status for active peering sessions
-    let cnode_api: Api<DynamicObject> = Api::all_with(client.clone(), &cilium_node_resource());
-    if let Ok(nodes_res) =
-        tokio::time::timeout(request_timeout(), cnode_api.list(&ListParams::default())).await
-    {
-        if let Ok(cnodes) = nodes_res {
-            for cnode in cnodes.items {
-                let n_name = cnode.metadata.name.clone().unwrap_or_default();
-                if let Some(status) = cnode.data.get("status") {
-                    let live_peers = extract_live_bgp_peers(status, 0);
-                    for live in live_peers {
-                        bgp_node_set.insert(n_name.clone());
-                        update_or_insert_neighbor(
-                            &mut neighbors,
-                            &n_name,
-                            live,
-                            &n_name,
-                            "CiliumNode",
-                            export_pod_cidr_default,
-                            node_pod_cidrs,
-                            lb_services,
-                        );
-                    }
-                }
+    for cnode in cnode_items {
+        let n_name = cnode.metadata.name.clone().unwrap_or_default();
+        if let Some(status) = cnode.data.get("status") {
+            let live_peers = extract_live_bgp_peers(status, 0);
+            for live in live_peers {
+                bgp_node_set.insert(n_name.clone());
+                update_or_insert_neighbor(
+                    &mut neighbors,
+                    &n_name,
+                    live,
+                    &n_name,
+                    "CiliumNode",
+                    export_pod_cidr_default,
+                    node_pod_cidrs,
+                    lb_services,
+                );
             }
         }
     }
@@ -965,7 +992,7 @@ async fn discover_cilium_bgp(
         BgpEngineType::None
     };
 
-    Ok(BgpClusterSummary {
+    BgpClusterSummary {
         engine,
         total_nodes: 0,
         bgp_nodes: bgp_node_set.len(),
@@ -976,7 +1003,7 @@ async fn discover_cilium_bgp(
         advertised_services,
         ip_pools,
         error: None,
-    })
+    }
 }
 
 fn update_or_insert_neighbor(
@@ -1194,20 +1221,45 @@ async fn discover_metallb_bgp(
     lb_services: &[(String, String, String, Option<String>)],
 ) -> Result<BgpClusterSummary, String> {
     let peer_api: Api<DynamicObject> = Api::all_with(client.clone(), &metallb_bgp_peer_resource());
-    let peers_res = match tokio::time::timeout(
+    let peer_items = match tokio::time::timeout(
         request_timeout(),
         peer_api.list(&ListParams::default()),
     )
     .await
     {
-        Ok(Ok(list)) if !list.items.is_empty() => list,
+        Ok(Ok(list)) if !list.items.is_empty() => list.items,
         _ => return Ok(BgpClusterSummary::default()),
     };
 
+    let pool_api: Api<DynamicObject> = Api::all_with(client.clone(), &metallb_ip_pool_resource());
+    let pool_items = match tokio::time::timeout(
+        request_timeout(),
+        pool_api.list(&ListParams::default()),
+    )
+    .await
+    {
+        Ok(Ok(list)) => list.items,
+        _ => Vec::new(),
+    };
+
+    Ok(build_metallb_bgp_summary(
+        peer_items,
+        pool_items,
+        node_labels,
+        lb_services,
+    ))
+}
+
+pub(crate) fn build_metallb_bgp_summary(
+    peer_items: Vec<DynamicObject>,
+    pool_items: Vec<DynamicObject>,
+    node_labels: &HashMap<String, BTreeMap<String, String>>,
+    lb_services: &[(String, String, String, Option<String>)],
+) -> BgpClusterSummary {
     let mut neighbors = Vec::new();
     let mut bgp_nodes = BTreeSet::new();
 
-    for peer in peers_res.items {
+    for peer in peer_items {
         let p_name = peer.metadata.name.clone().unwrap_or_default();
         let p_ns = peer.metadata.namespace.clone();
         let spec = match peer.data.get("spec") {
@@ -1263,34 +1315,29 @@ async fn discover_metallb_bgp(
     }
 
     let mut ip_pools = Vec::new();
-    let pool_api: Api<DynamicObject> = Api::all_with(client.clone(), &metallb_ip_pool_resource());
-    if let Ok(Ok(list)) =
-        tokio::time::timeout(request_timeout(), pool_api.list(&ListParams::default())).await
-    {
-        for pool in list.items {
-            let name = pool.metadata.name.clone().unwrap_or_default();
-            let pool_ns = pool.metadata.namespace.clone();
-            let mut cidrs = Vec::new();
-            if let Some(arr) = pool
-                .data
-                .get("spec")
-                .and_then(|s| s.get("addresses"))
-                .and_then(|v| v.as_array())
-            {
-                for item in arr {
-                    if let Some(s) = item.as_str() {
-                        cidrs.push(s.to_string());
-                    }
+    for pool in pool_items {
+        let name = pool.metadata.name.clone().unwrap_or_default();
+        let pool_ns = pool.metadata.namespace.clone();
+        let mut cidrs = Vec::new();
+        if let Some(arr) = pool
+            .data
+            .get("spec")
+            .and_then(|s| s.get("addresses"))
+            .and_then(|v| v.as_array())
+        {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    cidrs.push(s.to_string());
                 }
             }
-            ip_pools.push(BgpIpPool {
-                name,
-                namespace: pool_ns,
-                cidrs,
-                service_selector: String::new(),
-                disabled: false,
-            });
         }
+        ip_pools.push(BgpIpPool {
+            name,
+            namespace: pool_ns,
+            cidrs,
+            service_selector: String::new(),
+            disabled: false,
+        });
     }
 
     let mut advertised_services = Vec::new();
@@ -1319,7 +1366,7 @@ async fn discover_metallb_bgp(
         .iter()
         .filter(|n| n.session_state == BgpSessionState::Established)
         .count();
-    Ok(BgpClusterSummary {
+    BgpClusterSummary {
         engine: BgpEngineType::MetalLB,
         total_nodes: 0,
         bgp_nodes: bgp_nodes.len(),
@@ -1330,7 +1377,7 @@ async fn discover_metallb_bgp(
         advertised_services,
         ip_pools,
         error: None,
-    })
+    }
 }
 
 async fn discover_calico_bgp(
@@ -1338,20 +1385,27 @@ async fn discover_calico_bgp(
     node_labels: &HashMap<String, BTreeMap<String, String>>,
 ) -> Result<BgpClusterSummary, String> {
     let peer_api: Api<DynamicObject> = Api::all_with(client.clone(), &calico_bgp_peer_resource());
-    let peers_res = match tokio::time::timeout(
+    let peer_items = match tokio::time::timeout(
         request_timeout(),
         peer_api.list(&ListParams::default()),
     )
     .await
     {
-        Ok(Ok(list)) if !list.items.is_empty() => list,
+        Ok(Ok(list)) if !list.items.is_empty() => list.items,
         _ => return Ok(BgpClusterSummary::default()),
     };
 
+    Ok(build_calico_bgp_summary(peer_items, node_labels))
+}
+
+pub(crate) fn build_calico_bgp_summary(
+    peer_items: Vec<DynamicObject>,
+    node_labels: &HashMap<String, BTreeMap<String, String>>,
+) -> BgpClusterSummary {
     let mut neighbors = Vec::new();
     let mut bgp_nodes = BTreeSet::new();
 
-    for peer in peers_res.items {
+    for peer in peer_items {
         let p_name = peer.metadata.name.clone().unwrap_or_default();
         let spec = match peer.data.get("spec") {
             Some(s) => s,
@@ -1402,7 +1456,7 @@ async fn discover_calico_bgp(
         .iter()
         .filter(|n| n.session_state == BgpSessionState::Established)
         .count();
-    Ok(BgpClusterSummary {
+    BgpClusterSummary {
         engine: BgpEngineType::Calico,
         total_nodes: 0,
         bgp_nodes: bgp_nodes.len(),
@@ -1413,7 +1467,7 @@ async fn discover_calico_bgp(
         advertised_services: Vec::new(),
         ip_pools: Vec::new(),
         error: None,
-    })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1514,4 +1568,1074 @@ fn matches_node_selector(selector: &Value, node_labels: &BTreeMap<String, String
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_all_api_resources_and_timeout() {
+        assert_eq!(
+            cilium_bgp_peering_policy_resource().kind,
+            "CiliumBGPPeeringPolicy"
+        );
+        assert_eq!(cilium_bgp_peering_policy_resource().version, "v2alpha1");
+
+        assert_eq!(
+            cilium_bgp_cluster_config_v2_resource().kind,
+            "CiliumBGPClusterConfig"
+        );
+        assert_eq!(cilium_bgp_cluster_config_v2_resource().version, "v2");
+
+        assert_eq!(
+            cilium_bgp_cluster_config_v2alpha1_resource().kind,
+            "CiliumBGPClusterConfig"
+        );
+        assert_eq!(
+            cilium_bgp_cluster_config_v2alpha1_resource().version,
+            "v2alpha1"
+        );
+
+        assert_eq!(
+            cilium_bgp_peer_config_v2_resource().kind,
+            "CiliumBGPPeerConfig"
+        );
+        assert_eq!(cilium_bgp_peer_config_v2_resource().version, "v2");
+
+        assert_eq!(
+            cilium_bgp_peer_config_v2alpha1_resource().kind,
+            "CiliumBGPPeerConfig"
+        );
+        assert_eq!(
+            cilium_bgp_peer_config_v2alpha1_resource().version,
+            "v2alpha1"
+        );
+
+        assert_eq!(
+            cilium_bgp_advertisement_v2_resource().kind,
+            "CiliumBGPAdvertisement"
+        );
+        assert_eq!(cilium_bgp_advertisement_v2_resource().version, "v2");
+
+        assert_eq!(
+            cilium_bgp_advertisement_v2alpha1_resource().kind,
+            "CiliumBGPAdvertisement"
+        );
+        assert_eq!(
+            cilium_bgp_advertisement_v2alpha1_resource().version,
+            "v2alpha1"
+        );
+
+        assert_eq!(
+            cilium_bgp_node_config_v2_resource().kind,
+            "CiliumBGPNodeConfig"
+        );
+        assert_eq!(cilium_bgp_node_config_v2_resource().version, "v2");
+
+        assert_eq!(
+            cilium_bgp_node_config_v2alpha1_resource().kind,
+            "CiliumBGPNodeConfig"
+        );
+        assert_eq!(
+            cilium_bgp_node_config_v2alpha1_resource().version,
+            "v2alpha1"
+        );
+
+        assert_eq!(
+            cilium_bgp_node_config_override_v2_resource().kind,
+            "CiliumBGPNodeConfigOverride"
+        );
+        assert_eq!(cilium_bgp_node_config_override_v2_resource().version, "v2");
+
+        assert_eq!(
+            cilium_load_balancer_ip_pool_v2_resource().kind,
+            "CiliumLoadBalancerIPPool"
+        );
+        assert_eq!(cilium_load_balancer_ip_pool_v2_resource().version, "v2");
+
+        assert_eq!(
+            cilium_load_balancer_ip_pool_v2alpha1_resource().kind,
+            "CiliumLoadBalancerIPPool"
+        );
+        assert_eq!(
+            cilium_load_balancer_ip_pool_v2alpha1_resource().version,
+            "v2alpha1"
+        );
+
+        assert_eq!(cilium_node_resource().kind, "CiliumNode");
+        assert_eq!(cilium_node_resource().version, "v2");
+
+        assert_eq!(metallb_bgp_peer_resource().kind, "BGPPeer");
+        assert_eq!(metallb_bgp_peer_resource().version, "v1beta2");
+
+        assert_eq!(metallb_ip_pool_resource().kind, "IPAddressPool");
+        assert_eq!(metallb_ip_pool_resource().version, "v1beta1");
+
+        assert_eq!(calico_bgp_peer_resource().kind, "BGPPeer");
+        assert_eq!(calico_bgp_peer_resource().version, "v1");
+
+        assert_eq!(request_timeout(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_bgp_engine_type_display_and_equality() {
+        assert_eq!(BgpEngineType::CiliumV2.to_string(), "Cilium BGP (v2)");
+        assert_eq!(
+            BgpEngineType::CiliumV2Alpha1.to_string(),
+            "Cilium BGP (v2alpha1)"
+        );
+        assert_eq!(BgpEngineType::MetalLB.to_string(), "MetalLB BGP");
+        assert_eq!(BgpEngineType::Calico.to_string(), "Calico BGP");
+        assert_eq!(BgpEngineType::None.to_string(), "No BGP Engine Detected");
+
+        let json = serde_json::to_string(&BgpEngineType::CiliumV2).unwrap();
+        let parsed: BgpEngineType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, BgpEngineType::CiliumV2);
+    }
+
+    #[test]
+    fn test_bgp_session_state_all_cases() {
+        let cases = vec![
+            ("Established", BgpSessionState::Established),
+            ("established", BgpSessionState::Established),
+            ("ESTABLISHED", BgpSessionState::Established),
+            ("up", BgpSessionState::Established),
+            ("UP", BgpSessionState::Established),
+            ("Active", BgpSessionState::Active),
+            ("active", BgpSessionState::Active),
+            ("Connect", BgpSessionState::Connect),
+            ("connect", BgpSessionState::Connect),
+            ("Idle", BgpSessionState::Idle),
+            ("idle", BgpSessionState::Idle),
+            ("down", BgpSessionState::Idle),
+            ("DOWN", BgpSessionState::Idle),
+            ("OpenSent", BgpSessionState::OpenSent),
+            ("opensent", BgpSessionState::OpenSent),
+            ("OpenConfirm", BgpSessionState::OpenConfirm),
+            ("openconfirm", BgpSessionState::OpenConfirm),
+            ("Configured", BgpSessionState::Configured),
+            ("configured", BgpSessionState::Configured),
+            ("ready", BgpSessionState::Configured),
+            ("READY", BgpSessionState::Configured),
+            ("foobar", BgpSessionState::Unknown),
+            ("", BgpSessionState::Unknown),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(BgpSessionState::parse(input), expected, "input: {}", input);
+        }
+
+        assert_eq!(BgpSessionState::Established.to_string(), "Established");
+        assert_eq!(BgpSessionState::Active.to_string(), "Active");
+        assert_eq!(BgpSessionState::Connect.to_string(), "Connect");
+        assert_eq!(BgpSessionState::Idle.to_string(), "Idle");
+        assert_eq!(BgpSessionState::OpenSent.to_string(), "OpenSent");
+        assert_eq!(BgpSessionState::OpenConfirm.to_string(), "OpenConfirm");
+        assert_eq!(BgpSessionState::Configured.to_string(), "Configured");
+        assert_eq!(BgpSessionState::Unknown.to_string(), "Unknown");
+    }
+
+    #[test]
+    fn test_matches_node_selector_edges() {
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "topology.kubernetes.io/zone".to_string(),
+            "us-east-1a".to_string(),
+        );
+        labels.insert("node-role.kubernetes.io/worker".to_string(), "".to_string());
+        labels.insert("rack".to_string(), "rack-42".to_string());
+
+        // Null and empty object match everything
+        assert!(matches_node_selector(&Value::Null, &labels));
+        assert!(matches_node_selector(&json!({}), &labels));
+        assert!(matches_node_selector(&json!(42), &labels));
+
+        // matchLabels success & fail
+        assert!(matches_node_selector(
+            &json!({"matchLabels": {"topology.kubernetes.io/zone": "us-east-1a"}}),
+            &labels
+        ));
+        assert!(!matches_node_selector(
+            &json!({"matchLabels": {"topology.kubernetes.io/zone": "us-west-1b"}}),
+            &labels
+        ));
+        assert!(!matches_node_selector(
+            &json!({"matchLabels": {"missing-label": "val"}}),
+            &labels
+        ));
+        // matchLabels with non-string value is ignored
+        assert!(matches_node_selector(
+            &json!({"matchLabels": {"topology.kubernetes.io/zone": 123}}),
+            &labels
+        ));
+
+        // matchExpressions: Exists
+        assert!(matches_node_selector(
+            &json!({"matchExpressions": [{"key": "rack", "operator": "Exists"}]}),
+            &labels
+        ));
+        assert!(!matches_node_selector(
+            &json!({"matchExpressions": [{"key": "nonexistent", "operator": "Exists"}]}),
+            &labels
+        ));
+
+        // matchExpressions: DoesNotExist
+        assert!(matches_node_selector(
+            &json!({"matchExpressions": [{"key": "nonexistent", "operator": "DoesNotExist"}]}),
+            &labels
+        ));
+        assert!(!matches_node_selector(
+            &json!({"matchExpressions": [{"key": "rack", "operator": "DoesNotExist"}]}),
+            &labels
+        ));
+
+        // matchExpressions: In
+        assert!(matches_node_selector(
+            &json!({"matchExpressions": [{"key": "rack", "operator": "In", "values": ["rack-41", "rack-42"]}]}),
+            &labels
+        ));
+        assert!(!matches_node_selector(
+            &json!({"matchExpressions": [{"key": "rack", "operator": "In", "values": ["rack-1", "rack-2"]}]}),
+            &labels
+        ));
+        assert!(!matches_node_selector(
+            &json!({"matchExpressions": [{"key": "missing", "operator": "In", "values": ["val"]}]}),
+            &labels
+        ));
+
+        // matchExpressions: NotIn
+        assert!(matches_node_selector(
+            &json!({"matchExpressions": [{"key": "rack", "operator": "NotIn", "values": ["rack-1", "rack-2"]}]}),
+            &labels
+        ));
+        assert!(!matches_node_selector(
+            &json!({"matchExpressions": [{"key": "rack", "operator": "NotIn", "values": ["rack-42", "rack-43"]}]}),
+            &labels
+        ));
+        assert!(matches_node_selector(
+            &json!({"matchExpressions": [{"key": "missing", "operator": "NotIn", "values": ["val"]}]}),
+            &labels
+        ));
+
+        // matchExpressions: invalid expression or unknown operator
+        assert!(matches_node_selector(
+            &json!({"matchExpressions": [{"no_key": "val"}]}),
+            &labels
+        ));
+        assert!(matches_node_selector(
+            &json!({"matchExpressions": [{"key": "rack", "operator": "UnknownOp", "values": ["rack-42"]}]}),
+            &labels
+        ));
+    }
+
+    #[test]
+    fn test_find_matching_nodes() {
+        let mut node_labels = HashMap::new();
+        let mut l1 = BTreeMap::new();
+        l1.insert("env".to_string(), "prod".to_string());
+        l1.insert("zone".to_string(), "east".to_string());
+        node_labels.insert("node-1".to_string(), l1);
+
+        let mut l2 = BTreeMap::new();
+        l2.insert("env".to_string(), "staging".to_string());
+        l2.insert("zone".to_string(), "west".to_string());
+        node_labels.insert("node-2".to_string(), l2);
+
+        // None selector matches all
+        let matched = find_matching_nodes(None, &node_labels);
+        assert_eq!(matched.len(), 2);
+
+        // Empty array selector matches all
+        let empty_arr = json!([]);
+        let matched = find_matching_nodes(Some(&empty_arr), &node_labels);
+        assert_eq!(matched.len(), 2);
+
+        // Empty object selector matches all
+        let empty_obj = json!({});
+        let matched = find_matching_nodes(Some(&empty_obj), &node_labels);
+        assert_eq!(matched.len(), 2);
+
+        // Single object selector
+        let sel_obj = json!({"matchLabels": {"env": "prod"}});
+        let matched = find_matching_nodes(Some(&sel_obj), &node_labels);
+        assert_eq!(matched, vec!["node-1".to_string()]);
+
+        // Array of selectors (OR logic)
+        let sel_arr = json!([
+            {"matchLabels": {"env": "prod"}},
+            {"matchLabels": {"zone": "west"}}
+        ]);
+        let mut matched = find_matching_nodes(Some(&sel_arr), &node_labels);
+        matched.sort();
+        assert_eq!(matched, vec!["node-1".to_string(), "node-2".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_single_peer_status_variations() {
+        // Standard camelCase
+        let p1 = json!({
+            "peerAddress": "192.168.1.1",
+            "peerASN": 65001,
+            "localASN": 65000,
+            "sessionState": "Established",
+            "uptime": "5d2h",
+            "routesAdvertised": 15,
+            "routesReceived": 25,
+            "name": "peer-core-1"
+        });
+        let info1 = parse_single_peer_status(&p1, 0).expect("should parse");
+        assert_eq!(info1.peer_address, "192.168.1.1");
+        assert_eq!(info1.peer_asn, 65001);
+        assert_eq!(info1.local_asn, 65000);
+        assert_eq!(info1.session_state, BgpSessionState::Established);
+        assert_eq!(info1.uptime.as_deref(), Some("5d2h"));
+        assert_eq!(info1.routes_advertised, 15);
+        assert_eq!(info1.routes_received, 25);
+        assert_eq!(info1.peer_name, "peer-core-1");
+
+        // Alternate snake_case & shortened keys
+        let p2 = json!({
+            "peer_address": "10.10.10.1",
+            "peer_asn": 64512,
+            "local_asn": 64500,
+            "state": "Active",
+            "established_time": "12m",
+            "routes_advertised": 4,
+            "routes_received": 8
+        });
+        let info2 = parse_single_peer_status(&p2, 0).expect("should parse");
+        assert_eq!(info2.peer_address, "10.10.10.1");
+        assert_eq!(info2.peer_asn, 64512);
+        assert_eq!(info2.local_asn, 64500);
+        assert_eq!(info2.session_state, BgpSessionState::Active);
+        assert_eq!(info2.uptime.as_deref(), Some("12m"));
+        assert_eq!(info2.routes_advertised, 4);
+        assert_eq!(info2.routes_received, 8);
+
+        // Fallback local ASN & alternate keys like "peer", "asn", "status", "lastChange", "advertised", "received"
+        let p3 = json!({
+            "peer": "172.16.0.2",
+            "asn": 64550,
+            "status": "Connect",
+            "lastChange": "1h",
+            "advertised": 10,
+            "received": 20
+        });
+        let info3 = parse_single_peer_status(&p3, 64500).expect("should parse");
+        assert_eq!(info3.peer_address, "172.16.0.2");
+        assert_eq!(info3.peer_asn, 64550);
+        assert_eq!(info3.local_asn, 64500);
+        assert_eq!(info3.session_state, BgpSessionState::Connect);
+        assert_eq!(info3.uptime.as_deref(), Some("1h"));
+        assert_eq!(info3.routes_advertised, 10);
+        assert_eq!(info3.routes_received, 20);
+
+        // Missing peerAddress returns None
+        let p4 = json!({
+            "peerASN": 65000,
+            "sessionState": "Established"
+        });
+        assert!(parse_single_peer_status(&p4, 0).is_none());
+    }
+
+    #[test]
+    fn test_extract_live_bgp_peers_recursive() {
+        let nested_status = json!({
+            "bgp": [
+                {
+                    "peerAddress": "192.168.1.1",
+                    "peerASN": 65001,
+                    "sessionState": "Established"
+                }
+            ],
+            "instances": [
+                {
+                    "localASN": 65100,
+                    "neighbors": [
+                        {
+                            "peerAddress": "192.168.1.2",
+                            "peerASN": 65002,
+                            "sessionState": "Active"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let peers = extract_live_bgp_peers(&nested_status, 65000);
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].peer_address, "192.168.1.1");
+        assert_eq!(peers[0].session_state, BgpSessionState::Established);
+        assert_eq!(peers[1].peer_address, "192.168.1.2");
+        assert_eq!(peers[1].local_asn, 65100);
+        assert_eq!(peers[1].session_state, BgpSessionState::Active);
+
+        // Empty value returns empty
+        assert!(extract_live_bgp_peers(&json!("invalid"), 0).is_empty());
+        assert!(extract_live_bgp_peers(&json!(42), 0).is_empty());
+    }
+
+    #[test]
+    fn test_update_or_insert_neighbor_logic() {
+        let mut neighbors = vec![BgpNeighbor {
+            node_name: "node-1".to_string(),
+            peer_address: "10.0.0.1".to_string(),
+            peer_asn: 65001,
+            local_asn: 65000,
+            session_state: BgpSessionState::Configured,
+            policy_name: "policy-a".to_string(),
+            policy_kind: "CiliumBGPClusterConfig".to_string(),
+            namespace: None,
+            export_pod_cidr: true,
+            hold_time_seconds: Some(90),
+            keepalive_time_seconds: Some(30),
+            connect_retry_seconds: Some(120),
+            multihop_ttl: Some(64),
+            graceful_restart: true,
+            advertised_prefixes: vec!["10.244.0.0/24".to_string()],
+            routes_count: 1,
+            routes_received: 0,
+            uptime_or_last_change: None,
+        }];
+
+        let mut node_pod_cidrs = HashMap::new();
+        node_pod_cidrs.insert("node-1".to_string(), vec!["10.244.0.0/24".to_string()]);
+        node_pod_cidrs.insert("node-2".to_string(), vec!["10.244.1.0/24".to_string()]);
+
+        let lb_services = vec![(
+            "web-svc".to_string(),
+            "default".to_string(),
+            "1.2.3.4".to_string(),
+            Some("public-pool".to_string()),
+        )];
+
+        // 1. Update existing neighbor (matched by node_name + peer_address)
+        let live_update = LiveBgpPeerInfo {
+            peer_address: "10.0.0.1".to_string(),
+            peer_asn: 65001,
+            local_asn: 65000,
+            session_state: BgpSessionState::Established,
+            uptime: Some("3d4h".to_string()),
+            routes_advertised: 5,
+            routes_received: 120,
+            peer_name: "".to_string(),
+        };
+
+        update_or_insert_neighbor(
+            &mut neighbors,
+            "node-1",
+            live_update,
+            "default-pol",
+            "CiliumBGPNodeConfig",
+            true,
+            &node_pod_cidrs,
+            &lb_services,
+        );
+
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].session_state, BgpSessionState::Established);
+        assert_eq!(neighbors[0].uptime_or_last_change.as_deref(), Some("3d4h"));
+        assert_eq!(neighbors[0].routes_count, 5);
+        assert_eq!(neighbors[0].routes_received, 120);
+
+        // 2. Insert new neighbor (no match)
+        let live_insert = LiveBgpPeerInfo {
+            peer_address: "10.0.0.2".to_string(),
+            peer_asn: 65002,
+            local_asn: 65000,
+            session_state: BgpSessionState::Active,
+            uptime: Some("10m".to_string()),
+            routes_advertised: 0,
+            routes_received: 0,
+            peer_name: "custom-peer-name".to_string(),
+        };
+
+        update_or_insert_neighbor(
+            &mut neighbors,
+            "node-2",
+            live_insert,
+            "default-pol",
+            "CiliumBGPNodeConfig",
+            true,
+            &node_pod_cidrs,
+            &lb_services,
+        );
+
+        assert_eq!(neighbors.len(), 2);
+        let n2 = &neighbors[1];
+        assert_eq!(n2.node_name, "node-2");
+        assert_eq!(n2.peer_address, "10.0.0.2");
+        assert_eq!(n2.peer_asn, 65002);
+        assert_eq!(n2.session_state, BgpSessionState::Active);
+        assert_eq!(n2.policy_name, "custom-peer-name");
+        assert_eq!(n2.policy_kind, "CiliumBGPNodeConfig");
+        assert!(n2.export_pod_cidr);
+        assert_eq!(
+            n2.advertised_prefixes,
+            vec![
+                "PodCIDR: 10.244.1.0/24".to_string(),
+                "VIP: 1.2.3.4 (default/web-svc)".to_string(),
+            ]
+        );
+        assert_eq!(n2.routes_count, 2);
+
+        // 3. Insert without export_pod_cidr
+        let live_no_cidr = LiveBgpPeerInfo {
+            peer_address: "10.0.0.3".to_string(),
+            peer_asn: 65003,
+            local_asn: 65000,
+            session_state: BgpSessionState::Idle,
+            uptime: None,
+            routes_advertised: 0,
+            routes_received: 0,
+            peer_name: "".to_string(),
+        };
+
+        update_or_insert_neighbor(
+            &mut neighbors,
+            "node-2",
+            live_no_cidr,
+            "fallback-pol",
+            "CiliumNode",
+            false,
+            &node_pod_cidrs,
+            &lb_services,
+        );
+
+        assert_eq!(neighbors.len(), 3);
+        let n3 = &neighbors[2];
+        assert_eq!(n3.node_name, "node-2");
+        assert_eq!(n3.policy_name, "fallback-pol");
+        assert_eq!(n3.policy_kind, "CiliumNode");
+        assert!(!n3.export_pod_cidr);
+        assert_eq!(
+            n3.advertised_prefixes,
+            vec!["VIP: 1.2.3.4 (default/web-svc)".to_string()]
+        );
+        assert_eq!(n3.routes_count, 1);
+
+        // 4. Update matching existing with empty node_name
+        let mut empty_node_neighbor = vec![BgpNeighbor {
+            node_name: "".to_string(),
+            peer_address: "10.0.0.99".to_string(),
+            peer_asn: 65099,
+            local_asn: 0,
+            session_state: BgpSessionState::Configured,
+            policy_name: "p".to_string(),
+            policy_kind: "k".to_string(),
+            namespace: None,
+            export_pod_cidr: false,
+            hold_time_seconds: None,
+            keepalive_time_seconds: None,
+            connect_retry_seconds: None,
+            multihop_ttl: None,
+            graceful_restart: false,
+            advertised_prefixes: vec![],
+            routes_count: 0,
+            routes_received: 0,
+            uptime_or_last_change: None,
+        }];
+
+        let live_fill_node = LiveBgpPeerInfo {
+            peer_address: "10.0.0.99".to_string(),
+            peer_asn: 65099,
+            local_asn: 65000,
+            session_state: BgpSessionState::Established,
+            uptime: Some("1d".to_string()),
+            routes_advertised: 10,
+            routes_received: 50,
+            peer_name: "".to_string(),
+        };
+
+        update_or_insert_neighbor(
+            &mut empty_node_neighbor,
+            "node-filled",
+            live_fill_node,
+            "p",
+            "k",
+            false,
+            &node_pod_cidrs,
+            &lb_services,
+        );
+
+        assert_eq!(empty_node_neighbor.len(), 1);
+        assert_eq!(empty_node_neighbor[0].node_name, "node-filled");
+        assert_eq!(
+            empty_node_neighbor[0].session_state,
+            BgpSessionState::Established
+        );
+        assert_eq!(empty_node_neighbor[0].local_asn, 65000);
+        assert_eq!(empty_node_neighbor[0].routes_count, 10);
+        assert_eq!(empty_node_neighbor[0].routes_received, 50);
+    }
+
+    #[test]
+    fn test_cilium_peer_config_data_clone_and_debug() {
+        let cfg = CiliumPeerConfigData {
+            hold_time: Some(90),
+            keepalive: Some(30),
+            connect_retry: Some(60),
+            multihop: Some(4),
+            graceful_restart: true,
+        };
+        let cloned = cfg.clone();
+        assert_eq!(cloned.hold_time, Some(90));
+        assert_eq!(cloned.keepalive, Some(30));
+        assert_eq!(cloned.connect_retry, Some(60));
+        assert_eq!(cloned.multihop, Some(4));
+        assert!(cloned.graceful_restart);
+        assert!(!format!("{:?}", cfg).is_empty());
+    }
+
+    #[test]
+    fn test_live_bgp_peer_info_clone_and_debug() {
+        let info = LiveBgpPeerInfo {
+            peer_address: "10.0.0.1".to_string(),
+            peer_asn: 65000,
+            local_asn: 65001,
+            session_state: BgpSessionState::Established,
+            uptime: Some("1h".to_string()),
+            routes_advertised: 2,
+            routes_received: 10,
+            peer_name: "p1".to_string(),
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.peer_address, "10.0.0.1");
+        assert_eq!(cloned.routes_advertised, 2);
+        assert!(!format!("{:?}", info).is_empty());
+    }
+
+    #[test]
+    fn test_build_cilium_bgp_summary_v2_full() {
+        let mut pool_obj1 =
+            DynamicObject::new("pool-1", &cilium_load_balancer_ip_pool_v2_resource());
+        pool_obj1.data = json!({
+            "spec": {
+                "cidrs": ["192.168.10.0/24"],
+                "serviceSelector": {"matchLabels": {"app": "web"}},
+                "disabled": false
+            }
+        });
+
+        let mut pool_obj2 =
+            DynamicObject::new("pool-2", &cilium_load_balancer_ip_pool_v2_resource());
+        pool_obj2.data = json!({
+            "spec": {
+                "blocks": [{"cidr": "10.10.0.0/16"}],
+                "disabled": true
+            }
+        });
+
+        let mut peer_cfg = DynamicObject::new("peer-cfg-1", &cilium_bgp_peer_config_v2_resource());
+        peer_cfg.data = json!({
+            "spec": {
+                "timers": {
+                    "holdTimeSeconds": 90,
+                    "keepAliveTimeSeconds": 30,
+                    "connectRetryTimeSeconds": 60
+                },
+                "ebgpMultihop": 4,
+                "gracefulRestart": {"enabled": true}
+            }
+        });
+
+        let mut adv_obj = DynamicObject::new("adv-1", &cilium_bgp_advertisement_v2_resource());
+        adv_obj.data = json!({
+            "spec": {
+                "advertisements": [
+                    {"advertisementType": "PodCIDR"}
+                ]
+            }
+        });
+
+        let mut cluster_cfg =
+            DynamicObject::new("cluster-cfg-1", &cilium_bgp_cluster_config_v2_resource());
+        cluster_cfg.data = json!({
+            "spec": {
+                "nodeSelector": {"matchLabels": {"role": "worker"}},
+                "bgpInstances": [
+                    {
+                        "localASN": 65000,
+                        "peers": [
+                            {
+                                "peerAddress": "172.16.1.1",
+                                "peerASN": 65001,
+                                "peerConfigRef": {"name": "peer-cfg-1"}
+                            },
+                            {
+                                "peerAddress": "172.16.1.2",
+                                "peerASN": 65002,
+                                "timers": {
+                                    "holdTimeSeconds": 60,
+                                    "keepAliveTimeSeconds": 20,
+                                    "connectRetryTimeSeconds": 40
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let mut node_cfg = DynamicObject::new("worker-1", &cilium_bgp_node_config_v2_resource());
+        node_cfg.data = json!({
+            "status": {
+                "bgp": [
+                    {
+                        "peerAddress": "172.16.1.1",
+                        "sessionState": "Established",
+                        "uptime": "2d4h",
+                        "routesAdvertised": 10,
+                        "routesReceived": 20
+                    }
+                ]
+            }
+        });
+
+        let mut cnode = DynamicObject::new("worker-1", &cilium_node_resource());
+        cnode.data = json!({
+            "status": {
+                "bgp": [
+                    {
+                        "peerAddress": "172.16.1.2",
+                        "sessionState": "Active"
+                    }
+                ]
+            }
+        });
+
+        let mut node_labels = HashMap::new();
+        let mut w1_labels = BTreeMap::new();
+        w1_labels.insert("role".to_string(), "worker".to_string());
+        node_labels.insert("worker-1".to_string(), w1_labels);
+
+        let mut node_pod_cidrs = HashMap::new();
+        node_pod_cidrs.insert("worker-1".to_string(), vec!["10.244.1.0/24".to_string()]);
+
+        let lb_services = vec![(
+            "ingress-svc".to_string(),
+            "cilium-system".to_string(),
+            "192.168.10.50".to_string(),
+            Some("pool-1".to_string()),
+        )];
+
+        let summary = build_cilium_bgp_summary(
+            vec![pool_obj1, pool_obj2],
+            vec![peer_cfg],
+            vec![adv_obj],
+            vec![cluster_cfg],
+            vec![node_cfg],
+            vec![],
+            vec![cnode],
+            &node_labels,
+            &node_pod_cidrs,
+            &lb_services,
+        );
+
+        assert_eq!(summary.engine, BgpEngineType::CiliumV2);
+        assert_eq!(summary.ip_pools.len(), 2);
+        assert_eq!(summary.ip_pools[0].name, "pool-1");
+        assert!(!summary.ip_pools[0].disabled);
+        assert_eq!(summary.ip_pools[1].name, "pool-2");
+        assert!(summary.ip_pools[1].disabled);
+
+        assert_eq!(summary.peers.len(), 2);
+        assert_eq!(summary.established_peers, 1);
+        assert_eq!(summary.degraded_peers, 1);
+
+        let p1 = &summary.peers[0];
+        assert_eq!(p1.peer_address, "172.16.1.1");
+        assert_eq!(p1.session_state, BgpSessionState::Established);
+        assert_eq!(p1.routes_count, 10);
+        assert_eq!(p1.routes_received, 20);
+
+        let p2 = &summary.peers[1];
+        assert_eq!(p2.peer_address, "172.16.1.2");
+        assert_eq!(p2.session_state, BgpSessionState::Active);
+
+        assert_eq!(summary.advertised_services.len(), 1);
+        assert_eq!(summary.advertised_services[0].service_name, "ingress-svc");
+    }
+
+    #[test]
+    fn test_build_cilium_bgp_summary_v2alpha1_legacy() {
+        let mut pol_obj = DynamicObject::new("peering-pol", &cilium_bgp_peering_policy_resource());
+        pol_obj.data = json!({
+            "spec": {
+                "nodeSelectors": [{"matchLabels": {"zone": "east"}}],
+                "virtualRouters": [
+                    {
+                        "localASN": 64512,
+                        "exportPodCIDR": true,
+                        "neighbors": [
+                            {
+                                "peerAddress": "10.1.1.1",
+                                "peerASN": 64513,
+                                "holdTimeSeconds": 90,
+                                "keepAliveTimeSeconds": 30,
+                                "connectRetryTimeSeconds": 60,
+                                "eBGPMultihopTTL": 3,
+                                "gracefulRestart": {"enabled": true}
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let mut node_labels = HashMap::new();
+        let mut e_labels = BTreeMap::new();
+        e_labels.insert("zone".to_string(), "east".to_string());
+        node_labels.insert("node-east".to_string(), e_labels);
+
+        let mut node_pod_cidrs = HashMap::new();
+        node_pod_cidrs.insert("node-east".to_string(), vec!["10.244.0.0/24".to_string()]);
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![pol_obj],
+            vec![],
+            &node_labels,
+            &node_pod_cidrs,
+            &[],
+        );
+
+        assert_eq!(summary.engine, BgpEngineType::CiliumV2Alpha1);
+        assert_eq!(summary.peers.len(), 1);
+        let peer = &summary.peers[0];
+        assert_eq!(peer.node_name, "node-east");
+        assert_eq!(peer.peer_address, "10.1.1.1");
+        assert_eq!(peer.peer_asn, 64513);
+        assert_eq!(peer.local_asn, 64512);
+        assert_eq!(peer.hold_time_seconds, Some(90));
+        assert_eq!(peer.keepalive_time_seconds, Some(30));
+        assert_eq!(peer.connect_retry_seconds, Some(60));
+        assert_eq!(peer.multihop_ttl, Some(3));
+        assert!(peer.graceful_restart);
+        assert!(peer.export_pod_cidr);
+        assert_eq!(peer.routes_count, 1);
+    }
+
+    #[test]
+    fn test_build_cilium_bgp_summary_empty_returns_none_engine() {
+        let node_labels = HashMap::new();
+        let node_pod_cidrs = HashMap::new();
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &node_pod_cidrs,
+            &[],
+        );
+
+        assert_eq!(summary.engine, BgpEngineType::None);
+        assert!(summary.peers.is_empty());
+        assert!(summary.ip_pools.is_empty());
+    }
+
+    #[test]
+    fn test_build_metallb_bgp_summary_full() {
+        let mut peer_obj = DynamicObject::new("metallb-peer-1", &metallb_bgp_peer_resource());
+        peer_obj.metadata.namespace = Some("metallb-system".to_string());
+        peer_obj.data = json!({
+            "spec": {
+                "peerAddress": "192.168.100.1",
+                "peerASN": 64512,
+                "myASN": 64511,
+                "holdTime": 90,
+                "nodeSelectors": [{"matchLabels": {"bgp": "true"}}]
+            }
+        });
+
+        let mut pool_obj = DynamicObject::new("metallb-pool-1", &metallb_ip_pool_resource());
+        pool_obj.metadata.namespace = Some("metallb-system".to_string());
+        pool_obj.data = json!({
+            "spec": {
+                "addresses": ["192.168.100.200-192.168.100.250"]
+            }
+        });
+
+        let mut node_labels = HashMap::new();
+        let mut l1 = BTreeMap::new();
+        l1.insert("bgp".to_string(), "true".to_string());
+        node_labels.insert("node-1".to_string(), l1);
+
+        let mut l2 = BTreeMap::new();
+        l2.insert("bgp".to_string(), "false".to_string());
+        node_labels.insert("node-2".to_string(), l2);
+
+        let lb_services = vec![(
+            "nginx-lb".to_string(),
+            "default".to_string(),
+            "192.168.100.201".to_string(),
+            Some("metallb-pool-1".to_string()),
+        )];
+
+        let summary =
+            build_metallb_bgp_summary(vec![peer_obj], vec![pool_obj], &node_labels, &lb_services);
+
+        assert_eq!(summary.engine, BgpEngineType::MetalLB);
+        assert_eq!(summary.bgp_nodes, 1);
+        assert_eq!(summary.total_peers, 1);
+        assert_eq!(summary.ip_pools.len(), 1);
+        assert_eq!(summary.ip_pools[0].name, "metallb-pool-1");
+        assert_eq!(
+            summary.ip_pools[0].namespace.as_deref(),
+            Some("metallb-system")
+        );
+        assert_eq!(
+            summary.ip_pools[0].cidrs,
+            vec!["192.168.100.200-192.168.100.250".to_string()]
+        );
+
+        let p = &summary.peers[0];
+        assert_eq!(p.node_name, "node-1");
+        assert_eq!(p.peer_address, "192.168.100.1");
+        assert_eq!(p.peer_asn, 64512);
+        assert_eq!(p.local_asn, 64511);
+        assert_eq!(p.policy_kind, "BGPPeer");
+        assert_eq!(p.namespace.as_deref(), Some("metallb-system"));
+        assert_eq!(p.hold_time_seconds, Some(90));
+        assert_eq!(p.routes_count, 1);
+
+        assert_eq!(summary.advertised_services.len(), 1);
+        assert_eq!(summary.advertised_services[0].service_name, "nginx-lb");
+    }
+
+    #[test]
+    fn test_build_calico_bgp_summary_full() {
+        let mut peer_obj = DynamicObject::new("calico-global-peer", &calico_bgp_peer_resource());
+        peer_obj.data = json!({
+            "spec": {
+                "peerIP": "10.0.1.1",
+                "asNumber": 65005
+            }
+        });
+
+        let mut node_labels = HashMap::new();
+        node_labels.insert("calico-worker-1".to_string(), BTreeMap::new());
+
+        let summary = build_calico_bgp_summary(vec![peer_obj], &node_labels);
+
+        assert_eq!(summary.engine, BgpEngineType::Calico);
+        assert_eq!(summary.bgp_nodes, 1);
+        assert_eq!(summary.total_peers, 1);
+        let p = &summary.peers[0];
+        assert_eq!(p.node_name, "calico-worker-1");
+        assert_eq!(p.peer_address, "10.0.1.1");
+        assert_eq!(p.peer_asn, 65005);
+        assert_eq!(p.policy_kind, "BGPPeer");
+    }
+
+    #[test]
+    fn test_build_cilium_bgp_summary_alternate_keys_and_edge_cases() {
+        // Missing spec objects are skipped cleanly
+        let empty_cluster_cfg =
+            DynamicObject::new("bad-cluster", &cilium_bgp_cluster_config_v2_resource());
+        let empty_policy = DynamicObject::new("bad-policy", &cilium_bgp_peering_policy_resource());
+
+        // Cluster config with alternative key names: `instances`, `neighbors`, `address`, `peerIP`, `localAsn`, `peerAsn`
+        let mut cluster_cfg_alt =
+            DynamicObject::new("alt-cluster", &cilium_bgp_cluster_config_v2_resource());
+        cluster_cfg_alt.data = json!({
+            "spec": {
+                "instances": [
+                    {
+                        "localAsn": 64512,
+                        "neighbors": [
+                            {
+                                "peerIP": "10.20.30.40",
+                                "peerAsn": 64599
+                            },
+                            {
+                                "address": "10.20.30.41",
+                                "peerASN": 64598
+                            },
+                            {
+                                "peerAddress": "" // empty address is skipped
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        // Advertisement with non-podcidr advertisementType sets export_pod_cidr_default to false
+        let mut adv_svc = DynamicObject::new("adv-svc", &cilium_bgp_advertisement_v2_resource());
+        adv_svc.data = json!({
+            "spec": {
+                "advertisements": [
+                    {"advertisementType": "Service"}
+                ]
+            }
+        });
+
+        let mut node_labels = HashMap::new();
+        node_labels.insert("node-any".to_string(), BTreeMap::new());
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![adv_svc],
+            vec![empty_cluster_cfg, cluster_cfg_alt],
+            vec![],
+            vec![empty_policy],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &[],
+        );
+
+        assert_eq!(summary.engine, BgpEngineType::CiliumV2);
+        assert_eq!(summary.peers.len(), 2);
+        assert_eq!(summary.peers[0].peer_address, "10.20.30.40");
+        assert_eq!(summary.peers[0].peer_asn, 64599);
+        assert_eq!(summary.peers[0].local_asn, 64512);
+        assert!(!summary.peers[0].export_pod_cidr);
+
+        assert_eq!(summary.peers[1].peer_address, "10.20.30.41");
+        assert_eq!(summary.peers[1].peer_asn, 64598);
+    }
+
+    #[test]
+    fn test_build_metallb_and_calico_edge_cases() {
+        // MetalLB with missing spec or empty peer address
+        let empty_peer = DynamicObject::new("bad-peer", &metallb_bgp_peer_resource());
+        let mut peer_with_ip = DynamicObject::new("ip-peer", &metallb_bgp_peer_resource());
+        peer_with_ip.data = json!({
+            "spec": {
+                "peerIP": "192.168.1.1",
+                "peerAsn": 65001,
+                "localAsn": 65000
+            }
+        });
+
+        let mut node_labels = HashMap::new();
+        node_labels.insert("node-1".to_string(), BTreeMap::new());
+
+        let summary =
+            build_metallb_bgp_summary(vec![empty_peer, peer_with_ip], vec![], &node_labels, &[]);
+        assert_eq!(summary.engine, BgpEngineType::MetalLB);
+        assert_eq!(summary.peers.len(), 1);
+        assert_eq!(summary.peers[0].peer_address, "192.168.1.1");
+        assert_eq!(summary.peers[0].peer_asn, 65001);
+        assert_eq!(summary.peers[0].local_asn, 65000);
+
+        // Calico with missing spec
+        let empty_calico = DynamicObject::new("bad-calico", &calico_bgp_peer_resource());
+        let calico_summary = build_calico_bgp_summary(vec![empty_calico], &node_labels);
+        assert_eq!(calico_summary.engine, BgpEngineType::Calico);
+        assert_eq!(calico_summary.peers.len(), 0);
+    }
 }
