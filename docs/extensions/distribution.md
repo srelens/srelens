@@ -33,7 +33,9 @@ description.
 **Review installation** downloads a size-bounded manifest over HTTPS, checks its
 SHA-256 against the selected catalog release, verifies its ID, version and API range
 against the entry, and validates the desktop app's capability rules. The exact verified
-bytes then go through the permission review and install action.
+bytes then go through the permission review and install action. The review lists what
+each permission is bound to and opens the full manifest on request, so a catalog app can
+be read before it is installed (see [permissions.md](permissions.md#declaring-and-granting)).
 
 A catalog change invalidates the selected checksum and requires a new review. Replacing
 an installed ID is explicit and keeps its settings. There are no automatic updates or

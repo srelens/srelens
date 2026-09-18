@@ -129,14 +129,14 @@ An author who wants an app to do more than show custom resources.
 |---|---|---|---|---|
 | APP-1 | Read kubeconfig, tokens or local files | I | No app code is loaded or run. `ManifestKind` has one variant, `declarative` (`crates/plugin-host/src/manifest.rs`), and the broker (`crates/plugin-host/src/lib.rs`) only forwards JSON arguments to host handlers. A manifest has no field that names a file, URL or command, and unknown fields are refused (`deny_unknown_fields`). The host resolves credentials from the context name; the app never sees them. | Shipped |
 | APP-2 | Reach arbitrary network endpoints or run commands | I, E | As APP-1. Desktop bindings may target only `k8s.listCustomResource` and `k8s.listEvents` (`validate_app` in `crates/registry/src/extensions.rs`), and no binding may target another app's `plugin/` capability (`Manifest::validate`). | Shipped. Brokered network access planned in [#568] |
-| APP-3 | Read Secrets or other core resources through the reader | I | `validate_app` (`crates/registry/src/extensions.rs`) requires a fixed, non-empty `group`, `version`, `plural` and `kind` of letters, digits, `.` and `-`, so the core group (Secrets, ConfigMaps, Pods) cannot be bound. The group must also be shaped like a CustomResourceDefinition group, with a dot and no empty label, so built-in groups such as `apps` and `batch` are refused (`group_problems` in `crates/registry/src/extensions/crd.rs`). The same rule runs when the inventory loads, so a stored app that breaks it is quarantined. Before dispatching, `extensions.read`, `extensions.resource` and `extensions.action` confirm that a CustomResourceDefinition named `{plural}.{group}` declares that group and plural and serves the bound version on the cluster (`require` in the same file, `custom_resource_serves` in `crates/kube/src/crds.rs`). That refuses dotted built-in groups such as `networking.k8s.io`, aggregated APIs, and a version the CRD does not serve; a failed lookup refuses the call and says so. `k8s.listCustomResource` returns names, namespaces, ages and the declared printer columns (`list_custom_resource_capability` in `crates/kube/src/crds.rs`). | Shipped. Built-in groups refused in [#601]. See residual risk |
+| APP-3 | Read Secrets or other core resources through the reader | I | `validate_app` (`crates/registry/src/extensions.rs`) requires a fixed, non-empty `group`, `version`, `plural` and `kind` of letters, digits, `.` and `-`, so the core group (Secrets, ConfigMaps, Pods) cannot be bound. The group must also be shaped like a CustomResourceDefinition group, with a dot and no empty label, so built-in groups such as `apps` and `batch` are refused (`group_problems` in `crates/registry/src/extensions/crd.rs`). The same rule runs when the inventory loads, so a stored app that breaks it is quarantined. Before dispatching, `extensions.read`, `extensions.resource` and `extensions.action` confirm that a CustomResourceDefinition named `{plural}.{group}` declares that group and plural and serves the bound version on the cluster (`require` in the same file, `custom_resource_serves` in `crates/kube/src/crds.rs`). That refuses dotted built-in groups such as `networking.k8s.io`, aggregated APIs, and a version the CRD does not serve; a failed lookup refuses the call and says so. `k8s.listCustomResource` returns names, namespaces, ages and the declared printer columns (`list_custom_resource_capability` in `crates/kube/src/crds.rs`). | Shipped. Built-in groups refused in [#601]; bindings shown in the install review by [#608]. See residual risk |
 | APP-4 | Widen a read by overriding bound arguments | T, E | The broker refuses any input not listed in the binding's `inputs` and any missing required one, and the schema it exposes sets `additionalProperties: false` (`PluginHost::register`). Fixed `arguments` are merged into every call, and inputs may not overlap them, so a caller cannot override one. `extensions.read` forwards only `context` and `namespace` and checks the namespace's syntax; `validate_app` refuses a binding that fixes either. | Shipped |
 | APP-5 | Write to the cluster, or dispatch an operation that needs consent | E | `validate_app` refuses a target that is not read-only or carries `requires_confirm`, `sensitive` or `destructive`. A manifest cannot supply annotations: the broker copies the host's and forces `requires_confirm` on anything not read-only, sensitive or destructive. The only writes are host-owned GitOps actions: `resolve` (`crates/registry/src/extensions/resource.rs`) takes the group, version, plural, kind and scope from the app's declared reader, and `supported_actions` (`crates/kube/src/gitops.rs`) allowlists kinds, versions and actions. | Shipped. Declared actions planned in [#549]; an opt-in for unsigned apps that write in [#558] |
 | APP-6 | Keep acting after being disabled, removed, updated or quarantined | E | `extensions.read`, `extensions.resource` and `extensions.action` read the inventory on every call, and require the app to be enabled, at the caller's revision, and to pass `validate_app` with its stored grants. `Registration::unregister` revokes the handlers older registry snapshots still hold. Calls already admitted may finish. | Shipped |
 | APP-7 | Use a permission it was not granted | E | `permissions` must name exactly the bound targets (`EXTENSION_PERMISSION_MISMATCH` in `Manifest::validate`), and each one must be among the grants the caller supplied (`validate_app`, `PluginHost::register`). | Shipped |
 | APP-8 | Escalate through an update or rollback | E | An update is a new `extensions.configure` install, which is mutating and carries its own grants; nothing updates automatically. A rollback verifies the kept version's signature again and runs `validate_app` with the grants given now (`Configure::Rollback` in `crates/registry/src/extensions.rs`). The review shows the full permission list again, not what changed. | Shipped. Permission diff planned in [#554]; update checks and downgrade protection in [#563] |
 | APP-9 | Pose as an official app | S | IDs under `org.srelens.` install only with the srelens signature (`check_install` in `crates/registry/src/extensions.rs`, `reserved` in `crates/registry/src/extensions/signing.rs`), so an unsigned install cannot take an official ID or replace a signed app. An unsigned entry already stored under one, such as an app installed before [#528] reserved the namespace, is quarantined when the inventory loads, so it cannot be enabled, and no unsigned kept version under one is restored (`unsigned_reserved`, `reverify` and the `rollback` action in `crates/registry/src/extensions.rs`; shipped by [#602]). Bundled logos are chosen by ID (`packages/ui-next/src/extensions/ExtensionLogo.tsx`). Settings → Apps labels each app **Unsigned local**, **Signed by srelens** or **Signature not verified** (`packages/ui-next/src/extensions/Extensions.tsx`). | Shipped. See residual risk |
-| APP-10 | Spoof host UI or dialogs | S | Apps contribute data, never markup: pages, detail tabs and row actions render with host components, and the frontend renders no text as raw HTML. Names, titles and groups are 1–120 characters with no control characters and no format characters (category Cf), such as right-to-left overrides and zero-width spaces, so none displays differently from what it holds (`label` and `is_format_character` in `crates/plugin-host/src/manifest.rs`, [#603]). Catalog names and descriptions refuse the same control and format characters (`parse_catalog` in `crates/registry/src/extensions/catalog.rs`). The install review renders a manifest's own name only once the host has accepted it, and says "This manifest" for one still being checked or refused (`ExtensionManager` in `packages/ui-next/src/extensions/Extensions.tsx`). Install and action reviews are host-owned (`packages/ui-next/src/extensions/Extensions.tsx`, `packages/ui-next/src/extensions/ExtensionResourceDetails.tsx`). | Shipped. See residual risk |
+| APP-10 | Spoof host UI or dialogs | S | Apps contribute data, never markup: pages, detail tabs and row actions render with host components, and the frontend renders no text as raw HTML. Names, titles and groups are 1–120 characters with no control characters and no format characters (category Cf), such as right-to-left overrides and zero-width spaces, so none displays differently from what it holds (`label` and `is_format_character` in `crates/plugin-host/src/manifest.rs`, [#603]). Catalog names and descriptions refuse the same control and format characters (`parse_catalog` in `crates/registry/src/extensions/catalog.rs`). The install review renders a manifest's own name only once the host has accepted it, and says "This manifest" for one still being checked or refused (`ExtensionManager` in `packages/ui-next/src/extensions/Extensions.tsx`). Values the host does not restrict, such as printer column names and JSON paths, are drawn in the review's binding summary with format, control and line-separator characters written as escapes, and the review's manifest view escapes format characters as Details does (`plainText` and `escapeFormatCharacters` in `packages/ui-next/src/extensions/displayText.ts`, [#608]). Install and action reviews are host-owned (`packages/ui-next/src/extensions/Extensions.tsx`, `packages/ui-next/src/extensions/ExtensionResourceDetails.tsx`). | Shipped. See residual risk |
 | APP-11 | Read clusters the user did not intend the app for | I | Every read names an explicit context and runs under that context's RBAC. Installation is app-wide, so an enabled app can read any cluster the user opens it on. An optional per-app cluster allow-list, enforced in `extensions.read`, `extensions.resource` and `extensions.action`, is in review. | Pending in [#597] ([#535]) |
 | APP-12 | Exhaust the host | D | What an app declares is bounded. A manifest is at most 256 KiB (`MAX_MANIFEST_BYTES` in `crates/plugin-host/src/manifest.rs`), with 1–32 capabilities, at most 64 contributions, 1–32 kinds per detail tab or row action, and 1–12 pages per dashboard. The inventory is at most 1 MiB and keeps at most three replaced versions per app. Single-resource inspection reads at most 10 pages of 500 events (`list_events` in `crates/kube/src/gitops.rs`). What an app's pages and dashboards read is not bounded; see residual risk. | Manifest and inventory limits shipped. Bounded app reads planned in [#609]; performance budgets in [#581] |
 
@@ -157,26 +157,31 @@ Residual risk:
     can request it without consent. A custom resource can hold values as sensitive as a
     built-in one, for example a CRD whose spec embeds credentials.
 
-  RBAC still applies, but the install review shows only `k8s.listCustomResource`, not the
-  binding (see the next point).
-- **Grants are per host capability, and the install review does not show what they
-  cover.** Granting `k8s.listCustomResource` grants whatever the manifest binds. The
-  review (`ExtensionManager` in `packages/ui-next/src/extensions/Extensions.tsx`, which
-  the classic design reuses through `apps/desktop/src/components/Extensions.tsx`) shows
-  the app's name, a signature label, the requested capability IDs and any validation
-  problems. It never shows the manifest, or the groups, kinds and printer columns it
-  binds.
-  - **Pasted manifest:** the text stays visible in **Install a local manifest**, and
-    editing it cancels the review.
-  - **Catalog install:** the manifest is downloaded and installed without being shown
-    (`packages/ui-next/src/extensions/ExtensionCatalog.tsx`). The catalog lists only the
-    app's name, description, ID, versions and license. An unsigned catalog app is
+  RBAC still applies, and the install review names the custom resources and columns each
+  binding reads (see the next point).
+- **Grants are per host capability, not per binding.** Granting `k8s.listCustomResource`
+  grants whatever the manifest binds, so the install review shows what that is
+  ([#608]). The review (`ExtensionManager` in
+  `packages/ui-next/src/extensions/Extensions.tsx`, which the classic design reuses
+  through `apps/desktop/src/components/Extensions.tsx`) shows the app's name, a signature
+  label, the requested capability IDs and any validation problems.
+  - **Bindings:** once the host has accepted the manifest, the review lists each
+    custom-resource reader's group, version, kind, plural, scope and printer columns
+    with their JSON paths; each event reader's API groups, per dashboard that shows its
+    events; and any other binding's fixed arguments (`ExtensionBindings` in
+    `packages/ui-next/src/extensions/ExtensionBindings.tsx`).
+  - **Manifest:** **View manifest** opens the full manifest before anything is
+    installed, for catalog and pasted installs alike. A catalog install's manifest is
+    otherwise never shown before it is installed; the catalog lists only the app's name,
+    description, ID, versions and license
+    (`packages/ui-next/src/extensions/ExtensionCatalog.tsx`). An unsigned catalog app is
     labelled **Unsigned local manifest** in the review.
   - **After install:** the full manifest can be read under Details
     (`packages/ui-next/src/extensions/ExtensionDetails.tsx`).
 
-  [#554] adds a diff for updates, not a summary for first installs. Showing the bindings in the install review is planned
-  in [#608].
+  The review says what is bound, not whether it matters: it names the CRDs an app reads
+  but cannot tell whether their objects hold anything sensitive, and nothing makes the
+  user read it. [#554] adds a diff for updates.
 - **App reads are unbounded.** An app page lists with `k8s.listCustomResource`
   (`list_custom_resource_capability` in `crates/kube/src/crds.rs`), and a dashboard reads
   events with `k8s.listEvents` (`list_events_capability` in `crates/kube/src/events.rs`).
@@ -327,7 +332,6 @@ Out of scope as an attacker (see [Scope](#scope)), but the host still checks wha
 | [#581] | APP-12, VULN-4: performance budgets |
 | [#607] | MCP-1: refuse non-loopback addresses for headless HTTP unless explicitly exposed |
 | [#605] | VULN-3: redact extension settings in the MCP audit log |
-| [#608] | APP-3: show what an app binds in the install review |
 | [#609] | APP-12, VULN-4: paginate and cap app reader lists, limit printer columns and virtualize app tables |
 | [#611] | LOCAL-2: sync the parent directory after replacing the inventory and catalog cache |
 | [#515] ([#522]) | WEB-1: per-user apps on the web host |
