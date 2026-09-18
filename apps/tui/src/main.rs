@@ -94,12 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cli.mcp_allow_destructive,
             cli.mcp_allow_sensitive_reads,
         );
-        srelens_mcp::stdio::serve(
-            server,
-            tokio::io::BufReader::new(tokio::io::stdin()),
-            tokio::io::stdout(),
-        )
-        .await?;
+        mcp_server::run_mcp_stdio(server, tokio::io::stdin(), tokio::io::stdout()).await?;
         return Ok(());
     }
 
@@ -115,12 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     allow_destructive,
                     allow_sensitive_reads,
                 );
-                srelens_mcp::stdio::serve(
-                    server,
-                    tokio::io::BufReader::new(tokio::io::stdin()),
-                    tokio::io::stdout(),
-                )
-                .await?;
+                mcp_server::run_mcp_stdio(server, tokio::io::stdin(), tokio::io::stdout()).await?;
                 return Ok(());
             }
             CliCommand::Version => {
