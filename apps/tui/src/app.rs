@@ -2202,6 +2202,10 @@ impl App {
                             self.modal = None;
                             self.switch_view_to_kind(ResourceKind::BgpPeers).await;
                         }
+                        KeyCode::Char('i') | KeyCode::Char('I') => {
+                            self.modal = None;
+                            self.open_add_cluster_modal();
+                        }
                         KeyCode::Char('u') | KeyCode::Char('U') => {
                             if let Some(ref ver) = self.tui_config.update_available {
                                 self.set_toast(

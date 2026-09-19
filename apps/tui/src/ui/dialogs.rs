@@ -1319,7 +1319,7 @@ pub fn render_feature_banner_modal(
         .clamp(48, 118)
         .min(area.width);
     let modal_height = (area.height.saturating_sub(2))
-        .clamp(18, 28)
+        .clamp(18, 29)
         .min(area.height);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
@@ -1345,7 +1345,7 @@ pub fn render_feature_banner_modal(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Top description & update alert
-            Constraint::Min(12),   // Features list
+            Constraint::Min(13),   // Features list
             Constraint::Length(3), // Checkbox and key hints
         ])
         .split(inner);
@@ -1417,11 +1417,11 @@ pub fn render_feature_banner_modal(
     }
 
     let header_hint = if inner_w >= 108 {
-        "Key built-in features you should know (press [0-9, b, u] to jump directly, or type ':' for command prompt):"
+        "Key built-in features you should know (press [0-9, b, i, u] to jump directly, or type ':' for command prompt):"
     } else if inner_w >= 80 {
-        "Key built-in features (press [0-9, b, u] to jump directly, or ':' for commands):"
+        "Key built-in features (press [0-9, b, i, u] to jump directly, or ':' for commands):"
     } else {
-        "Key features (press [0-9, b, u] to jump, ':' for commands):"
+        "Key features (press [0-9, b, i, u] to jump, ':' for commands):"
     };
 
     header_lines.push(Line::from(vec![Span::styled(
@@ -1437,7 +1437,7 @@ pub fn render_feature_banner_modal(
         "Check for new releases & update binary ('srelens-tui update')".to_string()
     };
 
-    let features: [(&str, &str, &str, String, &str); 12] = [
+    let features: [(&str, &str, &str, String, &str); 13] = [
         (
             "[1]",
             ":helm",
@@ -1514,6 +1514,13 @@ pub fn render_feature_banner_modal(
             "[BGP Peering]",
             "BGP control plane, live peering topology & route VIPs".to_string(),
             ":bgp",
+        ),
+        (
+            "[i]",
+            ":import",
+            "[Add Cluster]",
+            "Import Kubernetes cluster / kubeconfig from clipboard or file path".to_string(),
+            ":import",
         ),
         ("[u]", ":update", "[Self Update]", update_desc, ":update"),
     ];
@@ -1633,7 +1640,7 @@ pub fn render_feature_banner_modal(
         ]
     };
 
-    let jump_hint = "0-9, b, u";
+    let jump_hint = "0-9, b, i, u";
     let footer_spans = if inner_w >= 98 {
         vec![
             Span::styled(" Press ", Style::default().fg(Theme::dim())),
