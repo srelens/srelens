@@ -1927,6 +1927,8 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
     let make_app = |name: &str, dest: &str| srelens_kube::argo::ArgoApplication {
         name: name.to_string(),
         namespace: "argocd".to_string(),
+        uid: String::new(),
+        resource_version: String::new(),
         project: "default".to_string(),
         destination_server: "".to_string(),
         destination_name: dest.to_string(),
@@ -2057,6 +2059,8 @@ async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_i
     let local_app = srelens_kube::argo::ArgoApplication {
         name: "local-app".to_string(),
         namespace: "argocd".to_string(),
+        uid: String::new(),
+        resource_version: String::new(),
         project: "default".to_string(),
         destination_server: "https://kubernetes.default.svc".to_string(),
         destination_name: "".to_string(),
@@ -2129,6 +2133,8 @@ async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_i
     let hub_app = srelens_kube::argo::ArgoApplication {
         name: "spoke-app".to_string(),
         namespace: "argocd".to_string(),
+        uid: String::new(),
+        resource_version: String::new(),
         project: "default".to_string(),
         destination_server: "https://10.0.0.2:6443".to_string(),
         destination_name: "".to_string(),
@@ -2220,6 +2226,8 @@ async fn test_argo_app_handlers_and_interactions() {
     let test_app = srelens_kube::argo::ArgoApplication {
         name: "test-service".to_string(),
         namespace: "argocd".to_string(),
+        uid: String::new(),
+        resource_version: String::new(),
         project: "default".to_string(),
         destination_server: "https://10.0.0.1:6443".to_string(),
         destination_name: "".to_string(),
@@ -5444,21 +5452,21 @@ async fn argo_modal_confirm_and_action_results() {
 
     // 1. Sync confirm execution
     app.execute_modal_confirm(
-        "argo_sync:{\"ctx\":\"prod-cluster\",\"ns\":\"argocd\",\"name\":\"billing-service\",\"prune\":false,\"dry_run\":false}".to_string(),
+        "argo_sync:{\"ctx\":\"prod-cluster\",\"ns\":\"argocd\",\"name\":\"billing-service\",\"uid\":\"u-1\",\"resource_version\":\"7\",\"prune\":false,\"dry_run\":false}".to_string(),
     )
     .await;
     assert!(toast(&app).contains("Triggering sync for 'billing-service'"));
 
     // 2. Toggle auto-sync confirm execution (enable: true)
     app.execute_modal_confirm(
-        "argo_toggle_auto:{\"ctx\":\"prod-cluster\",\"ns\":\"argocd\",\"name\":\"billing-service\",\"enable\":true}".to_string(),
+        "argo_toggle_auto:{\"ctx\":\"prod-cluster\",\"ns\":\"argocd\",\"name\":\"billing-service\",\"uid\":\"u-1\",\"resource_version\":\"7\",\"enable\":true}".to_string(),
     )
     .await;
     assert!(toast(&app).contains("Enabling auto-sync for 'billing-service'"));
 
     // 3. Toggle auto-sync confirm execution (enable: false)
     app.execute_modal_confirm(
-        "argo_toggle_auto:{\"ctx\":\"prod-cluster\",\"ns\":\"argocd\",\"name\":\"billing-service\",\"enable\":false}".to_string(),
+        "argo_toggle_auto:{\"ctx\":\"prod-cluster\",\"ns\":\"argocd\",\"name\":\"billing-service\",\"uid\":\"u-1\",\"resource_version\":\"7\",\"enable\":false}".to_string(),
     )
     .await;
     assert!(toast(&app).contains("Pausing auto-sync for 'billing-service'"));
@@ -5476,6 +5484,177 @@ async fn argo_modal_confirm_and_action_results() {
         Err("connection refused".to_string()),
     );
     assert!(toast(&app).contains("⚠ Sync 'billing-service' failed: connection refused"));
+}
+
+/// An Argo view listing one Application with a known uid and resourceVersion.
+fn argo_view_with_reviewed_app(namespace: &str, name: &str) -> ActiveView {
+    let listed = srelens_kube::argo::ArgoApplication::from_json(&json!({
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "uid": "uid-as-listed",
+            "resourceVersion": "4242",
+        },
+        "spec": {"project": "default", "destination": {"name": "in-cluster"}},
+        "status": {"sync": {"status": "OutOfSync"}, "health": {"status": "Healthy"}}
+    }));
+    let mut state = srelens_tui::views::argo_view::ArgoViewState::new();
+    state.set_applications(vec![listed.clone()], vec![listed], false, None);
+    ActiveView::Argo(state)
+}
+
+fn confirm_payload(app: &App, prefix: &str) -> Value {
+    match &app.modal {
+        Some(Modal::Confirm { action_name, .. }) => serde_json::from_str(
+            action_name
+                .strip_prefix(prefix)
+                .unwrap_or_else(|| panic!("expected {prefix}, got {action_name}")),
+        )
+        .unwrap(),
+        other => panic!("expected a {prefix} confirmation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn argo_confirmations_carry_the_listed_applications_uid_and_resource_version() {
+    // #620: the confirmation named the Application by namespace and name only,
+    // so one deleted and recreated while the dialog was open received the
+    // confirmed write. Every Argo write confirmation now carries the listed
+    // object's identity and version, for the write to be pinned to.
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    app.active_view = argo_view_with_reviewed_app("team", "billing");
+
+    for (key, prefix, field, value) in [
+        (ch('s'), "argo_sync:", "prune", json!(false)),
+        (
+            shift(KeyCode::Char('S')),
+            "argo_sync:",
+            "prune",
+            json!(true),
+        ),
+        (ch('p'), "argo_toggle_auto:", "enable", json!(true)),
+    ] {
+        press(&mut app, key).await;
+        let payload = confirm_payload(&app, prefix);
+        assert_eq!(payload["ns"], "team", "{prefix}");
+        assert_eq!(payload["name"], "billing", "{prefix}");
+        assert_eq!(payload["uid"], "uid-as-listed", "{prefix}");
+        assert_eq!(payload["resource_version"], "4242", "{prefix}");
+        assert_eq!(payload[field], value, "{prefix}");
+        app.modal = None;
+    }
+
+    // The action palette's Sync is pinned the same way.
+    press(&mut app, ch('x')).await;
+    if let Some(Modal::ActionPalette {
+        actions,
+        selected_idx,
+        ..
+    }) = &mut app.modal
+    {
+        *selected_idx = actions
+            .iter()
+            .position(|a| a.id == srelens_tui::ui::dialogs::QuickActionId::ArgoSync)
+            .expect("the palette offers Sync");
+    } else {
+        panic!("expected the action palette, got {:?}", app.modal);
+    }
+    app.execute_action_palette().await;
+    let payload = confirm_payload(&app, "argo_sync:");
+    assert_eq!(payload["uid"], "uid-as-listed");
+    assert_eq!(payload["resource_version"], "4242");
+    assert_eq!(payload["prune"], false);
+}
+
+#[tokio::test]
+async fn palette_sync_of_an_application_no_longer_listed_is_refused() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    app.active_view = argo_view_with_reviewed_app("team", "billing");
+    press(&mut app, ch('x')).await;
+    if let Some(Modal::ActionPalette {
+        actions,
+        selected_idx,
+        ..
+    }) = &mut app.modal
+    {
+        *selected_idx = actions
+            .iter()
+            .position(|a| a.id == srelens_tui::ui::dialogs::QuickActionId::ArgoSync)
+            .unwrap();
+    }
+    // The list refreshed while the palette was open and the Application went.
+    app.active_view = argo_view_with_reviewed_app("team", "other");
+
+    app.execute_action_palette().await;
+    assert!(
+        app.modal.is_none(),
+        "no confirmation without a reviewed object"
+    );
+    assert!(
+        toast(&app).contains("Cannot sync 'team/billing'"),
+        "{}",
+        toast(&app)
+    );
+}
+
+#[tokio::test]
+async fn argo_writes_without_a_reviewed_identity_are_refused() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    for (action, expected) in [
+        (
+            r#"argo_sync:{"ctx":"prod","ns":"argocd","name":"billing","prune":true,"dry_run":false}"#,
+            "⚠ Sync 'billing' failed: the Application's reviewed identity is unknown",
+        ),
+        (
+            r#"argo_sync:{"ctx":"prod","ns":"argocd","name":"billing","uid":"u","prune":true,"dry_run":false}"#,
+            "⚠ Sync 'billing' failed: the Application's reviewed identity is unknown",
+        ),
+        (
+            r#"argo_toggle_auto:{"ctx":"prod","ns":"argocd","name":"billing","resource_version":"7","enable":false}"#,
+            "⚠ Pause Auto-Sync for 'billing' failed: the Application's reviewed identity is unknown",
+        ),
+    ] {
+        app.execute_modal_confirm(action.to_string()).await;
+        assert!(toast(&app).contains(expected), "{action}: {}", toast(&app));
+    }
+
+    // The old colon-separated form cannot carry an identity and is not acted on.
+    app.toast = None;
+    app.execute_modal_confirm("argo_sync:prod:argocd:billing:true:false".to_string())
+        .await;
+    app.execute_modal_confirm("argo_toggle_auto:prod:argocd:billing:false".to_string())
+        .await;
+    assert!(app.toast.is_none(), "{}", toast(&app));
+}
+
+#[tokio::test]
+async fn a_write_refused_as_stale_reloads_the_applications() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    app.active_view = argo_view_with_reviewed_app("team", "billing");
+
+    app.handle_argo_action_result("Sync 'billing'", Err("connection refused".to_string()));
+    assert!(!app.argo_refreshing, "an unrelated failure reloads nothing");
+    // A proxy's plain-text 404 is an endpoint failure, not a gone Application.
+    app.handle_argo_action_result(
+        "Sync 'billing'",
+        Err("Failed to trigger sync for 'team/billing': ApiError: 404 page not found: Failed to parse error data (ErrorResponse { status: \"Failure\", message: \"404 page not found\", reason: \"Failed to parse error data\", code: 404 })".to_string()),
+    );
+    assert!(!app.argo_refreshing, "an endpoint 404 reloads nothing");
+
+    let err = format!(
+        "Failed to trigger sync for 'team/billing': {}",
+        srelens_kube::argo::APPLICATION_CHANGED
+    );
+    app.handle_argo_action_result("Sync 'billing'", Err(err));
+    assert_eq!(
+        toast(&app),
+        "⚠ Sync 'billing' failed: Failed to trigger sync for 'team/billing': the Application changed since you reviewed it; refresh and try again"
+    );
+    assert!(
+        app.argo_refreshing,
+        "the list reloads so the retry is made against what is there now"
+    );
 }
 
 #[tokio::test]

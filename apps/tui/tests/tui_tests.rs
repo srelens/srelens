@@ -7052,6 +7052,8 @@ mod tests {
             "metadata": {
                 "name": "auth-api",
                 "namespace": "argocd",
+                "uid": "auth-api-uid",
+                "resourceVersion": "981",
             },
             "spec": {
                 "project": "default",
@@ -7134,6 +7136,8 @@ mod tests {
             assert_eq!(val["ctx"], "mgmt-hub");
             assert_eq!(val["ns"], "argocd");
             assert_eq!(val["name"], "auth-api");
+            assert_eq!(val["uid"], "auth-api-uid");
+            assert_eq!(val["resource_version"], "981");
             assert_eq!(val["prune"], false);
         } else {
             panic!("Expected Modal::Confirm for argo_sync");
@@ -7149,6 +7153,8 @@ mod tests {
             assert_eq!(val["ctx"], "mgmt-hub");
             assert_eq!(val["ns"], "argocd");
             assert_eq!(val["name"], "auth-api");
+            assert_eq!(val["uid"], "auth-api-uid");
+            assert_eq!(val["resource_version"], "981");
             assert_eq!(val["prune"], true);
         } else {
             panic!("Expected Modal::Confirm for argo_sync with prune");
@@ -7164,6 +7170,8 @@ mod tests {
             assert_eq!(val["ctx"], "mgmt-hub");
             assert_eq!(val["ns"], "argocd");
             assert_eq!(val["name"], "auth-api");
+            assert_eq!(val["uid"], "auth-api-uid");
+            assert_eq!(val["resource_version"], "981");
             assert_eq!(val["enable"], true);
         } else {
             panic!("Expected Modal::Confirm for argo_toggle_auto");
@@ -7259,6 +7267,8 @@ mod tests {
             "ctx": eks_arn_ctx,
             "ns": "argocd",
             "name": "payment-service",
+            "uid": "payment-service-uid",
+            "resource_version": "12",
             "prune": false,
             "dry_run": false,
         });
