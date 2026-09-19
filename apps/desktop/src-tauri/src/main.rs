@@ -1,6 +1,8 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod headless_log;
+
 use std::sync::Arc;
 
 use srelens_mcp::auth::TokenStore as _;
@@ -79,11 +81,15 @@ fn main() {
     let allow_destructive = args.iter().any(|a| a == "--mcp-allow-destructive");
     let allow_sensitive_reads = args.iter().any(|a| a == "--mcp-allow-sensitive-reads");
     if args.iter().any(|a| a == "--mcp-stdio") {
+        // Headless: no `tauri_plugin_log`. Install a stderr logger so durability
+        // warnings from `durable::replace` reach the operator.
+        headless_log::init();
         drop(master_password);
         run_mcp_stdio(allow_destructive, allow_sensitive_reads);
         return;
     }
     if let Some(i) = args.iter().position(|a| a == "--mcp-http") {
+        headless_log::init();
         // The next arg is the address unless it's itself a flag (e.g.
         // `--mcp-http --mcp-allow-destructive` with no address given).
         let addr = args
