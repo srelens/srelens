@@ -302,6 +302,7 @@ pub enum CommandTarget {
     SetTheme(String),
     FeatureBanner,
     Update,
+    AddCluster,
 }
 
 pub const COMMAND_REGISTRY: &[CommandDef] = &[
@@ -522,6 +523,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         target: CommandTarget::Contexts,
     },
     CommandDef {
+        name: "import",
+        aliases: &["add-cluster", "import-kubeconfig", "add-ctx", "kubeconfig-add"],
+        description: "Import a new Kubernetes cluster / kubeconfig from clipboard or file path",
+        target: CommandTarget::AddCluster,
+    },
+    CommandDef {
         name: "overview",
         aliases: &["info", "cluster"],
         description: "Cluster overview, health summary and node/pod capacity",
@@ -554,7 +561,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
     CommandDef {
         name: "features",
         aliases: &["banner", "guide", "welcome"],
-        description: "Show SRElens feature highlights banner (:helm, :overview, :gpuinfo, :workloads, :argo, :ai, :ai-settings, :config, :banner)",
+        description: "Show SRElens feature highlights banner (:helm, :overview, :gpuinfo, :workloads, :argo, :ai, :ai-settings, :config, :import, :banner)",
         target: CommandTarget::FeatureBanner,
     },
     CommandDef {
@@ -679,7 +686,7 @@ impl DynamicCommandDef {
             },
             CommandTarget::CustomResource(_) => "CRD",
             CommandTarget::ThemePicker | CommandTarget::SetTheme(_) => "Themes",
-            CommandTarget::Contexts => "Context",
+            CommandTarget::Contexts | CommandTarget::AddCluster => "Context",
             CommandTarget::Namespaces => "Namespace",
             CommandTarget::Help => "Help",
             CommandTarget::FeatureBanner => "Guide",
@@ -711,6 +718,7 @@ impl DynamicCommandDef {
             CommandTarget::SetTheme(_) => ":theme <name>",
             CommandTarget::Namespaces => ":namespaces",
             CommandTarget::Contexts => ":contexts",
+            CommandTarget::AddCluster => ":import",
             CommandTarget::Help => ":help",
             CommandTarget::FeatureBanner => ":features",
             CommandTarget::Quit => ":quit",
