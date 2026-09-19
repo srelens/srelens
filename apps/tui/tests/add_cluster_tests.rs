@@ -27,6 +27,28 @@ users:
 
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+struct EnvVarGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_import_kubeconfig_from_yaml_content() {
     let _lock = ENV_LOCK.lock().await;
@@ -34,7 +56,7 @@ async fn test_import_kubeconfig_from_yaml_content() {
     let temp = tempfile::tempdir().unwrap();
     let managed_dir = temp.path().join("managed_configs");
     std::fs::create_dir_all(&managed_dir).unwrap();
-    std::env::set_var("SRELENS_KUBECONFIG_DIR", &managed_dir);
+    let _guard = EnvVarGuard::set("SRELENS_KUBECONFIG_DIR", &managed_dir);
 
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
@@ -79,6 +101,12 @@ users:
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let dir_perms = std::fs::metadata(&managed_dir).unwrap().permissions();
+        assert_eq!(
+            dir_perms.mode() & 0o777,
+            0o700,
+            "managed directory must have 0700 permissions"
+        );
         let perms = std::fs::metadata(&saved_files[0]).unwrap().permissions();
         assert_eq!(
             perms.mode() & 0o777,
@@ -86,8 +114,6 @@ users:
             "file must have 0600 permissions"
         );
     }
-
-    std::env::remove_var("SRELENS_KUBECONFIG_DIR");
 }
 
 #[tokio::test]
@@ -97,7 +123,7 @@ async fn test_import_kubeconfig_from_file_path() {
     let temp = tempfile::tempdir().unwrap();
     let managed_dir = temp.path().join("managed_configs");
     std::fs::create_dir_all(&managed_dir).unwrap();
-    std::env::set_var("SRELENS_KUBECONFIG_DIR", &managed_dir);
+    let _guard = EnvVarGuard::set("SRELENS_KUBECONFIG_DIR", &managed_dir);
 
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
@@ -144,6 +170,12 @@ users:
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let dir_perms = std::fs::metadata(&managed_dir).unwrap().permissions();
+        assert_eq!(
+            dir_perms.mode() & 0o777,
+            0o700,
+            "managed directory must have 0700 permissions"
+        );
         let perms = std::fs::metadata(&saved_files[0]).unwrap().permissions();
         assert_eq!(
             perms.mode() & 0o777,
@@ -151,8 +183,42 @@ users:
             "file must have 0600 permissions"
         );
     }
+}
 
-    std::env::remove_var("SRELENS_KUBECONFIG_DIR");
+#[tokio::test]
+async fn test_add_cluster_modal_bracketed_paste() {
+    let (tx, _rx) = unbounded_channel::<AppEvent>();
+    let temp = tempfile::tempdir().unwrap();
+    let initial_config = temp.path().join("config");
+    std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
+
+    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+        .await
+        .unwrap();
+
+    app.modal = Some(Modal::AddCluster {
+        input: String::new(),
+        cursor_pos: 0,
+        error_message: None,
+        preview_contexts: vec![],
+    });
+
+    let pasted_yaml = "apiVersion: v1\r\nkind: Config\r\nclusters:\r\n- name: c\r\n  cluster: {server: 'https://127.0.0.1:1'}\r\ncontexts:\r\n- name: pasted-ctx\r\n  context: {cluster: c, user: u}\r\nusers:\r\n- name: u\r\n  user: {}\r\n";
+    app.handle_paste(pasted_yaml.to_string());
+
+    if let Some(Modal::AddCluster {
+        input,
+        preview_contexts,
+        error_message,
+        ..
+    }) = &app.modal
+    {
+        assert!(!input.contains("\r\n"), "CRLF should be converted to LF");
+        assert_eq!(preview_contexts, &vec!["pasted-ctx".to_string()]);
+        assert!(error_message.is_none());
+    } else {
+        panic!("expected Modal::AddCluster to be open");
+    }
 }
 
 #[test]

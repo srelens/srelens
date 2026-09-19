@@ -913,10 +913,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dot_kube = temp.path().join(".kube");
         std::fs::create_dir_all(&dot_kube).unwrap();
-        std::fs::write(dot_kube.join("config"), "apiVersion: v1").unwrap();
-        std::fs::write(dot_kube.join("cluster-a.yaml"), "apiVersion: v1").unwrap();
-        std::fs::write(dot_kube.join("cluster-b"), "apiVersion: v1").unwrap();
-        std::fs::write(dot_kube.join(".hidden"), "apiVersion: v1").unwrap();
+        let valid_yaml = "apiVersion: v1\nkind: Config\nclusters: [{name: c, cluster: {server: 'https://127.0.0.1:1'}}]\ncontexts: [{name: test, context: {cluster: c, user: u}}]\nusers: [{name: u, user: {}}]\n";
+        std::fs::write(dot_kube.join("config"), valid_yaml).unwrap();
+        std::fs::write(dot_kube.join("cluster-a.yaml"), valid_yaml).unwrap();
+        std::fs::write(dot_kube.join("cluster-b"), valid_yaml).unwrap();
+        std::fs::write(dot_kube.join(".hidden"), valid_yaml).unwrap();
 
         let paths = kubeconfig_paths_in_home(temp.path());
         assert!(paths.contains(&dot_kube.join("config")));

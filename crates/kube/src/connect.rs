@@ -178,13 +178,13 @@ pub fn is_valid_kubeconfig_file(path: &Path) -> bool {
     let Ok(content) = std::fs::read_to_string(path) else {
         return false;
     };
-    if !content.contains("clusters")
-        && !content.contains("contexts")
-        && !content.contains("apiVersion")
-    {
+    if !content.contains("clusters") && !content.contains("contexts") {
         return false;
     }
-    kube::config::Kubeconfig::from_yaml(&content).is_ok()
+    match kube::config::Kubeconfig::from_yaml(&content) {
+        Ok(cfg) => !cfg.contexts.is_empty() || !cfg.clusters.is_empty(),
+        Err(_) => false,
+    }
 }
 
 /// Write a private kubeconfig file with mode 0600 (Unix) and a collision-resistant
@@ -196,6 +196,12 @@ pub fn write_private_kubeconfig_file(
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir)
         .map_err(|e| format!("Failed to create directory {}: {}", dir.display(), e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("Failed to restrict directory {}: {}", dir.display(), e))?;
+    }
 
     let safe_name: String = base_name
         .chars()
@@ -235,6 +241,8 @@ pub fn write_private_kubeconfig_file(
     use std::io::Write as _;
     file.write_all(yaml.as_bytes())
         .map_err(|e| format!("Failed to write kubeconfig to {}: {}", path.display(), e))?;
+    file.sync_all()
+        .map_err(|e| format!("Failed to sync kubeconfig at {}: {}", path.display(), e))?;
     Ok(path)
 }
 
@@ -1483,5 +1491,77 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let err = result.expect_err("an unreachable cluster must not read as facts");
         assert!(!format!("{err:?}").is_empty());
+    }
+
+    #[test]
+    fn discover_kubeconfig_files_in_finds_nested_and_filters_excluded_and_invalid() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        let valid_yaml = "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster: {server: 'https://127.0.0.1:6443'}\ncontexts:\n- name: ctx\n  context: {cluster: c, user: u}\nusers:\n- name: u\n  user: {token: t}\n";
+
+        // Valid nested kubeconfig
+        let nested_dir = root.join("sub").join("nested");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        let valid_file = nested_dir.join("config.yaml");
+        std::fs::write(&valid_file, valid_yaml).unwrap();
+
+        // Excluded cache directory
+        let cache_dir = root.join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_file = cache_dir.join("cached.yaml");
+        std::fs::write(&cache_file, valid_yaml).unwrap();
+
+        // Excluded tmp directory
+        let tmp_dir = root.join("tmp");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tmp_file = tmp_dir.join("temp.yaml");
+        std::fs::write(&tmp_file, valid_yaml).unwrap();
+
+        // Excluded hidden directory
+        let hidden_dir = root.join(".hidden");
+        std::fs::create_dir_all(&hidden_dir).unwrap();
+        let hidden_file = hidden_dir.join("hidden.yaml");
+        std::fs::write(&hidden_file, valid_yaml).unwrap();
+
+        // Invalid YAML file
+        let invalid_file = root.join("invalid.yaml");
+        std::fs::write(&invalid_file, "this: is: not: [valid: yaml").unwrap();
+
+        // Non-kubeconfig YAML file
+        let other_yaml = root.join("service.yaml");
+        std::fs::write(
+            &other_yaml,
+            "apiVersion: v1\nkind: Service\nmetadata:\n  name: test\n",
+        )
+        .unwrap();
+
+        let discovered = discover_kubeconfig_files_in(root);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0], valid_file);
+        assert!(is_valid_kubeconfig_file(&valid_file));
+        assert!(!is_valid_kubeconfig_file(&invalid_file));
+        assert!(!is_valid_kubeconfig_file(&other_yaml));
+    }
+
+    #[test]
+    fn write_private_kubeconfig_file_creates_file_and_sets_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let target_dir = temp.path().join("configs");
+        let content = "apiVersion: v1\nkind: Config\n";
+
+        let path = write_private_kubeconfig_file(&target_dir, "test-cluster", content).unwrap();
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(&target_dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700, "directory mode must be 0700");
+
+            let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(file_mode, 0o600, "file mode must be 0600");
+        }
     }
 }

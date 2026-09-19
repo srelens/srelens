@@ -699,8 +699,7 @@ impl AssistantViewState {
             }
 
             if !msg.content.trim().is_empty() {
-                let normalized = ensure_spacing_after_periods(&msg.content);
-                md.push_str(&normalized);
+                md.push_str(&msg.content);
                 md.push_str("\n\n");
             }
 

@@ -2920,11 +2920,24 @@ impl App {
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
                         if let Some(clip) = get_clipboard_text() {
-                            input = clip;
-                            cursor_pos = input.chars().count();
-                            let (preview, err) = Self::parse_add_cluster_preview(&input);
-                            preview_contexts = preview;
-                            error_message = err;
+                            let cleaned = clip.replace("\r\n", "\n");
+                            let pos = cursor_pos.min(input.chars().count());
+                            let mut chars: Vec<char> = input.chars().collect();
+                            let added_len = cleaned.chars().count();
+                            for (i, c) in cleaned.chars().enumerate() {
+                                chars.insert(pos + i, c);
+                            }
+                            let candidate: String = chars.into_iter().collect();
+                            if candidate.len() <= 1024 * 1024 {
+                                input = candidate;
+                                cursor_pos = pos + added_len;
+                                let (preview, err) = Self::parse_add_cluster_preview(&input);
+                                preview_contexts = preview;
+                                error_message = err;
+                            } else {
+                                error_message =
+                                    Some("Clipboard content exceeds 1 MB limit".to_string());
+                            }
                             self.modal = Some(Modal::AddCluster {
                                 input,
                                 cursor_pos,
@@ -3017,14 +3030,16 @@ impl App {
                         if !key.modifiers.contains(KeyModifiers::CONTROL)
                             && !key.modifiers.contains(KeyModifiers::ALT) =>
                     {
-                        let mut chars: Vec<char> = input.chars().collect();
-                        let pos = cursor_pos.min(chars.len());
-                        chars.insert(pos, c);
-                        cursor_pos += 1;
-                        input = chars.into_iter().collect();
-                        let (preview, err) = Self::parse_add_cluster_preview(&input);
-                        preview_contexts = preview;
-                        error_message = err;
+                        if input.len() < 1024 * 1024 {
+                            let mut chars: Vec<char> = input.chars().collect();
+                            let pos = cursor_pos.min(chars.len());
+                            chars.insert(pos, c);
+                            cursor_pos += 1;
+                            input = chars.into_iter().collect();
+                            let (preview, err) = Self::parse_add_cluster_preview(&input);
+                            preview_contexts = preview;
+                            error_message = err;
+                        }
                         self.modal = Some(Modal::AddCluster {
                             input,
                             cursor_pos,
@@ -8078,6 +8093,30 @@ impl App {
                     let cleaned = text.replace("\r\n", "").replace('\n', "");
                     local_port_input.push_str(&cleaned);
                 }
+                Modal::AddCluster {
+                    ref mut input,
+                    ref mut cursor_pos,
+                    ref mut error_message,
+                    ref mut preview_contexts,
+                } => {
+                    let cleaned = text.replace("\r\n", "\n");
+                    let pos = (*cursor_pos).min(input.chars().count());
+                    let mut chars: Vec<char> = input.chars().collect();
+                    let added_len = cleaned.chars().count();
+                    for (i, c) in cleaned.chars().enumerate() {
+                        chars.insert(pos + i, c);
+                    }
+                    let candidate: String = chars.into_iter().collect();
+                    if candidate.len() <= 1024 * 1024 {
+                        *input = candidate;
+                        *cursor_pos = pos + added_len;
+                        let (preview, err) = Self::parse_add_cluster_preview(input);
+                        *preview_contexts = preview;
+                        *error_message = err;
+                    } else {
+                        *error_message = Some("Pasted content exceeds 1 MB limit".to_string());
+                    }
+                }
                 _ => {}
             }
         }
@@ -8358,7 +8397,16 @@ impl App {
                 {
                     (vec![], Some("File does not exist".to_string()))
                 } else {
-                    (vec![], None)
+                    match kube::config::Kubeconfig::from_yaml(trimmed) {
+                        Ok(cfg) => {
+                            if cfg.contexts.is_empty() {
+                                (vec![], Some("Kubeconfig contains no contexts".to_string()))
+                            } else {
+                                (cfg.contexts.into_iter().map(|c| c.name).collect(), None)
+                            }
+                        }
+                        Err(e) => (vec![], Some(format!("Invalid kubeconfig: {}", e))),
+                    }
                 }
             } else {
                 (vec![], None)
