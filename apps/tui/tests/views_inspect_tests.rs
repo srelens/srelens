@@ -1183,6 +1183,30 @@ fn settings_view_highlights_the_focused_field_on_the_selected_card() {
     let r = row_of(&l, "1. Anthropic (Claude)") + 1;
     let kx = col(&l[r], "API Key:");
     assert_eq!(b[(kx, r as u16)].fg, Theme::YELLOW);
+
+    s.selected_provider_idx = 3;
+    s.selected_field = SettingField::BaseUrl;
+    let b = render_buffer(120, 40, |f| render_settings_view(f, f.area(), &s));
+    let l = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &s));
+    let r = row_of(&l, "4. OpenAI-Compatible / Ollama (Local)") + 3;
+    assert!(l[r].contains("Base URL: http://localhost:11434/v1"), "{}", l[r]);
+    let bx = col(&l[r], "Base URL:");
+    assert_eq!(b[(bx, r as u16)].fg, Theme::YELLOW);
+    let vx = col(&l[r], "http://localhost:11434/v1");
+    assert_eq!(b[(vx, r as u16)].fg, Theme::YELLOW);
+}
+
+#[test]
+fn settings_view_renders_base_url_for_openai_compatible_provider() {
+    let state = settings_state();
+    let lines = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &state));
+    let oai_compat_row = row_of(&lines, "4. OpenAI-Compatible / Ollama (Local)");
+    let base_url_row = oai_compat_row + 3;
+    assert!(
+        lines[base_url_row].contains("Base URL: http://localhost:11434/v1"),
+        "Base URL row must be rendered: {}",
+        lines[base_url_row]
+    );
 }
 
 #[test]
