@@ -221,6 +221,44 @@ async fn test_add_cluster_modal_bracketed_paste() {
     }
 }
 
+#[tokio::test]
+async fn test_add_cluster_modal_oversized_paste() {
+    let (tx, _rx) = unbounded_channel::<AppEvent>();
+    let temp = tempfile::tempdir().unwrap();
+    let initial_config = temp.path().join("config");
+    std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
+
+    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+        .await
+        .unwrap();
+
+    let initial_input = "apiVersion: v1".to_string();
+    app.modal = Some(Modal::AddCluster {
+        input: initial_input.clone(),
+        cursor_pos: initial_input.len(),
+        error_message: None,
+        preview_contexts: vec![],
+    });
+
+    let huge_content = "x".repeat(1024 * 1024 + 10);
+    app.handle_paste(huge_content);
+
+    if let Some(Modal::AddCluster {
+        input,
+        error_message,
+        ..
+    }) = &app.modal
+    {
+        assert_eq!(input, &initial_input, "input must remain unchanged");
+        assert_eq!(
+            error_message.as_deref(),
+            Some("Pasted content exceeds 1 MB limit")
+        );
+    } else {
+        panic!("expected Modal::AddCluster to be open");
+    }
+}
+
 #[test]
 fn test_render_add_cluster_modal() {
     let modal = Modal::AddCluster {

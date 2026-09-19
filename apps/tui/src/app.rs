@@ -2921,22 +2921,22 @@ impl App {
                     {
                         if let Some(clip) = get_clipboard_text() {
                             let cleaned = clip.replace("\r\n", "\n");
-                            let pos = cursor_pos.min(input.chars().count());
-                            let mut chars: Vec<char> = input.chars().collect();
-                            let added_len = cleaned.chars().count();
-                            for (i, c) in cleaned.chars().enumerate() {
-                                chars.insert(pos + i, c);
-                            }
-                            let candidate: String = chars.into_iter().collect();
-                            if candidate.len() <= 1024 * 1024 {
-                                input = candidate;
+                            if input.len().saturating_add(cleaned.len()) > 1024 * 1024 {
+                                error_message =
+                                    Some("Clipboard content exceeds 1 MB limit".to_string());
+                            } else {
+                                let pos = cursor_pos.min(input.chars().count());
+                                let added_len = cleaned.chars().count();
+                                let byte_pos = input
+                                    .char_indices()
+                                    .nth(pos)
+                                    .map(|(b, _)| b)
+                                    .unwrap_or(input.len());
+                                input.insert_str(byte_pos, &cleaned);
                                 cursor_pos = pos + added_len;
                                 let (preview, err) = Self::parse_add_cluster_preview(&input);
                                 preview_contexts = preview;
                                 error_message = err;
-                            } else {
-                                error_message =
-                                    Some("Clipboard content exceeds 1 MB limit".to_string());
                             }
                             self.modal = Some(Modal::AddCluster {
                                 input,
@@ -8100,21 +8100,21 @@ impl App {
                     ref mut preview_contexts,
                 } => {
                     let cleaned = text.replace("\r\n", "\n");
-                    let pos = (*cursor_pos).min(input.chars().count());
-                    let mut chars: Vec<char> = input.chars().collect();
-                    let added_len = cleaned.chars().count();
-                    for (i, c) in cleaned.chars().enumerate() {
-                        chars.insert(pos + i, c);
-                    }
-                    let candidate: String = chars.into_iter().collect();
-                    if candidate.len() <= 1024 * 1024 {
-                        *input = candidate;
+                    if input.len().saturating_add(cleaned.len()) > 1024 * 1024 {
+                        *error_message = Some("Pasted content exceeds 1 MB limit".to_string());
+                    } else {
+                        let pos = (*cursor_pos).min(input.chars().count());
+                        let added_len = cleaned.chars().count();
+                        let byte_pos = input
+                            .char_indices()
+                            .nth(pos)
+                            .map(|(b, _)| b)
+                            .unwrap_or(input.len());
+                        input.insert_str(byte_pos, &cleaned);
                         *cursor_pos = pos + added_len;
                         let (preview, err) = Self::parse_add_cluster_preview(input);
                         *preview_contexts = preview;
                         *error_message = err;
-                    } else {
-                        *error_message = Some("Pasted content exceeds 1 MB limit".to_string());
                     }
                 }
                 _ => {}
