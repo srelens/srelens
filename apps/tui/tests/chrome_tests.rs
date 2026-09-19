@@ -547,7 +547,7 @@ fn the_context_picker_lists_every_context_with_badges_and_marks_the_active_one()
     );
     assert!(text.contains("  [remote] staging ns:[web]"), "{text}");
     assert!(
-        text.contains("Showing 3/3 contexts  •  Enter: Switch  Esc: Cancel"),
+        text.contains("Showing 3/3 contexts  •  Enter: Switch  Ctrl+i: Import  Esc: Cancel"),
         "{text}"
     );
 }

@@ -2837,6 +2837,14 @@ impl App {
                                 current_context,
                             });
                         }
+                        KeyCode::Char('a')
+                        | KeyCode::Char('A')
+                        | KeyCode::Char('i')
+                        | KeyCode::Char('I')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            self.open_add_cluster_modal();
+                        }
                         KeyCode::Char(c)
                             if !key.modifiers.contains(KeyModifiers::CONTROL)
                                 && !key.modifiers.contains(KeyModifiers::ALT) =>
@@ -2876,6 +2884,152 @@ impl App {
                         _ => {}
                     }
                 }
+                Modal::AddCluster {
+                    mut input,
+                    mut cursor_pos,
+                    mut error_message,
+                    mut preview_contexts,
+                } => match key.code {
+                    KeyCode::Esc => {
+                        self.modal = None;
+                    }
+                    KeyCode::Enter => match self.import_kubeconfig(&input) {
+                        Ok(ctx_name) => {
+                            self.modal = None;
+                            self.set_toast(
+                                format!("✓ Imported and switched to context '{}'", ctx_name),
+                                Theme::status_ok(),
+                            );
+                            self.switch_context(ctx_name).await;
+                        }
+                        Err(err) => {
+                            error_message = Some(err);
+                            self.modal = Some(Modal::AddCluster {
+                                input,
+                                cursor_pos,
+                                error_message,
+                                preview_contexts,
+                            });
+                        }
+                    },
+                    KeyCode::Char('v') | KeyCode::Char('V')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if let Some(clip) = get_clipboard_text() {
+                            input = clip;
+                            cursor_pos = input.chars().count();
+                            let (preview, err) = Self::parse_add_cluster_preview(&input);
+                            preview_contexts = preview;
+                            error_message = err;
+                            self.modal = Some(Modal::AddCluster {
+                                input,
+                                cursor_pos,
+                                error_message,
+                                preview_contexts,
+                            });
+                        }
+                    }
+                    _ if is_word_delete_key(&key) => {
+                        delete_prev_word(&mut input);
+                        cursor_pos = input.chars().count();
+                        let (preview, err) = Self::parse_add_cluster_preview(&input);
+                        preview_contexts = preview;
+                        error_message = err;
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::Char('u') | KeyCode::Char('U')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        input.clear();
+                        cursor_pos = 0;
+                        preview_contexts.clear();
+                        error_message = None;
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::Backspace => {
+                        let mut chars: Vec<char> = input.chars().collect();
+                        if cursor_pos > 0 && !chars.is_empty() {
+                            chars.remove(cursor_pos - 1);
+                            cursor_pos -= 1;
+                            input = chars.into_iter().collect();
+                            let (preview, err) = Self::parse_add_cluster_preview(&input);
+                            preview_contexts = preview;
+                            error_message = err;
+                        }
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::Left => {
+                        cursor_pos = cursor_pos.saturating_sub(1);
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::Right => {
+                        cursor_pos = (cursor_pos + 1).min(input.chars().count());
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::Home => {
+                        cursor_pos = 0;
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::End => {
+                        cursor_pos = input.chars().count();
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::Char(c)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        let mut chars: Vec<char> = input.chars().collect();
+                        let pos = cursor_pos.min(chars.len());
+                        chars.insert(pos, c);
+                        cursor_pos += 1;
+                        input = chars.into_iter().collect();
+                        let (preview, err) = Self::parse_add_cluster_preview(&input);
+                        preview_contexts = preview;
+                        error_message = err;
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    _ => {}
+                },
                 Modal::NamespacePicker {
                     namespaces,
                     mut selected_idx,
@@ -8123,12 +8277,276 @@ impl App {
         });
     }
 
+    pub fn open_add_cluster_modal(&mut self) {
+        let clip = get_clipboard_text().unwrap_or_default();
+        let (input, preview_contexts, error_message) = if !clip.trim().is_empty() {
+            let (preview, err) = Self::parse_add_cluster_preview(&clip);
+            if err.is_none() && !preview.is_empty() {
+                (clip, preview, None)
+            } else {
+                (String::new(), vec![], None)
+            }
+        } else {
+            (String::new(), vec![], None)
+        };
+
+        let cursor_pos = input.chars().count();
+        self.modal = Some(Modal::AddCluster {
+            input,
+            cursor_pos,
+            error_message,
+            preview_contexts,
+        });
+    }
+
+    fn parse_add_cluster_preview(input: &str) -> (Vec<String>, Option<String>) {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return (vec![], None);
+        }
+
+        if trimmed.contains('\n')
+            || trimmed.starts_with("apiVersion:")
+            || trimmed.starts_with("clusters:")
+            || trimmed.starts_with("kind:")
+        {
+            match kube::config::Kubeconfig::from_yaml(trimmed) {
+                Ok(cfg) => {
+                    if cfg.contexts.is_empty() {
+                        (vec![], Some("Kubeconfig contains no contexts".to_string()))
+                    } else {
+                        (cfg.contexts.into_iter().map(|c| c.name).collect(), None)
+                    }
+                }
+                Err(e) => (vec![], Some(format!("Invalid YAML: {}", e))),
+            }
+        } else {
+            let resolved_path = if trimmed.starts_with("~/") || trimmed == "~" {
+                dirs::home_dir().map(|h| {
+                    if trimmed == "~" {
+                        h
+                    } else {
+                        h.join(&trimmed[2..])
+                    }
+                })
+            } else {
+                Some(PathBuf::from(trimmed))
+            };
+
+            if let Some(ref path) = resolved_path {
+                if path.is_file() {
+                    match std::fs::read_to_string(path) {
+                        Ok(content) => match kube::config::Kubeconfig::from_yaml(&content) {
+                            Ok(cfg) => {
+                                if cfg.contexts.is_empty() {
+                                    (vec![], Some("File contains no contexts".to_string()))
+                                } else {
+                                    (cfg.contexts.into_iter().map(|c| c.name).collect(), None)
+                                }
+                            }
+                            Err(e) => (vec![], Some(format!("Invalid kubeconfig file: {}", e))),
+                        },
+                        Err(e) => (vec![], Some(format!("Cannot read file: {}", e))),
+                    }
+                } else if trimmed.contains('/')
+                    || trimmed.starts_with('~')
+                    || trimmed.starts_with('.')
+                {
+                    (vec![], Some("File does not exist".to_string()))
+                } else {
+                    (vec![], None)
+                }
+            } else {
+                (vec![], None)
+            }
+        }
+    }
+
+    pub fn import_kubeconfig(&mut self, input: &str) -> Result<String, String> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err("Input is empty".to_string());
+        }
+
+        let mut target_path: Option<PathBuf> = None;
+        let mut parsed_config: Option<kube::config::Kubeconfig> = None;
+
+        let resolved_path = if trimmed.starts_with("~/") || trimmed == "~" {
+            dirs::home_dir().map(|h| {
+                if trimmed == "~" {
+                    h
+                } else {
+                    h.join(&trimmed[2..])
+                }
+            })
+        } else {
+            Some(PathBuf::from(trimmed))
+        };
+
+        if let Some(ref path) = resolved_path {
+            if path.is_file() {
+                match std::fs::read_to_string(path) {
+                    Ok(content) => match kube::config::Kubeconfig::from_yaml(&content) {
+                        Ok(cfg) => {
+                            if cfg.contexts.is_empty() {
+                                return Err("Kubeconfig file contains no contexts".to_string());
+                            }
+                            parsed_config = Some(cfg);
+                            target_path = Some(path.clone());
+                        }
+                        Err(e) => {
+                            return Err(format!("Invalid kubeconfig file: {}", e));
+                        }
+                    },
+                    Err(e) => {
+                        return Err(format!("Failed to read file: {}", e));
+                    }
+                }
+            }
+        }
+
+        if parsed_config.is_none() {
+            match kube::config::Kubeconfig::from_yaml(trimmed) {
+                Ok(cfg) => {
+                    if cfg.contexts.is_empty() {
+                        return Err("Kubeconfig contains no contexts".to_string());
+                    }
+
+                    let config_dir = srelens_kube::connect::default_kubeconfig_dir()
+                        .or_else(|| {
+                            dirs::home_dir().map(|h| h.join(".kube").join("srelens-configs"))
+                        })
+                        .ok_or_else(|| {
+                            "Could not determine config directory to save kubeconfig".to_string()
+                        })?;
+
+                    std::fs::create_dir_all(&config_dir).map_err(|e| {
+                        format!("Failed to create directory {}: {}", config_dir.display(), e)
+                    })?;
+
+                    let first_ctx = cfg
+                        .current_context
+                        .as_deref()
+                        .or_else(|| cfg.contexts.first().map(|c| c.name.as_str()))
+                        .unwrap_or("cluster");
+
+                    let safe_name: String = first_ctx
+                        .chars()
+                        .map(|c| {
+                            if c.is_alphanumeric() || c == '-' || c == '_' {
+                                c
+                            } else {
+                                '_'
+                            }
+                        })
+                        .collect();
+
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+
+                    let filename = format!("{}-{}.yaml", safe_name, timestamp);
+                    let file_path = config_dir.join(filename);
+
+                    std::fs::write(&file_path, trimmed).map_err(|e| {
+                        format!(
+                            "Failed to write kubeconfig to {}: {}",
+                            file_path.display(),
+                            e
+                        )
+                    })?;
+
+                    target_path = Some(file_path);
+                    parsed_config = Some(cfg);
+                }
+                Err(e) => {
+                    if trimmed.contains('/') || trimmed.starts_with('~') || trimmed.starts_with('.')
+                    {
+                        return Err(format!("File does not exist or invalid: {}", trimmed));
+                    }
+                    return Err(format!("Invalid kubeconfig YAML: {}", e));
+                }
+            }
+        }
+
+        let target_path =
+            target_path.ok_or_else(|| "Failed to resolve target kubeconfig path".to_string())?;
+        let parsed = parsed_config.ok_or_else(|| "Failed to parse kubeconfig".to_string())?;
+
+        if !self.kubeconfig_paths.contains(&target_path) {
+            self.kubeconfig_paths.push(target_path.clone());
+        }
+        self.client_cache
+            .ensure_paths_sync(vec![target_path.clone()]);
+
+        let resolved = srelens_kube::context_resolve::resolve_contexts(&self.kubeconfig_paths);
+        self.contexts = resolved
+            .iter()
+            .map(|rc| ContextDto {
+                name: rc.display_name.clone(),
+                stable_id: rc.stable_id().to_string(),
+                key: rc.key(),
+                cluster: rc.cluster.clone(),
+                server: rc.server.clone(),
+                namespace: rc.namespace.clone(),
+                is_current: rc.is_current,
+                is_local: false,
+                provider: None,
+                source_file: rc.source.to_string_lossy().into_owned(),
+                auth_kind: rc.auth_kind.clone(),
+            })
+            .collect();
+
+        let target_context_name = parsed
+            .current_context
+            .as_deref()
+            .or_else(|| parsed.contexts.first().map(|c| c.name.as_str()))
+            .unwrap_or("");
+
+        let target_dto = self
+            .contexts
+            .iter()
+            .find(|c| {
+                c.source_file == target_path.to_string_lossy()
+                    && (c.name == target_context_name || c.key.ends_with(target_context_name))
+            })
+            .or_else(|| {
+                self.contexts
+                    .iter()
+                    .find(|c| c.source_file == target_path.to_string_lossy())
+            })
+            .or_else(|| self.contexts.iter().find(|c| c.name == target_context_name));
+
+        if let Some(dto) = target_dto {
+            let name = dto.name.clone();
+            self.active_context = name.clone();
+            self.cluster_name = dto.cluster.clone();
+            self.server_url = dto.server.clone();
+            self.active_namespace = if !dto.namespace.is_empty() {
+                dto.namespace.clone()
+            } else {
+                String::new()
+            };
+            self.cluster_version = "Connecting...".to_string();
+            self.is_connected = false;
+            self.connection_attempt_start = Instant::now();
+            self.cluster_unreachable = false;
+            Ok(name)
+        } else {
+            Ok(target_context_name.to_string())
+        }
+    }
+
     pub async fn execute_view_target(&mut self, target: CommandTarget) {
         match target {
             CommandTarget::Resource(kind) => self.switch_view_to_kind(kind).await,
             CommandTarget::CustomResource(crd) => self.switch_view_to_crd(crd).await,
             CommandTarget::Contexts => {
                 self.open_context_picker();
+            }
+            CommandTarget::AddCluster => {
+                self.open_add_cluster_modal();
             }
             CommandTarget::Namespaces => {
                 let initial_idx = self

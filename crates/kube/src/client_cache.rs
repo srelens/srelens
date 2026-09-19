@@ -59,6 +59,17 @@ impl ClientCache {
         }
     }
 
+    /// Synchronous version of `ensure_paths`, using `try_write`.
+    pub fn ensure_paths_sync(&self, additional: Vec<PathBuf>) {
+        if let Ok(mut current) = self.paths.try_write() {
+            for p in additional {
+                if !current.contains(&p) {
+                    current.push(p);
+                }
+            }
+        }
+    }
+
     pub async fn paths(&self) -> Vec<PathBuf> {
         self.paths.read().await.clone()
     }
@@ -265,7 +276,10 @@ mod tests {
             Some("t1".to_string()),
         );
 
-        cache.get("ctx-a").await.expect("second get rebuilds with t2");
+        cache
+            .get("ctx-a")
+            .await
+            .expect("second get rebuilds with t2");
         assert_eq!(
             cache.clients.lock().await.get("ctx-a").unwrap().1,
             Some("t2".to_string()),

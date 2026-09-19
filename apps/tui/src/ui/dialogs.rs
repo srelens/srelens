@@ -83,6 +83,12 @@ pub enum Modal {
         show_on_startup: bool,
         update_available: Option<String>,
     },
+    AddCluster {
+        input: String,
+        cursor_pos: usize,
+        error_message: Option<String>,
+        preview_contexts: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -744,6 +750,13 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 ),
                 Span::styled(": Switch  ", Style::default().fg(Theme::DIM)),
                 Span::styled(
+                    "Ctrl+i",
+                    Style::default()
+                        .fg(Theme::CYAN)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(": Import  ", Style::default().fg(Theme::DIM)),
+                Span::styled(
                     "Esc",
                     Style::default()
                         .fg(Theme::YELLOW)
@@ -1128,7 +1141,172 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
         } => {
             render_feature_banner_modal(f, area, *show_on_startup, update_available.as_deref());
         }
+        Modal::AddCluster {
+            input,
+            cursor_pos,
+            error_message,
+            preview_contexts,
+        } => {
+            render_add_cluster_modal(
+                f,
+                area,
+                input,
+                *cursor_pos,
+                error_message.as_deref(),
+                preview_contexts,
+            );
+        }
     }
+}
+
+pub fn render_add_cluster_modal(
+    f: &mut Frame,
+    area: Rect,
+    input: &str,
+    cursor_pos: usize,
+    error_message: Option<&str>,
+    preview_contexts: &[String],
+) {
+    let modal_area = centered_rect(65, 45, area);
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::ACCENT))
+        .title(" Import Cluster / Kubeconfig (:import, :add-cluster) ");
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Input box
+            Constraint::Min(3),    // Preview / Error status box
+            Constraint::Length(1), // Footer help
+        ])
+        .split(inner);
+
+    // 1. Input box
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::CYAN))
+        .title(" Kubeconfig File Path or Raw YAML (<Ctrl+v> to Paste) ");
+
+    let display_input = if input.contains('\n') {
+        let lines: Vec<&str> = input.lines().collect();
+        format!(
+            "[Pasted YAML: {} lines, {} bytes] (Press Enter to import)",
+            lines.len(),
+            input.len()
+        )
+    } else {
+        let chars: Vec<char> = input.chars().collect();
+        let idx = cursor_pos.min(chars.len());
+        let before: String = chars[..idx].iter().collect();
+        let after: String = chars[idx..].iter().collect();
+        format!("{}█{}", before, after)
+    };
+
+    let input_para = Paragraph::new(Line::from(vec![
+        Span::styled(" > ", Style::default().fg(Theme::DIM)),
+        Span::styled(
+            display_input,
+            Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(input_block);
+    f.render_widget(input_para, chunks[0]);
+
+    // 2. Preview / Status box
+    let mut status_lines = Vec::new();
+    if let Some(err) = error_message {
+        status_lines.push(Line::from(vec![
+            Span::styled(
+                "✗ ",
+                Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(err, Style::default().fg(Theme::RED)),
+        ]));
+    } else if !preview_contexts.is_empty() {
+        status_lines.push(Line::from(vec![
+            Span::styled(
+                "✓ Detected Context(s): ",
+                Style::default()
+                    .fg(Theme::GREEN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                preview_contexts.join(", "),
+                Style::default()
+                    .fg(Theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        status_lines.push(Line::from(vec![Span::styled(
+            "  Ready to import into SRElens managed kubeconfigs.",
+            Style::default().fg(Theme::DIM),
+        )]));
+    } else if input.trim().is_empty() {
+        status_lines.push(Line::from(vec![Span::styled(
+            "• Enter a path to a kubeconfig file (e.g. ~/Downloads/cluster.yaml)",
+            Style::default().fg(Theme::DIM),
+        )]));
+        status_lines.push(Line::from(vec![Span::styled(
+            "• Or press <Ctrl+v> to paste raw kubeconfig YAML directly from clipboard",
+            Style::default().fg(Theme::DIM),
+        )]));
+    } else {
+        status_lines.push(Line::from(vec![Span::styled(
+            "Press <Enter> to parse and import...",
+            Style::default().fg(Theme::YELLOW),
+        )]));
+    }
+
+    let status_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(if error_message.is_some() {
+            Theme::RED
+        } else {
+            Theme::BORDER
+        }))
+        .title(" Status & Context Preview ");
+    f.render_widget(Paragraph::new(status_lines).block(status_block), chunks[1]);
+
+    // 3. Footer
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "<Ctrl+v>",
+            Style::default()
+                .fg(Theme::CYAN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Paste  |  ", Theme::header_label()),
+        Span::styled(
+            "<Enter>",
+            Style::default()
+                .fg(Theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Import & Connect  |  ", Theme::header_label()),
+        Span::styled(
+            "<Ctrl+w>",
+            Style::default()
+                .fg(Theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Rubout  |  ", Theme::header_label()),
+        Span::styled(
+            "<Esc>",
+            Style::default().fg(Theme::RED).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Cancel", Theme::header_label()),
+    ]))
+    .alignment(Alignment::Center);
+    f.render_widget(footer, chunks[2]);
 }
 
 pub fn render_feature_banner_modal(
