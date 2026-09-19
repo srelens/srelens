@@ -444,6 +444,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::ArgoActionResult { action, result } => {
                     app.handle_argo_action_result(&action, result);
                 }
+                AppEvent::BgpResult { context, result } => {
+                    app.handle_bgp_result(&context, result);
+                }
             }
 
             if !app.is_running {

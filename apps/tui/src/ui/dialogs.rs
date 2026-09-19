@@ -170,7 +170,7 @@ pub fn format_action_display(action_name: &str) -> String {
     if action_name.starts_with("stop-pf:") {
         return "Stop Port Forward".to_string();
     }
-    if action_name.starts_with("delete:") {
+    if action_name.starts_with("delete:") || action_name.starts_with("bulk_delete:") {
         return "Delete".to_string();
     }
     if action_name.starts_with("restart:") {
@@ -1137,9 +1137,11 @@ pub fn render_feature_banner_modal(
     show_on_startup: bool,
     update_available: Option<&str>,
 ) {
-    let modal_width = (area.width.saturating_sub(4)).clamp(48, 96).min(area.width);
+    let modal_width = (area.width.saturating_sub(4))
+        .clamp(48, 118)
+        .min(area.width);
     let modal_height = (area.height.saturating_sub(2))
-        .clamp(18, 27)
+        .clamp(18, 28)
         .min(area.height);
     let modal_x = area.x + (area.width.saturating_sub(modal_width)) / 2;
     let modal_y = area.y + (area.height.saturating_sub(modal_height)) / 2;
@@ -1165,10 +1167,12 @@ pub fn render_feature_banner_modal(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Top description & update alert
-            Constraint::Min(11),   // Features list
+            Constraint::Min(12),   // Features list
             Constraint::Length(3), // Checkbox and key hints
         ])
         .split(inner);
+
+    let inner_w = chunks[1].width as usize;
 
     // 1. Header description & update indicator
     let mut header_lines = vec![Line::from(vec![Span::styled(
@@ -1214,10 +1218,7 @@ pub fn render_feature_banner_modal(
     } else {
         header_lines.push(Line::from(vec![
             Span::styled(
-                format!(
-                    "Version v{} • Type ",
-                    env!("CARGO_PKG_VERSION")
-                ),
+                format!("Version v{} • Type ", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(Theme::dim()),
             ),
             Span::styled(
@@ -1237,12 +1238,18 @@ pub fn render_feature_banner_modal(
         ]));
     }
 
-    header_lines.push(Line::from(vec![
-        Span::styled(
-            "Key built-in features you should know (press [0-9, u] to jump directly, or type ':' for command prompt):",
-            Style::default().fg(Theme::dim()),
-        ),
-    ]));
+    let header_hint = if inner_w >= 108 {
+        "Key built-in features you should know (press [0-9, b, u] to jump directly, or type ':' for command prompt):"
+    } else if inner_w >= 80 {
+        "Key built-in features (press [0-9, b, u] to jump directly, or ':' for commands):"
+    } else {
+        "Key features (press [0-9, b, u] to jump, ':' for commands):"
+    };
+
+    header_lines.push(Line::from(vec![Span::styled(
+        header_hint,
+        Style::default().fg(Theme::dim()),
+    )]));
     f.render_widget(Paragraph::new(header_lines), chunks[0]);
 
     // 2. Feature highlights
@@ -1252,7 +1259,7 @@ pub fn render_feature_banner_modal(
         "Check for new releases & update binary ('srelens-tui update')".to_string()
     };
 
-    let features: [(&str, &str, &str, String, &str); 11] = [
+    let features: [(&str, &str, &str, String, &str); 12] = [
         (
             "[1]",
             ":helm",
@@ -1323,10 +1330,16 @@ pub fn render_feature_banner_modal(
             "Direct SSH to host OS for node recovery (<S> on node)".to_string(),
             ":nodes -> <S>",
         ),
+        (
+            "[b]",
+            ":bgp",
+            "[BGP Peering]",
+            "BGP control plane, live peering topology & route VIPs".to_string(),
+            ":bgp",
+        ),
         ("[u]", ":update", "[Self Update]", update_desc, ":update"),
     ];
 
-    let inner_w = chunks[1].width as usize;
     let items: Vec<ListItem> = features
         .iter()
         .map(|(num, cmd, cat, desc, syntax)| {
@@ -1349,6 +1362,8 @@ pub fn render_feature_banner_modal(
                         .add_modifier(Modifier::BOLD),
                 )
             };
+
+            let prefix_w = 4 + 13 + 15; // num (4) + cmd (13) + cat (15)
             let mut spans = vec![
                 Span::styled(format!("{num} "), num_style),
                 Span::styled(format!("{:<13}", cmd), cmd_style),
@@ -1358,21 +1373,33 @@ pub fn render_feature_banner_modal(
                         .fg(Theme::accent())
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!(
-                        "{:<desc_len$}",
-                        desc,
-                        desc_len = if inner_w >= 85 { 44 } else { 32 }
-                    ),
-                    Style::default().fg(Theme::fg()),
-                ),
             ];
-            if inner_w >= 80 {
+
+            if inner_w >= 110 {
+                let syntax_str = format!("  ({})", syntax);
+                let avail_desc = inner_w.saturating_sub(prefix_w + syntax_str.len());
+                let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
+                    let s: String = desc.chars().take(avail_desc - 3).collect();
+                    format!("{}...", s)
+                } else {
+                    desc.clone()
+                };
                 spans.push(Span::styled(
-                    format!("  ({})", syntax),
-                    Style::default().fg(Theme::dim()),
+                    format!("{:<avail_desc$}", clean_desc),
+                    Style::default().fg(Theme::fg()),
                 ));
+                spans.push(Span::styled(syntax_str, Style::default().fg(Theme::dim())));
+            } else {
+                let avail_desc = inner_w.saturating_sub(prefix_w);
+                let clean_desc = if desc.chars().count() > avail_desc && avail_desc > 3 {
+                    let s: String = desc.chars().take(avail_desc - 3).collect();
+                    format!("{}...", s)
+                } else {
+                    desc.clone()
+                };
+                spans.push(Span::styled(clean_desc, Style::default().fg(Theme::fg())));
             }
+
             ListItem::new(Line::from(spans))
         })
         .collect();
@@ -1428,13 +1455,9 @@ pub fn render_feature_banner_modal(
         ]
     };
 
-    let footer_lines = vec![
-        Line::from(vec![Span::styled(
-            "─".repeat(inner_w.min(90)),
-            Style::default().fg(Theme::border()),
-        )]),
-        Line::from(checkbox_spans),
-        Line::from(vec![
+    let jump_hint = "0-9, b, u";
+    let footer_spans = if inner_w >= 98 {
+        vec![
             Span::styled(" Press ", Style::default().fg(Theme::dim())),
             Span::styled(
                 "Enter",
@@ -1458,7 +1481,7 @@ pub fn render_feature_banner_modal(
             ),
             Span::styled(" to dismiss  |  Press ", Style::default().fg(Theme::dim())),
             Span::styled(
-                "0-9, u",
+                jump_hint,
                 Style::default()
                     .fg(Theme::cyan())
                     .add_modifier(Modifier::BOLD),
@@ -1466,7 +1489,69 @@ pub fn render_feature_banner_modal(
             Span::styled(" to jump directly  |  ", Style::default().fg(Theme::dim())),
             Span::styled(":banner", Style::default().fg(Theme::accent())),
             Span::styled(" to reopen anytime", Style::default().fg(Theme::dim())),
-        ]),
+        ]
+    } else if inner_w >= 75 {
+        vec![
+            Span::styled(" Press ", Style::default().fg(Theme::dim())),
+            Span::styled(
+                "Enter",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(", ", Style::default().fg(Theme::dim())),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(", or ", Style::default().fg(Theme::dim())),
+            Span::styled(
+                "q",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to dismiss  |  Press ", Style::default().fg(Theme::dim())),
+            Span::styled(
+                jump_hint,
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to jump  |  ", Style::default().fg(Theme::dim())),
+            Span::styled(":banner", Style::default().fg(Theme::accent())),
+            Span::styled(" to reopen", Style::default().fg(Theme::dim())),
+        ]
+    } else {
+        vec![
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" dismiss | ", Style::default().fg(Theme::dim())),
+            Span::styled(
+                jump_hint,
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" jump | ", Style::default().fg(Theme::dim())),
+            Span::styled(":banner", Style::default().fg(Theme::accent())),
+            Span::styled(" reopen", Style::default().fg(Theme::dim())),
+        ]
+    };
+
+    let footer_lines = vec![
+        Line::from(vec![Span::styled(
+            "─".repeat(inner_w),
+            Style::default().fg(Theme::border()),
+        )]),
+        Line::from(checkbox_spans),
+        Line::from(footer_spans),
     ];
 
     f.render_widget(Paragraph::new(footer_lines), chunks[2]);

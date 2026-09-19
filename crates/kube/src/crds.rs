@@ -411,6 +411,10 @@ pub struct ListCustomOut {
     #[serde(rename = "columnsError", skip_serializing_if = "Option::is_none")]
     pub columns_error: Option<String>,
     pub items: Vec<CustomRow>,
+    /// True when the list was cut at [`crate::list_cap::APP_LIST_CAP`] and more
+    /// resources remain on the API server (#609).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// Build a dynamic ApiResource for an arbitrary CRD GVK + plural.
@@ -523,12 +527,13 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                     Api::all_with(client.clone(), &ar)
                 };
                 let list =
-                    tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+                    tokio::time::timeout(request_timeout(), crate::list_cap::list_capped(&api, ListParams::default()))
                         .await
                         .map_err(|_| {
                             CapabilityError::Handler("list custom resource timed out".into())
                         })?
                         .map_err(handler_err)?;
+                let (objects, truncated) = list;
                 let (columns, columns_error) = if input.use_crd_columns {
                     match discover_columns(client, &input.group, &input.plural, &input.version)
                         .await
@@ -539,9 +544,13 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                 } else {
                     (input.printer_columns, None)
                 };
+                // Cap columns evaluated per row as well as those a binding may
+                // declare (#609) — a CRD can declare more than the manifest cap.
+                // Keep in sync with `MAX_PRINTER_COLUMNS` in plugin-host.
+                const MAX_COLUMNS: usize = 32;
+                let columns: Vec<_> = columns.into_iter().take(MAX_COLUMNS).collect();
                 let printer_columns = input.use_crd_columns.then(|| columns.clone());
-                let items = list
-                    .items
+                let items = objects
                     .into_iter()
                     .map(|o| {
                         let (values, sort_keys) = if columns.is_empty() {
@@ -569,6 +578,7 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                     items,
                     printer_columns,
                     columns_error,
+                    truncated,
                 })
             }
         },
@@ -1039,5 +1049,25 @@ mod tests {
             "v1alpha1",
             "applications"
         ));
+    }
+
+    #[test]
+    fn list_custom_out_omits_truncated_when_false() {
+        let raw = serde_json::to_value(ListCustomOut {
+            printer_columns: None,
+            columns_error: None,
+            items: vec![],
+            truncated: false,
+        })
+        .unwrap();
+        assert!(raw.get("truncated").is_none());
+        let cut = serde_json::to_value(ListCustomOut {
+            printer_columns: None,
+            columns_error: None,
+            items: vec![],
+            truncated: true,
+        })
+        .unwrap();
+        assert_eq!(cut["truncated"], true);
     }
 }

@@ -133,6 +133,8 @@ export const validateExtension = (manifest: string, grants: string[], signature?
 export interface ExtensionResourceResult {
   printerColumns?: Array<{name:string;jsonPath:string;type?:string}>;
   columnsError?: string;
+  /** True when the backend stopped at its row cap and more remain (#609). */
+  truncated?: boolean;
   items: Array<{
     name: string;
     namespace: string;

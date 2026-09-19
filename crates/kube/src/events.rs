@@ -63,6 +63,10 @@ pub struct EventSummary {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ListEventsOut {
     pub events: Vec<EventSummary>,
+    /// True when the list was cut at [`crate::list_cap::APP_LIST_CAP`] and more
+    /// events remain on the API server (#609).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 pub(crate) fn summarise(ev: Event) -> EventSummary {
@@ -141,12 +145,16 @@ pub fn list_events_capability(cache: Arc<ClientCache>) -> Capability {
                     .map_err(CapabilityError::Handler)?;
                 let api: kube::Api<Event> = crate::scoped_api(client, &input.namespace);
                 let params = event_list_params(&input.object_kind, &input.object_name);
-                let list = tokio::time::timeout(request_timeout(), api.list(&params))
-                    .await
-                    .map_err(|_| CapabilityError::Handler("list events timed out".into()))?
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                let (items, truncated) = tokio::time::timeout(
+                    request_timeout(),
+                    crate::list_cap::list_capped(&api, params),
+                )
+                .await
+                .map_err(|_| CapabilityError::Handler("list events timed out".into()))?
+                .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                 Ok(ListEventsOut {
-                    events: list.items.into_iter().map(summarise).collect(),
+                    events: items.into_iter().map(summarise).collect(),
+                    truncated,
                 })
             }
         },
@@ -277,5 +285,21 @@ mod tests {
             Some("involvedObject.name=web-1,involvedObject.kind=Pod")
         );
         assert_eq!(event_list_params("", "").field_selector, None);
+    }
+
+    #[test]
+    fn list_events_out_omits_truncated_when_false() {
+        let raw = serde_json::to_value(ListEventsOut {
+            events: vec![],
+            truncated: false,
+        })
+        .unwrap();
+        assert!(raw.get("truncated").is_none());
+        let cut = serde_json::to_value(ListEventsOut {
+            events: vec![],
+            truncated: true,
+        })
+        .unwrap();
+        assert_eq!(cut["truncated"], true);
     }
 }

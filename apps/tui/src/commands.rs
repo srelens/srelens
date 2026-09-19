@@ -46,6 +46,7 @@ pub enum ResourceKind {
     GpuInfo,
     TopPods,
     TopNodes,
+    BgpPeers,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -187,6 +188,7 @@ impl ResourceKind {
             Self::GpuInfo => "GPU Info & VRAM Allocation",
             Self::TopPods => "Top Pods",
             Self::TopNodes => "Top Nodes",
+            Self::BgpPeers => "BGP Peering & Routes",
         }
     }
 
@@ -267,7 +269,8 @@ impl ResourceKind {
             | Self::CustomResourceDefinitions
             | Self::Overview
             | Self::Toolbox
-            | Self::Assistant => false,
+            | Self::Assistant
+            | Self::BgpPeers => false,
             _ => true,
         }
     }
@@ -403,6 +406,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         aliases: &["np", "netpol"],
         description: "Pod network traffic filtering and isolation rules",
         target: CommandTarget::Resource(ResourceKind::NetworkPolicies),
+    },
+    CommandDef {
+        name: "bgp",
+        aliases: &["peers", "bgppeers", "peering", "bgproutes"],
+        description: "BGP control plane peering sessions, advertised VIPs & IP pools",
+        target: CommandTarget::Resource(ResourceKind::BgpPeers),
     },
     CommandDef {
         name: "configmaps",
@@ -637,7 +646,8 @@ impl DynamicCommandDef {
                 | ResourceKind::Endpoints
                 | ResourceKind::EndpointSlices
                 | ResourceKind::Ingresses
-                | ResourceKind::NetworkPolicies => "Network",
+                | ResourceKind::NetworkPolicies
+                | ResourceKind::BgpPeers => "Network",
                 ResourceKind::ConfigMaps
                 | ResourceKind::Secrets
                 | ResourceKind::ResourceQuotas

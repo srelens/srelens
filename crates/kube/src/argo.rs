@@ -52,6 +52,12 @@ pub struct ArgoSyncHistoryItem {
 pub struct ArgoApplication {
     pub name: String,
     pub namespace: String,
+    /// `metadata.uid` of the object as listed: which Application this is, as
+    /// opposed to another later created under the same namespace and name.
+    pub uid: String,
+    /// `metadata.resourceVersion` of the object as listed: the version the
+    /// operator is looking at when they confirm a write.
+    pub resource_version: String,
     pub project: String,
     pub destination_server: String,
     pub destination_name: String,
@@ -86,6 +92,16 @@ impl ArgoApplication {
             .and_then(|m| m.get("namespace"))
             .and_then(|v| v.as_str())
             .unwrap_or("argocd")
+            .to_string();
+        let uid = meta
+            .and_then(|m| m.get("uid"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let resource_version = meta
+            .and_then(|m| m.get("resourceVersion"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
             .to_string();
         let created_at = meta
             .and_then(|m| m.get("creationTimestamp"))
@@ -297,6 +313,8 @@ impl ArgoApplication {
         Self {
             name,
             namespace,
+            uid,
+            resource_version,
             project,
             destination_server,
             destination_name,
@@ -319,6 +337,49 @@ impl ArgoApplication {
             sync_history,
         }
     }
+}
+
+/// The Application an operator reviewed before confirming a write: where it
+/// lives, which object it was, and the version they saw. A sync or auto-sync
+/// toggle is pinned to all four, so it cannot land on a replacement created
+/// under the same namespace and name while the confirmation was open (#620).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedApplication {
+    pub namespace: String,
+    pub name: String,
+    pub uid: String,
+    pub resource_version: String,
+}
+
+impl ArgoApplication {
+    /// This Application's identity and version, as listed.
+    pub fn reviewed(&self) -> ReviewedApplication {
+        ReviewedApplication {
+            namespace: self.namespace.clone(),
+            name: self.name.clone(),
+            uid: self.uid.clone(),
+            resource_version: self.resource_version.clone(),
+        }
+    }
+}
+
+/// What a pinned write reports when the Application it was pinned to has been
+/// replaced or has changed since the operator reviewed it.
+pub const APPLICATION_CHANGED: &str =
+    "the Application changed since you reviewed it; refresh and try again";
+
+/// What a pinned write reports when the Application it was pinned to has been
+/// deleted since the operator reviewed it.
+pub const APPLICATION_GONE: &str =
+    "the Application you reviewed no longer exists; refresh and try again";
+
+/// Whether a write's error means what the operator reviewed is out of date —
+/// the Application changed, was replaced, or is gone — so the caller can reload
+/// what it shows before they try again. Only a refusal the API server itself
+/// wrote is mapped to these messages, so an endpoint failure with the same
+/// HTTP code (a proxy's plain-text 404) is never read as one.
+pub fn is_stale_review(err: &str) -> bool {
+    err.contains(APPLICATION_CHANGED) || err.contains(APPLICATION_GONE)
 }
 
 pub fn normalize_server_url(url: &str) -> String {
@@ -848,23 +909,64 @@ pub async fn fetch_argo_application_detail(
     Ok(ArgoApplication::from_json(&val))
 }
 
-pub async fn trigger_argo_sync(
-    cache: &Arc<ClientCache>,
-    context: &str,
-    name: &str,
-    namespace: &str,
-    prune: bool,
-    dry_run: bool,
+/// Sends `patch` to the Application the operator reviewed, and nowhere else.
+///
+/// The patch carries the reviewed `uid` and `resourceVersion` through the same
+/// precondition the GitOps action path uses (`gitops::pin_to_reviewed`), so
+/// the API server refuses it when the object was replaced under the same name
+/// or has moved on since it was listed. A write with no reviewed identity is
+/// refused here rather than sent unpinned.
+async fn patch_reviewed_application(
+    client: kube::Client,
+    app: &ReviewedApplication,
+    mut patch: Value,
+    failed: &str,
 ) -> Result<(), String> {
-    let client = cache
-        .get(context)
-        .await
-        .map_err(|e| format!("Failed to connect to cluster '{}': {}", context, e))?;
+    let target = format!("{}/{}", app.namespace, app.name);
+    if app.uid.is_empty() || app.resource_version.is_empty() {
+        return Err(format!(
+            "{failed} '{target}': the Application's reviewed identity is unknown; refresh and try again"
+        ));
+    }
+    crate::gitops::pin_to_reviewed(&mut patch, &app.uid, &app.resource_version);
 
     let ar = argo_application_resource();
-    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
+    let api: Api<DynamicObject> = Api::namespaced_with(client, &app.namespace, &ar);
+    api.patch(
+        &app.name,
+        &PatchParams::apply("srelens"),
+        &Patch::Merge(&patch),
+    )
+    .await
+    .map_err(|e| match e {
+        // Each arm also requires the reason the API server itself writes. A
+        // proxy or router in front of it can answer with the same HTTP code and
+        // a plain-text body, which kube-client wraps as `Error::Api` with the
+        // reason "Failed to parse error data": that is an endpoint failure, not
+        // a fact about the Application, so it falls through as itself.
+        //
+        // resourceVersion moved on (or the object was replaced, which always
+        // moves it): the optimistic-concurrency precondition failed.
+        kube::Error::Api(ref s) if s.code == 409 && s.reason == "Conflict" => {
+            format!("{failed} '{target}': {APPLICATION_CHANGED}")
+        }
+        // A uid that no longer matches is rejected as an immutable-field change.
+        kube::Error::Api(ref s)
+            if s.code == 422 && s.reason == "Invalid" && s.message.contains("uid") =>
+        {
+            format!("{failed} '{target}': {APPLICATION_CHANGED}")
+        }
+        kube::Error::Api(ref s) if s.code == 404 && s.reason == "NotFound" => {
+            format!("{failed} '{target}': {APPLICATION_GONE}")
+        }
+        e => format!("{failed} '{target}': {e}"),
+    })?;
+    Ok(())
+}
 
-    let patch = serde_json::json!({
+/// The merge patch that requests a sync operation.
+fn sync_patch(prune: bool, dry_run: bool) -> Value {
+    serde_json::json!({
         "operation": {
             "sync": {
                 "prune": prune,
@@ -874,13 +976,38 @@ pub async fn trigger_argo_sync(
                 }
             }
         }
-    });
+    })
+}
 
-    api.patch(name, &PatchParams::apply("srelens"), &Patch::Merge(&patch))
+/// Requests a sync of the Application the operator reviewed. Refused by the API
+/// server if that Application was replaced or changed after it was listed.
+pub async fn trigger_argo_sync(
+    cache: &Arc<ClientCache>,
+    context: &str,
+    app: &ReviewedApplication,
+    prune: bool,
+    dry_run: bool,
+) -> Result<(), String> {
+    let client = cache
+        .get(context)
         .await
-        .map_err(|e| format!("Failed to trigger sync for '{name}': {e}"))?;
+        .map_err(|e| format!("Failed to connect to cluster '{}': {}", context, e))?;
+    sync_with_client(client, app, prune, dry_run).await
+}
 
-    Ok(())
+async fn sync_with_client(
+    client: kube::Client,
+    app: &ReviewedApplication,
+    prune: bool,
+    dry_run: bool,
+) -> Result<(), String> {
+    patch_reviewed_application(
+        client,
+        app,
+        sync_patch(prune, dry_run),
+        "Failed to trigger sync for",
+    )
+    .await
 }
 
 /// The merge patch that turns auto-sync on or off.
@@ -903,27 +1030,35 @@ pub fn auto_sync_patch(enable: bool) -> Value {
     serde_json::json!({ "spec": { "syncPolicy": { "automated": automated } } })
 }
 
+/// Turns auto-sync on or off for the Application the operator reviewed.
+/// Refused by the API server if that Application was replaced or changed after
+/// it was listed. The pin needs no read first, so a role that may patch but
+/// not get Applications can still toggle.
 pub async fn toggle_argo_auto_sync(
     cache: &Arc<ClientCache>,
     context: &str,
-    name: &str,
-    namespace: &str,
+    app: &ReviewedApplication,
     enable: bool,
 ) -> Result<bool, String> {
     let client = cache
         .get(context)
         .await
         .map_err(|e| format!("Failed to connect to cluster '{}': {}", context, e))?;
+    toggle_auto_sync_with_client(client, app, enable).await
+}
 
-    let ar = argo_application_resource();
-    let api: Api<DynamicObject> = Api::namespaced_with(client, namespace, &ar);
-
-    let patch = auto_sync_patch(enable);
-
-    api.patch(name, &PatchParams::apply("srelens"), &Patch::Merge(&patch))
-        .await
-        .map_err(|e| format!("Failed to update auto-sync for '{name}': {e}"))?;
-
+async fn toggle_auto_sync_with_client(
+    client: kube::Client,
+    app: &ReviewedApplication,
+    enable: bool,
+) -> Result<bool, String> {
+    patch_reviewed_application(
+        client,
+        app,
+        auto_sync_patch(enable),
+        "Failed to update auto-sync for",
+    )
+    .await?;
     Ok(enable)
 }
 
@@ -1089,6 +1224,8 @@ mod tests {
         let app = ArgoApplication {
             name: "test-app".into(),
             namespace: "argocd".into(),
+            uid: String::new(),
+            resource_version: String::new(),
             project: "default".into(),
             destination_server: "https://api.prod.example.com:6443/".into(),
             destination_name: "prod-cluster".into(),
@@ -1202,6 +1339,8 @@ mod tests {
         let app = ArgoApplication {
             name: "backend-service".into(),
             namespace: "argocd".into(),
+            uid: String::new(),
+            resource_version: String::new(),
             project: "default".into(),
             destination_server: "".into(),
             destination_name: "search-backend-prod0-eu-w4".into(),
@@ -1278,6 +1417,8 @@ mod tests {
         let other_app = ArgoApplication {
             name: "abreuv2-prod-as-se1".into(),
             namespace: "argocd".into(),
+            uid: String::new(),
+            resource_version: String::new(),
             project: "default".into(),
             destination_server: "".into(),
             destination_name: "advertiser-service-prod0-as-se1".into(),
@@ -1314,6 +1455,8 @@ mod tests {
         let spoke_server_app = ArgoApplication {
             name: "stage-data-pipeline".into(),
             namespace: "argocd".into(),
+            uid: String::new(),
+            resource_version: String::new(),
             project: "default".into(),
             destination_server: "https://10.200.1.1:6443".into(),
             destination_name: "".into(),
@@ -1421,6 +1564,223 @@ mod tests {
             auto_sync_patch(false),
             serde_json::json!({"spec": {"syncPolicy": {"automated": null}}})
         );
+    }
+
+    fn reviewed(uid: &str, resource_version: &str) -> ReviewedApplication {
+        ReviewedApplication {
+            namespace: "team".into(),
+            name: "apps".into(),
+            uid: uid.into(),
+            resource_version: resource_version.into(),
+        }
+    }
+
+    type Requests = Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+    /// A client whose every request is recorded and answered with `status`
+    /// (a `Status` body carrying `message` when it is an error).
+    fn mock_client(status: u16, message: &'static str) -> (kube::Client, Requests) {
+        // The reason the API server itself gives for each status.
+        let reason = match status {
+            403 => "Forbidden",
+            404 => "NotFound",
+            409 => "Conflict",
+            422 => "Invalid",
+            _ => "",
+        };
+        mock_client_with_error_body(
+            status,
+            serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","code":status,"reason":reason,"message":message})
+                .to_string(),
+        )
+    }
+
+    /// A client answering every request with `status`, and, when that is an
+    /// error, with `error_body` verbatim — which need not be a `Status`.
+    fn mock_client_with_error_body(status: u16, error_body: String) -> (kube::Client, Requests) {
+        let error_body = Arc::new(error_body);
+        let requests: Requests = Arc::new(std::sync::Mutex::new(vec![]));
+        let captured = requests.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let captured = captured.clone();
+            let error_body = error_body.clone();
+            async move {
+                let line = format!("{} {}", request.method(), request.uri());
+                let body = request.into_body().collect_bytes().await.unwrap();
+                let value = if body.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&body).unwrap()
+                };
+                captured.lock().unwrap().push((line, value));
+                let body = if status >= 400 {
+                    error_body.to_string()
+                } else {
+                    serde_json::json!({"apiVersion":"argoproj.io/v1alpha1","kind":"Application","metadata":{"name":"apps","namespace":"team","uid":"u","resourceVersion":"3"}}).to_string()
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        (kube::Client::new(service, "default"), requests)
+    }
+
+    #[test]
+    fn a_listed_application_carries_its_uid_and_resource_version() {
+        let app = ArgoApplication::from_json(&serde_json::json!({
+            "metadata": {"name": "apps", "namespace": "team", "uid": "u-1", "resourceVersion": "42"}
+        }));
+        assert_eq!(app.uid, "u-1");
+        assert_eq!(app.resource_version, "42");
+        assert_eq!(
+            app.reviewed(),
+            ReviewedApplication {
+                namespace: "team".into(),
+                name: "apps".into(),
+                uid: "u-1".into(),
+                resource_version: "42".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_and_toggle_are_pinned_to_the_reviewed_uid_and_resource_version() {
+        // #620: the patch once named only namespace/name, so an Application
+        // deleted and recreated while the confirmation was open received the
+        // confirmed sync — prune included.
+        let (client, requests) = mock_client(200, "");
+        sync_with_client(client, &reviewed("u", "2"), true, false)
+            .await
+            .unwrap();
+        let (client, toggles) = mock_client(200, "");
+        assert!(
+            toggle_auto_sync_with_client(client, &reviewed("u", "2"), true)
+                .await
+                .unwrap()
+        );
+
+        for (requests, what) in [(requests, "sync"), (toggles, "toggle")] {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1, "{what}: one write and no read");
+            assert!(
+                requests[0].0.starts_with(
+                    "PATCH /apis/argoproj.io/v1alpha1/namespaces/team/applications/apps?"
+                ),
+                "{what}: {}",
+                requests[0].0
+            );
+            assert_eq!(
+                requests[0].1["metadata"],
+                serde_json::json!({"uid": "u", "resourceVersion": "2"}),
+                "{what}"
+            );
+            if what == "sync" {
+                assert_eq!(requests[0].1["operation"]["sync"]["prune"], true);
+            } else {
+                assert_eq!(
+                    requests[0].1["spec"],
+                    serde_json::json!({"syncPolicy": {"automated": {}}})
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_precondition_is_reported_as_a_changed_application() {
+        let cases: [(u16, &'static str, &str); 3] = [
+            // resourceVersion moved on, or the object was replaced.
+            (
+                409,
+                "Operation cannot be fulfilled on applications.argoproj.io \"apps\": the object has been modified",
+                APPLICATION_CHANGED,
+            ),
+            // uid differs from the stored object's.
+            (
+                422,
+                "Application.argoproj.io \"apps\" is invalid: metadata.uid: Invalid value: \"u\": field is immutable",
+                APPLICATION_CHANGED,
+            ),
+            (404, "applications.argoproj.io \"apps\" not found", APPLICATION_GONE),
+        ];
+        for (status, message, expected) in cases {
+            let (client, _) = mock_client(status, message);
+            let err = sync_with_client(client, &reviewed("u", "2"), true, false)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err,
+                format!("Failed to trigger sync for 'team/apps': {expected}")
+            );
+            assert!(is_stale_review(&err));
+
+            let (client, _) = mock_client(status, message);
+            let err = toggle_auto_sync_with_client(client, &reviewed("u", "2"), false)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err,
+                format!("Failed to update auto-sync for 'team/apps': {expected}")
+            );
+            assert!(is_stale_review(&err));
+        }
+
+        // Any other refusal says what the cluster said, not that the object changed.
+        let (client, _) = mock_client(403, "applications.argoproj.io \"apps\" is forbidden");
+        let err = sync_with_client(client, &reviewed("u", "2"), false, false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("forbidden"), "{err}");
+        assert!(!is_stale_review(&err));
+    }
+
+    #[tokio::test]
+    async fn an_error_the_api_server_did_not_write_is_not_a_stale_review() {
+        // A router or proxy in front of the API server answers with plain text;
+        // kube-client wraps it as `Error::Api` with the HTTP code and the reason
+        // "Failed to parse error data". That says the endpoint failed, not that
+        // the Application is gone or changed, so it must not claim either or
+        // make the TUI reload.
+        for status in [404, 409, 422] {
+            let (client, requests) =
+                mock_client_with_error_body(status, format!("{status} page not found uid"));
+            let err = sync_with_client(client, &reviewed("u", "2"), true, false)
+                .await
+                .unwrap_err();
+            assert!(!is_stale_review(&err), "{status}: {err}");
+            assert!(err.contains("page not found"), "{status}: {err}");
+            assert_eq!(requests.lock().unwrap().len(), 1);
+
+            let (client, _) =
+                mock_client_with_error_body(status, format!("{status} page not found uid"));
+            let err = toggle_auto_sync_with_client(client, &reviewed("u", "2"), true)
+                .await
+                .unwrap_err();
+            assert!(!is_stale_review(&err), "{status}: {err}");
+            assert!(err.contains("page not found"), "{status}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_with_no_reviewed_identity_is_refused_before_any_request() {
+        for app in [reviewed("", "2"), reviewed("u", "")] {
+            let (client, requests) = mock_client(200, "");
+            let err = sync_with_client(client, &app, true, false)
+                .await
+                .unwrap_err();
+            assert!(err.contains("reviewed identity is unknown"), "{err}");
+            let (client, toggles) = mock_client(200, "");
+            let err = toggle_auto_sync_with_client(client, &app, false)
+                .await
+                .unwrap_err();
+            assert!(err.contains("reviewed identity is unknown"), "{err}");
+            assert!(requests.lock().unwrap().is_empty());
+            assert!(toggles.lock().unwrap().is_empty());
+        }
     }
 
     static CACHE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1737,18 +2097,19 @@ mod tests {
         assert!(err.contains("Failed to connect to cluster"));
 
         // 3. trigger_argo_sync reports connect error
-        let err = trigger_argo_sync(&cache, "nonexistent-ctx", "my-app", "argocd", false, false)
+        let app = reviewed("u", "2");
+        let err = trigger_argo_sync(&cache, "nonexistent-ctx", &app, false, false)
             .await
             .unwrap_err();
         assert!(err.contains("Failed to connect to cluster"));
 
         // 4. toggle_argo_auto_sync reports connect error (enable true and false)
-        let err = toggle_argo_auto_sync(&cache, "nonexistent-ctx", "my-app", "argocd", true)
+        let err = toggle_argo_auto_sync(&cache, "nonexistent-ctx", &app, true)
             .await
             .unwrap_err();
         assert!(err.contains("Failed to connect to cluster"));
 
-        let err = toggle_argo_auto_sync(&cache, "nonexistent-ctx", "my-app", "argocd", false)
+        let err = toggle_argo_auto_sync(&cache, "nonexistent-ctx", &app, false)
             .await
             .unwrap_err();
         assert!(err.contains("Failed to connect to cluster"));

@@ -318,6 +318,47 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
             "CustomResourceDefinition",
             false,
         ),
+        "ciliumbgpnodeconfig" | "ciliumbgpnodeconfigs" => {
+            ("cilium.io", "v2", "CiliumBGPNodeConfig", false)
+        }
+        "ciliumbgpclusterconfig" | "ciliumbgpclusterconfigs" => {
+            ("cilium.io", "v2", "CiliumBGPClusterConfig", false)
+        }
+        "ciliumbgppeerconfig" | "ciliumbgppeerconfigs" => {
+            ("cilium.io", "v2", "CiliumBGPPeerConfig", false)
+        }
+        "ciliumbgpadvertisement" | "ciliumbgpadvertisements" => {
+            ("cilium.io", "v2", "CiliumBGPAdvertisement", false)
+        }
+        "ciliumbgpnodeconfigoverride" | "ciliumbgpnodeconfigoverrides" => {
+            ("cilium.io", "v2", "CiliumBGPNodeConfigOverride", false)
+        }
+        "ciliumbgppeeringpolicy" | "ciliumbgppeeringpolicies" => {
+            ("cilium.io", "v2alpha1", "CiliumBGPPeeringPolicy", false)
+        }
+        "ciliumloadbalancerippool" | "ciliumloadbalancerippools" => {
+            ("cilium.io", "v2", "CiliumLoadBalancerIPPool", false)
+        }
+        "ciliumnode" | "ciliumnodes" => ("cilium.io", "v2", "CiliumNode", false),
+        "ciliumclusterwidenetworkpolicy" | "ciliumclusterwidenetworkpolicies" | "ccnp" => {
+            ("cilium.io", "v2", "CiliumClusterwideNetworkPolicy", false)
+        }
+        "ciliumnetworkpolicy" | "ciliumnetworkpolicies" | "cnp" => {
+            ("cilium.io", "v2", "CiliumNetworkPolicy", true)
+        }
+        "ciliumendpoint" | "ciliumendpoints" | "cep" => {
+            ("cilium.io", "v2", "CiliumEndpoint", true)
+        }
+        "ciliumidentity" | "ciliumidentities" => ("cilium.io", "v2", "CiliumIdentity", false),
+        "bgppeer" | "bgppeers" => ("crd.projectcalico.org", "v1", "BGPPeer", false),
+        "bgpconfiguration" | "bgpconfigurations" => {
+            ("crd.projectcalico.org", "v1", "BGPConfiguration", false)
+        }
+        "ippool" | "ippools" => ("crd.projectcalico.org", "v1", "IPPool", false),
+        "ipaddresspool" | "ipaddresspools" => ("metallb.io", "v1beta1", "IPAddressPool", true),
+        "bgpadvertisement" | "bgpadvertisements" => {
+            ("metallb.io", "v1beta1", "BGPAdvertisement", true)
+        }
         _ => return None,
     };
     Some((GroupVersionKind::gvk(group, version, k), namespaced))
@@ -2318,5 +2359,44 @@ metadata:
             .unwrap()
             .contains_key("password"));
         assert_eq!(v["stringData"]["password"], "");
+    }
+
+    #[test]
+    fn test_cilium_bgp_gvk_scoping() {
+        let (gvk, namespaced) = gvk_for("CiliumBGPNodeConfig").expect("gvk for CiliumBGPNodeConfig");
+        assert_eq!(gvk.group, "cilium.io");
+        assert_eq!(gvk.version, "v2");
+        assert_eq!(gvk.kind, "CiliumBGPNodeConfig");
+        assert!(!namespaced, "CiliumBGPNodeConfig must be cluster-scoped (non-namespaced)");
+
+        let (gvk, namespaced) = gvk_for("CiliumBGPClusterConfig").expect("gvk for CiliumBGPClusterConfig");
+        assert_eq!(gvk.group, "cilium.io");
+        assert_eq!(gvk.version, "v2");
+        assert_eq!(gvk.kind, "CiliumBGPClusterConfig");
+        assert!(!namespaced, "CiliumBGPClusterConfig must be cluster-scoped");
+
+        let (gvk, namespaced) = gvk_for("CiliumBGPPeerConfig").expect("gvk for CiliumBGPPeerConfig");
+        assert_eq!(gvk.group, "cilium.io");
+        assert_eq!(gvk.version, "v2");
+        assert_eq!(gvk.kind, "CiliumBGPPeerConfig");
+        assert!(!namespaced, "CiliumBGPPeerConfig must be cluster-scoped");
+
+        let (gvk, namespaced) = gvk_for("CiliumBGPAdvertisement").expect("gvk for CiliumBGPAdvertisement");
+        assert_eq!(gvk.group, "cilium.io");
+        assert_eq!(gvk.version, "v2");
+        assert_eq!(gvk.kind, "CiliumBGPAdvertisement");
+        assert!(!namespaced, "CiliumBGPAdvertisement must be cluster-scoped");
+
+        let (gvk, namespaced) = gvk_for("CiliumLoadBalancerIPPool").expect("gvk for CiliumLoadBalancerIPPool");
+        assert_eq!(gvk.group, "cilium.io");
+        assert_eq!(gvk.version, "v2");
+        assert_eq!(gvk.kind, "CiliumLoadBalancerIPPool");
+        assert!(!namespaced, "CiliumLoadBalancerIPPool must be cluster-scoped");
+
+        let (gvk, namespaced) = gvk_for("CiliumNetworkPolicy").expect("gvk for CiliumNetworkPolicy");
+        assert_eq!(gvk.group, "cilium.io");
+        assert_eq!(gvk.version, "v2");
+        assert_eq!(gvk.kind, "CiliumNetworkPolicy");
+        assert!(namespaced, "CiliumNetworkPolicy must be namespaced");
     }
 }

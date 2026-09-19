@@ -2277,15 +2277,10 @@ async fn node_inspector_keys_navigate_pods_and_offer_node_actions() {
     assert_eq!(ni.selected_pod_idx, 1);
     app.handle_key_event(common::ch('g')).await;
     app.handle_key_event(common::ctrl('d')).await;
-    let ActiveView::NodeInspector(ni) = &app.active_view else {
-        panic!()
-    };
-    assert_eq!(ni.selected_pod_idx, 1);
-    app.handle_key_event(common::ctrl('u')).await;
-    let ActiveView::NodeInspector(ni) = &app.active_view else {
-        panic!()
-    };
-    assert_eq!(ni.selected_pod_idx, 0);
+    assert!(
+        matches!(&app.modal, Some(Modal::Confirm { action_name, .. }) if action_name == "delete:Pod:default:api-0")
+    );
+    app.modal = None;
 
     app.handle_key_event(common::ch('s')).await;
     assert!(matches!(

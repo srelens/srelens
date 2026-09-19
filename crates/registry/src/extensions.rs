@@ -1431,13 +1431,15 @@ mod tests {
     fn kept_versions_give_way_before_the_inventory_outgrows_its_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("apps.json");
-        // A valid manifest with thousands of small entries. The inventory is saved
-        // pretty-printed, so each copy takes about 400 KiB there: the installed version
-        // and three kept ones cannot all fit in 1 MiB.
+        // A valid manifest padded under the 256 KiB decode limit. The inventory is
+        // saved pretty-printed, so the installed version and three kept ones cannot
+        // all fit in 1 MiB. Inflate via `$schema` (host-ignored) rather than
+        // printerColumns, which are capped at 32 (#609).
         let large = |version: &str| {
             let mut value: Value = serde_json::from_str(&manifest_at(version)).unwrap();
-            value["capabilities"][0]["arguments"]["printerColumns"] =
-                json!(vec![json!({"name": "c", "jsonPath": ".a"}); 4300]);
+            let base = value.to_string().len();
+            let pad = (256 * 1024usize).saturating_sub(base + 32);
+            value["$schema"] = json!("x".repeat(pad));
             value.to_string()
         };
         for minor in 1..=4 {

@@ -51,13 +51,8 @@ impl LogsViewState {
             follow: true,
             timestamps: false,
             previous: false,
-            // Off by default. A pod that logs one long JSON entry gets a
-            // paragraph-shaped block that pushes the short lines around it
-            // out of view -- and the wrapped renderer scrolls by entry, so
-            // an entry taller than the viewport has middle rows nothing can
-            // reach. Machine text runs on one row and scrolls sideways;
-            // `w` turns wrapping on for anyone reading prose.
-            wrap: false,
+            // On by default. `w` toggles wrapping for unwrapped horizontal scrolling.
+            wrap: true,
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match_idx: None,
@@ -79,13 +74,8 @@ impl LogsViewState {
             follow: true,
             timestamps: false,
             previous: false,
-            // Off by default. A pod that logs one long JSON entry gets a
-            // paragraph-shaped block that pushes the short lines around it
-            // out of view -- and the wrapped renderer scrolls by entry, so
-            // an entry taller than the viewport has middle rows nothing can
-            // reach. Machine text runs on one row and scrolls sideways;
-            // `w` turns wrapping on for anyone reading prose.
-            wrap: false,
+            // On by default. `w` toggles wrapping for unwrapped horizontal scrolling.
+            wrap: true,
             search_query: String::new(),
             search_matches: Vec::new(),
             current_match_idx: None,

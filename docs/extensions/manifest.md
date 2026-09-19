@@ -55,7 +55,7 @@ Each entry in `capabilities` binds a local operation to a trusted host capabilit
 | `name` | Local operation name, unique within the manifest. Addressed as `plugin/<id>/<name>`. |
 | `title` | Display title, held to the same rules as `name`. |
 | `target` | The host capability ID. It cannot start with `plugin/`; apps cannot call other apps. |
-| `arguments` | Fixed arguments, merged into every call. Callers cannot override them. |
+| `arguments` | Fixed arguments, merged into every call. Callers cannot override them. A `k8s.listCustomResource` binding may declare at most 32 `printerColumns`. |
 | `inputs` | The argument names a caller may supply. They cannot overlap with `arguments`. |
 
 Every required argument of the target must come from `arguments` or `inputs`, and the

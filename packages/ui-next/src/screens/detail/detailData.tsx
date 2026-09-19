@@ -495,8 +495,14 @@ export function useDetailPaneState({
     const redacted = redactSecretManifest(result.yaml);
     return redacted.error !== undefined ? { error: redacted.error } : { data: redacted.yaml };
   });
-  const eventsState = useLoad<EventSummary[]>(openedPanes.has(PANE_EVENTS), target, () =>
-    listEvents(context, namespace, { kind, name }).then((r) => ({ data: r.events, error: r.error })),
+  const eventsState = useLoad<{ events: EventSummary[]; truncated?: boolean }>(
+    openedPanes.has(PANE_EVENTS),
+    target,
+    () =>
+      listEvents(context, namespace, { kind, name }).then((r) => ({
+        data: r.events !== undefined ? { events: r.events, truncated: r.truncated } : undefined,
+        error: r.error,
+      })),
   );
 
   // Falls back to the first pane rather than pointing at one that isn't
@@ -618,7 +624,7 @@ function EventsPane({
   namespace,
   name,
 }: {
-  state: LoadState<EventSummary[]>;
+  state: LoadState<{ events: EventSummary[]; truncated?: boolean }>;
   kind: string;
   namespace: string | null;
   name: string;
@@ -637,5 +643,21 @@ function EventsPane({
   // `Table` renders `emptyText` itself for a genuinely empty list — an early
   // `return null` here would leave a healthy, event-free object looking like
   // a broken pane instead of a labelled one.
-  return <Table columns={EVENT_COLUMNS} data={state.data} getRowKey={(e) => e.name} emptyText="No events" />;
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      {state.data.truncated && (
+        <Alert tone="info" title={`Showing the first ${state.data.events.length.toLocaleString()} events`}>
+          More remain on the cluster. This list stops at the shared list row cap.
+        </Alert>
+      )}
+      <div className="min-h-0 flex-1">
+        <Table
+          columns={EVENT_COLUMNS}
+          data={state.data.events}
+          getRowKey={(e) => e.name}
+          emptyText="No events"
+        />
+      </div>
+    </div>
+  );
 }

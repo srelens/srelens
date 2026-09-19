@@ -21,6 +21,7 @@ pub mod gpu_view;
 pub mod top_view;
 pub mod tui_config_view;
 pub mod yaml_view;
+pub mod bgp_view;
 
 /// Strip everything from cluster-controlled text that would desynchronise
 /// ratatui's buffer from the real terminal. A raw `\t` written into a cell
@@ -214,3 +215,4 @@ pub use tree_view::{render_tree_view, TreeViewState};
 pub use tui_config_view::{render_tui_config_view, TuiConfigViewState};
 pub use node_inspector_view::{render_node_inspector_view, NodeInspectorState};
 pub use yaml_view::{render_yaml_view, YamlViewState};
+pub use bgp_view::{render_bgp_view, BgpTab, BgpViewState};

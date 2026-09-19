@@ -1927,6 +1927,8 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
     let make_app = |name: &str, dest: &str| srelens_kube::argo::ArgoApplication {
         name: name.to_string(),
         namespace: "argocd".to_string(),
+        uid: String::new(),
+        resource_version: String::new(),
         project: "default".to_string(),
         destination_server: "".to_string(),
         destination_name: dest.to_string(),
@@ -2057,6 +2059,8 @@ async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_i
     let local_app = srelens_kube::argo::ArgoApplication {
         name: "local-app".to_string(),
         namespace: "argocd".to_string(),
+        uid: String::new(),
+        resource_version: String::new(),
         project: "default".to_string(),
         destination_server: "https://kubernetes.default.svc".to_string(),
         destination_name: "".to_string(),
@@ -2129,6 +2133,8 @@ async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_i
     let hub_app = srelens_kube::argo::ArgoApplication {
         name: "spoke-app".to_string(),
         namespace: "argocd".to_string(),
+        uid: String::new(),
+        resource_version: String::new(),
         project: "default".to_string(),
         destination_server: "https://10.0.0.2:6443".to_string(),
         destination_name: "".to_string(),
@@ -2220,6 +2226,8 @@ async fn test_argo_app_handlers_and_interactions() {
     let test_app = srelens_kube::argo::ArgoApplication {
         name: "test-service".to_string(),
         namespace: "argocd".to_string(),
+        uid: String::new(),
+        resource_version: String::new(),
         project: "default".to_string(),
         destination_server: "https://10.0.0.1:6443".to_string(),
         destination_name: "".to_string(),
@@ -4387,7 +4395,200 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
     assert!(app.modal.is_none());
     assert!(matches!(&app.active_view, ActiveView::Table(t) if t.kind == ResourceKind::Nodes));
 
+    // Re-open via :features and test 'b' jumps to BGP Peering view
+    common::type_str(&mut app, ":features").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.modal, Some(Modal::FeatureBanner { .. })));
+
+    press(&mut app, ch('b')).await;
+    assert!(app.modal.is_none());
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
     std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
+}
+
+#[tokio::test]
+async fn bgp_view_keys_open_yaml_and_describe_with_correct_crd_kind() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    // Navigate to :bgp
+    common::type_str(&mut app, ":bgp").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    if let ActiveView::Bgp(ref mut bgp) = app.active_view {
+        let summary = srelens_kube::bgp::BgpClusterSummary {
+            engine: srelens_kube::bgp::BgpEngineType::CiliumV2,
+            total_nodes: 2,
+            bgp_nodes: 2,
+            total_peers: 1,
+            established_peers: 1,
+            degraded_peers: 0,
+            peers: vec![srelens_kube::bgp::BgpNeighbor {
+                node_name: "data-processing-stage-master-1".to_string(),
+                peer_address: "10.128.12.2".to_string(),
+                peer_asn: 65101,
+                local_asn: 65101,
+                session_state: srelens_kube::bgp::BgpSessionState::Established,
+                policy_name: "cilium-bgp-fabric-peering".to_string(),
+                policy_kind: "CiliumBGPClusterConfig".to_string(),
+                namespace: None,
+                export_pod_cidr: true,
+                hold_time_seconds: Some(90),
+                keepalive_time_seconds: Some(30),
+                connect_retry_seconds: Some(120),
+                multihop_ttl: Some(64),
+                graceful_restart: true,
+                advertised_prefixes: vec!["10.244.0.0/24".to_string()],
+                routes_count: 1,
+                routes_received: 316,
+                uptime_or_last_change: Some("344h".to_string()),
+            }],
+            advertised_services: vec![],
+            ip_pools: vec![srelens_kube::bgp::BgpIpPool {
+                name: "default-lb-pool".to_string(),
+                namespace: None,
+                cidrs: vec!["10.0.0.0/24".to_string()],
+                service_selector: String::new(),
+                disabled: false,
+            }],
+            error: None,
+        };
+        bgp.set_summary(summary);
+    }
+
+    // Press 'y' -> opens YAML view with CiliumBGPClusterConfig (not CiliumBGPNodeConfig)
+    press(&mut app, ch('y')).await;
+    match &app.active_view {
+        ActiveView::Yaml(y) => {
+            assert_eq!(y.resource_name, "cilium-bgp-fabric-peering");
+            assert_eq!(y.resource_kind, "CiliumBGPClusterConfig");
+        }
+        _ => panic!("expected ActiveView::Yaml"),
+    }
+
+    // Press 'Esc' -> returns to Bgp view
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    // Press 'd' -> opens Describe view with CiliumBGPClusterConfig
+    press(&mut app, ch('d')).await;
+    match &app.active_view {
+        ActiveView::Describe(d) => {
+            assert_eq!(d.resource_name, "cilium-bgp-fabric-peering");
+            assert_eq!(d.resource_kind, "CiliumBGPClusterConfig");
+        }
+        _ => panic!("expected ActiveView::Describe"),
+    }
+
+    // Press 'Esc' -> returns to Bgp view
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    // Switch to IP Pools tab (Tab twice: Peers -> Services -> IpPools)
+    press(&mut app, key(KeyCode::Tab)).await;
+    press(&mut app, key(KeyCode::Tab)).await;
+
+    // Press 'y' on IP pool -> opens YAML view with CiliumLoadBalancerIPPool
+    press(&mut app, ch('y')).await;
+    match &app.active_view {
+        ActiveView::Yaml(y) => {
+            assert_eq!(y.resource_name, "default-lb-pool");
+            assert_eq!(y.resource_kind, "CiliumLoadBalancerIPPool");
+        }
+        _ => panic!("expected ActiveView::Yaml"),
+    }
+}
+
+#[tokio::test]
+async fn bgp_view_namespaced_metallb_peer_and_pool_drilldown() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    // Open BGP view directly
+    app.switch_view_to_kind(ResourceKind::BgpPeers).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    if let ActiveView::Bgp(ref mut bgp) = app.active_view {
+        let summary = srelens_kube::bgp::BgpClusterSummary {
+            engine: srelens_kube::bgp::BgpEngineType::MetalLB,
+            total_nodes: 2,
+            bgp_nodes: 2,
+            total_peers: 1,
+            established_peers: 0,
+            degraded_peers: 0,
+            peers: vec![srelens_kube::bgp::BgpNeighbor {
+                node_name: "node-1".to_string(),
+                peer_address: "10.0.0.1".to_string(),
+                peer_asn: 64512,
+                local_asn: 64512,
+                session_state: srelens_kube::bgp::BgpSessionState::Configured,
+                policy_name: "metallb-peer-1".to_string(),
+                policy_kind: "BGPPeer".to_string(),
+                namespace: Some("metallb-system".to_string()),
+                export_pod_cidr: false,
+                hold_time_seconds: None,
+                keepalive_time_seconds: None,
+                connect_retry_seconds: None,
+                multihop_ttl: None,
+                graceful_restart: false,
+                advertised_prefixes: vec![],
+                routes_count: 0,
+                routes_received: 0,
+                uptime_or_last_change: None,
+            }],
+            advertised_services: vec![],
+            ip_pools: vec![srelens_kube::bgp::BgpIpPool {
+                name: "metallb-pool-1".to_string(),
+                namespace: Some("metallb-system".to_string()),
+                cidrs: vec!["192.168.1.0/24".to_string()],
+                service_selector: String::new(),
+                disabled: false,
+            }],
+            error: None,
+        };
+        bgp.set_summary(summary);
+    }
+
+    // Press 'd' -> opens describe view with namespace "metallb-system"
+    press(&mut app, ch('d')).await;
+    match &app.active_view {
+        ActiveView::Describe(d) => {
+            assert_eq!(d.resource_name, "metallb-peer-1");
+            assert_eq!(d.resource_kind, "BGPPeer");
+            assert_eq!(d.namespace.as_deref(), Some("metallb-system"));
+        }
+        _ => panic!("expected ActiveView::Describe"),
+    }
+
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    // Switch to IP Pools tab
+    press(&mut app, key(KeyCode::Tab)).await;
+    press(&mut app, key(KeyCode::Tab)).await;
+
+    // Press 'd' on pool -> opens describe with namespace "metallb-system" and kind "IPAddressPool"
+    press(&mut app, ch('d')).await;
+    match &app.active_view {
+        ActiveView::Describe(d) => {
+            assert_eq!(d.resource_name, "metallb-pool-1");
+            assert_eq!(d.resource_kind, "IPAddressPool");
+            assert_eq!(d.namespace.as_deref(), Some("metallb-system"));
+        }
+        _ => panic!("expected ActiveView::Describe"),
+    }
+}
+
+#[tokio::test]
+async fn node_inspector_press_b_jumps_to_bgp_dashboard() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    app.open_node_inspector("node-1".to_string());
+    assert!(matches!(app.active_view, ActiveView::NodeInspector(_)));
+
+    // Press 'b' -> navigates to BgpPeers
+    press(&mut app, ch('b')).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
 }
 
 #[tokio::test]
@@ -5251,21 +5452,21 @@ async fn argo_modal_confirm_and_action_results() {
 
     // 1. Sync confirm execution
     app.execute_modal_confirm(
-        "argo_sync:{\"ctx\":\"prod-cluster\",\"ns\":\"argocd\",\"name\":\"billing-service\",\"prune\":false,\"dry_run\":false}".to_string(),
+        "argo_sync:{\"ctx\":\"prod-cluster\",\"ns\":\"argocd\",\"name\":\"billing-service\",\"uid\":\"u-1\",\"resource_version\":\"7\",\"prune\":false,\"dry_run\":false}".to_string(),
     )
     .await;
     assert!(toast(&app).contains("Triggering sync for 'billing-service'"));
 
     // 2. Toggle auto-sync confirm execution (enable: true)
     app.execute_modal_confirm(
-        "argo_toggle_auto:{\"ctx\":\"prod-cluster\",\"ns\":\"argocd\",\"name\":\"billing-service\",\"enable\":true}".to_string(),
+        "argo_toggle_auto:{\"ctx\":\"prod-cluster\",\"ns\":\"argocd\",\"name\":\"billing-service\",\"uid\":\"u-1\",\"resource_version\":\"7\",\"enable\":true}".to_string(),
     )
     .await;
     assert!(toast(&app).contains("Enabling auto-sync for 'billing-service'"));
 
     // 3. Toggle auto-sync confirm execution (enable: false)
     app.execute_modal_confirm(
-        "argo_toggle_auto:{\"ctx\":\"prod-cluster\",\"ns\":\"argocd\",\"name\":\"billing-service\",\"enable\":false}".to_string(),
+        "argo_toggle_auto:{\"ctx\":\"prod-cluster\",\"ns\":\"argocd\",\"name\":\"billing-service\",\"uid\":\"u-1\",\"resource_version\":\"7\",\"enable\":false}".to_string(),
     )
     .await;
     assert!(toast(&app).contains("Pausing auto-sync for 'billing-service'"));
@@ -5283,6 +5484,177 @@ async fn argo_modal_confirm_and_action_results() {
         Err("connection refused".to_string()),
     );
     assert!(toast(&app).contains("⚠ Sync 'billing-service' failed: connection refused"));
+}
+
+/// An Argo view listing one Application with a known uid and resourceVersion.
+fn argo_view_with_reviewed_app(namespace: &str, name: &str) -> ActiveView {
+    let listed = srelens_kube::argo::ArgoApplication::from_json(&json!({
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "uid": "uid-as-listed",
+            "resourceVersion": "4242",
+        },
+        "spec": {"project": "default", "destination": {"name": "in-cluster"}},
+        "status": {"sync": {"status": "OutOfSync"}, "health": {"status": "Healthy"}}
+    }));
+    let mut state = srelens_tui::views::argo_view::ArgoViewState::new();
+    state.set_applications(vec![listed.clone()], vec![listed], false, None);
+    ActiveView::Argo(state)
+}
+
+fn confirm_payload(app: &App, prefix: &str) -> Value {
+    match &app.modal {
+        Some(Modal::Confirm { action_name, .. }) => serde_json::from_str(
+            action_name
+                .strip_prefix(prefix)
+                .unwrap_or_else(|| panic!("expected {prefix}, got {action_name}")),
+        )
+        .unwrap(),
+        other => panic!("expected a {prefix} confirmation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn argo_confirmations_carry_the_listed_applications_uid_and_resource_version() {
+    // #620: the confirmation named the Application by namespace and name only,
+    // so one deleted and recreated while the dialog was open received the
+    // confirmed write. Every Argo write confirmation now carries the listed
+    // object's identity and version, for the write to be pinned to.
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    app.active_view = argo_view_with_reviewed_app("team", "billing");
+
+    for (key, prefix, field, value) in [
+        (ch('s'), "argo_sync:", "prune", json!(false)),
+        (
+            shift(KeyCode::Char('S')),
+            "argo_sync:",
+            "prune",
+            json!(true),
+        ),
+        (ch('p'), "argo_toggle_auto:", "enable", json!(true)),
+    ] {
+        press(&mut app, key).await;
+        let payload = confirm_payload(&app, prefix);
+        assert_eq!(payload["ns"], "team", "{prefix}");
+        assert_eq!(payload["name"], "billing", "{prefix}");
+        assert_eq!(payload["uid"], "uid-as-listed", "{prefix}");
+        assert_eq!(payload["resource_version"], "4242", "{prefix}");
+        assert_eq!(payload[field], value, "{prefix}");
+        app.modal = None;
+    }
+
+    // The action palette's Sync is pinned the same way.
+    press(&mut app, ch('x')).await;
+    if let Some(Modal::ActionPalette {
+        actions,
+        selected_idx,
+        ..
+    }) = &mut app.modal
+    {
+        *selected_idx = actions
+            .iter()
+            .position(|a| a.id == srelens_tui::ui::dialogs::QuickActionId::ArgoSync)
+            .expect("the palette offers Sync");
+    } else {
+        panic!("expected the action palette, got {:?}", app.modal);
+    }
+    app.execute_action_palette().await;
+    let payload = confirm_payload(&app, "argo_sync:");
+    assert_eq!(payload["uid"], "uid-as-listed");
+    assert_eq!(payload["resource_version"], "4242");
+    assert_eq!(payload["prune"], false);
+}
+
+#[tokio::test]
+async fn palette_sync_of_an_application_no_longer_listed_is_refused() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    app.active_view = argo_view_with_reviewed_app("team", "billing");
+    press(&mut app, ch('x')).await;
+    if let Some(Modal::ActionPalette {
+        actions,
+        selected_idx,
+        ..
+    }) = &mut app.modal
+    {
+        *selected_idx = actions
+            .iter()
+            .position(|a| a.id == srelens_tui::ui::dialogs::QuickActionId::ArgoSync)
+            .unwrap();
+    }
+    // The list refreshed while the palette was open and the Application went.
+    app.active_view = argo_view_with_reviewed_app("team", "other");
+
+    app.execute_action_palette().await;
+    assert!(
+        app.modal.is_none(),
+        "no confirmation without a reviewed object"
+    );
+    assert!(
+        toast(&app).contains("Cannot sync 'team/billing'"),
+        "{}",
+        toast(&app)
+    );
+}
+
+#[tokio::test]
+async fn argo_writes_without_a_reviewed_identity_are_refused() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    for (action, expected) in [
+        (
+            r#"argo_sync:{"ctx":"prod","ns":"argocd","name":"billing","prune":true,"dry_run":false}"#,
+            "⚠ Sync 'billing' failed: the Application's reviewed identity is unknown",
+        ),
+        (
+            r#"argo_sync:{"ctx":"prod","ns":"argocd","name":"billing","uid":"u","prune":true,"dry_run":false}"#,
+            "⚠ Sync 'billing' failed: the Application's reviewed identity is unknown",
+        ),
+        (
+            r#"argo_toggle_auto:{"ctx":"prod","ns":"argocd","name":"billing","resource_version":"7","enable":false}"#,
+            "⚠ Pause Auto-Sync for 'billing' failed: the Application's reviewed identity is unknown",
+        ),
+    ] {
+        app.execute_modal_confirm(action.to_string()).await;
+        assert!(toast(&app).contains(expected), "{action}: {}", toast(&app));
+    }
+
+    // The old colon-separated form cannot carry an identity and is not acted on.
+    app.toast = None;
+    app.execute_modal_confirm("argo_sync:prod:argocd:billing:true:false".to_string())
+        .await;
+    app.execute_modal_confirm("argo_toggle_auto:prod:argocd:billing:false".to_string())
+        .await;
+    assert!(app.toast.is_none(), "{}", toast(&app));
+}
+
+#[tokio::test]
+async fn a_write_refused_as_stale_reloads_the_applications() {
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    app.active_view = argo_view_with_reviewed_app("team", "billing");
+
+    app.handle_argo_action_result("Sync 'billing'", Err("connection refused".to_string()));
+    assert!(!app.argo_refreshing, "an unrelated failure reloads nothing");
+    // A proxy's plain-text 404 is an endpoint failure, not a gone Application.
+    app.handle_argo_action_result(
+        "Sync 'billing'",
+        Err("Failed to trigger sync for 'team/billing': ApiError: 404 page not found: Failed to parse error data (ErrorResponse { status: \"Failure\", message: \"404 page not found\", reason: \"Failed to parse error data\", code: 404 })".to_string()),
+    );
+    assert!(!app.argo_refreshing, "an endpoint 404 reloads nothing");
+
+    let err = format!(
+        "Failed to trigger sync for 'team/billing': {}",
+        srelens_kube::argo::APPLICATION_CHANGED
+    );
+    app.handle_argo_action_result("Sync 'billing'", Err(err));
+    assert_eq!(
+        toast(&app),
+        "⚠ Sync 'billing' failed: Failed to trigger sync for 'team/billing': the Application changed since you reviewed it; refresh and try again"
+    );
+    assert!(
+        app.argo_refreshing,
+        "the list reloads so the retry is made against what is there now"
+    );
 }
 
 #[tokio::test]
@@ -5373,6 +5745,7 @@ async fn node_ssh_modal_keys_and_submit() {
 #[tokio::test]
 async fn tui_config_view_key_interactions() {
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    app.tui_config = srelens_tui::tui_config::TuiConfig::default();
 
     let cfg = srelens_tui::views::TuiConfigViewState::new();
     app.active_view = ActiveView::TuiConfig(cfg);
@@ -5447,4 +5820,155 @@ async fn tui_config_view_key_interactions() {
     // 4. Exit config view with 'q'
     press(&mut app, ch('q')).await;
     assert!(matches!(app.active_view, ActiveView::Table(_)));
+}
+
+#[tokio::test]
+async fn test_node_inspector_ctrl_d_deletes_selected_pod_and_updates_view() {
+    let (mut app, _rx) = common::app().await;
+    let mut ni = NodeInspectorState::new("node-1".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-1".into(),
+        status: "Ready".into(),
+        pods: vec![
+            srelens_kube::node_inspector::NodePodItem {
+                name: "pod-1".into(),
+                namespace: "default".into(),
+                phase: "Running".into(),
+                ready_containers: "1/1".into(),
+                restarts: 0,
+                age: "5m".into(),
+                cpu_requests_millicores: 100,
+                mem_requests_mib: 128,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.0.1".into(),
+            },
+            srelens_kube::node_inspector::NodePodItem {
+                name: "pod-2".into(),
+                namespace: "default".into(),
+                phase: "Running".into(),
+                ready_containers: "1/1".into(),
+                restarts: 0,
+                age: "10m".into(),
+                cpu_requests_millicores: 200,
+                mem_requests_mib: 256,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.0.2".into(),
+            },
+        ],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    // Press Ctrl+d on pod-1
+    press(&mut app, ctrl('d')).await;
+
+    // Verify confirmation modal is opened
+    match &app.modal {
+        Some(Modal::Confirm {
+            title,
+            action_name,
+            is_destructive,
+            ..
+        }) => {
+            assert!(title.contains("pod-1"));
+            assert_eq!(action_name, "delete:Pod:default:pod-1");
+            assert!(is_destructive);
+        }
+        _ => panic!(
+            "expected Modal::Confirm for pod-1 deletion, got {:?}",
+            app.modal
+        ),
+    }
+
+    // Cancel with 'n'
+    press(&mut app, ch('n')).await;
+    assert!(app.modal.is_none());
+
+    // Press Ctrl+d again and confirm with Enter
+    press(&mut app, ctrl('d')).await;
+    assert!(app.modal.is_some());
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn test_node_inspector_ctrl_d_when_no_pods_safely_noops() {
+    let (mut app, _rx) = common::app().await;
+    let mut ni = NodeInspectorState::new("node-empty".into());
+    let details = srelens_kube::node_inspector::NodeInspectorDetails {
+        name: "node-empty".into(),
+        status: "Ready".into(),
+        pods: vec![],
+        ..Default::default()
+    };
+    ni.set_details(details);
+    app.active_view = ActiveView::NodeInspector(ni);
+
+    press(&mut app, ctrl('d')).await;
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn test_table_ctrl_d_bulk_delete_tagged_pods_opens_confirm_modal() {
+    let (mut app, _rx) = common::app().await;
+    set_table(
+        &mut app,
+        ResourceKind::Pods,
+        pods(&["pod-a", "pod-b", "pod-c"]),
+    );
+
+    // Mark pod-a (idx 0) and pod-c (idx 2)
+    press(&mut app, ch(' ')).await; // mark pod-a
+    press(&mut app, ch('j')).await; // move to pod-b
+    press(&mut app, ch('j')).await; // move to pod-c
+    press(&mut app, ch(' ')).await; // mark pod-c
+
+    if let ActiveView::Table(ref t) = app.active_view {
+        assert_eq!(t.marked_indices.len(), 2);
+    }
+
+    // Press Ctrl+d to trigger bulk deletion modal
+    press(&mut app, ctrl('d')).await;
+
+    match &app.modal {
+        Some(Modal::Confirm {
+            title,
+            message,
+            action_name,
+            is_destructive,
+        }) => {
+            assert!(title.contains("2"), "title should show count: {}", title);
+            assert!(
+                message.contains("2"),
+                "message should show count: {}",
+                message
+            );
+            assert!(
+                action_name.starts_with("bulk_delete:"),
+                "action_name: {}",
+                action_name
+            );
+            assert!(action_name.contains("pod-a") && action_name.contains("pod-c"));
+            assert!(is_destructive);
+        }
+        other => panic!("expected Modal::Confirm for bulk delete, got {:?}", other),
+    }
+
+    // Dismiss with 'n'
+    press(&mut app, ch('n')).await;
+    assert!(app.modal.is_none());
+
+    // Marked indices remain intact after cancel
+    if let ActiveView::Table(ref t) = app.active_view {
+        assert_eq!(t.marked_indices.len(), 2);
+    }
+
+    // Press Ctrl+d again and confirm with Enter
+    press(&mut app, ctrl('d')).await;
+    assert!(app.modal.is_some());
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.modal.is_none());
 }
