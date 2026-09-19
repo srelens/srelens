@@ -11,6 +11,12 @@ cluster's RBAC.
 - A declaration is not an authorization. The host supplies grants separately:
   installation shows the requested permissions for review, and **Install and grant
   permissions** grants that list.
+- A grant covers whatever the manifest binds to that capability, so the review also
+  shows the bindings once the host has accepted the manifest: for each
+  `k8s.listCustomResource` reader its group, version, kind, plural, scope and printer
+  columns (with their JSON paths); for each `k8s.listEvents` reader the API groups its
+  dashboards show; for anything else its fixed arguments. **View manifest** opens the
+  full manifest before installing, whether it came from the Catalog or was pasted.
 - Installing a new version of an installed app shows its permissions again. The
   application never silently replaces a manifest or expands its grants. A
   permission diff on update is planned
