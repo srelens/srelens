@@ -36,6 +36,21 @@ describe("custom columns", () => {
     expect(cols.map((c) => c.key)).toEqual(["name", "namespace", "age"]);
   });
 
+  it("keeps at most 32 printer columns so headers match evaluated row values", () => {
+    const printerColumns = Array.from({ length: 40 }, (_, i) => ({
+      name: `Col${i}`,
+      type: "string",
+      jsonPath: `.status.c${i}`,
+    }));
+    const headers = customColumns(crd({ printerColumns }))
+      .map((c) => c.header)
+      .filter((h) => typeof h === "string" && h.startsWith("Col"));
+    expect(headers).toHaveLength(32);
+    expect(headers[0]).toBe("Col0");
+    expect(headers[31]).toBe("Col31");
+    expect(headers).not.toContain("Col32");
+  });
+
   // `printerSortValue(type, value, sortKey)` takes three `string` parameters,
   // so a future argument swap at the call site in customColumns still
   // compiles. These pin the order by giving `columns` and `sortKeys` values

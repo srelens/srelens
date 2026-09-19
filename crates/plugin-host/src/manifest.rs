@@ -176,6 +176,10 @@ fn field_present(value: &Value, path: &str) -> bool {
 
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 
+/// Most printer columns a binding may declare (#609). Refused at
+/// `capabilities[i].arguments.printerColumns` with `EXTENSION_INVALID_VALUE`.
+pub const MAX_PRINTER_COLUMNS: usize = 32;
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -598,6 +602,19 @@ impl Manifest {
                         Code::InvalidBinding,
                         format!("{at}.inputs[{position}]"),
                         format!("\"{input}\" is a bound argument, so it cannot also be an input"),
+                    );
+                }
+            }
+            if let Some(columns) = binding
+                .arguments
+                .get("printerColumns")
+                .and_then(Value::as_array)
+            {
+                if columns.len() > MAX_PRINTER_COLUMNS {
+                    problems.push(
+                        Code::InvalidValue,
+                        format!("{at}.arguments.printerColumns"),
+                        format!("Declare at most {MAX_PRINTER_COLUMNS} printerColumns"),
                     );
                 }
             }

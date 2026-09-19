@@ -445,15 +445,15 @@ export async function listEvents(
   namespace: string | null,
   object?: EventObjectFilter,
   invoke: Invoker = invokeCapability,
-): Promise<{ events?: EventSummary[]; error?: string }> {
+): Promise<{ events?: EventSummary[]; truncated?: boolean; error?: string }> {
   try {
-    const out = await invoke<{ events: EventSummary[] }>("k8s.listEvents", {
+    const out = await invoke<{ events: EventSummary[]; truncated?: boolean }>("k8s.listEvents", {
       context,
       namespace: namespace ?? "",
       objectKind: object?.kind ?? "",
       objectName: object?.name ?? "",
     });
-    return { events: out.events };
+    return { events: out.events, truncated: out.truncated };
   } catch (e) {
     return { error: String(e) };
   }

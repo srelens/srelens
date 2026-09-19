@@ -908,6 +908,47 @@ it("distinguishes filtered rows from an empty resource response", async () => {
   expect(screen.queryByText("No resources returned by this app.")).toBeNull();
 });
 
+it("says when the backend capped the list and pages matching rows", async () => {
+  const items = Array.from({ length: 150 }, (_, i) => ({
+    name: `app-${i}`,
+    namespace: "team",
+    age: "1d",
+    columns: [] as string[],
+  }));
+  vi.mocked(readExtension).mockResolvedValue({ items, truncated: true });
+  render(<ExtensionResults plugin={plugin} capability="list" context="test" />);
+  expect(
+    await screen.findByText(
+      "Showing the first 150 resources; more remain on the cluster.",
+    ),
+  ).toBeTruthy();
+  expect(screen.getByText("app-0")).toBeTruthy();
+  expect(screen.queryByText("app-100")).toBeNull();
+  expect(screen.getByText(/50 matching rows not shown/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: /Show 50 more/ }));
+  expect(screen.getByText("app-100")).toBeTruthy();
+  expect(screen.queryByText(/matching rows not shown/)).toBeNull();
+});
+
+it("resets the visible page after a refresh", async () => {
+  const items = Array.from({ length: 150 }, (_, i) => ({
+    name: `app-${i}`,
+    namespace: "team",
+    age: "1d",
+    columns: [] as string[],
+  }));
+  vi.mocked(readExtension).mockResolvedValue({ items });
+  render(<ExtensionResults plugin={plugin} capability="list" context="test" />);
+  await screen.findByText("app-0");
+  fireEvent.click(screen.getByRole("button", { name: /Show 50 more/ }));
+  expect(screen.getByText("app-100")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+  await waitFor(() => {
+    expect(screen.queryByText("app-100")).toBeNull();
+    expect(screen.getByText("app-0")).toBeTruthy();
+  });
+});
+
 it("advances app resource ages without refreshing backend data", async () => {
   const {act}=await import("@testing-library/react");
   vi.useFakeTimers();

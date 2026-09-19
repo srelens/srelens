@@ -15,7 +15,7 @@ import type { KindDescriptor, ListRow } from "../../lib/kinds/types";
 const { getObject, getManifest, listEvents, listCrds, deleteResource, podsOnNode } = vi.hoisted(() => ({
   getObject: vi.fn(async (): Promise<{ object?: K8sObject; error?: string }> => ({})),
   getManifest: vi.fn(async (): Promise<{ yaml?: string; error?: string }> => ({ yaml: "" })),
-  listEvents: vi.fn(async (): Promise<{ events?: EventSummary[]; error?: string }> => ({ events: [] })),
+  listEvents: vi.fn(async (): Promise<{ events?: EventSummary[]; truncated?: boolean; error?: string }> => ({ events: [] })),
   listCrds: vi.fn(async (): Promise<{ crds?: CrdRef[]; error?: string }> => ({ crds: [] })),
   // The footer's actions are the row menu's, so the one write a test reaches
   // for is mocked here too — a confirm that is never taken must reach nothing.
@@ -378,6 +378,24 @@ describe("ResourceDetailView", () => {
     const normalPill = getByText("Normal");
     expect(normalPill.getAttribute("data-kind")).toBe("neutral");
     expect(normalPill.getAttribute("data-bad")).toBeNull();
+  });
+
+  it("says when the Events pane stopped at the shared list row cap", async () => {
+    getObject.mockResolvedValue({ object: POD });
+    listEvents.mockResolvedValue({
+      events: [
+        { name: "web-1.abc", namespace: "default", type: "Warning", reason: "BackOff", object: "Pod/web-1", message: "container crashed", age: "5m", count: 1 },
+      ],
+      truncated: true,
+    });
+    const { getByRole, getByText } = render(
+      <ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />,
+    );
+    await waitFor(() => expect(getByRole("tab", { name: "Events" })).toBeDefined());
+    await userEvent.click(getByRole("tab", { name: "Events" }));
+    await waitFor(() => expect(getByText("BackOff")).toBeDefined());
+    expect(getByText(/Showing the first 1 events/i)).toBeTruthy();
+    expect(getByText(/shared list row cap/i)).toBeTruthy();
   });
 
   it("does not query the cluster's CRDs to fetch a built-in kind's manifest", async () => {
