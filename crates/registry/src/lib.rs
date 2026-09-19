@@ -51,7 +51,7 @@ pub fn kubeconfig_paths_in_home(home: &std::path::Path) -> Vec<PathBuf> {
     let dot_kube = home.join(".kube");
     let mut paths = vec![dot_kube.join("config")];
     if dot_kube.is_dir() {
-        for file in srelens_kube::connect::kubeconfig_files_in(&dot_kube) {
+        for file in srelens_kube::connect::discover_kubeconfig_files_in(&dot_kube) {
             if !paths.contains(&file) {
                 paths.push(file);
             }

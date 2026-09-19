@@ -59,17 +59,6 @@ impl ClientCache {
         }
     }
 
-    /// Synchronous version of `ensure_paths`, using `try_write`.
-    pub fn ensure_paths_sync(&self, additional: Vec<PathBuf>) {
-        if let Ok(mut current) = self.paths.try_write() {
-            for p in additional {
-                if !current.contains(&p) {
-                    current.push(p);
-                }
-            }
-        }
-    }
-
     pub async fn paths(&self) -> Vec<PathBuf> {
         self.paths.read().await.clone()
     }

@@ -25,10 +25,17 @@ users:
     token: fake-token-123
 "#;
 
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn test_import_kubeconfig_from_yaml_content() {
+    let _lock = ENV_LOCK.lock().await;
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
+    let managed_dir = temp.path().join("managed_configs");
+    std::fs::create_dir_all(&managed_dir).unwrap();
+    std::env::set_var("SRELENS_KUBECONFIG_DIR", &managed_dir);
+
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
@@ -56,19 +63,42 @@ users:
     token: sec-token-456
 "#;
 
-    let imported_ctx = app.import_kubeconfig(new_yaml).unwrap();
+    let imported_ctx = app.import_kubeconfig(new_yaml).await.unwrap();
     assert_eq!(imported_ctx, "secondary-cluster-ctx");
+    app.switch_context(imported_ctx.clone()).await;
     assert_eq!(app.active_context, "secondary-cluster-ctx");
     assert!(app
         .contexts
         .iter()
         .any(|c| c.name == "secondary-cluster-ctx"));
+
+    // Verify it was persisted to the isolated managed directory
+    let saved_files = srelens_kube::connect::kubeconfig_files_in(&managed_dir);
+    assert_eq!(saved_files.len(), 1);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(&saved_files[0]).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "file must have 0600 permissions"
+        );
+    }
+
+    std::env::remove_var("SRELENS_KUBECONFIG_DIR");
 }
 
 #[tokio::test]
 async fn test_import_kubeconfig_from_file_path() {
+    let _lock = ENV_LOCK.lock().await;
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
+    let managed_dir = temp.path().join("managed_configs");
+    std::fs::create_dir_all(&managed_dir).unwrap();
+    std::env::set_var("SRELENS_KUBECONFIG_DIR", &managed_dir);
+
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
@@ -100,10 +130,29 @@ users:
 
     let imported_ctx = app
         .import_kubeconfig(&external_yaml_path.to_string_lossy())
+        .await
         .unwrap();
     assert_eq!(imported_ctx, "file-imported-ctx");
+    app.switch_context(imported_ctx.clone()).await;
     assert_eq!(app.active_context, "file-imported-ctx");
     assert!(app.contexts.iter().any(|c| c.name == "file-imported-ctx"));
+
+    // Verify it was copied into managed dir for persistence across restarts
+    let saved_files = srelens_kube::connect::kubeconfig_files_in(&managed_dir);
+    assert_eq!(saved_files.len(), 1);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(&saved_files[0]).unwrap().permissions();
+        assert_eq!(
+            perms.mode() & 0o777,
+            0o600,
+            "file must have 0600 permissions"
+        );
+    }
+
+    std::env::remove_var("SRELENS_KUBECONFIG_DIR");
 }
 
 #[test]

@@ -72,6 +72,9 @@ pub fn init_timeout_from_env() -> u64 {
 /// config is saved. Tied to the bundle identifier, like `settings.json`, so it
 /// survives dev/installed builds and binary renames.
 pub fn default_kubeconfig_dir() -> Option<PathBuf> {
+    if let Some(override_dir) = std::env::var_os("SRELENS_KUBECONFIG_DIR") {
+        return Some(PathBuf::from(override_dir));
+    }
     Some(
         dirs::config_dir()?
             .join("app.srelens.desktop")
@@ -116,6 +119,123 @@ pub fn kubeconfig_files_in(dir: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort();
     files
+}
+
+/// Recursively discovers and validates all valid kubeconfig YAML files within
+/// `dir` up to a maximum depth of 5, skipping dotfiles and hidden directories.
+pub fn discover_kubeconfig_files_in(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_kubeconfigs_recursive(dir, 0, &mut files);
+    files.sort();
+    files
+}
+
+fn collect_kubeconfigs_recursive(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if depth > 5 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Skip dotfiles, hidden directories, and known non-config cache folders
+        if name.starts_with('.')
+            || name.eq_ignore_ascii_case("cache")
+            || name.eq_ignore_ascii_case("http-cache")
+            || name.eq_ignore_ascii_case("schema")
+            || name.eq_ignore_ascii_case("tmp")
+            || name.eq_ignore_ascii_case("temp")
+        {
+            continue;
+        }
+        if path.is_dir() {
+            collect_kubeconfigs_recursive(&path, depth + 1, out);
+        } else if path.is_file() {
+            let is_likely_config = name == "config"
+                || name.ends_with(".yaml")
+                || name.ends_with(".yml")
+                || name.ends_with(".conf")
+                || name.ends_with(".config")
+                || !name.contains('.');
+            if is_likely_config && is_valid_kubeconfig_file(&path) {
+                out.push(path);
+            }
+        }
+    }
+}
+
+pub fn is_valid_kubeconfig_file(path: &Path) -> bool {
+    let Ok(meta) = path.metadata() else {
+        return false;
+    };
+    if meta.len() == 0 || meta.len() > 2 * 1024 * 1024 {
+        return false;
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    if !content.contains("clusters")
+        && !content.contains("contexts")
+        && !content.contains("apiVersion")
+    {
+        return false;
+    }
+    kube::config::Kubeconfig::from_yaml(&content).is_ok()
+}
+
+/// Write a private kubeconfig file with mode 0600 (Unix) and a collision-resistant
+/// filename ({base_name}-{nanos}-{pid}.yaml) inside `dir`.
+pub fn write_private_kubeconfig_file(
+    dir: &Path,
+    base_name: &str,
+    yaml: &str,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("Failed to create directory {}: {}", dir.display(), e))?;
+
+    let safe_name: String = base_name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+
+    let filename = format!("{}-{}-{}.yaml", safe_name, nanos, pid);
+    let path = dir.join(filename);
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+
+    let mut file = opts.open(&path).map_err(|e| {
+        format!(
+            "Failed to create private kubeconfig at {}: {}",
+            path.display(),
+            e
+        )
+    })?;
+    use std::io::Write as _;
+    file.write_all(yaml.as_bytes())
+        .map_err(|e| format!("Failed to write kubeconfig to {}: {}", path.display(), e))?;
+    Ok(path)
 }
 
 /// Build an authenticated kube-rs client for a named kubeconfig context.
@@ -190,7 +310,9 @@ fn standalone_context_yaml(mut config: Kubeconfig, context: &str) -> Result<Stri
     if !config.clusters.iter().any(|c| c.name == inner.cluster)
         || !config.auth_infos.iter().any(|a| a.name == inner_user)
     {
-        return Err(format!("context '{context}' is missing its cluster or user here"));
+        return Err(format!(
+            "context '{context}' is missing its cluster or user here"
+        ));
     }
 
     config.contexts.retain(|c| c.name == context);
@@ -666,7 +788,11 @@ fn facts_from_nodes(nodes: &[Node]) -> (String, String) {
 
 /// Read metrics-server's availability out of a discovery listing that answered.
 fn metrics_server_from_groups(groups: &APIGroupList) -> MetricsServerFact {
-    match groups.groups.iter().find(|group| group.name == METRICS_GROUP) {
+    match groups
+        .groups
+        .iter()
+        .find(|group| group.name == METRICS_GROUP)
+    {
         Some(group) => MetricsServerFact {
             state: MetricsServerState::Present,
             version: group
@@ -875,7 +1001,10 @@ mod tests {
     #[test]
     fn timeout_setter_clamps_to_supported_range() {
         // Above the max is clamped down.
-        assert_eq!(set_request_timeout_secs(MAX_TIMEOUT_SECS + 1), MAX_TIMEOUT_SECS);
+        assert_eq!(
+            set_request_timeout_secs(MAX_TIMEOUT_SECS + 1),
+            MAX_TIMEOUT_SECS
+        );
         assert_eq!(request_timeout(), Duration::from_secs(MAX_TIMEOUT_SECS));
         // Zero is clamped up to the minimum.
         assert_eq!(set_request_timeout_secs(0), MIN_TIMEOUT_SECS);
@@ -900,7 +1029,10 @@ mod tests {
             !err.contains("srelens-should-never-run-this"),
             "exec command must not be run: {err}"
         );
-        assert!(!err.contains("exec"), "no exec plugin should be attempted: {err}");
+        assert!(
+            !err.contains("exec"),
+            "no exec plugin should be attempted: {err}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1088,16 +1220,33 @@ mod tests {
 
         let paths = vec![file_a.clone(), file_b.clone()];
         let resolved = crate::context_resolve::resolve_contexts(&paths);
-        assert_eq!(resolved.len(), 2, "both duplicate-named contexts must be visible");
-        let a_display = resolved.iter().find(|c| c.source == file_a).unwrap().display_name.clone();
-        let b_display = resolved.iter().find(|c| c.source == file_b).unwrap().display_name.clone();
+        assert_eq!(
+            resolved.len(),
+            2,
+            "both duplicate-named contexts must be visible"
+        );
+        let a_display = resolved
+            .iter()
+            .find(|c| c.source == file_a)
+            .unwrap()
+            .display_name
+            .clone();
+        let b_display = resolved
+            .iter()
+            .find(|c| c.source == file_b)
+            .unwrap()
+            .display_name
+            .clone();
         assert_ne!(a_display, b_display, "disambiguated names must differ");
 
         // Connecting by fileB's display name must reach fileB's server, not the
         // first-merged fileA.
         let config = config_for_context(&paths, &b_display).await.unwrap();
         assert!(
-            config.cluster_url.to_string().starts_with("https://b.example"),
+            config
+                .cluster_url
+                .to_string()
+                .starts_with("https://b.example"),
             "expected fileB's server, got {}",
             config.cluster_url
         );
@@ -1125,7 +1274,8 @@ mod tests {
             panic!("expected Ok, got Err({e})");
         }
 
-        let missing = build_client_with_bearer(std::slice::from_ref(&path), "missing-ctx", "t").await;
+        let missing =
+            build_client_with_bearer(std::slice::from_ref(&path), "missing-ctx", "t").await;
         assert!(missing.is_err());
 
         let _ = std::fs::remove_file(&path);
@@ -1198,9 +1348,18 @@ mod tests {
 
     #[test]
     fn each_known_provider_scheme_names_its_platform() {
-        assert_eq!(provider_from_provider_id("gce://acme-prod/europe-west4-a/gke-node-1"), "GKE");
-        assert_eq!(provider_from_provider_id("aws:///eu-west-1a/i-0abc1234"), "EKS");
-        assert_eq!(provider_from_provider_id("azure:///subscriptions/s/vm-1"), "AKS");
+        assert_eq!(
+            provider_from_provider_id("gce://acme-prod/europe-west4-a/gke-node-1"),
+            "GKE"
+        );
+        assert_eq!(
+            provider_from_provider_id("aws:///eu-west-1a/i-0abc1234"),
+            "EKS"
+        );
+        assert_eq!(
+            provider_from_provider_id("azure:///subscriptions/s/vm-1"),
+            "AKS"
+        );
         assert_eq!(
             provider_from_provider_id("kind://docker/srelens-demo/srelens-demo-worker"),
             "kind"
@@ -1209,7 +1368,10 @@ mod tests {
 
     #[test]
     fn an_unrecognised_scheme_reports_the_scheme_itself_not_a_guess() {
-        assert_eq!(provider_from_provider_id("openstack:///d9c1-4a/instance"), "openstack");
+        assert_eq!(
+            provider_from_provider_id("openstack:///d9c1-4a/instance"),
+            "openstack"
+        );
         assert_eq!(provider_from_provider_id("hcloud://12345"), "hcloud");
     }
 

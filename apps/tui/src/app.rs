@@ -2897,7 +2897,7 @@ impl App {
                     KeyCode::Esc => {
                         self.modal = None;
                     }
-                    KeyCode::Enter => match self.import_kubeconfig(&input) {
+                    KeyCode::Enter => match self.import_kubeconfig(&input).await {
                         Ok(ctx_name) => {
                             self.modal = None;
                             self.set_toast(
@@ -8366,7 +8366,7 @@ impl App {
         }
     }
 
-    pub fn import_kubeconfig(&mut self, input: &str) -> Result<String, String> {
+    pub async fn import_kubeconfig(&mut self, input: &str) -> Result<String, String> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return Err("Input is empty".to_string());
@@ -8374,6 +8374,10 @@ impl App {
 
         let mut target_path: Option<PathBuf> = None;
         let mut parsed_config: Option<kube::config::Kubeconfig> = None;
+
+        let config_dir = srelens_kube::connect::default_kubeconfig_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join(".kube").join("srelens-configs")))
+            .ok_or_else(|| "Could not determine config directory to save kubeconfig".to_string())?;
 
         let resolved_path = if trimmed.starts_with("~/") || trimmed == "~" {
             dirs::home_dir().map(|h| {
@@ -8395,8 +8399,20 @@ impl App {
                             if cfg.contexts.is_empty() {
                                 return Err("Kubeconfig file contains no contexts".to_string());
                             }
+                            let first_ctx = cfg
+                                .current_context
+                                .as_deref()
+                                .or_else(|| cfg.contexts.first().map(|c| c.name.as_str()))
+                                .unwrap_or("cluster");
+
+                            // Copy/persist into managed directory so it survives restarts
+                            let saved_file = srelens_kube::connect::write_private_kubeconfig_file(
+                                &config_dir,
+                                first_ctx,
+                                &content,
+                            )?;
+                            target_path = Some(saved_file);
                             parsed_config = Some(cfg);
-                            target_path = Some(path.clone());
                         }
                         Err(e) => {
                             return Err(format!("Invalid kubeconfig file: {}", e));
@@ -8416,52 +8432,18 @@ impl App {
                         return Err("Kubeconfig contains no contexts".to_string());
                     }
 
-                    let config_dir = srelens_kube::connect::default_kubeconfig_dir()
-                        .or_else(|| {
-                            dirs::home_dir().map(|h| h.join(".kube").join("srelens-configs"))
-                        })
-                        .ok_or_else(|| {
-                            "Could not determine config directory to save kubeconfig".to_string()
-                        })?;
-
-                    std::fs::create_dir_all(&config_dir).map_err(|e| {
-                        format!("Failed to create directory {}: {}", config_dir.display(), e)
-                    })?;
-
                     let first_ctx = cfg
                         .current_context
                         .as_deref()
                         .or_else(|| cfg.contexts.first().map(|c| c.name.as_str()))
                         .unwrap_or("cluster");
 
-                    let safe_name: String = first_ctx
-                        .chars()
-                        .map(|c| {
-                            if c.is_alphanumeric() || c == '-' || c == '_' {
-                                c
-                            } else {
-                                '_'
-                            }
-                        })
-                        .collect();
-
-                    let timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-
-                    let filename = format!("{}-{}.yaml", safe_name, timestamp);
-                    let file_path = config_dir.join(filename);
-
-                    std::fs::write(&file_path, trimmed).map_err(|e| {
-                        format!(
-                            "Failed to write kubeconfig to {}: {}",
-                            file_path.display(),
-                            e
-                        )
-                    })?;
-
-                    target_path = Some(file_path);
+                    let saved_file = srelens_kube::connect::write_private_kubeconfig_file(
+                        &config_dir,
+                        first_ctx,
+                        trimmed,
+                    )?;
+                    target_path = Some(saved_file);
                     parsed_config = Some(cfg);
                 }
                 Err(e) => {
@@ -8482,7 +8464,8 @@ impl App {
             self.kubeconfig_paths.push(target_path.clone());
         }
         self.client_cache
-            .ensure_paths_sync(vec![target_path.clone()]);
+            .ensure_paths(vec![target_path.clone()])
+            .await;
 
         let resolved = srelens_kube::context_resolve::resolve_contexts(&self.kubeconfig_paths);
         self.contexts = resolved
@@ -8523,20 +8506,7 @@ impl App {
             .or_else(|| self.contexts.iter().find(|c| c.name == target_context_name));
 
         if let Some(dto) = target_dto {
-            let name = dto.name.clone();
-            self.active_context = name.clone();
-            self.cluster_name = dto.cluster.clone();
-            self.server_url = dto.server.clone();
-            self.active_namespace = if !dto.namespace.is_empty() {
-                dto.namespace.clone()
-            } else {
-                String::new()
-            };
-            self.cluster_version = "Connecting...".to_string();
-            self.is_connected = false;
-            self.connection_attempt_start = Instant::now();
-            self.cluster_unreachable = false;
-            Ok(name)
+            Ok(dto.name.clone())
         } else {
             Ok(target_context_name.to_string())
         }
