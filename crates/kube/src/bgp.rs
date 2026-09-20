@@ -1518,7 +1518,23 @@ pub(crate) fn build_calico_bgp_summary(
             .to_string();
         let as_num = spec.get("asNumber").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
-        for (node_name, _) in node_labels {
+        // A Calico `BGPPeer` scopes itself: `spec.node` names one node,
+        // `spec.nodeSelector` selects several, and a peer carrying neither is
+        // global. Attributing every peer to every node reported sessions that
+        // do not exist and made `total_peers` peers × nodes.
+        //
+        // Calico may also write `nodeSelector` as one of its own selector
+        // expressions (`has(rack)`), which this does not evaluate; such a peer
+        // keeps the global reading rather than dropping rows for sessions that
+        // may well exist.
+        let targets: Vec<String> = match spec.get("node").and_then(|v| v.as_str()) {
+            Some(node) if node_labels.contains_key(node) => vec![node.to_string()],
+            // A peer pinned to a node this cluster does not have peers nowhere.
+            Some(_) => Vec::new(),
+            None => find_matching_nodes(spec.get("nodeSelector"), node_labels),
+        };
+
+        for node_name in &targets {
             bgp_nodes.insert(node_name.clone());
             neighbors.push(BgpNeighbor {
                 node_name: node_name.clone(),
@@ -2810,6 +2826,59 @@ mod tests {
         let calico_summary = build_calico_bgp_summary(vec![empty_calico], &node_labels);
         assert_eq!(calico_summary.engine, BgpEngineType::Calico);
         assert_eq!(calico_summary.peers.len(), 0);
+    }
+
+    #[test]
+    fn a_calico_peer_is_reported_only_on_the_nodes_it_targets() {
+        let mut node_labels = HashMap::new();
+        node_labels.insert(
+            "rack1-host1".to_string(),
+            BTreeMap::from([("rack".to_string(), "rack1".to_string())]),
+        );
+        node_labels.insert(
+            "rack2-host1".to_string(),
+            BTreeMap::from([("rack".to_string(), "rack2".to_string())]),
+        );
+
+        // `spec.node` names one node.
+        let mut pinned = DynamicObject::new("pinned", &calico_bgp_peer_resource());
+        pinned.data = json!({
+            "spec": {"node": "rack1-host1", "peerIP": "10.0.0.1", "asNumber": 64512}
+        });
+        let summary = build_calico_bgp_summary(vec![pinned], &node_labels);
+        let nodes: Vec<&str> = summary.peers.iter().map(|p| p.node_name.as_str()).collect();
+        assert_eq!(nodes, ["rack1-host1"]);
+        assert_eq!(summary.total_peers, 1);
+        assert_eq!(summary.bgp_nodes, 1);
+
+        // `spec.nodeSelector` selects several.
+        let mut selected = DynamicObject::new("selected", &calico_bgp_peer_resource());
+        selected.data = json!({
+            "spec": {
+                "nodeSelector": {"matchLabels": {"rack": "rack2"}},
+                "peerIP": "10.0.0.2",
+                "asNumber": 64512
+            }
+        });
+        let summary = build_calico_bgp_summary(vec![selected], &node_labels);
+        let nodes: Vec<&str> = summary.peers.iter().map(|p| p.node_name.as_str()).collect();
+        assert_eq!(nodes, ["rack2-host1"]);
+
+        // Neither: the peer is global.
+        let mut global = DynamicObject::new("global", &calico_bgp_peer_resource());
+        global.data = json!({"spec": {"peerIP": "10.0.0.3", "asNumber": 64512}});
+        let summary = build_calico_bgp_summary(vec![global], &node_labels);
+        assert_eq!(summary.total_peers, 2);
+        assert_eq!(summary.bgp_nodes, 2);
+
+        // A node this cluster does not have is reported nowhere, rather than
+        // everywhere.
+        let mut stale = DynamicObject::new("stale", &calico_bgp_peer_resource());
+        stale.data = json!({
+            "spec": {"node": "decommissioned", "peerIP": "10.0.0.4", "asNumber": 64512}
+        });
+        let summary = build_calico_bgp_summary(vec![stale], &node_labels);
+        assert_eq!(summary.total_peers, 0);
     }
 
     #[test]
