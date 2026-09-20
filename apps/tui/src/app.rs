@@ -3715,6 +3715,69 @@ impl App {
                         }
                     }
                 }
+                Modal::Diagnosis {
+                    resource_kind,
+                    resource_name,
+                    namespace,
+                    report,
+                    mut scroll_offset,
+                } => match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.modal = None;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        scroll_offset = scroll_offset.saturating_sub(1);
+                        self.modal = Some(Modal::Diagnosis {
+                            resource_kind,
+                            resource_name,
+                            namespace,
+                            report,
+                            scroll_offset,
+                        });
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        scroll_offset = scroll_offset.saturating_add(1);
+                        self.modal = Some(Modal::Diagnosis {
+                            resource_kind,
+                            resource_name,
+                            namespace,
+                            report,
+                            scroll_offset,
+                        });
+                    }
+                    KeyCode::Char('l') => {
+                        let r_name = resource_name.clone();
+                        let r_ns = namespace.clone();
+                        self.modal = None;
+                        self.prompt_pod_logs(r_name, r_ns).await;
+                    }
+                    KeyCode::Char('d') => {
+                        let r_kind = resource_kind.clone();
+                        let r_name = resource_name.clone();
+                        let r_ns = namespace.clone();
+                        self.modal = None;
+                        self.open_describe_view(r_kind, r_name, r_ns).await;
+                    }
+                    KeyCode::Char('a') => {
+                        let summary = report.summary.clone();
+                        let r_kind = resource_kind.clone();
+                        let r_name = resource_name.clone();
+                        self.modal = None;
+                        self.assistant_state.input =
+                            format!("Diagnose {} {}: {}", r_kind, r_name, summary);
+                        let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
+                        self.nav_stack.push(old);
+                    }
+                    KeyCode::Char('e') => {
+                        let r_kind = resource_kind.clone();
+                        let r_name = resource_name.clone();
+                        let r_ns = namespace.clone();
+                        self.modal = None;
+                        self.open_yaml_view(r_name, r_kind, r_ns).await;
+                        self.requires_terminal_suspend = Some(SuspendAction::EditYaml);
+                    }
+                    _ => {}
+                },
             }
             return;
         }
@@ -4984,6 +5047,24 @@ impl App {
                             }
                         } else if let Some(name) = sel_name.clone() {
                             self.open_resource_tree(kind_str.clone(), name, sel_ns.clone());
+                        }
+                    }
+                    KeyCode::Char('!') => {
+                        // Instant Root-Cause Diagnosis
+                        if table_kind == ResourceKind::Events {
+                            if let Some(item) = table.selected_item() {
+                                let (obj_kind, obj_name) = parse_involved_object(item);
+                                if !obj_name.is_empty() {
+                                    self.trigger_instant_diagnosis(obj_kind, obj_name, sel_ns.clone()).await;
+                                }
+                            }
+                        } else if let Some(name) = sel_name.clone() {
+                            let effective_kind = if table_kind == ResourceKind::Workloads {
+                                row_kind.clone()
+                            } else {
+                                kind_str.clone()
+                            };
+                            self.trigger_instant_diagnosis(effective_kind, name, sel_ns.clone()).await;
                         }
                     }
                     KeyCode::Enter => {
@@ -10226,6 +10307,166 @@ impl App {
         }
     }
 
+    pub async fn trigger_instant_diagnosis(
+        &mut self,
+        kind: String,
+        name: String,
+        namespace: Option<String>,
+    ) {
+        let is_pod = kind.eq_ignore_ascii_case("Pod") || kind.eq_ignore_ascii_case("Pods");
+        let is_workload = matches!(
+            kind.as_str(),
+            "Deployment" | "StatefulSet" | "DaemonSet" | "Job" | "CronJob"
+        );
+
+        let target_ns = namespace.clone().or_else(|| {
+            if self.active_namespace.is_empty() {
+                None
+            } else {
+                Some(self.active_namespace.clone())
+            }
+        });
+
+        // 1. Locate the pod JSON
+        let pod_json: Option<serde_json::Value> = if is_pod {
+            let mut found = None;
+            if let ActiveView::Table(ref table) = self.active_view {
+                if let Some(item) = table.selected_item() {
+                    let item_name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| item.pointer("/metadata/name").and_then(|v| v.as_str()));
+                    if item_name == Some(&name) {
+                        found = Some(item.clone());
+                    }
+                }
+            }
+            if found.is_none() {
+                for ((_, ns, k), items) in &self.resource_cache {
+                    if (k.eq_ignore_ascii_case("Pods") || k.eq_ignore_ascii_case("pod"))
+                        && (target_ns.as_deref().map(|n| n == ns).unwrap_or(true) || ns.is_empty())
+                    {
+                        for item in items {
+                            let item_name = item
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .or_else(|| item.pointer("/metadata/name").and_then(|v| v.as_str()));
+                            if item_name == Some(&name) {
+                                found = Some(item.clone());
+                                break;
+                            }
+                        }
+                    }
+                    if found.is_some() {
+                        break;
+                    }
+                }
+            }
+            found
+        } else if is_workload {
+            let ns = target_ns.clone().unwrap_or_else(|| "default".to_string());
+            let pods = self.get_workload_pods(&kind, &name, &ns).await;
+            if pods.is_empty() {
+                self.set_toast(
+                    format!("No pods found for {}/{}", kind, name),
+                    Theme::status_warn(),
+                );
+                return;
+            }
+            let mut target_pod = None;
+            for ((_, c_ns, k), items) in &self.resource_cache {
+                if (k.eq_ignore_ascii_case("Pods") || k.eq_ignore_ascii_case("pod"))
+                    && (c_ns == &ns || c_ns.is_empty())
+                {
+                    for item in items {
+                        let item_name = item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| item.pointer("/metadata/name").and_then(|v| v.as_str()));
+                        if let Some(pname) = item_name {
+                            if pods.contains(&pname.to_string()) {
+                                let phase = item
+                                    .pointer("/status/phase")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if phase != "Running" || target_pod.is_none() {
+                                    target_pod = Some(item.clone());
+                                    if phase != "Running" {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            target_pod
+        } else {
+            None
+        };
+
+        let pod_value = match pod_json {
+            Some(p) => p,
+            None => {
+                self.set_toast(
+                    format!("Cannot find pod details for diagnosis: {}/{}", kind, name),
+                    Theme::status_warn(),
+                );
+                return;
+            }
+        };
+
+        // 2. Correlate events for this pod
+        let mut pod_events = Vec::new();
+        let pod_name = pod_value
+            .get("name")
+            .and_then(|v| v.as_str())
+            .or_else(|| pod_value.pointer("/metadata/name").and_then(|v| v.as_str()))
+            .unwrap_or(&name);
+
+        for ((_, _, k), items) in &self.resource_cache {
+            if k.eq_ignore_ascii_case("Events") || k.eq_ignore_ascii_case("event") {
+                for evt in items {
+                    let involved_name =
+                        evt.pointer("/involvedObject/name").and_then(|v| v.as_str());
+                    if involved_name == Some(pod_name) {
+                        pod_events.push(evt.clone());
+                    }
+                }
+            }
+        }
+
+        // 3. Optional: fetch previous logs if connected
+        let mut prev_logs: Option<String> = None;
+        if let Ok(client) = self.client_cache.get(&self.active_context).await {
+            let ns_query = target_ns.as_deref().unwrap_or("default");
+            let api: kube::Api<k8s_openapi::api::core::v1::Pod> =
+                kube::Api::namespaced(client, ns_query);
+            let log_params =
+                srelens_kube::logs::build_log_params(None, false, Some(50), None, false, true);
+            if let Ok(logs) = api.logs(pod_name, &log_params).await {
+                if !logs.trim().is_empty() {
+                    prev_logs = Some(logs);
+                }
+            }
+        }
+
+        // 4. Run diagnostic engine
+        let report = srelens_kube::diagnose::analyze_pod_health(
+            &pod_value,
+            &pod_events,
+            prev_logs.as_deref(),
+        );
+
+        self.modal = Some(Modal::Diagnosis {
+            resource_kind: kind,
+            resource_name: name,
+            namespace: target_ns,
+            report,
+            scroll_offset: 0,
+        });
+    }
+
     pub fn open_node_inspector(&mut self, node_name: String) {
         let mut inspector_state = node_inspector_view::NodeInspectorState::new(node_name.clone());
         if let Some(hist) = self.node_metrics_history.get(&node_name) {
@@ -10856,6 +11097,13 @@ impl App {
             "pod" | "pods" => {
                 let mut acts = vec![
                     QuickActionItem {
+                        id: QuickActionId::DiagnoseResource,
+                        key_hint: "!".to_string(),
+                        title: "🔍 Instant Root-Cause Diagnosis".to_string(),
+                        description: "Correlate exit codes, OOM limits, crash traces & events in one shot"
+                            .to_string(),
+                    },
+                    QuickActionItem {
                         id: QuickActionId::AskAi,
                         key_hint: "ai".to_string(),
                         title: "🤖 Ask AI Assistant about this Pod".to_string(),
@@ -11318,6 +11566,9 @@ impl App {
             if let Some(chosen) = filtered.get(selected_idx) {
                 use crate::ui::dialogs::QuickActionId;
                 match chosen.id {
+                    QuickActionId::DiagnoseResource => {
+                        self.trigger_instant_diagnosis(resource_kind, resource_name, namespace).await;
+                    }
                     QuickActionId::AskAi => {
                         let prompt = if resource_kind.eq_ignore_ascii_case("application")
                             || resource_kind.eq_ignore_ascii_case("applications")
@@ -13312,6 +13563,7 @@ impl App {
                                 ("<Tab>", "Segment"),
                                 ("</>", "Filter"),
                                 ("<Enter>", "Action"),
+                                ("<!>", "Diagnose"),
                                 ("<l>", "Logs"),
                                 ("<d>", "Describe"),
                                 ("<y>", "YAML"),
@@ -13328,6 +13580,7 @@ impl App {
                                     &[
                                         ("<:>", "Cmd"),
                                         ("</>", "Filter"),
+                                        ("<!>", "Diagnose"),
                                         ("<l>", "Logs"),
                                         ("<s>", "Shell"),
                                         ("<m>", "Metrics"),
@@ -13345,6 +13598,7 @@ impl App {
                                     &[
                                         ("<:>", "Cmd"),
                                         ("</>", "Filter"),
+                                        ("<!>", "Diagnose"),
                                         ("<l>", "Logs"),
                                         ("<s>", "Shell"),
                                         ("<m>", "Metrics"),
@@ -13455,6 +13709,7 @@ impl App {
                             &[
                                 ("<:>", "Cmd"),
                                 ("</>", "Filter"),
+                                ("<!>", "Diagnose"),
                                 ("<w>", "Triage"),
                                 ("<R>", "Reasons"),
                                 ("<Enter>", "Resource"),

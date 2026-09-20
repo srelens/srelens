@@ -89,10 +89,18 @@ pub enum Modal {
         error_message: Option<String>,
         preview_contexts: Vec<String>,
     },
+    Diagnosis {
+        resource_kind: String,
+        resource_name: String,
+        namespace: Option<String>,
+        report: srelens_kube::diagnose::DiagnosticReport,
+        scroll_offset: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuickActionId {
+    DiagnoseResource,
     AskAi,
     PlaybookCrashLoop,
     PlaybookPending,
@@ -1156,7 +1164,214 @@ pub fn render_modal(f: &mut Frame, area: Rect, modal: &Modal) {
                 preview_contexts,
             );
         }
+        Modal::Diagnosis {
+            resource_kind,
+            resource_name,
+            namespace,
+            report,
+            scroll_offset,
+        } => {
+            render_diagnosis_modal(
+                f,
+                area,
+                resource_kind,
+                resource_name,
+                namespace.as_deref(),
+                report,
+                *scroll_offset,
+            );
+        }
     }
+}
+
+pub fn render_diagnosis_modal(
+    f: &mut Frame,
+    area: Rect,
+    resource_kind: &str,
+    resource_name: &str,
+    namespace: Option<&str>,
+    report: &srelens_kube::diagnose::DiagnosticReport,
+    scroll_offset: usize,
+) {
+    use srelens_kube::diagnose::{DiagnosticVerdict, SignalSeverity};
+
+    let modal_area = centered_rect(75, 75, area);
+    f.render_widget(Clear, modal_area);
+
+    let ns_str = namespace.map(|n| format!(" -n {}", n)).unwrap_or_default();
+    let title = format!(
+        " ⚡ Root-Cause Diagnosis: {}/{}{} ",
+        resource_kind, resource_name, ns_str
+    );
+
+    let (border_color, verdict_badge, verdict_color) = match report.verdict {
+        DiagnosticVerdict::OOMKilled => (Theme::RED, " OOMKilled ", Theme::RED),
+        DiagnosticVerdict::CrashLoopBackOff => (Theme::RED, " CrashLoopBackOff ", Theme::RED),
+        DiagnosticVerdict::ConfigError => (Theme::RED, " ConfigError ", Theme::RED),
+        DiagnosticVerdict::ImagePullFailed => (Theme::RED, " ImagePullFailed ", Theme::RED),
+        DiagnosticVerdict::SchedulingFailed => (Theme::YELLOW, " SchedulingFailed ", Theme::YELLOW),
+        DiagnosticVerdict::Healthy => (Theme::GREEN, " Healthy ", Theme::GREEN),
+        DiagnosticVerdict::Unknown => (Theme::DIM, " Unknown ", Theme::DIM),
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(border_color))
+        .title(title);
+
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Verdict & Summary
+            Constraint::Length(4), // Remediation
+            Constraint::Min(4),    // Signals & Traces
+            Constraint::Length(1), // Footer keys
+        ])
+        .split(inner);
+
+    // 1. Verdict & Summary
+    let verdict_spans = vec![
+        Span::styled(
+            verdict_badge,
+            Style::default()
+                .fg(Color::Black)
+                .bg(verdict_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            &report.summary,
+            Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let verdict_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::border()))
+        .title(" Verdict ");
+    f.render_widget(
+        Paragraph::new(Line::from(verdict_spans)).block(verdict_block),
+        chunks[0],
+    );
+
+    // 2. Recommended Remediation
+    let remediation_text = if report.remediation.is_empty() {
+        "No immediate remediation required."
+    } else {
+        &report.remediation
+    };
+    let rem_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::CYAN))
+        .title(" 💡 Recommended Remediation ");
+    let rem_p = Paragraph::new(remediation_text)
+        .style(Style::default().fg(Theme::CYAN))
+        .wrap(Wrap { trim: true })
+        .block(rem_block);
+    f.render_widget(rem_p, chunks[1]);
+
+    // 3. Correlated Signals
+    let mut signal_lines = Vec::new();
+    if report.signals.is_empty() {
+        signal_lines.push(Line::from(Span::styled(
+            "No abnormal signals or warning events detected.",
+            Style::default().fg(Theme::DIM),
+        )));
+    } else {
+        for sig in &report.signals {
+            let (icon, icon_color) = match sig.severity {
+                SignalSeverity::Error => ("✖ ", Theme::RED),
+                SignalSeverity::Warning => ("▲ ", Theme::YELLOW),
+                SignalSeverity::Info => ("ℹ ", Theme::CYAN),
+            };
+            signal_lines.push(Line::from(vec![
+                Span::styled(
+                    icon,
+                    Style::default().fg(icon_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    &sig.title,
+                    Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            if let Some(ref detail) = sig.detail {
+                signal_lines.push(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(detail, Style::default().fg(Theme::DIM)),
+                ]));
+            }
+            signal_lines.push(Line::raw(""));
+        }
+    }
+
+    let signals_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(Theme::border_type())
+        .border_style(Style::default().fg(Theme::border()))
+        .title(format!(
+            " 🔍 Correlated Signals ({}) ",
+            report.signals.len()
+        ));
+    let signals_p = Paragraph::new(signal_lines)
+        .scroll((scroll_offset as u16, 0))
+        .wrap(Wrap { trim: false })
+        .block(signals_block);
+    f.render_widget(signals_p, chunks[2]);
+
+    // 4. Footer shortcuts
+    let footer_line = Line::from(vec![
+        Span::styled(
+            "[Esc/q]",
+            Style::default()
+                .fg(Theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Close  │  ", Style::default().fg(Theme::DIM)),
+        Span::styled(
+            "[l]",
+            Style::default()
+                .fg(Theme::CYAN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Logs  │  ", Style::default().fg(Theme::DIM)),
+        Span::styled(
+            "[d]",
+            Style::default()
+                .fg(Theme::CYAN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Describe  │  ", Style::default().fg(Theme::DIM)),
+        Span::styled(
+            "[e]",
+            Style::default()
+                .fg(Theme::CYAN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Edit YAML  │  ", Style::default().fg(Theme::DIM)),
+        Span::styled(
+            "[a]",
+            Style::default()
+                .fg(Theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Ask AI  │  ", Style::default().fg(Theme::DIM)),
+        Span::styled(
+            "[↑/↓]",
+            Style::default()
+                .fg(Theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Scroll", Style::default().fg(Theme::DIM)),
+    ]);
+    f.render_widget(
+        Paragraph::new(footer_line).alignment(Alignment::Center),
+        chunks[3],
+    );
 }
 
 pub fn render_add_cluster_modal(
