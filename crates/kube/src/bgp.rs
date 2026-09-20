@@ -117,6 +117,19 @@ pub struct BgpAdvertisedService {
     pub service_type: String,
 }
 
+/// A LoadBalancer Service the cluster might advertise. Its labels travel with
+/// it because a `CiliumBGPAdvertisement` selects Services by label, and
+/// whether a Service is advertised is the whole question the Services tab
+/// answers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LbService {
+    pub name: String,
+    pub namespace: String,
+    pub load_balancer_ip: String,
+    pub ip_pool: Option<String>,
+    pub labels: BTreeMap<String, String>,
+}
+
 /// A Cilium or MetalLB LoadBalancer IP Pool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BgpIpPool {
@@ -422,7 +435,7 @@ pub async fn fetch_bgp_summary(client: &kube::Client) -> Result<BgpClusterSummar
         .map_err(|_| "Service fetch timed out".to_string())?
         .map_err(|e| format!("Fetch services: {}", e))?;
 
-    let mut lb_services: Vec<(String, String, String, Option<String>)> = Vec::new();
+    let mut lb_services: Vec<LbService> = Vec::new();
     for svc in &svc_list.items {
         if let Some(ref spec) = svc.spec {
             if spec.type_.as_deref() == Some("LoadBalancer") {
@@ -461,7 +474,13 @@ pub async fn fetch_bgp_summary(client: &kube::Client) -> Result<BgpClusterSummar
                     }
                 }
                 if !lb_ip.is_empty() {
-                    lb_services.push((s_name, s_ns, lb_ip, ip_pool_ann));
+                    lb_services.push(LbService {
+                        name: s_name,
+                        namespace: s_ns,
+                        load_balancer_ip: lb_ip,
+                        ip_pool: ip_pool_ann,
+                        labels: svc.metadata.labels.clone().unwrap_or_default(),
+                    });
                 }
             }
         }
@@ -567,7 +586,7 @@ async fn discover_cilium_bgp(
     client: &kube::Client,
     node_labels: &HashMap<String, BTreeMap<String, String>>,
     node_pod_cidrs: &HashMap<String, Vec<String>>,
-    lb_services: &[(String, String, String, Option<String>)],
+    lb_services: &[LbService],
 ) -> Result<BgpClusterSummary, String> {
     // Every lookup that could not be read is remembered rather than collapsed
     // into "this cluster has none of these".
@@ -664,7 +683,7 @@ pub(crate) fn build_cilium_bgp_summary(
     cnode_items: Vec<DynamicObject>,
     node_labels: &HashMap<String, BTreeMap<String, String>>,
     node_pod_cidrs: &HashMap<String, Vec<String>>,
-    lb_services: &[(String, String, String, Option<String>)],
+    lb_services: &[LbService],
 ) -> BgpClusterSummary {
     let mut neighbors: Vec<BgpNeighbor> = Vec::new();
     let mut ip_pools: Vec<BgpIpPool> = Vec::new();
@@ -739,6 +758,12 @@ pub(crate) fn build_cilium_bgp_summary(
     }
 
     // C. Load CiliumBGPAdvertisement (v2 / v2alpha1)
+    //
+    // The advertisements say what the cluster announces. Only the Services
+    // they select are advertised: an advertisement carrying just `PodCIDR`
+    // announces no VIP at all, and one with a Service selector announces only
+    // the Services that selector matches.
+    let advertised = advertised_lb_services(&adv_items, lb_services);
     let mut export_pod_cidr_default = true;
     if !adv_items.is_empty() {
         is_cilium_v2 = true;
@@ -845,8 +870,11 @@ pub(crate) fn build_cilium_bgp_summary(
                                     }
                                 }
                             }
-                            for (s_name, s_ns, lb_ip, _) in lb_services {
-                                prefixes.push(format!("VIP: {} ({}/{})", lb_ip, s_ns, s_name));
+                            for svc in lb_services {
+                                prefixes.push(format!(
+                                    "VIP: {} ({}/{})",
+                                    svc.load_balancer_ip, svc.namespace, svc.name
+                                ));
                             }
                             let routes_count = prefixes.len();
 
@@ -954,8 +982,11 @@ pub(crate) fn build_cilium_bgp_summary(
                                         }
                                     }
                                 }
-                                for (s_name, s_ns, lb_ip, _) in lb_services {
-                                    prefixes.push(format!("VIP: {} ({}/{})", lb_ip, s_ns, s_name));
+                                for svc in lb_services {
+                                    prefixes.push(format!(
+                                        "VIP: {} ({}/{})",
+                                        svc.load_balancer_ip, svc.namespace, svc.name
+                                    ));
                                 }
 
                                 let routes_count = prefixes.len();
@@ -1008,7 +1039,7 @@ pub(crate) fn build_cilium_bgp_summary(
         }
     }
 
-    // Correlate Advertised Services
+    // Correlate Advertised Services: only the ones an advertisement selects.
     let mut advertised_services: Vec<BgpAdvertisedService> = Vec::new();
     let announcing_node_names: Vec<String> = bgp_node_set.iter().cloned().collect();
     let peer_addresses: Vec<String> = neighbors
@@ -1016,12 +1047,12 @@ pub(crate) fn build_cilium_bgp_summary(
         .map(|n| format!("{}:{}", n.peer_address, n.peer_asn))
         .collect();
 
-    for (s_name, s_ns, lb_ip, ip_pool_ann) in lb_services {
+    for svc in &advertised {
         advertised_services.push(BgpAdvertisedService {
-            service_name: s_name.clone(),
-            namespace: s_ns.clone(),
-            load_balancer_ip: lb_ip.clone(),
-            ip_pool: ip_pool_ann.clone(),
+            service_name: svc.name.clone(),
+            namespace: svc.namespace.clone(),
+            load_balancer_ip: svc.load_balancer_ip.clone(),
+            ip_pool: svc.ip_pool.clone(),
             announcing_nodes: announcing_node_names.clone(),
             peers: peer_addresses.clone(),
             service_type: "LoadBalancer".to_string(),
@@ -1080,7 +1111,7 @@ fn update_or_insert_neighbor(
     default_policy_kind: &str,
     export_pod_cidr: bool,
     node_pod_cidrs: &HashMap<String, Vec<String>>,
-    lb_services: &[(String, String, String, Option<String>)],
+    lb_services: &[LbService],
 ) {
     if let Some(existing) = neighbors.iter_mut().find(|n| {
         (n.node_name == node_name || n.node_name.is_empty())
@@ -1115,8 +1146,11 @@ fn update_or_insert_neighbor(
                 }
             }
         }
-        for (s_name, s_ns, lb_ip, _) in lb_services {
-            prefixes.push(format!("VIP: {} ({}/{})", lb_ip, s_ns, s_name));
+        for svc in lb_services {
+            prefixes.push(format!(
+                "VIP: {} ({}/{})",
+                svc.load_balancer_ip, svc.namespace, svc.name
+            ));
         }
         let routes_count = if live.routes_advertised > 0 {
             live.routes_advertised
@@ -1284,7 +1318,7 @@ fn parse_single_peer_status(p: &Value, fallback_local_asn: u32) -> Option<LiveBg
 async fn discover_metallb_bgp(
     client: &kube::Client,
     node_labels: &HashMap<String, BTreeMap<String, String>>,
-    lb_services: &[(String, String, String, Option<String>)],
+    lb_services: &[LbService],
 ) -> Result<BgpClusterSummary, String> {
     let mut failures: Vec<String> = Vec::new();
 
@@ -1316,7 +1350,7 @@ pub(crate) fn build_metallb_bgp_summary(
     peer_items: Vec<DynamicObject>,
     pool_items: Vec<DynamicObject>,
     node_labels: &HashMap<String, BTreeMap<String, String>>,
-    lb_services: &[(String, String, String, Option<String>)],
+    lb_services: &[LbService],
 ) -> BgpClusterSummary {
     let mut neighbors = Vec::new();
     let mut bgp_nodes = BTreeSet::new();
@@ -1367,7 +1401,7 @@ pub(crate) fn build_metallb_bgp_summary(
                 graceful_restart: false,
                 advertised_prefixes: lb_services
                     .iter()
-                    .map(|s| format!("VIP: {}", s.2))
+                    .map(|s| format!("VIP: {}", s.load_balancer_ip))
                     .collect(),
                 routes_count: lb_services.len(),
                 routes_received: 0,
@@ -1404,12 +1438,12 @@ pub(crate) fn build_metallb_bgp_summary(
 
     let mut advertised_services = Vec::new();
     let ann_nodes: Vec<String> = bgp_nodes.iter().cloned().collect();
-    for (s_name, s_ns, lb_ip, ip_pool_ann) in lb_services {
+    for svc in lb_services {
         advertised_services.push(BgpAdvertisedService {
-            service_name: s_name.clone(),
-            namespace: s_ns.clone(),
-            load_balancer_ip: lb_ip.clone(),
-            ip_pool: ip_pool_ann.clone(),
+            service_name: svc.name.clone(),
+            namespace: svc.namespace.clone(),
+            load_balancer_ip: svc.load_balancer_ip.clone(),
+            ip_pool: svc.ip_pool.clone(),
             announcing_nodes: ann_nodes.clone(),
             peers: neighbors.iter().map(|n| n.peer_address.clone()).collect(),
             service_type: "LoadBalancer".to_string(),
@@ -1530,6 +1564,61 @@ pub(crate) fn build_calico_bgp_summary(
 // Selector Matching
 // ---------------------------------------------------------------------------
 
+/// The Service selectors carried by the cluster's `CiliumBGPAdvertisement`
+/// objects, one entry per `advertisementType: Service` block. `None` is "no
+/// advertisement was read at all", which is what a legacy `v2alpha1` cluster
+/// looks like and tells us nothing; `Some(vec![])` is advertisements that
+/// announce no Service — a `PodCIDR`-only cluster. A `None` entry inside the
+/// list is a Service advertisement with no selector, which takes every
+/// Service.
+fn service_advertisement_selectors(adv_items: &[DynamicObject]) -> Option<Vec<Option<Value>>> {
+    if adv_items.is_empty() {
+        return None;
+    }
+    let mut selectors = Vec::new();
+    for adv in adv_items {
+        let Some(blocks) = adv
+            .data
+            .get("spec")
+            .and_then(|s| s.get("advertisements"))
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        for block in blocks {
+            let kind = block
+                .get("advertisementType")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if kind.eq_ignore_ascii_case("service") {
+                selectors.push(block.get("selector").cloned());
+            }
+        }
+    }
+    Some(selectors)
+}
+
+/// The LoadBalancer Services the cluster's advertisements actually select.
+/// With no advertisement to read, every LoadBalancer Service is returned, as
+/// before — an absent advertisement is not evidence either way.
+fn advertised_lb_services<'a>(
+    adv_items: &[DynamicObject],
+    lb_services: &'a [LbService],
+) -> Vec<&'a LbService> {
+    let Some(selectors) = service_advertisement_selectors(adv_items) else {
+        return lb_services.iter().collect();
+    };
+    lb_services
+        .iter()
+        .filter(|svc| {
+            selectors.iter().any(|selector| match selector {
+                None => true,
+                Some(sel) => matches_label_selector(sel, &svc.labels),
+            })
+        })
+        .collect()
+}
+
 fn find_matching_nodes(
     selectors_val: Option<&Value>,
     node_labels: &HashMap<String, BTreeMap<String, String>>,
@@ -1547,7 +1636,7 @@ fn find_matching_nodes(
     for (node_name, labels) in node_labels {
         let mut matched = false;
         for sel in &selectors {
-            if matches_node_selector(sel, labels) {
+            if matches_label_selector(sel, labels) {
                 matched = true;
                 break;
             }
@@ -1559,7 +1648,9 @@ fn find_matching_nodes(
     out
 }
 
-fn matches_node_selector(selector: &Value, node_labels: &BTreeMap<String, String>) -> bool {
+/// A Kubernetes `LabelSelector` (`matchLabels` / `matchExpressions`) against
+/// one object's labels. Nodes and Services are both selected this way.
+fn matches_label_selector(selector: &Value, node_labels: &BTreeMap<String, String>) -> bool {
     if selector.is_null() {
         return true;
     }
@@ -1630,6 +1721,24 @@ fn matches_node_selector(selector: &Value, node_labels: &BTreeMap<String, String
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A LoadBalancer Service fixture with no labels.
+    fn lb(name: &str, namespace: &str, ip: &str, pool: Option<&str>) -> LbService {
+        LbService {
+            name: name.to_string(),
+            namespace: namespace.to_string(),
+            load_balancer_ip: ip.to_string(),
+            ip_pool: pool.map(String::from),
+            labels: BTreeMap::new(),
+        }
+    }
+
+    /// The same, carrying one label an advertisement can select on.
+    fn lb_labelled(name: &str, ip: &str, key: &str, value: &str) -> LbService {
+        let mut svc = lb(name, "default", ip, None);
+        svc.labels.insert(key.to_string(), value.to_string());
+        svc
+    }
 
     #[test]
     fn test_all_api_resources_and_timeout() {
@@ -1794,7 +1903,7 @@ mod tests {
     }
 
     #[test]
-    fn test_matches_node_selector_edges() {
+    fn test_matches_label_selector_edges() {
         let mut labels = BTreeMap::new();
         labels.insert(
             "topology.kubernetes.io/zone".to_string(),
@@ -1804,83 +1913,83 @@ mod tests {
         labels.insert("rack".to_string(), "rack-42".to_string());
 
         // Null and empty object match everything
-        assert!(matches_node_selector(&Value::Null, &labels));
-        assert!(matches_node_selector(&json!({}), &labels));
-        assert!(matches_node_selector(&json!(42), &labels));
+        assert!(matches_label_selector(&Value::Null, &labels));
+        assert!(matches_label_selector(&json!({}), &labels));
+        assert!(matches_label_selector(&json!(42), &labels));
 
         // matchLabels success & fail
-        assert!(matches_node_selector(
+        assert!(matches_label_selector(
             &json!({"matchLabels": {"topology.kubernetes.io/zone": "us-east-1a"}}),
             &labels
         ));
-        assert!(!matches_node_selector(
+        assert!(!matches_label_selector(
             &json!({"matchLabels": {"topology.kubernetes.io/zone": "us-west-1b"}}),
             &labels
         ));
-        assert!(!matches_node_selector(
+        assert!(!matches_label_selector(
             &json!({"matchLabels": {"missing-label": "val"}}),
             &labels
         ));
         // matchLabels with non-string value is ignored
-        assert!(matches_node_selector(
+        assert!(matches_label_selector(
             &json!({"matchLabels": {"topology.kubernetes.io/zone": 123}}),
             &labels
         ));
 
         // matchExpressions: Exists
-        assert!(matches_node_selector(
+        assert!(matches_label_selector(
             &json!({"matchExpressions": [{"key": "rack", "operator": "Exists"}]}),
             &labels
         ));
-        assert!(!matches_node_selector(
+        assert!(!matches_label_selector(
             &json!({"matchExpressions": [{"key": "nonexistent", "operator": "Exists"}]}),
             &labels
         ));
 
         // matchExpressions: DoesNotExist
-        assert!(matches_node_selector(
+        assert!(matches_label_selector(
             &json!({"matchExpressions": [{"key": "nonexistent", "operator": "DoesNotExist"}]}),
             &labels
         ));
-        assert!(!matches_node_selector(
+        assert!(!matches_label_selector(
             &json!({"matchExpressions": [{"key": "rack", "operator": "DoesNotExist"}]}),
             &labels
         ));
 
         // matchExpressions: In
-        assert!(matches_node_selector(
+        assert!(matches_label_selector(
             &json!({"matchExpressions": [{"key": "rack", "operator": "In", "values": ["rack-41", "rack-42"]}]}),
             &labels
         ));
-        assert!(!matches_node_selector(
+        assert!(!matches_label_selector(
             &json!({"matchExpressions": [{"key": "rack", "operator": "In", "values": ["rack-1", "rack-2"]}]}),
             &labels
         ));
-        assert!(!matches_node_selector(
+        assert!(!matches_label_selector(
             &json!({"matchExpressions": [{"key": "missing", "operator": "In", "values": ["val"]}]}),
             &labels
         ));
 
         // matchExpressions: NotIn
-        assert!(matches_node_selector(
+        assert!(matches_label_selector(
             &json!({"matchExpressions": [{"key": "rack", "operator": "NotIn", "values": ["rack-1", "rack-2"]}]}),
             &labels
         ));
-        assert!(!matches_node_selector(
+        assert!(!matches_label_selector(
             &json!({"matchExpressions": [{"key": "rack", "operator": "NotIn", "values": ["rack-42", "rack-43"]}]}),
             &labels
         ));
-        assert!(matches_node_selector(
+        assert!(matches_label_selector(
             &json!({"matchExpressions": [{"key": "missing", "operator": "NotIn", "values": ["val"]}]}),
             &labels
         ));
 
         // matchExpressions: invalid expression or unknown operator
-        assert!(matches_node_selector(
+        assert!(matches_label_selector(
             &json!({"matchExpressions": [{"no_key": "val"}]}),
             &labels
         ));
-        assert!(matches_node_selector(
+        assert!(matches_label_selector(
             &json!({"matchExpressions": [{"key": "rack", "operator": "UnknownOp", "values": ["rack-42"]}]}),
             &labels
         ));
@@ -2060,12 +2169,7 @@ mod tests {
         node_pod_cidrs.insert("node-1".to_string(), vec!["10.244.0.0/24".to_string()]);
         node_pod_cidrs.insert("node-2".to_string(), vec!["10.244.1.0/24".to_string()]);
 
-        let lb_services = vec![(
-            "web-svc".to_string(),
-            "default".to_string(),
-            "1.2.3.4".to_string(),
-            Some("public-pool".to_string()),
-        )];
+        let lb_services = vec![lb("web-svc", "default", "1.2.3.4", Some("public-pool"))];
 
         // 1. Update existing neighbor (matched by node_name + peer_address)
         let live_update = LiveBgpPeerInfo {
@@ -2301,7 +2405,11 @@ mod tests {
         adv_obj.data = json!({
             "spec": {
                 "advertisements": [
-                    {"advertisementType": "PodCIDR"}
+                    {"advertisementType": "PodCIDR"},
+                    // Without this block the cluster announces no VIP, and
+                    // the Services tab below would be empty.
+                    {"advertisementType": "Service",
+                     "service": {"addresses": ["LoadBalancerIP"]}}
                 ]
             }
         });
@@ -2370,11 +2478,11 @@ mod tests {
         let mut node_pod_cidrs = HashMap::new();
         node_pod_cidrs.insert("worker-1".to_string(), vec!["10.244.1.0/24".to_string()]);
 
-        let lb_services = vec![(
-            "ingress-svc".to_string(),
-            "cilium-system".to_string(),
-            "192.168.10.50".to_string(),
-            Some("pool-1".to_string()),
+        let lb_services = vec![lb(
+            "ingress-svc",
+            "cilium-system",
+            "192.168.10.50",
+            Some("pool-1"),
         )];
 
         let summary = build_cilium_bgp_summary(
@@ -2531,11 +2639,11 @@ mod tests {
         l2.insert("bgp".to_string(), "false".to_string());
         node_labels.insert("node-2".to_string(), l2);
 
-        let lb_services = vec![(
-            "nginx-lb".to_string(),
-            "default".to_string(),
-            "192.168.100.201".to_string(),
-            Some("metallb-pool-1".to_string()),
+        let lb_services = vec![lb(
+            "nginx-lb",
+            "default",
+            "192.168.100.201",
+            Some("metallb-pool-1"),
         )];
 
         let summary =
@@ -2693,6 +2801,153 @@ mod tests {
         let calico_summary = build_calico_bgp_summary(vec![empty_calico], &node_labels);
         assert_eq!(calico_summary.engine, BgpEngineType::Calico);
         assert_eq!(calico_summary.peers.len(), 0);
+    }
+
+    /// A Cilium cluster config peering one node, so the summary has an engine
+    /// and the Services tab is reached.
+    fn one_node_cluster_config() -> DynamicObject {
+        let mut cluster_cfg =
+            DynamicObject::new("cluster-cfg", &cilium_bgp_cluster_config_v2_resource());
+        cluster_cfg.data = json!({
+            "spec": {
+                "bgpInstances": [{
+                    "localASN": 65000,
+                    "peers": [{"peerAddress": "172.16.1.1", "peerASN": 65001}]
+                }]
+            }
+        });
+        cluster_cfg
+    }
+
+    fn advertisement(name: &str, blocks: Value) -> DynamicObject {
+        let mut adv = DynamicObject::new(name, &cilium_bgp_advertisement_v2_resource());
+        adv.data = json!({ "spec": { "advertisements": blocks } });
+        adv
+    }
+
+    fn one_node_labels() -> HashMap<String, BTreeMap<String, String>> {
+        let mut node_labels = HashMap::new();
+        node_labels.insert("node-1".to_string(), BTreeMap::new());
+        node_labels
+    }
+
+    #[test]
+    fn an_advertisement_carrying_only_pod_cidr_advertises_no_service() {
+        let node_labels = one_node_labels();
+        let lb_services = vec![lb("web", "default", "1.2.3.4", None)];
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![advertisement(
+                "adv-podcidr",
+                json!([{"advertisementType": "PodCIDR"}]),
+            )],
+            vec![one_node_cluster_config()],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &lb_services,
+        );
+
+        assert_eq!(summary.peers.len(), 1, "the peer is still configured");
+        assert!(
+            summary.advertised_services.is_empty(),
+            "a PodCIDR-only advertisement announces no VIP, got {:?}",
+            summary.advertised_services
+        );
+    }
+
+    #[test]
+    fn an_advertisement_selector_excluding_a_service_yields_no_row_for_it() {
+        let node_labels = one_node_labels();
+        let lb_services = vec![
+            lb_labelled("public-lb", "1.2.3.4", "tier", "public"),
+            lb_labelled("internal-lb", "10.0.0.9", "tier", "internal"),
+        ];
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![advertisement(
+                "adv-service",
+                json!([{
+                    "advertisementType": "Service",
+                    "service": {"addresses": ["LoadBalancerIP"]},
+                    "selector": {"matchLabels": {"tier": "public"}}
+                }]),
+            )],
+            vec![one_node_cluster_config()],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &lb_services,
+        );
+
+        let names: Vec<&str> = summary
+            .advertised_services
+            .iter()
+            .map(|s| s.service_name.as_str())
+            .collect();
+        assert_eq!(names, ["public-lb"]);
+    }
+
+    #[test]
+    fn a_service_advertisement_without_a_selector_takes_every_service() {
+        let node_labels = one_node_labels();
+        let lb_services = vec![
+            lb_labelled("public-lb", "1.2.3.4", "tier", "public"),
+            lb_labelled("internal-lb", "10.0.0.9", "tier", "internal"),
+        ];
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![advertisement(
+                "adv-service",
+                json!([
+                    {"advertisementType": "PodCIDR"},
+                    {"advertisementType": "Service",
+                     "service": {"addresses": ["LoadBalancerIP"]}}
+                ]),
+            )],
+            vec![one_node_cluster_config()],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &lb_services,
+        );
+
+        assert_eq!(summary.advertised_services.len(), 2);
+    }
+
+    #[test]
+    fn a_cluster_with_no_advertisement_to_read_still_lists_its_services() {
+        // Nothing was read about what is advertised, so nothing is claimed
+        // either way: the legacy v2alpha1 shape keeps its Services tab.
+        let node_labels = one_node_labels();
+        let lb_services = vec![lb("web", "default", "1.2.3.4", None)];
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![],
+            vec![one_node_cluster_config()],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &lb_services,
+        );
+
+        assert_eq!(summary.advertised_services.len(), 1);
     }
 
     /// A cluster that serves Nodes and Services, and answers every CRD list
