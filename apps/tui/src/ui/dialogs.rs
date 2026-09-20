@@ -1210,6 +1210,9 @@ pub fn render_diagnosis_modal(
         DiagnosticVerdict::ConfigError => (Theme::RED, " ConfigError ", Theme::RED),
         DiagnosticVerdict::ImagePullFailed => (Theme::RED, " ImagePullFailed ", Theme::RED),
         DiagnosticVerdict::SchedulingFailed => (Theme::YELLOW, " SchedulingFailed ", Theme::YELLOW),
+        DiagnosticVerdict::Evicted => (Theme::RED, " Evicted ", Theme::RED),
+        DiagnosticVerdict::Failed => (Theme::RED, " Failed ", Theme::RED),
+        DiagnosticVerdict::NodeLost => (Theme::YELLOW, " NodeLost ", Theme::YELLOW),
         DiagnosticVerdict::Healthy => (Theme::GREEN, " Healthy ", Theme::GREEN),
         DiagnosticVerdict::Unknown => (Theme::DIM, " Unknown ", Theme::DIM),
     };

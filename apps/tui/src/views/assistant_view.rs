@@ -1808,6 +1808,29 @@ fn parse_cells(line: &str) -> Vec<String> {
 
 fn clean_cell_text(s: &str) -> String {
     let mut cleaned = s.trim().to_string();
+
+    // Strip outer markdown bold: **text** or __text__
+    while (cleaned.starts_with("**") && cleaned.ends_with("**") && cleaned.len() >= 4)
+        || (cleaned.starts_with("__") && cleaned.ends_with("__") && cleaned.len() >= 4)
+    {
+        cleaned = cleaned[2..cleaned.len() - 2].trim().to_string();
+    }
+
+    // Strip outer markdown italic: *text* or _text_
+    while (cleaned.starts_with('*') && cleaned.ends_with('*') && cleaned.len() >= 2)
+        || (cleaned.starts_with('_') && cleaned.ends_with('_') && cleaned.len() >= 2)
+    {
+        cleaned = cleaned[1..cleaned.len() - 1].trim().to_string();
+    }
+
+    // Strip residual inline bold markers
+    if cleaned.contains("**") {
+        cleaned = cleaned.replace("**", "");
+    }
+    if cleaned.contains("__") {
+        cleaned = cleaned.replace("__", "");
+    }
+
     if cleaned.contains('`') {
         cleaned = cleaned.replace('`', "");
     }
@@ -2802,5 +2825,15 @@ Done.";
             last_msg.content,
             "Step 1 done.\n\nStep 2 done.\n\nFinal answer."
         );
+    }
+
+    #[test]
+    fn test_clean_cell_text_bold_and_italic_markdown() {
+        assert_eq!(clean_cell_text("**Phase**"), "Phase");
+        assert_eq!(clean_cell_text("**Reason**"), "Reason");
+        assert_eq!(clean_cell_text("*Ready*"), "Ready");
+        assert_eq!(clean_cell_text("__Node__"), "Node");
+        assert_eq!(clean_cell_text("`exitCode`"), "exitCode");
+        assert_eq!(clean_cell_text("**Pod Age**"), "Pod Age");
     }
 }

@@ -9,6 +9,9 @@ pub enum DiagnosticVerdict {
     ConfigError,
     ImagePullFailed,
     SchedulingFailed,
+    Evicted,
+    Failed,
+    NodeLost,
     Unknown,
 }
 
@@ -205,6 +208,81 @@ pub fn analyze_pod_health(
         }
     }
 
+    let phase = pod
+        .pointer("/status/phase")
+        .or_else(|| pod.get("phase"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let status_reason = pod
+        .pointer("/status/reason")
+        .or_else(|| pod.get("reason"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let status_message = pod
+        .pointer("/status/message")
+        .or_else(|| pod.get("message"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let pod_name = pod
+        .pointer("/metadata/name")
+        .or_else(|| pod.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("pod");
+
+    // 1. Check for Evicted pod (ephemeral-storage exhaustion, node memory/disk pressure)
+    if status_reason.eq_ignore_ascii_case("Evicted")
+        || status_message.to_lowercase().contains("evicted")
+        || (phase.eq_ignore_ascii_case("Failed")
+            && status_message.to_lowercase().contains("ephemeral-storage"))
+    {
+        signals.push(DiagnosticSignal {
+            severity: SignalSeverity::Error,
+            title: "Pod Evicted by kubelet".to_string(),
+            detail: if !status_message.is_empty() {
+                Some(status_message.to_string())
+            } else {
+                None
+            },
+        });
+
+        let remediation = if status_message.to_lowercase().contains("ephemeral-storage") {
+            "Pod evicted due to node ephemeral-storage exhaustion. Increase ephemeral-storage limits or clean up disk.".to_string()
+        } else if status_message.to_lowercase().contains("memory") {
+            "Pod evicted due to node memory pressure. Check node allocatable memory and pod memory limits.".to_string()
+        } else {
+            "Pod was evicted due to node resource pressure. Adjust resource limits or clean up node.".to_string()
+        };
+
+        return DiagnosticReport {
+            verdict: DiagnosticVerdict::Evicted,
+            summary: if !status_message.is_empty() {
+                format!("Pod Evicted: {}", status_message)
+            } else {
+                format!("Pod '{}' was Evicted by kubelet", pod_name)
+            },
+            remediation,
+            signals,
+        };
+    }
+
+    // 2. Check for Unknown phase (node lost / kubelet unresponsive)
+    if phase.eq_ignore_ascii_case("Unknown") {
+        signals.push(DiagnosticSignal {
+            severity: SignalSeverity::Warning,
+            title: "Node Lost / Kubelet Unresponsive".to_string(),
+            detail: Some("Pod is in Unknown phase. Kubelet stopped posting status.".to_string()),
+        });
+        return DiagnosticReport {
+            verdict: DiagnosticVerdict::NodeLost,
+            summary: format!("Pod '{}' is in Unknown phase", pod_name),
+            remediation: "Check node health, network connectivity, or kubelet service.".to_string(),
+            signals,
+        };
+    }
+
     // Check top-level waitingReason (e.g. from PodSummary or synthetic views)
     let top_waiting_reason = pod
         .get("waitingReason")
@@ -384,6 +462,65 @@ pub fn analyze_pod_health(
                 detail: Some(msg.to_string()),
             });
         }
+    }
+
+    if phase.eq_ignore_ascii_case("Failed") {
+        let exit_code = container_statuses.and_then(|statuses| {
+            statuses.iter().find_map(|cs| {
+                cs.pointer("/lastState/terminated/exitCode")
+                    .or_else(|| cs.pointer("/state/terminated/exitCode"))
+                    .and_then(|v| v.as_i64())
+            })
+        });
+
+        let term_reason = container_statuses
+            .and_then(|statuses| {
+                statuses.iter().find_map(|cs| {
+                    cs.pointer("/lastState/terminated/reason")
+                        .or_else(|| cs.pointer("/state/terminated/reason"))
+                        .and_then(|v| v.as_str())
+                })
+            })
+            .unwrap_or(status_reason);
+
+        let summary = if let Some(code) = exit_code {
+            if code == 143 {
+                "Pod Failed: terminated with SIGTERM (exit code 143)".to_string()
+            } else {
+                format!(
+                    "Pod Failed: container exited with code {} (exit code {})",
+                    code, code
+                )
+            }
+        } else if !status_message.is_empty() {
+            format!("Pod Failed: {}", status_message)
+        } else {
+            format!("Pod '{}' terminated in Failed phase", pod_name)
+        };
+
+        signals.push(DiagnosticSignal {
+            severity: SignalSeverity::Error,
+            title: format!(
+                "Pod Failed ({})",
+                if !term_reason.is_empty() {
+                    term_reason
+                } else {
+                    "Error"
+                }
+            ),
+            detail: if !status_message.is_empty() {
+                Some(status_message.to_string())
+            } else {
+                exit_code.map(|c| format!("Exit code: {}", c))
+            },
+        });
+
+        return DiagnosticReport {
+            verdict: DiagnosticVerdict::Failed,
+            summary,
+            remediation: "Check application logs, exit code, or pod restartPolicy.".to_string(),
+            signals,
+        };
     }
 
     DiagnosticReport {
@@ -613,5 +750,73 @@ mod tests {
             report.signals[0].detail.as_deref(),
             Some("Error: secret \"intentionally-missing-secret\" not found")
         );
+    }
+
+    #[test]
+    fn test_diagnose_evicted_pod() {
+        let pod = json!({
+            "metadata": { "name": "matchbox-app-preview-1014-6596698bd6-4tv8p", "namespace": "matching" },
+            "status": {
+                "phase": "Failed",
+                "reason": "Evicted",
+                "message": "The node was low on resource: ephemeral-storage. Container matchbox was using 524288000B.",
+                "containerStatuses": [{
+                    "name": "matchbox",
+                    "ready": false,
+                    "lastState": {
+                        "terminated": {
+                            "exitCode": 143,
+                            "reason": "ContainerCannotRun"
+                        }
+                    }
+                }]
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_eq!(report.verdict, DiagnosticVerdict::Evicted);
+        assert!(report.summary.contains("Evicted"));
+        assert!(
+            report.remediation.contains("ephemeral-storage")
+                || report.remediation.contains("evicted")
+        );
+        assert!(!report.signals.is_empty());
+    }
+
+    #[test]
+    fn test_diagnose_failed_pod_with_exit_code() {
+        let pod = json!({
+            "metadata": { "name": "batch-job-fail-x9", "namespace": "default" },
+            "status": {
+                "phase": "Failed",
+                "containerStatuses": [{
+                    "name": "task",
+                    "ready": false,
+                    "lastState": {
+                        "terminated": {
+                            "exitCode": 1,
+                            "reason": "Error"
+                        }
+                    }
+                }]
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_eq!(report.verdict, DiagnosticVerdict::Failed);
+        assert!(report.summary.contains("Failed") || report.summary.contains("exit code 1"));
+    }
+
+    #[test]
+    fn test_diagnose_unknown_phase() {
+        let pod = json!({
+            "metadata": { "name": "orphan-pod", "namespace": "default" },
+            "status": {
+                "phase": "Unknown"
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_eq!(report.verdict, DiagnosticVerdict::NodeLost);
     }
 }
