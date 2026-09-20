@@ -526,14 +526,23 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                 } else {
                     Api::all_with(client.clone(), &ar)
                 };
-                let list =
-                    tokio::time::timeout(request_timeout(), crate::list_cap::list_capped(&api, ListParams::default()))
+                // No outer timeout: `list_capped` spends `request_timeout()` on
+                // each page, which is what that budget measures. Wrapping the
+                // walk gave four pages one request's time, and a cluster large
+                // enough to need paging was the one most likely to be cut off.
+                //
+                // An API error keeps its own words untouched — the frontend
+                // parses them for the cluster-login prompt — and only a
+                // timeout gets a sentence of ours.
+                let (objects, truncated) =
+                    crate::list_cap::list_capped(&api, ListParams::default())
                         .await
-                        .map_err(|_| {
-                            CapabilityError::Handler("list custom resource timed out".into())
-                        })?
-                        .map_err(handler_err)?;
-                let (objects, truncated) = list;
+                        .map_err(|e| match e {
+                            crate::list_cap::ListCappedError::Api(error) => handler_err(error),
+                            timeout => CapabilityError::Handler(format!(
+                                "list custom resource timed out: {timeout}"
+                            )),
+                        })?;
                 let (columns, columns_error) = if input.use_crd_columns {
                     match discover_columns(client, &input.group, &input.plural, &input.version)
                         .await

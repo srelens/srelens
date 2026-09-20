@@ -5,6 +5,7 @@
 //! stall or exhaust the desktop app. Both now page with `limit`/`continue` and
 //! stop at [`APP_LIST_CAP`], telling the caller when they were cut off.
 
+use crate::connect::request_timeout;
 use kube::api::{Api, ListParams};
 use kube::Resource;
 use serde::de::DeserializeOwned;
@@ -16,6 +17,57 @@ pub const APP_LIST_PAGE: u32 = 500;
 /// Hard ceiling on rows returned by app-reader lists.
 pub const APP_LIST_CAP: usize = 2_000;
 
+/// Why a capped list did not finish.
+///
+/// Its own type rather than `kube::Error` because a timeout is not one: the
+/// budget belongs to a REQUEST, and a capped list makes up to four of them.
+/// Callers used to wrap the whole walk in one `request_timeout()`, which gave
+/// four pages a single page's time — a cluster slow enough to need paging was
+/// the one most likely to be cut off by it, and the message still said the
+/// list timed out rather than which part did.
+#[derive(Debug)]
+pub enum ListCappedError {
+    /// The API server answered, with an error.
+    Api(kube::Error),
+    /// One page did not answer within [`request_timeout`]. Carries how many
+    /// pages had already been read, so the message can say the walk was
+    /// partway through rather than implying the first request hung.
+    Timeout { pages_read: usize },
+}
+
+impl std::fmt::Display for ListCappedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Api(error) => write!(f, "{error}"),
+            Self::Timeout { pages_read: 0 } => write!(
+                f,
+                "the cluster did not answer within {}s",
+                crate::connect::request_timeout_secs()
+            ),
+            Self::Timeout { pages_read } => write!(
+                f,
+                "the cluster did not answer within {}s after {pages_read} page(s)",
+                crate::connect::request_timeout_secs()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ListCappedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Api(error) => Some(error),
+            Self::Timeout { .. } => None,
+        }
+    }
+}
+
+impl From<kube::Error> for ListCappedError {
+    fn from(error: kube::Error) -> Self {
+        Self::Api(error)
+    }
+}
+
 /// List until the cap or the end of the collection.
 ///
 /// `truncated` is true when more items remain unread (a continue token) or when
@@ -24,21 +76,49 @@ pub const APP_LIST_CAP: usize = 2_000;
 /// An empty page with a continue token is not the end: a selector-filtered
 /// chunk may return zero items while more matching objects remain later
 /// (Kubernetes list pagination). Stop only when the continue token is absent.
+///
+/// [`request_timeout`] is applied PER PAGE, here, because that is what it
+/// measures: every other capability spends it on one `api.list`. A caller must
+/// not wrap this call in a timeout of its own — that would divide one
+/// request's budget across every page of the walk.
 pub async fn list_capped<K>(
     api: &Api<K>,
     base: ListParams,
-) -> Result<(Vec<K>, bool), kube::Error>
+) -> Result<(Vec<K>, bool), ListCappedError>
+where
+    K: Resource + Clone + DeserializeOwned + Debug,
+{
+    list_capped_within(api, base, request_timeout()).await
+}
+
+/// [`list_capped`] with the per-page budget given rather than read from the
+/// process-wide setting.
+///
+/// Exists so the tests can assert the budget's BEHAVIOUR in milliseconds
+/// instead of seconds. The alternative — moving the global with
+/// `set_request_timeout_secs` — would reach every other test running beside
+/// them in the same process, and its one-second floor would make a "slow page"
+/// case cost seconds of wall clock.
+pub async fn list_capped_within<K>(
+    api: &Api<K>,
+    base: ListParams,
+    per_page: std::time::Duration,
+) -> Result<(Vec<K>, bool), ListCappedError>
 where
     K: Resource + Clone + DeserializeOwned + Debug,
 {
     let mut items = Vec::new();
     let mut token: Option<String> = None;
+    let mut pages_read = 0usize;
     loop {
         let mut params = base.clone().limit(APP_LIST_PAGE);
         if let Some(ref t) = token {
             params = params.continue_token(t);
         }
-        let page = api.list(&params).await?;
+        let page = tokio::time::timeout(per_page, api.list(&params))
+            .await
+            .map_err(|_| ListCappedError::Timeout { pages_read })??;
+        pages_read += 1;
         items.extend(page.items);
         token = page.metadata.continue_.filter(|t| !t.is_empty());
         if items.len() >= APP_LIST_CAP {
@@ -188,5 +268,117 @@ mod tests {
         assert_eq!(items.len(), APP_LIST_CAP);
         assert!(truncated);
         assert_eq!(uris.lock().unwrap().len(), 4);
+    }
+
+    /// A server that answers each page slowly, so a per-page budget can be
+    /// exceeded deliberately. `per_page` is how long each response is held.
+    fn mock_slow_event_pages(
+        pages: Vec<Value>,
+        per_page: std::time::Duration,
+    ) -> (Client, Arc<Mutex<Vec<String>>>) {
+        let pages = Arc::new(pages);
+        let served = Arc::new(AtomicUsize::new(0));
+        let uris = Arc::new(Mutex::new(vec![]));
+        let captured = uris.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let captured = captured.clone();
+            let pages = pages.clone();
+            let served = served.clone();
+            async move {
+                captured.lock().unwrap().push(request.uri().to_string());
+                let page = served.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(per_page).await;
+                let body = pages[page.min(pages.len() - 1)].clone();
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        (Client::new(service, "default"), uris)
+    }
+
+    /// A page that overruns the per-request budget fails the walk, and says it
+    /// timed out rather than blaming the API.
+    #[tokio::test]
+    async fn a_page_that_overruns_the_request_budget_times_out() {
+        let budget = std::time::Duration::from_millis(100);
+        let (client, uris) = mock_slow_event_pages(
+            vec![event_list(vec![event("never-arrives")], None)],
+            budget * 8,
+        );
+        let api: Api<Event> = Api::all(client);
+
+        let error = list_capped_within(&api, ListParams::default(), budget)
+            .await
+            .expect_err("a page slower than the budget must not be waited out");
+
+        assert!(
+            matches!(error, ListCappedError::Timeout { pages_read: 0 }),
+            "expected a timeout on the first page, got {error:?}"
+        );
+        assert!(error.to_string().contains("did not answer"), "{error}");
+        assert_eq!(uris.lock().unwrap().len(), 1);
+    }
+
+    /// The budget is per request, not per walk: three pages that each answer
+    /// comfortably inside it complete, even though together they take longer
+    /// than one budget. The outer whole-walk timeouts this replaces cut this
+    /// exact case off — four pages had to share one request's time.
+    #[tokio::test]
+    async fn a_multi_page_walk_outlasts_one_request_budget() {
+        let budget = std::time::Duration::from_millis(300);
+        // Each page well inside the budget; three of them well outside it.
+        let per_page = budget / 2;
+        let (client, uris) = mock_slow_event_pages(
+            vec![
+                event_list(vec![event("a")], Some("p2")),
+                event_list(vec![event("b")], Some("p3")),
+                event_list(vec![event("c")], None),
+            ],
+            per_page,
+        );
+        let api: Api<Event> = Api::all(client);
+
+        let started = std::time::Instant::now();
+        let (items, truncated) = list_capped_within(&api, ListParams::default(), budget)
+            .await
+            .expect("every page answered inside the per-request budget");
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|e| e.metadata.name.clone().unwrap())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert!(!truncated);
+        assert_eq!(uris.lock().unwrap().len(), 3);
+        assert!(
+            started.elapsed() > budget,
+            "the walk should have taken longer than one request's budget"
+        );
+        // And the old whole-walk wrapper would have refused it.
+        let (client, _) = mock_slow_event_pages(
+            vec![
+                event_list(vec![event("a")], Some("p2")),
+                event_list(vec![event("b")], Some("p3")),
+                event_list(vec![event("c")], None),
+            ],
+            per_page,
+        );
+        let api: Api<Event> = Api::all(client);
+        let whole_walk = tokio::time::timeout(
+            budget,
+            list_capped_within(&api, ListParams::default(), budget),
+        )
+        .await;
+        assert!(
+            whole_walk.is_err(),
+            "the whole-walk timeout this replaces would have cut the same walk off"
+        );
     }
 }

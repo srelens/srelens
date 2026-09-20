@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
-use crate::connect::request_timeout;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListEventsIn {
@@ -145,13 +144,23 @@ pub fn list_events_capability(cache: Arc<ClientCache>) -> Capability {
                     .map_err(CapabilityError::Handler)?;
                 let api: kube::Api<Event> = crate::scoped_api(client, &input.namespace);
                 let params = event_list_params(&input.object_kind, &input.object_name);
-                let (items, truncated) = tokio::time::timeout(
-                    request_timeout(),
-                    crate::list_cap::list_capped(&api, params),
-                )
-                .await
-                .map_err(|_| CapabilityError::Handler("list events timed out".into()))?
-                .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                // No outer timeout: `list_capped` spends `request_timeout()` on
+                // each page, which is what that budget measures. Wrapping the
+                // walk gave four pages one request's time, and a busy
+                // namespace — the one that needs paging — was the likeliest to
+                // be cut off by it. An API error keeps its own words, which
+                // the frontend parses for the cluster-login prompt.
+                let (items, truncated) =
+                    crate::list_cap::list_capped(&api, params)
+                        .await
+                        .map_err(|e| match e {
+                            crate::list_cap::ListCappedError::Api(error) => {
+                                CapabilityError::Handler(error.to_string())
+                            }
+                            timeout => CapabilityError::Handler(format!(
+                                "list events timed out: {timeout}"
+                            )),
+                        })?;
                 Ok(ListEventsOut {
                     events: items.into_iter().map(summarise).collect(),
                     truncated,
