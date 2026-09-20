@@ -763,7 +763,9 @@ pub(crate) enum AdvertisementLookup {
     Failed,
 }
 
-/// [`build_cilium_bgp_summary_from`] for an advertisement list that was read.
+/// [`build_cilium_bgp_summary_from`] for an advertisement list that was read:
+/// the shape the unit tests build their fixtures in.
+#[cfg(test)]
 pub(crate) fn build_cilium_bgp_summary(
     pool_items: Vec<DynamicObject>,
     peer_cfg_items: Vec<DynamicObject>,
