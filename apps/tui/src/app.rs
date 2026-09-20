@@ -9700,6 +9700,7 @@ impl App {
             Some(ref ar) if !ar.group.is_empty() => format!("{}.{}", ar.plural, ar.group),
             _ => k.clone(),
         };
+        let pinned_api_version = pinned.as_ref().map(|ar| ar.api_version.clone());
 
         let yaml_text = tokio::task::spawn(async move {
             let ns = ns_task;
@@ -9866,7 +9867,8 @@ impl App {
         .await
         .unwrap_or_default();
 
-        let yaml_state = YamlViewState::new(name, kind, ns, yaml_text);
+        let mut yaml_state = YamlViewState::new(name, kind, ns, yaml_text);
+        yaml_state.pinned_api_version = pinned_api_version;
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Yaml(yaml_state));
         self.nav_stack.push(old_view);
     }
@@ -9949,6 +9951,7 @@ impl App {
             Some(ref ar) if !ar.group.is_empty() => format!("{}.{}", ar.plural, ar.group),
             _ => k.clone(),
         };
+        let pinned_api_version = pinned.as_ref().map(|ar| ar.api_version.clone());
 
         let desc_text = tokio::task::spawn(async move {
             let ns = ns_task;
@@ -10158,7 +10161,8 @@ impl App {
         .await
         .unwrap_or_default();
 
-        let desc_state = DescribeViewState::new(name, kind, ns, desc_text);
+        let mut desc_state = DescribeViewState::new(name, kind, ns, desc_text);
+        desc_state.pinned_api_version = pinned_api_version;
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Describe(desc_state));
         self.nav_stack.push(old_view);
     }

@@ -138,6 +138,15 @@ pub(crate) struct LbService {
     pub labels: BTreeMap<String, String>,
 }
 
+/// What identifies a Service across the summary: its namespace and name.
+type ServiceKey = (String, String);
+
+impl LbService {
+    fn key(&self) -> ServiceKey {
+        (self.namespace.clone(), self.name.clone())
+    }
+}
+
 /// A Cilium or MetalLB LoadBalancer IP Pool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BgpIpPool {
@@ -353,6 +362,27 @@ fn request_timeout() -> Duration {
     Duration::from_secs(5)
 }
 
+/// What the API server said when asked to list one CRD version.
+///
+/// Both variants are the server answering. `NotServed` is the `404` that
+/// means this cluster has no such resource installed, kept apart from an
+/// empty `Served` list because the two say different things about a sibling
+/// version: a version that is not served tells us nothing about one that is.
+#[derive(Debug)]
+enum Listed {
+    Served(Vec<DynamicObject>),
+    NotServed,
+}
+
+impl Listed {
+    fn into_items(self) -> Vec<DynamicObject> {
+        match self {
+            Listed::Served(items) => items,
+            Listed::NotServed => Vec::new(),
+        }
+    }
+}
+
 /// List one CRD.
 ///
 /// `Ok` means the API server answered: either with objects, or — for a CRD
@@ -362,38 +392,46 @@ fn request_timeout() -> Duration {
 /// (AGENTS.md, "Say what you know, not what you guess"): a caller who cannot
 /// read `CiliumBGPClusterConfig` has learned nothing about the cluster's BGP,
 /// and reporting "no BGP engine" would be a confident, wrong claim.
-async fn list_one_resource(
-    client: &kube::Client,
-    res: &ApiResource,
-) -> Result<Vec<DynamicObject>, String> {
+async fn list_one_resource(client: &kube::Client, res: &ApiResource) -> Result<Listed, String> {
     let api: Api<DynamicObject> = Api::all_with(client.clone(), res);
     match tokio::time::timeout(request_timeout(), api.list(&ListParams::default())).await {
-        Ok(Ok(list)) => Ok(list.items),
+        Ok(Ok(list)) => Ok(Listed::Served(list.items)),
         // 404 is this cluster saying it serves no such resource.
-        Ok(Err(kube::Error::Api(e))) if e.code == 404 => Ok(Vec::new()),
+        Ok(Err(kube::Error::Api(e))) if e.code == 404 => Ok(Listed::NotServed),
         Ok(Err(e)) => Err(format!("list {}: {}", res.kind, e)),
         Err(_) => Err(format!("list {} timed out", res.kind)),
     }
 }
 
 /// List a CRD that exists under two API versions, preferring whichever
-/// version has objects. The lookup only fails when *neither* version could be
-/// read — one version answering `404` while the other serves objects is the
-/// normal shape of a cluster that has upgraded.
+/// version has objects. One version answering `404` while the other serves
+/// objects is the normal shape of a cluster that has upgraded.
+///
+/// The lookup fails when no *served* version could be read. A refused `v2`
+/// beside a `v2alpha1` the cluster does not serve is a refusal, not an
+/// absence: the only version that could have answered did not. Only when
+/// neither version is served, or a served version answered with no objects,
+/// is the result an empty list.
 async fn list_dynamic_resource(
     client: &kube::Client,
     res1: &ApiResource,
     res2: &ApiResource,
 ) -> Result<Vec<DynamicObject>, String> {
     let first = list_one_resource(client, res1).await;
-    if matches!(&first, Ok(items) if !items.is_empty()) {
-        return first;
+    if matches!(&first, Ok(Listed::Served(items)) if !items.is_empty()) {
+        return first.map(Listed::into_items);
     }
     let second = list_one_resource(client, res2).await;
     match (first, second) {
-        (_, Ok(items)) if !items.is_empty() => Ok(items),
-        (Ok(items), _) => Ok(items),
-        (Err(_), Ok(items)) => Ok(items),
+        (_, Ok(Listed::Served(items))) if !items.is_empty() => Ok(items),
+        // A served version answered with no objects: the CRD is installed and
+        // empty, whatever the other version said.
+        (Ok(Listed::Served(items)), _) => Ok(items),
+        (_, Ok(Listed::Served(items))) => Ok(items),
+        // Neither version is served: the cluster has no such CRD.
+        (Ok(Listed::NotServed), Ok(Listed::NotServed)) => Ok(Vec::new()),
+        // The one version that is served refused us.
+        (Err(e), Ok(Listed::NotServed)) | (Ok(Listed::NotServed), Err(e)) => Err(e),
         (Err(e), Err(_)) => Err(e),
     }
 }
@@ -499,12 +537,21 @@ pub async fn fetch_bgp_summary(client: &kube::Client) -> Result<BgpClusterSummar
     // the summary can say discovery failed rather than claim there is none.
     let mut failures: Vec<String> = Vec::new();
 
+    // An engine is detected from the objects the cluster serves, not from
+    // how many peers they resolve to. A MetalLB `BGPPeer` whose node selector
+    // matches no node, or a Calico peer pinned to a node that has since gone,
+    // is still that engine, configured to peer nowhere — dropping it for the
+    // next engine would end in "no BGP engine", which is a different and
+    // wrong claim. Each engine's builder only names itself when it read
+    // objects.
+    fn detected(summary: &BgpClusterSummary) -> bool {
+        summary.engine != BgpEngineType::None
+    }
+
     // 3. Try Cilium BGP Control Plane (v2 / v2alpha1)
     match discover_cilium_bgp(client, &node_labels_map, &node_pod_cidrs, &lb_services).await {
         Ok(cilium_summary) => {
-            if cilium_summary.engine != BgpEngineType::None
-                && (!cilium_summary.peers.is_empty() || !cilium_summary.ip_pools.is_empty())
-            {
+            if detected(&cilium_summary) {
                 let mut res = cilium_summary;
                 res.total_nodes = total_nodes;
                 return Ok(res);
@@ -519,9 +566,7 @@ pub async fn fetch_bgp_summary(client: &kube::Client) -> Result<BgpClusterSummar
     // 4. Fallback to MetalLB
     match discover_metallb_bgp(client, &node_labels_map, &lb_services).await {
         Ok(metallb_summary) => {
-            if metallb_summary.engine != BgpEngineType::None
-                && (!metallb_summary.peers.is_empty() || !metallb_summary.ip_pools.is_empty())
-            {
+            if detected(&metallb_summary) {
                 let mut res = metallb_summary;
                 res.total_nodes = total_nodes;
                 return Ok(res);
@@ -536,7 +581,7 @@ pub async fn fetch_bgp_summary(client: &kube::Client) -> Result<BgpClusterSummar
     // 5. Fallback to Calico
     match discover_calico_bgp(client, &node_labels_map).await {
         Ok(calico_summary) => {
-            if calico_summary.engine != BgpEngineType::None && !calico_summary.peers.is_empty() {
+            if detected(&calico_summary) {
                 let mut res = calico_summary;
                 res.total_nodes = total_nodes;
                 return Ok(res);
@@ -576,6 +621,11 @@ struct CiliumPeerConfigData {
     connect_retry: Option<u64>,
     multihop: Option<u32>,
     graceful_restart: bool,
+    /// `spec.families[].advertisements`: one label selector per address
+    /// family, each choosing the `CiliumBGPAdvertisement` objects that reach
+    /// sessions using this config. A family without one advertises nothing,
+    /// so an empty list here is a config that selects no advertisement.
+    advertisement_selectors: Vec<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -652,8 +702,16 @@ async fn discover_cilium_bgp(
         .await,
     );
 
-    let policy_items = take(list_one_resource(client, &cilium_bgp_peering_policy_resource()).await);
-    let cnode_items = take(list_one_resource(client, &cilium_node_resource()).await);
+    let policy_items = take(
+        list_one_resource(client, &cilium_bgp_peering_policy_resource())
+            .await
+            .map(Listed::into_items),
+    );
+    let cnode_items = take(
+        list_one_resource(client, &cilium_node_resource())
+            .await
+            .map(Listed::into_items),
+    );
 
     let mut summary = build_cilium_bgp_summary(
         pool_items,
@@ -761,6 +819,12 @@ pub(crate) fn build_cilium_bgp_summary(
                 .and_then(|g| g.get("enabled"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            if let Some(families) = spec.get("families").and_then(|v| v.as_array()) {
+                cfg.advertisement_selectors = families
+                    .iter()
+                    .filter_map(|family| family.get("advertisements").cloned())
+                    .collect();
+            }
         }
         peer_configs.insert(name, cfg);
     }
@@ -771,29 +835,37 @@ pub(crate) fn build_cilium_bgp_summary(
     // they select are advertised: an advertisement carrying just `PodCIDR`
     // announces no VIP at all, and one with a Service selector announces only
     // the Services that selector matches.
-    let advertised = advertised_lb_services(&adv_items, lb_services);
+    //
+    // An advertisement reaches a session only through the peer's
+    // `CiliumBGPPeerConfig`, whose `spec.families[].advertisements` selects
+    // advertisements by label. One that no peer config selects announces
+    // nothing, so what each peer advertises is resolved through its config
+    // below. The union over every advertisement — what the cluster *could*
+    // announce — stands in only for a peer whose config cannot be resolved:
+    // no `peerConfigRef`, or one naming a config that was not read. For such
+    // a peer the union is the pre-existing reading, kept because the
+    // alternative is to claim the peer announces nothing.
+    let all_advs: Vec<&DynamicObject> = adv_items.iter().collect();
+    let advertised_by_any = if adv_items.is_empty() {
+        // Nothing was read about what is advertised — the legacy v2alpha1
+        // shape — which is not evidence either way.
+        None
+    } else {
+        service_advertisement_selectors(&all_advs)
+    };
+    let advertised: Vec<&LbService> = select_lb_services(advertised_by_any.as_deref(), lb_services);
     let mut export_pod_cidr_default = true;
     if !adv_items.is_empty() {
         is_cilium_v2 = true;
-        export_pod_cidr_default = adv_items.iter().any(|adv| {
-            if let Some(arr) = adv
-                .data
-                .get("spec")
-                .and_then(|s| s.get("advertisements"))
-                .and_then(|v| v.as_array())
-            {
-                arr.iter().any(|item| {
-                    item.get("advertisementType")
-                        .and_then(|v| v.as_str())
-                        .map_or(false, |t| {
-                            t.eq_ignore_ascii_case("podcidr") || t.eq_ignore_ascii_case("pod")
-                        })
-                })
-            } else {
-                true
-            }
-        });
+        export_pod_cidr_default = advertises_pod_cidr(&all_advs);
     }
+
+    // Which sessions carry each advertised Service, kept beside `neighbors`
+    // (one entry per row, in push order) until the rows are correlated.
+    let mut neighbor_services: Vec<Vec<ServiceKey>> = Vec::new();
+    let keys_of = |services: &[&LbService]| -> Vec<ServiceKey> {
+        services.iter().map(|svc| svc.key()).collect()
+    };
 
     // D. Load CiliumBGPClusterConfig (v2 / v2alpha1)
     for obj in cluster_cfg_items {
@@ -853,25 +925,50 @@ pub(crate) fn build_cilium_bgp_summary(
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
 
-                        let peer_cfg =
-                            peer_configs.get(peer_cfg_name).cloned().unwrap_or_else(|| {
-                                let mut fallback = CiliumPeerConfigData::default();
-                                if let Some(timers) = peer.get("timers") {
-                                    fallback.hold_time =
-                                        timers.get("holdTimeSeconds").and_then(|v| v.as_u64());
-                                    fallback.keepalive =
-                                        timers.get("keepAliveTimeSeconds").and_then(|v| v.as_u64());
-                                    fallback.connect_retry = timers
-                                        .get("connectRetryTimeSeconds")
-                                        .and_then(|v| v.as_u64());
-                                }
-                                fallback
-                            });
+                        let resolved_cfg = peer_configs.get(peer_cfg_name);
+                        let peer_cfg = resolved_cfg.cloned().unwrap_or_else(|| {
+                            let mut fallback = CiliumPeerConfigData::default();
+                            if let Some(timers) = peer.get("timers") {
+                                fallback.hold_time =
+                                    timers.get("holdTimeSeconds").and_then(|v| v.as_u64());
+                                fallback.keepalive =
+                                    timers.get("keepAliveTimeSeconds").and_then(|v| v.as_u64());
+                                fallback.connect_retry = timers
+                                    .get("connectRetryTimeSeconds")
+                                    .and_then(|v| v.as_u64());
+                            }
+                            fallback
+                        });
+
+                        // What this session announces: the advertisements its
+                        // config selects, when the config was read (section C).
+                        let selection = resolved_cfg.map(|cfg| {
+                            let selected: Vec<&DynamicObject> = all_advs
+                                .iter()
+                                .copied()
+                                .filter(|adv| {
+                                    let labels = adv.metadata.labels.clone().unwrap_or_default();
+                                    cfg.advertisement_selectors
+                                        .iter()
+                                        .any(|sel| matches_label_selector(sel, &labels))
+                                })
+                                .collect();
+                            let services = select_lb_services(
+                                service_advertisement_selectors(&selected).as_deref(),
+                                lb_services,
+                            );
+                            (services, advertises_pod_cidr(&selected))
+                        });
+                        let (peer_advertised, export_pod_cidr): (&[&LbService], bool) =
+                            match &selection {
+                                Some((services, pod_cidr)) => (services.as_slice(), *pod_cidr),
+                                None => (advertised.as_slice(), export_pod_cidr_default),
+                            };
 
                         for node in &matching_nodes {
                             bgp_node_set.insert(node.clone());
                             let mut prefixes = Vec::new();
-                            if export_pod_cidr_default {
+                            if export_pod_cidr {
                                 if let Some(cidrs) = node_pod_cidrs.get(node) {
                                     for c in cidrs {
                                         prefixes.push(format!("PodCIDR: {}", c));
@@ -883,8 +980,9 @@ pub(crate) fn build_cilium_bgp_summary(
                             // once, with its announcing nodes and peers. A
                             // copy per neighbour grows as nodes × peers ×
                             // services.
-                            let routes_count = prefixes.len() + advertised.len();
+                            let routes_count = prefixes.len() + peer_advertised.len();
 
+                            neighbor_services.push(keys_of(peer_advertised));
                             neighbors.push(BgpNeighbor {
                                 node_name: node.clone(),
                                 peer_address: peer_addr.clone(),
@@ -897,7 +995,7 @@ pub(crate) fn build_cilium_bgp_summary(
                                 // already probes both for a Cilium kind.
                                 policy_api_version: String::new(),
                                 namespace: None,
-                                export_pod_cidr: export_pod_cidr_default,
+                                export_pod_cidr,
                                 hold_time_seconds: peer_cfg.hold_time,
                                 keepalive_time_seconds: peer_cfg.keepalive,
                                 connect_retry_seconds: peer_cfg.connect_retry,
@@ -923,7 +1021,7 @@ pub(crate) fn build_cilium_bgp_summary(
             let live_peers = extract_live_bgp_peers(status, 0);
             for live in live_peers {
                 bgp_node_set.insert(node_name.clone());
-                update_or_insert_neighbor(
+                let inserted = update_or_insert_neighbor(
                     &mut neighbors,
                     &node_name,
                     live,
@@ -933,6 +1031,11 @@ pub(crate) fn build_cilium_bgp_summary(
                     node_pod_cidrs,
                     advertised.len(),
                 );
+                if inserted {
+                    // A session no cluster config declared: nothing ties it
+                    // to a peer config, so the union stands in (section C).
+                    neighbor_services.push(keys_of(&advertised));
+                }
             }
         }
     }
@@ -1004,6 +1107,7 @@ pub(crate) fn build_cilium_bgp_summary(
                                 // Counted once at the summary level; see the
                                 // cluster-config path above.
                                 let routes_count = prefixes.len() + advertised.len();
+                                neighbor_services.push(keys_of(&advertised));
                                 neighbors.push(BgpNeighbor {
                                     node_name: node.clone(),
                                     peer_address: peer_addr.clone(),
@@ -1042,7 +1146,7 @@ pub(crate) fn build_cilium_bgp_summary(
             let live_peers = extract_live_bgp_peers(status, 0);
             for live in live_peers {
                 bgp_node_set.insert(n_name.clone());
-                update_or_insert_neighbor(
+                let inserted = update_or_insert_neighbor(
                     &mut neighbors,
                     &n_name,
                     live,
@@ -1052,26 +1156,38 @@ pub(crate) fn build_cilium_bgp_summary(
                     node_pod_cidrs,
                     advertised.len(),
                 );
+                if inserted {
+                    neighbor_services.push(keys_of(&advertised));
+                }
             }
         }
     }
 
-    // Correlate Advertised Services: only the ones an advertisement selects.
+    // Correlate Advertised Services: one row per Service some session
+    // announces, naming the nodes and peers that carry it rather than every
+    // node and peer in the cluster.
+    debug_assert_eq!(neighbor_services.len(), neighbors.len());
+    let mut announcers: BTreeMap<ServiceKey, (BTreeSet<String>, BTreeSet<String>)> =
+        BTreeMap::new();
+    for (neighbor, services) in neighbors.iter().zip(&neighbor_services) {
+        for key in services {
+            let (nodes, peers) = announcers.entry(key.clone()).or_default();
+            nodes.insert(neighbor.node_name.clone());
+            peers.insert(format!("{}:{}", neighbor.peer_address, neighbor.peer_asn));
+        }
+    }
     let mut advertised_services: Vec<BgpAdvertisedService> = Vec::new();
-    let announcing_node_names: Vec<String> = bgp_node_set.iter().cloned().collect();
-    let peer_addresses: Vec<String> = neighbors
-        .iter()
-        .map(|n| format!("{}:{}", n.peer_address, n.peer_asn))
-        .collect();
-
-    for svc in &advertised {
+    for svc in lb_services {
+        let Some((nodes, peers)) = announcers.get(&svc.key()) else {
+            continue;
+        };
         advertised_services.push(BgpAdvertisedService {
             service_name: svc.name.clone(),
             namespace: svc.namespace.clone(),
             load_balancer_ip: svc.load_balancer_ip.clone(),
             ip_pool: svc.ip_pool.clone(),
-            announcing_nodes: announcing_node_names.clone(),
-            peers: peer_addresses.clone(),
+            announcing_nodes: nodes.iter().cloned().collect(),
+            peers: peers.iter().cloned().collect(),
             service_type: "LoadBalancer".to_string(),
         });
     }
@@ -1131,7 +1247,7 @@ fn update_or_insert_neighbor(
     // How many LoadBalancer VIPs the cluster advertises. A count, not a list:
     // the VIPs themselves are carried once, by `advertised_services`.
     advertised_vips: usize,
-) {
+) -> bool {
     if let Some(existing) = neighbors.iter_mut().find(|n| {
         (n.node_name == node_name || n.node_name.is_empty())
             && (n.peer_address == live.peer_address
@@ -1156,6 +1272,7 @@ fn update_or_insert_neighbor(
         if live.routes_received > 0 {
             existing.routes_received = live.routes_received;
         }
+        false
     } else {
         let mut prefixes = Vec::new();
         if export_pod_cidr {
@@ -1196,6 +1313,7 @@ fn update_or_insert_neighbor(
             routes_received: live.routes_received,
             uptime_or_last_change: live.uptime,
         });
+        true
     }
 }
 
@@ -1337,10 +1455,13 @@ async fn discover_metallb_bgp(
     let mut failures: Vec<String> = Vec::new();
 
     let peer_items = match list_one_resource(client, &metallb_bgp_peer_resource()).await {
-        Ok(items) if items.is_empty() => {
-            return Ok(BgpClusterSummary::default());
+        Ok(listed) => {
+            let items = listed.into_items();
+            if items.is_empty() {
+                return Ok(BgpClusterSummary::default());
+            }
+            items
         }
-        Ok(items) => items,
         Err(e) => {
             // The cluster may run MetalLB and simply not let us look.
             return Err(e);
@@ -1348,7 +1469,7 @@ async fn discover_metallb_bgp(
     };
 
     let pool_items = match list_one_resource(client, &metallb_ip_pool_resource()).await {
-        Ok(items) => items,
+        Ok(listed) => listed.into_items(),
         Err(e) => {
             failures.push(e);
             Vec::new()
@@ -1496,7 +1617,9 @@ async fn discover_calico_bgp(
     client: &kube::Client,
     node_labels: &HashMap<String, BTreeMap<String, String>>,
 ) -> Result<BgpClusterSummary, String> {
-    let peer_items = list_one_resource(client, &calico_bgp_peer_resource()).await?;
+    let peer_items = list_one_resource(client, &calico_bgp_peer_resource())
+        .await?
+        .into_items();
     if peer_items.is_empty() {
         return Ok(BgpClusterSummary::default());
     }
@@ -1530,15 +1653,21 @@ pub(crate) fn build_calico_bgp_summary(
         // global. Attributing every peer to every node reported sessions that
         // do not exist and made `total_peers` peers × nodes.
         //
-        // Calico may also write `nodeSelector` as one of its own selector
-        // expressions (`has(rack)`), which this does not evaluate; such a peer
-        // keeps the global reading rather than dropping rows for sessions that
-        // may well exist.
+        // On the wire `nodeSelector` is a Calico selector expression — a
+        // string such as `rack == 'rack2'` or `has(rack)` — evaluated against
+        // the node's labels, which in a Kubernetes-backed Calico are the Node's
+        // own. A hand-written object in the Kubernetes `LabelSelector` shape is
+        // accepted too. An expression this parser does not understand keeps
+        // the global reading rather than dropping rows for sessions that may
+        // well exist.
         let targets: Vec<String> = match spec.get("node").and_then(|v| v.as_str()) {
             Some(node) if node_labels.contains_key(node) => vec![node.to_string()],
             // A peer pinned to a node this cluster does not have peers nowhere.
             Some(_) => Vec::new(),
-            None => find_matching_nodes(spec.get("nodeSelector"), node_labels),
+            None => match spec.get("nodeSelector") {
+                Some(Value::String(expr)) => calico_selected_nodes(expr, node_labels),
+                other => find_matching_nodes(other, node_labels),
+            },
         };
 
         for node_name in &targets {
@@ -1596,36 +1725,296 @@ pub(crate) fn build_calico_bgp_summary(
 }
 
 // ---------------------------------------------------------------------------
+// Calico selector expressions
+// ---------------------------------------------------------------------------
+
+/// The nodes a Calico selector expression picks out, sorted by name. An
+/// expression that does not parse selects every node — the global reading
+/// the caller would have used had the field been absent.
+fn calico_selected_nodes(
+    expr: &str,
+    node_labels: &HashMap<String, BTreeMap<String, String>>,
+) -> Vec<String> {
+    let Some(selector) = CalicoSelector::parse(expr) else {
+        return node_labels.keys().cloned().collect();
+    };
+    let mut out: Vec<String> = node_labels
+        .iter()
+        .filter(|(_, labels)| selector.matches(labels))
+        .map(|(name, _)| name.clone())
+        .collect();
+    out.sort();
+    out
+}
+
+/// A parsed Calico selector expression.
+///
+/// The grammar is Calico's own (`all()`, `has(k)`, `k == 'v'`, `k != 'v'`,
+/// `k in {'a', 'b'}`, `k not in {…}`, `k contains 'v'`, `k starts with 'v'`,
+/// `k ends with 'v'`, joined with `&&`, `||`, `!` and parentheses). Label
+/// values are quoted with `'` or `"`; keys are bare and may carry `.`, `/`,
+/// `-` and `_`. Anything else fails to parse rather than being guessed at.
+#[derive(Debug, Clone, PartialEq)]
+enum CalicoSelector {
+    All,
+    Has(String),
+    Eq(String, String),
+    Ne(String, String),
+    In(String, Vec<String>),
+    NotIn(String, Vec<String>),
+    Contains(String, String),
+    StartsWith(String, String),
+    EndsWith(String, String),
+    Not(Box<CalicoSelector>),
+    And(Box<CalicoSelector>, Box<CalicoSelector>),
+    Or(Box<CalicoSelector>, Box<CalicoSelector>),
+}
+
+impl CalicoSelector {
+    fn parse(expr: &str) -> Option<Self> {
+        let mut p = CalicoParser { src: expr, pos: 0 };
+        let sel = p.or_expr()?;
+        p.skip_ws();
+        if p.pos == p.src.len() {
+            Some(sel)
+        } else {
+            None
+        }
+    }
+
+    fn matches(&self, labels: &BTreeMap<String, String>) -> bool {
+        match self {
+            CalicoSelector::All => true,
+            CalicoSelector::Has(k) => labels.contains_key(k),
+            CalicoSelector::Eq(k, v) => labels.get(k) == Some(v),
+            CalicoSelector::Ne(k, v) => labels.get(k) != Some(v),
+            CalicoSelector::In(k, vs) => labels.get(k).is_some_and(|v| vs.contains(v)),
+            CalicoSelector::NotIn(k, vs) => !labels.get(k).is_some_and(|v| vs.contains(v)),
+            CalicoSelector::Contains(k, v) => labels.get(k).is_some_and(|l| l.contains(v)),
+            CalicoSelector::StartsWith(k, v) => labels.get(k).is_some_and(|l| l.starts_with(v)),
+            CalicoSelector::EndsWith(k, v) => labels.get(k).is_some_and(|l| l.ends_with(v)),
+            CalicoSelector::Not(inner) => !inner.matches(labels),
+            CalicoSelector::And(a, b) => a.matches(labels) && b.matches(labels),
+            CalicoSelector::Or(a, b) => a.matches(labels) || b.matches(labels),
+        }
+    }
+}
+
+/// A recursive-descent parser over one selector expression. Every method
+/// answers `None` for input it does not understand, and the whole parse
+/// fails with it.
+struct CalicoParser<'a> {
+    src: &'a str,
+    pos: usize,
+}
+
+impl<'a> CalicoParser<'a> {
+    fn rest(&self) -> &'a str {
+        &self.src[self.pos..]
+    }
+
+    fn skip_ws(&mut self) {
+        let trimmed = self.rest().trim_start();
+        self.pos = self.src.len() - trimmed.len();
+    }
+
+    fn eat(&mut self, token: &str) -> bool {
+        self.skip_ws();
+        if self.rest().starts_with(token) {
+            self.pos += token.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A keyword: the token followed by something that cannot continue an
+    /// identifier, so `in` does not match the start of `internal`.
+    fn eat_keyword(&mut self, word: &str) -> bool {
+        self.skip_ws();
+        let rest = self.rest();
+        if rest.starts_with(word)
+            && !rest[word.len()..]
+                .chars()
+                .next()
+                .is_some_and(is_calico_key_char)
+        {
+            self.pos += word.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn or_expr(&mut self) -> Option<CalicoSelector> {
+        let mut left = self.and_expr()?;
+        while self.eat("||") {
+            let right = self.and_expr()?;
+            left = CalicoSelector::Or(Box::new(left), Box::new(right));
+        }
+        Some(left)
+    }
+
+    fn and_expr(&mut self) -> Option<CalicoSelector> {
+        let mut left = self.not_expr()?;
+        while self.eat("&&") {
+            let right = self.not_expr()?;
+            left = CalicoSelector::And(Box::new(left), Box::new(right));
+        }
+        Some(left)
+    }
+
+    fn not_expr(&mut self) -> Option<CalicoSelector> {
+        if self.eat("!") {
+            return Some(CalicoSelector::Not(Box::new(self.not_expr()?)));
+        }
+        self.primary()
+    }
+
+    fn primary(&mut self) -> Option<CalicoSelector> {
+        if self.eat("(") {
+            let inner = self.or_expr()?;
+            return self.eat(")").then_some(inner);
+        }
+        if self.eat_keyword("all") {
+            return (self.eat("(") && self.eat(")")).then_some(CalicoSelector::All);
+        }
+        if self.eat_keyword("has") {
+            if !self.eat("(") {
+                return None;
+            }
+            let key = self.key()?;
+            return self.eat(")").then_some(CalicoSelector::Has(key));
+        }
+        let key = self.key()?;
+        if self.eat("==") {
+            return Some(CalicoSelector::Eq(key, self.value()?));
+        }
+        if self.eat("!=") {
+            return Some(CalicoSelector::Ne(key, self.value()?));
+        }
+        if self.eat_keyword("not") {
+            return self
+                .eat_keyword("in")
+                .then(|| self.set())
+                .flatten()
+                .map(|set| CalicoSelector::NotIn(key, set));
+        }
+        if self.eat_keyword("in") {
+            return Some(CalicoSelector::In(key, self.set()?));
+        }
+        if self.eat_keyword("contains") {
+            return Some(CalicoSelector::Contains(key, self.value()?));
+        }
+        if self.eat_keyword("starts") {
+            return self
+                .eat_keyword("with")
+                .then(|| self.value())
+                .flatten()
+                .map(|v| CalicoSelector::StartsWith(key, v));
+        }
+        if self.eat_keyword("ends") {
+            return self
+                .eat_keyword("with")
+                .then(|| self.value())
+                .flatten()
+                .map(|v| CalicoSelector::EndsWith(key, v));
+        }
+        None
+    }
+
+    fn key(&mut self) -> Option<String> {
+        self.skip_ws();
+        let rest = self.rest();
+        let len = rest
+            .char_indices()
+            .find(|(_, c)| !is_calico_key_char(*c))
+            .map(|(i, _)| i)
+            .unwrap_or(rest.len());
+        if len == 0 {
+            return None;
+        }
+        self.pos += len;
+        Some(rest[..len].to_string())
+    }
+
+    fn value(&mut self) -> Option<String> {
+        self.skip_ws();
+        let mut chars = self.rest().char_indices();
+        let (_, quote) = chars.next()?;
+        if quote != '\'' && quote != '"' {
+            return None;
+        }
+        let (end, _) = chars.find(|(_, c)| *c == quote)?;
+        let value = self.rest()[1..end].to_string();
+        self.pos += end + 1;
+        Some(value)
+    }
+
+    fn set(&mut self) -> Option<Vec<String>> {
+        if !self.eat("{") {
+            return None;
+        }
+        let mut values = Vec::new();
+        if self.eat("}") {
+            return Some(values);
+        }
+        loop {
+            values.push(self.value()?);
+            if self.eat(",") {
+                continue;
+            }
+            return self.eat("}").then_some(values);
+        }
+    }
+}
+
+fn is_calico_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-')
+}
+
+// ---------------------------------------------------------------------------
 // Selector Matching
 // ---------------------------------------------------------------------------
 
-/// The Service selectors carried by the cluster's `CiliumBGPAdvertisement`
-/// objects, one entry per `advertisementType: Service` block. `None` is "no
-/// advertisement was read at all", which is what a legacy `v2alpha1` cluster
-/// looks like and tells us nothing; `Some(vec![])` is advertisements that
-/// announce no Service — a `PodCIDR`-only cluster. A `None` entry inside the
-/// list is a Service advertisement with no selector, which takes every
-/// Service.
-fn service_advertisement_selectors(adv_items: &[DynamicObject]) -> Option<Vec<Option<Value>>> {
-    if adv_items.is_empty() {
-        return None;
-    }
+/// The Service selectors carried by a set of `CiliumBGPAdvertisement`
+/// objects: one entry per `advertisementType: Service` block whose
+/// `service.addresses` includes `LoadBalancerIP`. A block announcing only
+/// `ClusterIP` or `ExternalIP` addresses exports no VIP and contributes
+/// nothing. A `None` entry is a Service block with no selector, which takes
+/// every Service; `Some(vec![])` is advertisements that announce no VIP — a
+/// `PodCIDR`-only set.
+///
+/// The result is `None` when an advertisement cannot be read: `spec.
+/// advertisements` is not an array, or a Service block does not say which
+/// addresses it announces. Cilium requires both, so such an object is not a
+/// valid empty advertisement, and reading it as one would narrow the Services
+/// tab on the strength of a manifest we did not understand.
+fn service_advertisement_selectors(advs: &[&DynamicObject]) -> Option<Vec<Option<Value>>> {
     let mut selectors = Vec::new();
-    for adv in adv_items {
-        let Some(blocks) = adv
+    for adv in advs {
+        let blocks = adv
             .data
             .get("spec")
             .and_then(|s| s.get("advertisements"))
-            .and_then(|v| v.as_array())
-        else {
-            continue;
-        };
+            .and_then(|v| v.as_array())?;
         for block in blocks {
             let kind = block
                 .get("advertisementType")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            if kind.eq_ignore_ascii_case("service") {
+            if !kind.eq_ignore_ascii_case("service") {
+                continue;
+            }
+            let addresses = block
+                .get("service")
+                .and_then(|s| s.get("addresses"))
+                .and_then(|v| v.as_array())?;
+            let announces_lb_ip = addresses
+                .iter()
+                .filter_map(|a| a.as_str())
+                .any(|a| a.eq_ignore_ascii_case("LoadBalancerIP"));
+            if announces_lb_ip {
                 selectors.push(block.get("selector").cloned());
             }
         }
@@ -1633,14 +2022,37 @@ fn service_advertisement_selectors(adv_items: &[DynamicObject]) -> Option<Vec<Op
     Some(selectors)
 }
 
-/// The LoadBalancer Services the cluster's advertisements actually select.
-/// With no advertisement to read, every LoadBalancer Service is returned, as
-/// before — an absent advertisement is not evidence either way.
-fn advertised_lb_services<'a>(
-    adv_items: &[DynamicObject],
+/// Whether a set of advertisements announces PodCIDRs. An advertisement that
+/// cannot be read keeps the long-standing assumption that it does.
+fn advertises_pod_cidr(advs: &[&DynamicObject]) -> bool {
+    advs.iter().any(|adv| {
+        match adv
+            .data
+            .get("spec")
+            .and_then(|s| s.get("advertisements"))
+            .and_then(|v| v.as_array())
+        {
+            Some(blocks) => blocks.iter().any(|block| {
+                block
+                    .get("advertisementType")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|t| {
+                        t.eq_ignore_ascii_case("podcidr") || t.eq_ignore_ascii_case("pod")
+                    })
+            }),
+            None => true,
+        }
+    })
+}
+
+/// The LoadBalancer Services a set of selectors picks out. `None` — nothing
+/// readable was said about what is advertised — returns every Service, as
+/// before: an absent advertisement is not evidence either way.
+fn select_lb_services<'a>(
+    selectors: Option<&[Option<Value>]>,
     lb_services: &'a [LbService],
 ) -> Vec<&'a LbService> {
-    let Some(selectors) = service_advertisement_selectors(adv_items) else {
+    let Some(selectors) = selectors else {
         return lb_services.iter().collect();
     };
     lb_services
@@ -2371,6 +2783,7 @@ mod tests {
             connect_retry: Some(60),
             multihop: Some(4),
             graceful_restart: true,
+            advertisement_selectors: Vec::new(),
         };
         let cloned = cfg.clone();
         assert_eq!(cloned.hold_time, Some(90));
@@ -2429,11 +2842,21 @@ mod tests {
                     "connectRetryTimeSeconds": 60
                 },
                 "ebgpMultihop": 4,
-                "gracefulRestart": {"enabled": true}
+                "gracefulRestart": {"enabled": true},
+                // The family selects the advertisement below by label; an
+                // advertisement no peer config selects reaches no session.
+                "families": [{
+                    "afi": "ipv4", "safi": "unicast",
+                    "advertisements": {"matchLabels": {"advertise": "bgp"}}
+                }]
             }
         });
 
         let mut adv_obj = DynamicObject::new("adv-1", &cilium_bgp_advertisement_v2_resource());
+        adv_obj.metadata.labels = Some(BTreeMap::from([(
+            "advertise".to_string(),
+            "bgp".to_string(),
+        )]));
         adv_obj.data = json!({
             "spec": {
                 "advertisements": [
@@ -3193,37 +3616,17 @@ mod tests {
         assert_eq!(summary.advertised_services.len(), 1);
     }
 
-    /// A cluster that serves Nodes and Services, and answers every CRD list
-    /// with `crd_status`.
-    fn cluster_answering_crds_with(crd_status: u16) -> kube::Client {
+    /// A fake API server answering each request path with `answer(path)`.
+    fn cluster_answering<F>(answer: F) -> kube::Client
+    where
+        F: Fn(&str) -> (u16, Value) + Send + Sync + 'static,
+    {
+        let answer = std::sync::Arc::new(answer);
         let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
             let path = request.uri().path().to_owned();
+            let answer = answer.clone();
             async move {
-                let (status, body) = if path == "/api/v1/nodes" {
-                    (
-                        200,
-                        json!({"apiVersion":"v1","kind":"NodeList","metadata":{},"items":[
-                            {"apiVersion":"v1","kind":"Node",
-                             "metadata":{"name":"node-1","labels":{"role":"worker"}},
-                             "spec":{"podCIDR":"10.244.0.0/24"}}]}),
-                    )
-                } else if path == "/api/v1/services" {
-                    (
-                        200,
-                        json!({"apiVersion":"v1","kind":"ServiceList","metadata":{},"items":[]}),
-                    )
-                } else {
-                    let reason = if crd_status == 404 {
-                        "NotFound"
-                    } else {
-                        "Forbidden"
-                    };
-                    (
-                        crd_status,
-                        json!({"apiVersion":"v1","kind":"Status","status":"Failure",
-                            "code":crd_status,"reason":reason,"message":"rejected"}),
-                    )
-                };
+                let (status, body) = answer(&path);
                 Ok::<_, std::convert::Infallible>(
                     http::Response::builder()
                         .status(status)
@@ -3234,6 +3637,358 @@ mod tests {
             }
         });
         kube::Client::new(service, "default")
+    }
+
+    fn one_worker_node_list() -> Value {
+        json!({"apiVersion":"v1","kind":"NodeList","metadata":{},"items":[
+            {"apiVersion":"v1","kind":"Node",
+             "metadata":{"name":"node-1","labels":{"role":"worker"}},
+             "spec":{"podCIDR":"10.244.0.0/24"}}]})
+    }
+
+    fn empty_list(kind: &str) -> Value {
+        json!({"apiVersion":"v1","kind":kind,"metadata":{},"items":[]})
+    }
+
+    fn status(code: u16) -> (u16, Value) {
+        let reason = match code {
+            404 => "NotFound",
+            403 => "Forbidden",
+            _ => "Failure",
+        };
+        (
+            code,
+            json!({"apiVersion":"v1","kind":"Status","status":"Failure",
+                "code":code,"reason":reason,"message":"rejected"}),
+        )
+    }
+
+    /// A cluster that serves Nodes and Services, and answers every CRD list
+    /// with `crd_status`.
+    fn cluster_answering_crds_with(crd_status: u16) -> kube::Client {
+        cluster_answering(move |path| match path {
+            "/api/v1/nodes" => (200, one_worker_node_list()),
+            "/api/v1/services" => (200, empty_list("ServiceList")),
+            _ => status(crd_status),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_refused_served_version_beside_an_unserved_one_is_a_discovery_failure() {
+        // The cluster installs the Cilium CRDs at v2alpha1 only, and RBAC
+        // denies listing them: v2 answers 404, v2alpha1 answers 403. The one
+        // version that could have answered refused, so nothing has been
+        // learned about the cluster's BGP.
+        let summary = fetch_bgp_summary(&cluster_answering(|path| match path {
+            "/api/v1/nodes" => (200, one_worker_node_list()),
+            "/api/v1/services" => (200, empty_list("ServiceList")),
+            p if p.starts_with("/apis/cilium.io/v2alpha1/") => status(403),
+            _ => status(404),
+        }))
+        .await
+        .expect("nodes and services were readable");
+
+        assert_eq!(summary.engine, BgpEngineType::None);
+        let err = summary
+            .error
+            .expect("a 404 on the unserved version must not hide the refusal on the served one");
+        assert!(
+            err.contains("CiliumLoadBalancerIPPool") && err.contains("403"),
+            "error should name the refused lookup, got {err}"
+        );
+
+        // And the mirror image: v2 refused, v2alpha1 not served.
+        let summary = fetch_bgp_summary(&cluster_answering(|path| match path {
+            "/api/v1/nodes" => (200, one_worker_node_list()),
+            "/api/v1/services" => (200, empty_list("ServiceList")),
+            p if p.starts_with("/apis/cilium.io/v2/") => status(403),
+            _ => status(404),
+        }))
+        .await
+        .expect("nodes and services were readable");
+        assert!(summary.error.is_some(), "the refused v2 must surface");
+    }
+
+    #[tokio::test]
+    async fn a_metallb_peer_that_matches_no_node_still_reports_metallb() {
+        // The engine is decided by the objects the cluster serves, not by how
+        // many peers they resolve to: a BGPPeer whose node selector matches
+        // nothing is MetalLB configured to peer nowhere, not "no engine".
+        let summary = fetch_bgp_summary(&cluster_answering(|path| match path {
+            "/api/v1/nodes" => (200, one_worker_node_list()),
+            "/api/v1/services" => (200, empty_list("ServiceList")),
+            "/apis/metallb.io/v1beta2/bgppeers" => (
+                200,
+                json!({"apiVersion":"metallb.io/v1beta2","kind":"BGPPeerList","metadata":{},
+                    "items":[{"apiVersion":"metallb.io/v1beta2","kind":"BGPPeer",
+                        "metadata":{"name":"rack-9","namespace":"metallb-system"},
+                        "spec":{"peerAddress":"10.0.0.1","peerASN":64512,"myASN":64512,
+                                "nodeSelectors":[{"matchLabels":{"rack":"nowhere"}}]}}]}),
+            ),
+            "/apis/metallb.io/v1beta1/ipaddresspools" => (200, empty_list("IPAddressPoolList")),
+            _ => status(404),
+        }))
+        .await
+        .expect("nodes and services were readable");
+
+        assert_eq!(summary.engine, BgpEngineType::MetalLB);
+        assert_eq!(summary.total_peers, 0);
+        assert_eq!(summary.total_nodes, 1);
+        assert_eq!(summary.error, None);
+    }
+
+    fn labelled_advertisement(name: &str, label: (&str, &str), blocks: Value) -> DynamicObject {
+        let mut adv = advertisement(name, blocks);
+        adv.metadata.labels = Some(BTreeMap::from([(label.0.to_string(), label.1.to_string())]));
+        adv
+    }
+
+    fn peer_config_selecting(name: &str, label: (&str, &str)) -> DynamicObject {
+        let mut cfg = DynamicObject::new(name, &cilium_bgp_peer_config_v2_resource());
+        cfg.data = json!({
+            "spec": {
+                "families": [{
+                    "afi": "ipv4", "safi": "unicast",
+                    "advertisements": {"matchLabels": {label.0: label.1}}
+                }]
+            }
+        });
+        cfg
+    }
+
+    fn cluster_config_with_peer_config(peer_cfg: &str) -> DynamicObject {
+        let mut cluster_cfg =
+            DynamicObject::new("cluster-cfg", &cilium_bgp_cluster_config_v2_resource());
+        cluster_cfg.data = json!({
+            "spec": {
+                "bgpInstances": [{
+                    "localASN": 65000,
+                    "peers": [{
+                        "peerAddress": "172.16.1.1",
+                        "peerASN": 65001,
+                        "peerConfigRef": {"name": peer_cfg}
+                    }]
+                }]
+            }
+        });
+        cluster_cfg
+    }
+
+    #[test]
+    fn an_advertisement_no_peer_config_selects_announces_nothing() {
+        // Two Service advertisements exist; the peer's config selects only
+        // the one labelled `advertise=public`. The other reaches no session,
+        // so its Services are not advertised and do not count as routes.
+        let node_labels = one_node_labels();
+        let lb_services = vec![
+            lb_labelled("public-lb", "1.2.3.4", "tier", "public"),
+            lb_labelled("internal-lb", "10.0.0.9", "tier", "internal"),
+        ];
+        let service_block = |tier: &str| {
+            json!([{
+                "advertisementType": "Service",
+                "service": {"addresses": ["LoadBalancerIP"]},
+                "selector": {"matchLabels": {"tier": tier}}
+            }])
+        };
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![peer_config_selecting("cfg-public", ("advertise", "public"))],
+            vec![
+                labelled_advertisement(
+                    "adv-public",
+                    ("advertise", "public"),
+                    service_block("public"),
+                ),
+                labelled_advertisement(
+                    "adv-internal",
+                    ("advertise", "internal"),
+                    service_block("internal"),
+                ),
+            ],
+            vec![cluster_config_with_peer_config("cfg-public")],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &lb_services,
+        );
+
+        let names: Vec<&str> = summary
+            .advertised_services
+            .iter()
+            .map(|s| s.service_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["public-lb"],
+            "only the selected advertisement announces"
+        );
+        assert_eq!(summary.peers.len(), 1);
+        assert_eq!(summary.peers[0].routes_count, 1, "one VIP, no PodCIDR");
+        assert!(!summary.peers[0].export_pod_cidr);
+        let row = &summary.advertised_services[0];
+        assert_eq!(row.announcing_nodes, ["node-1"]);
+        assert_eq!(row.peers, ["172.16.1.1:65001"]);
+    }
+
+    #[test]
+    fn a_peer_whose_config_selects_no_advertisement_announces_nothing() {
+        let node_labels = one_node_labels();
+        let lb_services = vec![lb("web", "default", "1.2.3.4", None)];
+        // A config with a family that names no advertisements selector.
+        let mut cfg = DynamicObject::new("cfg-quiet", &cilium_bgp_peer_config_v2_resource());
+        cfg.data = json!({"spec": {"families": [{"afi": "ipv4", "safi": "unicast"}]}});
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![cfg],
+            vec![labelled_advertisement(
+                "adv",
+                ("advertise", "all"),
+                json!([{"advertisementType": "Service",
+                        "service": {"addresses": ["LoadBalancerIP"]}}]),
+            )],
+            vec![cluster_config_with_peer_config("cfg-quiet")],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &lb_services,
+        );
+
+        assert!(summary.advertised_services.is_empty());
+        assert_eq!(summary.peers[0].routes_count, 0);
+    }
+
+    #[test]
+    fn a_service_block_announcing_no_load_balancer_ip_advertises_no_vip() {
+        // `service.addresses` may name only ClusterIP or ExternalIP; such a
+        // block exports no LoadBalancer VIP.
+        let node_labels = one_node_labels();
+        let lb_services = vec![lb("web", "default", "1.2.3.4", None)];
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![advertisement(
+                "adv-clusterip",
+                json!([{"advertisementType": "Service",
+                        "service": {"addresses": ["ClusterIP", "ExternalIP"]}}]),
+            )],
+            vec![one_node_cluster_config()],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &lb_services,
+        );
+
+        assert!(
+            summary.advertised_services.is_empty(),
+            "got {:?}",
+            summary.advertised_services
+        );
+        assert_eq!(summary.peers[0].routes_count, 0);
+    }
+
+    #[test]
+    fn an_unreadable_advertisement_does_not_narrow_the_services() {
+        // Cilium requires `spec.advertisements`; an object without it is not
+        // a valid empty advertisement, so nothing is claimed from it.
+        let node_labels = one_node_labels();
+        let lb_services = vec![lb("web", "default", "1.2.3.4", None)];
+        let mut malformed = DynamicObject::new("adv-odd", &cilium_bgp_advertisement_v2_resource());
+        malformed.data = json!({"spec": {}});
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![malformed],
+            vec![one_node_cluster_config()],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &lb_services,
+        );
+        assert_eq!(summary.advertised_services.len(), 1);
+
+        // Likewise a Service block that does not say which addresses it
+        // announces.
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![advertisement(
+                "adv-no-addresses",
+                json!([{"advertisementType": "Service"}]),
+            )],
+            vec![one_node_cluster_config()],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &lb_services,
+        );
+        assert_eq!(summary.advertised_services.len(), 1);
+    }
+
+    #[test]
+    fn a_calico_selector_expression_scopes_the_peer_to_the_nodes_it_names() {
+        let mut node_labels = HashMap::new();
+        node_labels.insert(
+            "rack1-host1".to_string(),
+            BTreeMap::from([("rack".to_string(), "rack1".to_string())]),
+        );
+        node_labels.insert(
+            "rack2-host1".to_string(),
+            BTreeMap::from([("rack".to_string(), "rack2".to_string())]),
+        );
+        node_labels.insert("unracked".to_string(), BTreeMap::new());
+
+        let nodes_for = |expr: &str| -> Vec<String> {
+            let mut peer = DynamicObject::new("peer", &calico_bgp_peer_resource());
+            peer.data = json!({
+                "spec": {"nodeSelector": expr, "peerIP": "10.0.0.1", "asNumber": 64512}
+            });
+            build_calico_bgp_summary(vec![peer], &node_labels)
+                .peers
+                .iter()
+                .map(|p| p.node_name.clone())
+                .collect()
+        };
+
+        assert_eq!(nodes_for("rack == 'rack2'"), ["rack2-host1"]);
+        assert_eq!(nodes_for("rack != \"rack2\""), ["rack1-host1", "unracked"]);
+        assert_eq!(nodes_for("has(rack)"), ["rack1-host1", "rack2-host1"]);
+        assert_eq!(nodes_for("!has(rack)"), ["unracked"]);
+        assert_eq!(
+            nodes_for("rack in {'rack1', 'rack2'}"),
+            ["rack1-host1", "rack2-host1"]
+        );
+        assert_eq!(
+            nodes_for("rack not in {'rack1'}"),
+            ["rack2-host1", "unracked"]
+        );
+        assert_eq!(
+            nodes_for("has(rack) && rack starts with 'rack2' || !has(rack)"),
+            ["rack2-host1", "unracked"]
+        );
+        assert_eq!(nodes_for("all()").len(), 3, "all() is every node");
+        // An expression this parser does not understand keeps the global
+        // reading rather than dropping sessions that may exist.
+        assert_eq!(nodes_for("rack === 'rack2'").len(), 3);
+        assert_eq!(
+            nodes_for("internal == 'x'"),
+            Vec::<String>::new(),
+            "`in` is not `internal`"
+        );
     }
 
     #[tokio::test]

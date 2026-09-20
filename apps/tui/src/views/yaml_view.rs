@@ -14,6 +14,10 @@ pub struct YamlViewState {
     pub resource_name: String,
     pub resource_kind: String,
     pub namespace: Option<String>,
+    /// The `apiVersion` this view was pinned to by the row that opened it,
+    /// when the row knew which CRD it came from. `None` is a view that
+    /// resolved its kind by name.
+    pub pinned_api_version: Option<String>,
     pub yaml_content: String,
     pub original_yaml: String,
     pub lines: Vec<String>,
@@ -44,6 +48,7 @@ impl YamlViewState {
             resource_name: name,
             resource_kind: kind,
             namespace,
+            pinned_api_version: None,
             original_yaml: yaml_content.clone(),
             yaml_content,
             lines,

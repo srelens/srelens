@@ -195,6 +195,35 @@ fn test_bgp_summary_serde_roundtrip() {
 }
 
 #[test]
+fn a_peer_written_before_policy_api_version_existed_still_deserializes() {
+    // A payload from a build that predates the field: nothing pinned.
+    let json = serde_json::json!({
+        "node_name": "node-1",
+        "peer_address": "172.16.0.1",
+        "peer_asn": 65530,
+        "local_asn": 65531,
+        "session_state": "Established",
+        "policy_name": "metallb-peer-1",
+        "policy_kind": "BGPPeer",
+        "namespace": "metallb-system",
+        "export_pod_cidr": false,
+        "hold_time_seconds": null,
+        "keepalive_time_seconds": null,
+        "connect_retry_seconds": null,
+        "multihop_ttl": null,
+        "graceful_restart": false,
+        "advertised_prefixes": [],
+        "routes_count": 0,
+        "routes_received": 0,
+        "uptime_or_last_change": null
+    });
+    let neighbor: BgpNeighbor =
+        serde_json::from_value(json).expect("a row without policy_api_version must deserialize");
+    assert_eq!(neighbor.policy_api_version, "");
+    assert_eq!(neighbor.policy_kind, "BGPPeer");
+}
+
+#[test]
 fn test_established_peers_calculation_only_counts_established() {
     let n_established = BgpNeighbor {
         node_name: "n1".to_string(),
