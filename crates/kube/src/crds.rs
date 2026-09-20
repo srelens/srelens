@@ -530,19 +530,12 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                 // each page, which is what that budget measures. Wrapping the
                 // walk gave four pages one request's time, and a cluster large
                 // enough to need paging was the one most likely to be cut off.
-                //
-                // An API error keeps its own words untouched — the frontend
-                // parses them for the cluster-login prompt — and only a
-                // timeout gets a sentence of ours.
+                // The error mapping — an API error's own words, a sentence of
+                // ours only for a timeout — is `into_capability_error`'s.
                 let (objects, truncated) =
                     crate::list_cap::list_capped(&api, ListParams::default())
                         .await
-                        .map_err(|e| match e {
-                            crate::list_cap::ListCappedError::Api(error) => handler_err(error),
-                            timeout => CapabilityError::Handler(format!(
-                                "list custom resource timed out: {timeout}"
-                            )),
-                        })?;
+                        .map_err(|e| e.into_capability_error("list custom resource"))?;
                 let (columns, columns_error) = if input.use_crd_columns {
                     match discover_columns(client, &input.group, &input.plural, &input.version)
                         .await

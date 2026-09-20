@@ -844,7 +844,7 @@ fn render_pods_table(
 
     if d.pods.is_empty() {
         let empty_p = Paragraph::new("\n  No pods currently scheduled on this node.")
-            .style(Style::default().fg(Theme::DIM));
+            .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty_p, inner);
         return;
     }
@@ -1115,7 +1115,7 @@ fn render_pods_table(
             ),
             Span::styled(
                 pad_display(&ip_clean, ip_w),
-                Style::default().fg(Theme::DIM).bg(row_bg),
+                Style::default().fg(Theme::dim()).bg(row_bg),
             ),
             Span::styled(
                 pad_display(&pod.phase, status_w),
@@ -1131,7 +1131,7 @@ fn render_pods_table(
                     .fg(if pod.restarts > 0 {
                         Theme::YELLOW
                     } else {
-                        Theme::DIM
+                        Theme::dim()
                     })
                     .bg(row_bg),
             ),
@@ -1146,7 +1146,7 @@ fn render_pods_table(
             Span::styled(pad_display(&gpu_str, gpu_w), gpu_style),
             Span::styled(
                 pad_display(&age_clean, age_w),
-                Style::default().fg(Theme::DIM).bg(row_bg),
+                Style::default().fg(Theme::dim()).bg(row_bg),
             ),
         ]);
         lines.push(row);

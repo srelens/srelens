@@ -9,13 +9,26 @@ use crate::connect::request_timeout;
 use kube::api::{Api, ListParams};
 use kube::Resource;
 use serde::de::DeserializeOwned;
+use srelens_capability::CapabilityError;
 use std::fmt::Debug;
+use std::time::Duration;
 
 /// Page size when walking the API server's continue token.
 pub const APP_LIST_PAGE: u32 = 500;
 
 /// Hard ceiling on rows returned by app-reader lists.
 pub const APP_LIST_CAP: usize = 2_000;
+
+/// Most pages one walk will request before giving up with what it has.
+///
+/// The row cap alone does not bound the walk: a selector-filtered list can
+/// answer page after page with no matching item and a fresh continue token,
+/// since the API server pages the unfiltered collection and filters each
+/// chunk. Each such page spends a full per-page budget, so without this the
+/// number of requests — and the wall clock — was unbounded. Twenty pages is
+/// ten thousand objects scanned, five times what the cap can return; a walk
+/// that hits it stops and reports itself truncated, which is true.
+pub const APP_LIST_MAX_PAGES: usize = 20;
 
 /// Why a capped list did not finish.
 ///
@@ -29,26 +42,60 @@ pub const APP_LIST_CAP: usize = 2_000;
 pub enum ListCappedError {
     /// The API server answered, with an error.
     Api(kube::Error),
-    /// One page did not answer within [`request_timeout`]. Carries how many
-    /// pages had already been read, so the message can say the walk was
-    /// partway through rather than implying the first request hung.
-    Timeout { pages_read: usize },
+    /// One page did not answer within its budget. Carries how many pages had
+    /// already been read, so the message can say the walk was partway through
+    /// rather than implying the first request hung, and the budget that was
+    /// actually applied — not whatever the process-wide setting reads when the
+    /// message is rendered, which may differ from it.
+    Timeout { pages_read: usize, budget: Duration },
+}
+
+/// `5s`, or `100ms` for a budget under a second — the way a reader would say it.
+fn describe_budget(budget: Duration) -> String {
+    if budget.subsec_millis() == 0 {
+        format!("{}s", budget.as_secs())
+    } else {
+        format!("{}ms", budget.as_millis())
+    }
 }
 
 impl std::fmt::Display for ListCappedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Api(error) => write!(f, "{error}"),
-            Self::Timeout { pages_read: 0 } => write!(
+            // "Timed out" and not "the cluster did not answer": a timeout says
+            // only that the answer did not arrive in time, not whose fault
+            // that was.
+            Self::Timeout {
+                pages_read: 0,
+                budget,
+            } => write!(
                 f,
-                "the cluster did not answer within {}s",
-                crate::connect::request_timeout_secs()
+                "Kubernetes list request timed out after {}",
+                describe_budget(*budget)
             ),
-            Self::Timeout { pages_read } => write!(
+            Self::Timeout { pages_read, budget } => write!(
                 f,
-                "the cluster did not answer within {}s after {pages_read} page(s)",
-                crate::connect::request_timeout_secs()
+                "Kubernetes list request timed out after {} ({pages_read} page(s) already read)",
+                describe_budget(*budget)
             ),
+        }
+    }
+}
+
+impl ListCappedError {
+    /// The capability error a handler returns for this failure.
+    ///
+    /// An API error keeps its own words untouched — the frontend parses them
+    /// for the cluster-login prompt — and only a timeout gets a sentence of
+    /// ours, naming `what` was being listed. One place for both callers
+    /// (`k8s.listCustomResource`, `k8s.listEvents`) so they cannot drift.
+    pub fn into_capability_error(self, what: &str) -> CapabilityError {
+        match self {
+            Self::Api(error) => CapabilityError::Handler(error.to_string()),
+            timeout @ Self::Timeout { .. } => {
+                CapabilityError::Handler(format!("{what} timed out: {timeout}"))
+            }
         }
     }
 }
@@ -80,7 +127,8 @@ impl From<kube::Error> for ListCappedError {
 /// [`request_timeout`] is applied PER PAGE, here, because that is what it
 /// measures: every other capability spends it on one `api.list`. A caller must
 /// not wrap this call in a timeout of its own — that would divide one
-/// request's budget across every page of the walk.
+/// request's budget across every page of the walk. The walk as a whole is
+/// bounded by [`APP_LIST_MAX_PAGES`] instead.
 pub async fn list_capped<K>(
     api: &Api<K>,
     base: ListParams,
@@ -102,7 +150,7 @@ where
 pub async fn list_capped_within<K>(
     api: &Api<K>,
     base: ListParams,
-    per_page: std::time::Duration,
+    per_page: Duration,
 ) -> Result<(Vec<K>, bool), ListCappedError>
 where
     K: Resource + Clone + DeserializeOwned + Debug,
@@ -117,7 +165,10 @@ where
         }
         let page = tokio::time::timeout(per_page, api.list(&params))
             .await
-            .map_err(|_| ListCappedError::Timeout { pages_read })??;
+            .map_err(|_| ListCappedError::Timeout {
+                pages_read,
+                budget: per_page,
+            })??;
         pages_read += 1;
         items.extend(page.items);
         token = page.metadata.continue_.filter(|t| !t.is_empty());
@@ -128,6 +179,11 @@ where
         }
         if token.is_none() {
             return Ok((items, false));
+        }
+        // More remain, but this walk has spent its pages: what was read is
+        // returned as a cut-off list rather than requesting on indefinitely.
+        if pages_read >= APP_LIST_MAX_PAGES {
+            return Ok((items, true));
         }
     }
 }
@@ -317,11 +373,124 @@ mod tests {
             .expect_err("a page slower than the budget must not be waited out");
 
         assert!(
-            matches!(error, ListCappedError::Timeout { pages_read: 0 }),
+            matches!(error, ListCappedError::Timeout { pages_read: 0, budget: applied } if applied == budget),
             "expected a timeout on the first page, got {error:?}"
         );
-        assert!(error.to_string().contains("did not answer"), "{error}");
+        // The message names the budget that was APPLIED, not the process-wide
+        // setting the caller may have bypassed.
+        assert_eq!(
+            error.to_string(),
+            "Kubernetes list request timed out after 100ms"
+        );
         assert_eq!(uris.lock().unwrap().len(), 1);
+    }
+
+    /// A timeout partway through says how far the walk got.
+    #[tokio::test]
+    async fn a_second_page_that_times_out_reports_the_pages_already_read() {
+        let budget = Duration::from_millis(150);
+        // The first page answers at once; the second is held past the budget.
+        let served = Arc::new(AtomicUsize::new(0));
+        let uris = Arc::new(Mutex::new(vec![]));
+        let captured = uris.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let captured = captured.clone();
+            let served = served.clone();
+            async move {
+                captured.lock().unwrap().push(request.uri().to_string());
+                let page = served.fetch_add(1, Ordering::SeqCst);
+                let body = if page == 0 {
+                    event_list(vec![event("a")], Some("p2"))
+                } else {
+                    tokio::time::sleep(budget * 8).await;
+                    event_list(vec![event("b")], None)
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let api: Api<Event> = Api::all(Client::new(service, "default"));
+
+        let error = list_capped_within(&api, ListParams::default(), budget)
+            .await
+            .expect_err("the second page overran the budget");
+
+        assert!(
+            matches!(error, ListCappedError::Timeout { pages_read: 1, .. }),
+            "got {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "Kubernetes list request timed out after 150ms (1 page(s) already read)"
+        );
+        assert_eq!(uris.lock().unwrap().len(), 2);
+    }
+
+    /// A server that answers every page empty with a fresh continue token
+    /// never fills the cap. The walk stops at `APP_LIST_MAX_PAGES` and says
+    /// it was cut off, rather than requesting forever.
+    #[tokio::test]
+    async fn a_walk_of_empty_pages_with_fresh_tokens_is_bounded() {
+        let uris = Arc::new(Mutex::new(vec![]));
+        let captured = uris.clone();
+        let served = Arc::new(AtomicUsize::new(0));
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let captured = captured.clone();
+            let served = served.clone();
+            async move {
+                captured.lock().unwrap().push(request.uri().to_string());
+                let n = served.fetch_add(1, Ordering::SeqCst);
+                let body = event_list(vec![], Some(&format!("page-{}", n + 2)));
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let api: Api<Event> = Api::all(Client::new(service, "default"));
+
+        let (items, truncated) = list_capped(&api, ListParams::default())
+            .await
+            .expect("every page answered");
+
+        assert!(items.is_empty());
+        assert!(truncated, "a walk cut off by the page bound has more unread");
+        assert_eq!(uris.lock().unwrap().len(), APP_LIST_MAX_PAGES);
+    }
+
+    /// The handlers' mapping: an API error's own words pass through untouched
+    /// (the frontend parses them for the cluster-login prompt), and only a
+    /// timeout gets a sentence naming what was being listed.
+    #[test]
+    fn an_api_error_keeps_its_words_and_a_timeout_names_the_list() {
+        let api_error = kube::Error::Api(Box::new(
+            kube::core::Status::failure("Unauthorized", "Unauthorized").with_code(401),
+        ));
+        let expected = api_error.to_string();
+        match ListCappedError::Api(api_error).into_capability_error("list events") {
+            CapabilityError::Handler(message) => assert_eq!(message, expected),
+            other => panic!("expected a handler error, got {other:?}"),
+        }
+
+        let timeout = ListCappedError::Timeout {
+            pages_read: 2,
+            budget: Duration::from_secs(5),
+        };
+        match timeout.into_capability_error("list custom resource") {
+            CapabilityError::Handler(message) => assert_eq!(
+                message,
+                "list custom resource timed out: Kubernetes list request timed out after 5s (2 page(s) already read)"
+            ),
+            other => panic!("expected a handler error, got {other:?}"),
+        }
     }
 
     /// The budget is per request, not per walk: three pages that each answer

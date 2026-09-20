@@ -513,47 +513,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(client) = client {
                                 match srelens_kube::manifest::split_documents(&new_yaml) {
                                     Ok(docs) if !docs.is_empty() => {
-                                        // Each document's EFFECTIVE namespace, worked out
-                                        // before the docs are handed over (they are
-                                        // consumed) and by the same rule the apply itself
-                                        // uses: the document's own `metadata.namespace`,
-                                        // else the fallback. Invalidating every applied
-                                        // document in the VIEW's namespace left a
-                                        // multi-document manifest — or one editing a
-                                        // resource in another namespace — showing the
-                                        // pre-apply list in the namespace that actually
-                                        // changed.
-                                        let doc_namespaces: Vec<String> = docs
-                                            .iter()
-                                            .map(|doc| {
-                                                doc.get("metadata")
-                                                    .and_then(|m| m.get("namespace"))
-                                                    .and_then(|ns| ns.as_str())
-                                                    .map(str::to_string)
-                                                    .unwrap_or_else(|| {
-                                                        fallback_ns.unwrap_or("").to_string()
-                                                    })
-                                            })
-                                            .collect();
-                                        // One result per document, in order (`apply_documents`).
+                                        // The documents are consumed by the apply, so the
+                                        // copy the invalidation reads is taken first. One
+                                        // result comes back per document, in order.
+                                        let applied_from = docs.clone();
                                         let results = srelens_kube::manifest::apply_documents(&client, docs, fallback_ns, true).await;
                                         let applied_docs: Vec<_> = results.iter().filter(|d| d.applied).collect();
                                         let failed_docs: Vec<_> = results.iter().filter(|d| !d.applied).collect();
 
-                                        // Invalidate cache for every document that was applied
-                                        for (index, doc) in results.iter().enumerate() {
-                                            if !doc.applied {
-                                                continue;
-                                            }
-                                            let doc_ns = doc_namespaces
-                                                .get(index)
-                                                .map(String::as_str)
-                                                // A result with no document beside it should
-                                                // not happen; fall back rather than skip the
-                                                // invalidation and show stale rows.
-                                                .unwrap_or_else(|| res_ns.as_deref().unwrap_or(""));
-                                            app.invalidate_resource_cache_for(&doc.kind, doc_ns);
-                                        }
+                                        // Every applied document, in ITS namespace — not the
+                                        // view's (`app::applied_document_scopes`).
+                                        app.invalidate_applied_documents(&applied_from, fallback_ns, &results);
 
                                         if failed_docs.is_empty() && !applied_docs.is_empty() {
                                             let updated_names: Vec<String> = applied_docs.iter().map(|d| format!("{}/{}", d.kind, d.name)).collect();

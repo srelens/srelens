@@ -17,7 +17,15 @@ import {
 } from "@srelens/core";
 import { Button, Checkbox, Drawer, LoadingState, TabStrip, TextInput, type ContextMenuItem, type StripTab } from "@srelens/ui-kit";
 import { contextLabelFor } from "../lib/agentSuggestions";
-import { setContexts, setKubeconfigFiles, useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
+import {
+  pinContextKey,
+  resolveContext,
+  setContexts,
+  setKubeconfigFiles,
+  useContexts,
+  useContextsError,
+  useContextsStatus,
+} from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
 import { getMark, getContextLabel, loadMarks, useMark } from "../lib/marks";
@@ -170,7 +178,7 @@ export function Window({
   const { tabs, activeId, workspace } = useTabs();
   useMark("", "");
   const activeIdCluster = useActiveCluster();
-  const activeCtx = contexts.find((c) => c.stableId === activeIdCluster) ?? null;
+  const activeCtx = resolveContext(contexts, activeIdCluster) ?? null;
   // The console dock's own scope label — `Window`'s job because it is the one
   // place that already knows both the active tab's route and the active
   // cluster's name; `Console` itself only reads `scope` back off the provider.
@@ -259,6 +267,11 @@ export function Window({
         failure = outcome.error ?? "";
         listed = true;
         const ctxQuery = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("context") : null;
+        // The key outlives its resolution into a stable id below: workspaces
+        // hold the id, two contexts can share one, and every later lookup by
+        // id in this window must land on the context the query named rather
+        // than the first of the pair (see `pinContextKey`).
+        if (ctxQuery && windowLabel !== "main") pinContextKey(ctxQuery);
         // Empty workspaces from a parse that kept the document shell are the
         // same as no save: seeding against them cannot pick a target workspace.
         let saved = usableTabsState(loadTabsState(undefined, undefined, windowLabel));

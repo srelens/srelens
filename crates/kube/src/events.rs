@@ -148,19 +148,12 @@ pub fn list_events_capability(cache: Arc<ClientCache>) -> Capability {
                 // each page, which is what that budget measures. Wrapping the
                 // walk gave four pages one request's time, and a busy
                 // namespace — the one that needs paging — was the likeliest to
-                // be cut off by it. An API error keeps its own words, which
-                // the frontend parses for the cluster-login prompt.
-                let (items, truncated) =
-                    crate::list_cap::list_capped(&api, params)
-                        .await
-                        .map_err(|e| match e {
-                            crate::list_cap::ListCappedError::Api(error) => {
-                                CapabilityError::Handler(error.to_string())
-                            }
-                            timeout => CapabilityError::Handler(format!(
-                                "list events timed out: {timeout}"
-                            )),
-                        })?;
+                // be cut off by it. The error mapping — an API error's own
+                // words, a sentence of ours only for a timeout — is
+                // `into_capability_error`'s.
+                let (items, truncated) = crate::list_cap::list_capped(&api, params)
+                    .await
+                    .map_err(|e| e.into_capability_error("list events"))?;
                 Ok(ListEventsOut {
                     events: items.into_iter().map(summarise).collect(),
                     truncated,

@@ -1306,6 +1306,20 @@ impl App {
         self.set_toast(msg.to_string(), Theme::status_ok());
     }
 
+    /// Invalidate the cached lists an apply changed: one `(kind, namespace)`
+    /// per applied document, in that document's own namespace. See
+    /// `applied_document_scopes`.
+    pub fn invalidate_applied_documents(
+        &mut self,
+        docs: &[serde_json::Value],
+        fallback_ns: Option<&str>,
+        results: &[srelens_kube::manifest::ApplyDoc],
+    ) {
+        for (kind, ns) in applied_document_scopes(docs, fallback_ns, results) {
+            self.invalidate_resource_cache_for(&kind, &ns);
+        }
+    }
+
     pub fn invalidate_resource_cache_for(&mut self, kind: &str, ns: &str) {
         if kind.is_empty() {
             return;
@@ -13953,9 +13967,95 @@ pub fn parse_ready_ratio(s: &str) -> (i64, i64) {
     (have, want)
 }
 
+/// The `(kind, namespace)` pairs whose cached lists an apply invalidates:
+/// one per document that was applied, in that document's EFFECTIVE
+/// namespace — its own `metadata.namespace`, else `fallback_ns` — by the same
+/// rule `apply_documents` uses to place it. Results arrive one per document,
+/// in order, so the two are zipped.
+///
+/// Invalidating every applied document under the YAML view's namespace left a
+/// multi-document manifest, or one editing a resource in another namespace,
+/// showing the pre-apply list in the namespace that actually changed.
+pub fn applied_document_scopes(
+    docs: &[serde_json::Value],
+    fallback_ns: Option<&str>,
+    results: &[srelens_kube::manifest::ApplyDoc],
+) -> Vec<(String, String)> {
+    let fallback = fallback_ns.unwrap_or("");
+    results
+        .iter()
+        .enumerate()
+        .filter(|(_, result)| result.applied)
+        .map(|(index, result)| {
+            let ns = docs
+                .get(index)
+                .and_then(|doc| doc.get("metadata"))
+                .and_then(|m| m.get("namespace"))
+                .and_then(|ns| ns.as_str())
+                .unwrap_or(fallback);
+            (result.kind.clone(), ns.to_string())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn applied(kind: &str, name: &str, applied: bool) -> srelens_kube::manifest::ApplyDoc {
+        srelens_kube::manifest::ApplyDoc {
+            kind: kind.to_string(),
+            name: name.to_string(),
+            applied,
+            conflict: None,
+            error: None,
+        }
+    }
+
+    /// A manifest with documents in namespaces `a` and `b`, applied from a
+    /// view in namespace `c`, invalidates `a` and `b` — not `c` twice. A
+    /// document naming no namespace lands where the apply put it: the
+    /// fallback.
+    #[test]
+    fn each_applied_document_is_invalidated_in_its_own_namespace() {
+        let docs = vec![
+            serde_json::json!({"kind": "Deployment", "metadata": {"name": "web", "namespace": "a"}}),
+            serde_json::json!({"kind": "Service", "metadata": {"name": "web", "namespace": "b"}}),
+            serde_json::json!({"kind": "ConfigMap", "metadata": {"name": "web"}}),
+        ];
+        let results = vec![
+            applied("Deployment", "web", true),
+            applied("Service", "web", true),
+            applied("ConfigMap", "web", true),
+        ];
+
+        let scopes = applied_document_scopes(&docs, Some("c"), &results);
+
+        assert_eq!(
+            scopes,
+            vec![
+                ("Deployment".to_string(), "a".to_string()),
+                ("Service".to_string(), "b".to_string()),
+                ("ConfigMap".to_string(), "c".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_document_that_failed_to_apply_invalidates_nothing() {
+        let docs = vec![
+            serde_json::json!({"kind": "Deployment", "metadata": {"name": "web", "namespace": "a"}}),
+            serde_json::json!({"kind": "Service", "metadata": {"name": "web", "namespace": "b"}}),
+        ];
+        let results = vec![
+            applied("Deployment", "web", false),
+            applied("Service", "web", true),
+        ];
+
+        let scopes = applied_document_scopes(&docs, None, &results);
+
+        assert_eq!(scopes, vec![("Service".to_string(), "b".to_string())]);
+    }
 
     #[test]
     fn test_delete_prev_word_simple() {

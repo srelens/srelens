@@ -443,6 +443,12 @@ describe("Window boot", () => {
     await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
     expect(store.getState().workspaces.find((w) => w.id === store.getState().currentId)?.tabs.map((t) => t.sub))
       .toContain("right");
+    // Matching the query by key is undone if the active cluster — a stable
+    // id the pair shares — then resolves to the first of them: every
+    // cluster-scoped screen in this window would read and act on `left`.
+    expect(store.activeCluster()).toBe("dup");
+    expect(contextFor(store.activeCluster())?.key).toBe(second.key);
+    expect(contextFor(store.activeCluster())?.name).toBe("right");
     window.history.replaceState({}, "", "/");
   });
 

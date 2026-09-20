@@ -6278,6 +6278,78 @@ mod tests {
             .any(|(cmd, _)| cmd.name == "theme cyberpunk"));
     }
 
+    /// Secondary text in the node inspector follows the selected theme.
+    /// `Theme::DIM` is the default palette's value, fixed at compile time;
+    /// a view that draws it shows default-theme grey inside every other
+    /// theme, so the runtime accessor is what the pod table must read.
+    #[test]
+    fn node_inspector_secondary_text_follows_the_active_theme() {
+        let _lock = THEME_TEST_MUTEX.lock().unwrap();
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+        use srelens_tui::theme::Theme;
+        use srelens_tui::views::node_inspector_view::{
+            render_node_inspector_view, NodeInspectorState,
+        };
+
+        assert!(Theme::set_theme_by_name("solarized-dark").is_some());
+        assert_ne!(
+            Theme::dim(),
+            Theme::DIM,
+            "the test needs a theme whose dim differs from the default's"
+        );
+
+        let mut state = NodeInspectorState::new("node-1".to_string());
+        state.set_details(NodeInspectorDetails {
+            name: "node-1".to_string(),
+            status: "Ready".to_string(),
+            pods_count: 1,
+            pods: vec![NodePodItem {
+                name: "web".to_string(),
+                namespace: "default".to_string(),
+                phase: "Running".to_string(),
+                ready_containers: "1/1".to_string(),
+                restarts: 0,
+                age: "3d".to_string(),
+                cpu_requests_millicores: 100,
+                mem_requests_mib: 128,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.1.5".to_string(),
+            }],
+            ..Default::default()
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("test terminal");
+        terminal
+            .draw(|f| render_node_inspector_view(f, f.area(), &state))
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let (mut ip_cell, mut age_cell) = (None, None);
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect();
+            if !line.contains("10.244.1.5") {
+                continue;
+            }
+            let col = |needle: &str| {
+                let at = line.find(needle).unwrap();
+                line[..at].chars().count() as u16
+            };
+            ip_cell = Some(buf[(col("10.244.1.5"), y)].fg);
+            age_cell = Some(buf[(col("3d"), y)].fg);
+        }
+        // Reset before asserting so a failure does not leave the theme changed
+        // for the other tests that share this process.
+        assert!(Theme::set_theme_by_name("catppuccin-mocha").is_some());
+
+        let solarized_dim = ratatui::style::Color::Rgb(112, 131, 135);
+        assert_eq!(ip_cell, Some(solarized_dim), "the pod IP is secondary text");
+        assert_eq!(age_cell, Some(solarized_dim), "the pod age is secondary text");
+    }
+
     #[tokio::test]
     async fn test_theme_picker_live_preview_revert_and_commit() {
         let _lock = THEME_TEST_MUTEX.lock().unwrap();
