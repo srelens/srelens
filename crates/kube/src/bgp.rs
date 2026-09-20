@@ -140,6 +140,10 @@ pub struct BgpClusterSummary {
     pub peers: Vec<BgpNeighbor>,
     pub advertised_services: Vec<BgpAdvertisedService>,
     pub ip_pools: Vec<BgpIpPool>,
+    /// Why discovery could not see everything: a refused list, a timeout, an
+    /// unreachable server. `engine: None` with no error is the cluster
+    /// answering that it runs no BGP control plane; `engine: None` *with* an
+    /// error is discovery failing, and the two must not read alike.
     pub error: Option<String>,
 }
 
@@ -328,26 +332,49 @@ fn request_timeout() -> Duration {
     Duration::from_secs(5)
 }
 
+/// List one CRD.
+///
+/// `Ok` means the API server answered: either with objects, or — for a CRD
+/// this cluster does not have installed, which answers `404` — with none.
+/// `Err` means it did not answer: the request was refused, timed out, or the
+/// server was unreachable. Those two must never render as one sentence
+/// (AGENTS.md, "Say what you know, not what you guess"): a caller who cannot
+/// read `CiliumBGPClusterConfig` has learned nothing about the cluster's BGP,
+/// and reporting "no BGP engine" would be a confident, wrong claim.
+async fn list_one_resource(
+    client: &kube::Client,
+    res: &ApiResource,
+) -> Result<Vec<DynamicObject>, String> {
+    let api: Api<DynamicObject> = Api::all_with(client.clone(), res);
+    match tokio::time::timeout(request_timeout(), api.list(&ListParams::default())).await {
+        Ok(Ok(list)) => Ok(list.items),
+        // 404 is this cluster saying it serves no such resource.
+        Ok(Err(kube::Error::Api(e))) if e.code == 404 => Ok(Vec::new()),
+        Ok(Err(e)) => Err(format!("list {}: {}", res.kind, e)),
+        Err(_) => Err(format!("list {} timed out", res.kind)),
+    }
+}
+
+/// List a CRD that exists under two API versions, preferring whichever
+/// version has objects. The lookup only fails when *neither* version could be
+/// read — one version answering `404` while the other serves objects is the
+/// normal shape of a cluster that has upgraded.
 async fn list_dynamic_resource(
     client: &kube::Client,
     res1: &ApiResource,
     res2: &ApiResource,
-) -> Vec<DynamicObject> {
-    let api1: Api<DynamicObject> = Api::all_with(client.clone(), res1);
-    if let Ok(Ok(list)) =
-        tokio::time::timeout(request_timeout(), api1.list(&ListParams::default())).await
-    {
-        if !list.items.is_empty() {
-            return list.items;
-        }
+) -> Result<Vec<DynamicObject>, String> {
+    let first = list_one_resource(client, res1).await;
+    if matches!(&first, Ok(items) if !items.is_empty()) {
+        return first;
     }
-    let api2: Api<DynamicObject> = Api::all_with(client.clone(), res2);
-    if let Ok(Ok(list)) =
-        tokio::time::timeout(request_timeout(), api2.list(&ListParams::default())).await
-    {
-        return list.items;
+    let second = list_one_resource(client, res2).await;
+    match (first, second) {
+        (_, Ok(items)) if !items.is_empty() => Ok(items),
+        (Ok(items), _) => Ok(items),
+        (Err(_), Ok(items)) => Ok(items),
+        (Err(e), Err(_)) => Err(e),
     }
-    Vec::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -440,38 +467,58 @@ pub async fn fetch_bgp_summary(client: &kube::Client) -> Result<BgpClusterSummar
         }
     }
 
+    // A lookup that was refused or timed out is not an answer about the
+    // cluster. Each engine's failures are kept so that, if no engine is found,
+    // the summary can say discovery failed rather than claim there is none.
+    let mut failures: Vec<String> = Vec::new();
+
     // 3. Try Cilium BGP Control Plane (v2 / v2alpha1)
-    if let Ok(cilium_summary) =
-        discover_cilium_bgp(client, &node_labels_map, &node_pod_cidrs, &lb_services).await
-    {
-        if cilium_summary.engine != BgpEngineType::None
-            && (!cilium_summary.peers.is_empty() || !cilium_summary.ip_pools.is_empty())
-        {
-            let mut res = cilium_summary;
-            res.total_nodes = total_nodes;
-            return Ok(res);
+    match discover_cilium_bgp(client, &node_labels_map, &node_pod_cidrs, &lb_services).await {
+        Ok(cilium_summary) => {
+            if cilium_summary.engine != BgpEngineType::None
+                && (!cilium_summary.peers.is_empty() || !cilium_summary.ip_pools.is_empty())
+            {
+                let mut res = cilium_summary;
+                res.total_nodes = total_nodes;
+                return Ok(res);
+            }
+            if let Some(e) = cilium_summary.error {
+                failures.push(e);
+            }
         }
+        Err(e) => failures.push(e),
     }
 
     // 4. Fallback to MetalLB
-    if let Ok(metallb_summary) = discover_metallb_bgp(client, &node_labels_map, &lb_services).await
-    {
-        if metallb_summary.engine != BgpEngineType::None
-            && (!metallb_summary.peers.is_empty() || !metallb_summary.ip_pools.is_empty())
-        {
-            let mut res = metallb_summary;
-            res.total_nodes = total_nodes;
-            return Ok(res);
+    match discover_metallb_bgp(client, &node_labels_map, &lb_services).await {
+        Ok(metallb_summary) => {
+            if metallb_summary.engine != BgpEngineType::None
+                && (!metallb_summary.peers.is_empty() || !metallb_summary.ip_pools.is_empty())
+            {
+                let mut res = metallb_summary;
+                res.total_nodes = total_nodes;
+                return Ok(res);
+            }
+            if let Some(e) = metallb_summary.error {
+                failures.push(e);
+            }
         }
+        Err(e) => failures.push(e),
     }
 
     // 5. Fallback to Calico
-    if let Ok(calico_summary) = discover_calico_bgp(client, &node_labels_map).await {
-        if calico_summary.engine != BgpEngineType::None && !calico_summary.peers.is_empty() {
-            let mut res = calico_summary;
-            res.total_nodes = total_nodes;
-            return Ok(res);
+    match discover_calico_bgp(client, &node_labels_map).await {
+        Ok(calico_summary) => {
+            if calico_summary.engine != BgpEngineType::None && !calico_summary.peers.is_empty() {
+                let mut res = calico_summary;
+                res.total_nodes = total_nodes;
+                return Ok(res);
+            }
+            if let Some(e) = calico_summary.error {
+                failures.push(e);
+            }
         }
+        Err(e) => failures.push(e),
     }
 
     Ok(BgpClusterSummary {
@@ -484,7 +531,10 @@ pub async fn fetch_bgp_summary(client: &kube::Client) -> Result<BgpClusterSummar
         peers: Vec::new(),
         advertised_services: Vec::new(),
         ip_pools: Vec::new(),
-        error: None,
+        // No engine was found. Whether that is a fact about the cluster or
+        // only about what this caller may read is the difference between
+        // `None` and a reason here.
+        error: join_failures(&failures).map(|why| format!("BGP discovery failed: {}", why)),
     })
 }
 
@@ -519,62 +569,66 @@ async fn discover_cilium_bgp(
     node_pod_cidrs: &HashMap<String, Vec<String>>,
     lb_services: &[(String, String, String, Option<String>)],
 ) -> Result<BgpClusterSummary, String> {
-    let pool_items = list_dynamic_resource(
-        client,
-        &cilium_load_balancer_ip_pool_v2_resource(),
-        &cilium_load_balancer_ip_pool_v2alpha1_resource(),
-    )
-    .await;
-
-    let peer_cfg_items = list_dynamic_resource(
-        client,
-        &cilium_bgp_peer_config_v2_resource(),
-        &cilium_bgp_peer_config_v2alpha1_resource(),
-    )
-    .await;
-
-    let adv_items = list_dynamic_resource(
-        client,
-        &cilium_bgp_advertisement_v2_resource(),
-        &cilium_bgp_advertisement_v2alpha1_resource(),
-    )
-    .await;
-
-    let cluster_cfg_items = list_dynamic_resource(
-        client,
-        &cilium_bgp_cluster_config_v2_resource(),
-        &cilium_bgp_cluster_config_v2alpha1_resource(),
-    )
-    .await;
-
-    let node_cfg_items = list_dynamic_resource(
-        client,
-        &cilium_bgp_node_config_v2_resource(),
-        &cilium_bgp_node_config_v2alpha1_resource(),
-    )
-    .await;
-
-    let policy_api: Api<DynamicObject> =
-        Api::all_with(client.clone(), &cilium_bgp_peering_policy_resource());
-    let policy_items = match tokio::time::timeout(
-        request_timeout(),
-        policy_api.list(&ListParams::default()),
-    )
-    .await
-    {
-        Ok(Ok(list)) => list.items,
-        _ => Vec::new(),
+    // Every lookup that could not be read is remembered rather than collapsed
+    // into "this cluster has none of these".
+    let mut failures: Vec<String> = Vec::new();
+    let mut take = |result: Result<Vec<DynamicObject>, String>| match result {
+        Ok(items) => items,
+        Err(e) => {
+            failures.push(e);
+            Vec::new()
+        }
     };
 
-    let cnode_api: Api<DynamicObject> = Api::all_with(client.clone(), &cilium_node_resource());
-    let cnode_items =
-        match tokio::time::timeout(request_timeout(), cnode_api.list(&ListParams::default())).await
-        {
-            Ok(Ok(list)) => list.items,
-            _ => Vec::new(),
-        };
+    let pool_items = take(
+        list_dynamic_resource(
+            client,
+            &cilium_load_balancer_ip_pool_v2_resource(),
+            &cilium_load_balancer_ip_pool_v2alpha1_resource(),
+        )
+        .await,
+    );
 
-    Ok(build_cilium_bgp_summary(
+    let peer_cfg_items = take(
+        list_dynamic_resource(
+            client,
+            &cilium_bgp_peer_config_v2_resource(),
+            &cilium_bgp_peer_config_v2alpha1_resource(),
+        )
+        .await,
+    );
+
+    let adv_items = take(
+        list_dynamic_resource(
+            client,
+            &cilium_bgp_advertisement_v2_resource(),
+            &cilium_bgp_advertisement_v2alpha1_resource(),
+        )
+        .await,
+    );
+
+    let cluster_cfg_items = take(
+        list_dynamic_resource(
+            client,
+            &cilium_bgp_cluster_config_v2_resource(),
+            &cilium_bgp_cluster_config_v2alpha1_resource(),
+        )
+        .await,
+    );
+
+    let node_cfg_items = take(
+        list_dynamic_resource(
+            client,
+            &cilium_bgp_node_config_v2_resource(),
+            &cilium_bgp_node_config_v2alpha1_resource(),
+        )
+        .await,
+    );
+
+    let policy_items = take(list_one_resource(client, &cilium_bgp_peering_policy_resource()).await);
+    let cnode_items = take(list_one_resource(client, &cilium_node_resource()).await);
+
+    let mut summary = build_cilium_bgp_summary(
         pool_items,
         peer_cfg_items,
         adv_items,
@@ -585,7 +639,19 @@ async fn discover_cilium_bgp(
         node_labels,
         node_pod_cidrs,
         lb_services,
-    ))
+    );
+    summary.error = join_failures(&failures);
+    Ok(summary)
+}
+
+/// One sentence naming every lookup that could not be read, or `None` when
+/// they all answered.
+fn join_failures(failures: &[String]) -> Option<String> {
+    if failures.is_empty() {
+        None
+    } else {
+        Some(failures.join("; "))
+    }
 }
 
 pub(crate) fn build_cilium_bgp_summary(
@@ -1220,34 +1286,30 @@ async fn discover_metallb_bgp(
     node_labels: &HashMap<String, BTreeMap<String, String>>,
     lb_services: &[(String, String, String, Option<String>)],
 ) -> Result<BgpClusterSummary, String> {
-    let peer_api: Api<DynamicObject> = Api::all_with(client.clone(), &metallb_bgp_peer_resource());
-    let peer_items = match tokio::time::timeout(
-        request_timeout(),
-        peer_api.list(&ListParams::default()),
-    )
-    .await
-    {
-        Ok(Ok(list)) if !list.items.is_empty() => list.items,
-        _ => return Ok(BgpClusterSummary::default()),
+    let mut failures: Vec<String> = Vec::new();
+
+    let peer_items = match list_one_resource(client, &metallb_bgp_peer_resource()).await {
+        Ok(items) if items.is_empty() => {
+            return Ok(BgpClusterSummary::default());
+        }
+        Ok(items) => items,
+        Err(e) => {
+            // The cluster may run MetalLB and simply not let us look.
+            return Err(e);
+        }
     };
 
-    let pool_api: Api<DynamicObject> = Api::all_with(client.clone(), &metallb_ip_pool_resource());
-    let pool_items = match tokio::time::timeout(
-        request_timeout(),
-        pool_api.list(&ListParams::default()),
-    )
-    .await
-    {
-        Ok(Ok(list)) => list.items,
-        _ => Vec::new(),
+    let pool_items = match list_one_resource(client, &metallb_ip_pool_resource()).await {
+        Ok(items) => items,
+        Err(e) => {
+            failures.push(e);
+            Vec::new()
+        }
     };
 
-    Ok(build_metallb_bgp_summary(
-        peer_items,
-        pool_items,
-        node_labels,
-        lb_services,
-    ))
+    let mut summary = build_metallb_bgp_summary(peer_items, pool_items, node_labels, lb_services);
+    summary.error = join_failures(&failures);
+    Ok(summary)
 }
 
 pub(crate) fn build_metallb_bgp_summary(
@@ -1384,16 +1446,10 @@ async fn discover_calico_bgp(
     client: &kube::Client,
     node_labels: &HashMap<String, BTreeMap<String, String>>,
 ) -> Result<BgpClusterSummary, String> {
-    let peer_api: Api<DynamicObject> = Api::all_with(client.clone(), &calico_bgp_peer_resource());
-    let peer_items = match tokio::time::timeout(
-        request_timeout(),
-        peer_api.list(&ListParams::default()),
-    )
-    .await
-    {
-        Ok(Ok(list)) if !list.items.is_empty() => list.items,
-        _ => return Ok(BgpClusterSummary::default()),
-    };
+    let peer_items = list_one_resource(client, &calico_bgp_peer_resource()).await?;
+    if peer_items.is_empty() {
+        return Ok(BgpClusterSummary::default());
+    }
 
     Ok(build_calico_bgp_summary(peer_items, node_labels))
 }
@@ -2637,5 +2693,80 @@ mod tests {
         let calico_summary = build_calico_bgp_summary(vec![empty_calico], &node_labels);
         assert_eq!(calico_summary.engine, BgpEngineType::Calico);
         assert_eq!(calico_summary.peers.len(), 0);
+    }
+
+    /// A cluster that serves Nodes and Services, and answers every CRD list
+    /// with `crd_status`.
+    fn cluster_answering_crds_with(crd_status: u16) -> kube::Client {
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let path = request.uri().path().to_owned();
+            async move {
+                let (status, body) = if path == "/api/v1/nodes" {
+                    (
+                        200,
+                        json!({"apiVersion":"v1","kind":"NodeList","metadata":{},"items":[
+                            {"apiVersion":"v1","kind":"Node",
+                             "metadata":{"name":"node-1","labels":{"role":"worker"}},
+                             "spec":{"podCIDR":"10.244.0.0/24"}}]}),
+                    )
+                } else if path == "/api/v1/services" {
+                    (
+                        200,
+                        json!({"apiVersion":"v1","kind":"ServiceList","metadata":{},"items":[]}),
+                    )
+                } else {
+                    let reason = if crd_status == 404 {
+                        "NotFound"
+                    } else {
+                        "Forbidden"
+                    };
+                    (
+                        crd_status,
+                        json!({"apiVersion":"v1","kind":"Status","status":"Failure",
+                            "code":crd_status,"reason":reason,"message":"rejected"}),
+                    )
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        kube::Client::new(service, "default")
+    }
+
+    #[tokio::test]
+    async fn a_forbidden_crd_list_reports_discovery_failure_not_an_absent_engine() {
+        let summary = fetch_bgp_summary(&cluster_answering_crds_with(403))
+            .await
+            .expect("nodes and services were readable");
+
+        assert_eq!(summary.engine, BgpEngineType::None);
+        assert_eq!(summary.total_nodes, 1);
+        let err = summary
+            .error
+            .expect("a refused CRD list must not read as an unconfigured cluster");
+        assert!(
+            err.starts_with("BGP discovery failed: "),
+            "error should name the failure, got {err}"
+        );
+        assert!(
+            err.contains("CiliumLoadBalancerIPPool"),
+            "error should name the lookup that failed, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cluster_without_the_bgp_crds_reports_no_engine_and_no_error() {
+        // 404 is the cluster answering that it serves no such resource.
+        let summary = fetch_bgp_summary(&cluster_answering_crds_with(404))
+            .await
+            .expect("nodes and services were readable");
+
+        assert_eq!(summary.engine, BgpEngineType::None);
+        assert_eq!(summary.error, None);
     }
 }

@@ -424,6 +424,73 @@ fn bgp_view_empty_peer_table_onboarding_guidance() {
 }
 
 #[test]
+fn bgp_view_says_discovery_failed_rather_than_no_engine() {
+    // A caller who may not list the BGP CRDs learns nothing about the
+    // cluster; the view must not report that as an unconfigured cluster.
+    let mut state = BgpViewState::new();
+    state.set_summary(BgpClusterSummary {
+        engine: BgpEngineType::None,
+        total_nodes: 3,
+        error: Some("BGP discovery failed: list CiliumLoadBalancerIPPool: forbidden".to_string()),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        state.discovery_error(),
+        Some("BGP discovery failed: list CiliumLoadBalancerIPPool: forbidden")
+    );
+
+    let lines = render_lines(160, 24, |f| {
+        render_bgp_view(f, f.area(), &state);
+    });
+    let text = lines.join("\n");
+    assert!(text.contains("Discovery Failed"), "header: {text}");
+    assert!(
+        text.contains("list CiliumLoadBalancerIPPool"),
+        "body: {text}"
+    );
+    assert!(text.contains("Press 'r' to retry"));
+    assert!(!text.contains("No BGP Engine Detected"));
+    assert!(!text.contains("No BGP peering sessions detected"));
+}
+
+#[test]
+fn bgp_view_reports_a_cluster_that_answered_with_no_engine_as_an_absence() {
+    let mut state = BgpViewState::new();
+    state.set_summary(BgpClusterSummary {
+        engine: BgpEngineType::None,
+        total_nodes: 3,
+        ..Default::default()
+    });
+
+    assert_eq!(state.discovery_error(), None);
+
+    let lines = render_lines(160, 24, |f| {
+        render_bgp_view(f, f.area(), &state);
+    });
+    let text = lines.join("\n");
+    assert!(text.contains("No BGP Engine Detected"), "header: {text}");
+    assert!(text.contains("No BGP peering sessions detected"));
+}
+
+#[test]
+fn bgp_view_warns_when_a_found_engine_was_read_only_in_part() {
+    // An engine was found, so the tab still holds what was read — but a
+    // refused lookup means this is not the whole cluster.
+    let mut state = BgpViewState::new();
+    let mut summary = sample_bgp_summary();
+    summary.error = Some("list IPAddressPool: forbidden".to_string());
+    state.set_summary(summary);
+
+    let lines = render_lines(200, 24, |f| {
+        render_bgp_view(f, f.area(), &state);
+    });
+    let text = lines.join("\n");
+    assert!(text.contains("Discovery incomplete"), "header: {text}");
+    assert!(text.contains("node-worker-01"), "rows still render: {text}");
+}
+
+#[test]
 fn bgp_view_footer_inspector_with_missing_optional_fields() {
     let mut state = BgpViewState::new();
     let mut summary = sample_bgp_summary();
