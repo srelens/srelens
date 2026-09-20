@@ -158,11 +158,21 @@ pub fn api_resource_for_api_version(api_version: &str, kind: &str) -> Option<Api
     if api_version.is_empty() || kind.trim().is_empty() {
         return None;
     }
-    let (group, version) = match api_version.split_once('/') {
-        Some((g, v)) => (g, v),
-        None => ("", api_version),
+    // `version` or `group/version`, both parts present and neither carrying
+    // whitespace. `Some` means "pinned" to the caller, which then queries
+    // this resource instead of falling back to the name-only table, so a
+    // shape that is not an apiVersion — `/v1`, `metallb.io/v1/extra` — is
+    // refused here rather than handed to `from_gvk` to make something of.
+    let parts: Vec<&str> = api_version.split('/').collect();
+    let (group, version) = match parts.as_slice() {
+        [version] => ("", *version),
+        [group, version] if !group.is_empty() => (*group, *version),
+        _ => return None,
     };
-    if version.is_empty() {
+    if version.is_empty()
+        || group.chars().any(char::is_whitespace)
+        || version.chars().any(char::is_whitespace)
+    {
         return None;
     }
     Some(ApiResource::from_gvk(&GroupVersionKind::gvk(
@@ -2334,6 +2344,26 @@ metadata:
         assert!(api_resource_for_api_version("   ", "BGPPeer").is_none());
         assert!(api_resource_for_api_version("metallb.io/", "BGPPeer").is_none());
         assert!(api_resource_for_api_version("metallb.io/v1beta2", "").is_none());
+    }
+
+    /// The doc promises `None` for a malformed `apiVersion`, and a caller
+    /// takes `Some` as "pinned": YAML and Describe then query that resource
+    /// instead of the name-only fallback. So a string that is not
+    /// `version` or `group/version` must not become a resource.
+    #[test]
+    fn a_malformed_api_version_pins_nothing() {
+        // An empty group beside a slash is not the core group.
+        assert!(api_resource_for_api_version("/v1", "BGPPeer").is_none());
+        // A second slash is not a version.
+        assert!(api_resource_for_api_version("metallb.io/v1/extra", "BGPPeer").is_none());
+        assert!(api_resource_for_api_version("a/b/c/d", "BGPPeer").is_none());
+        // Whitespace inside either part.
+        assert!(api_resource_for_api_version("metallb.io/v1 beta2", "BGPPeer").is_none());
+        assert!(api_resource_for_api_version("metal lb.io/v1beta2", "BGPPeer").is_none());
+        assert!(api_resource_for_api_version("v 1", "Node").is_none());
+        // The well-formed shapes still resolve.
+        assert!(api_resource_for_api_version("v1", "Node").is_some());
+        assert!(api_resource_for_api_version("metallb.io/v1beta2", "BGPPeer").is_some());
     }
 
     // -- parse_api_version edge cases ------------------------------------------
