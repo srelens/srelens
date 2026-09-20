@@ -205,6 +205,83 @@ pub fn analyze_pod_health(
         }
     }
 
+    // Check top-level waitingReason (e.g. from PodSummary or synthetic views)
+    let top_waiting_reason = pod
+        .get("waitingReason")
+        .or_else(|| pod.get("waiting_reason"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    if let Some(reason) = top_waiting_reason {
+        let name = pod.get("name").and_then(|v| v.as_str()).unwrap_or("pod");
+        let event_msg = events.iter().find_map(|e| {
+            let r = e.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            if r == "Failed" || r == "FailedMount" || r == reason {
+                e.get("message").and_then(|v| v.as_str())
+            } else {
+                None
+            }
+        });
+
+        if reason == "CreateContainerConfigError" || reason == "CreateContainerError" {
+            let detail = event_msg.map(|s| s.to_string());
+            let remediation = if let Some(ref d) = detail {
+                format!("Ensure referenced config or secret exists: {}", d)
+            } else {
+                "Ensure referenced ConfigMap or Secret exists and is accessible in the namespace."
+                    .to_string()
+            };
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Error,
+                title: format!("Container config error ({})", reason),
+                detail,
+            });
+            return DiagnosticReport {
+                verdict: DiagnosticVerdict::ConfigError,
+                summary: format!("Pod '{}' failed with {}", name, reason),
+                remediation,
+                signals,
+            };
+        }
+
+        if reason == "ImagePullBackOff" || reason == "ErrImagePull" || reason == "InvalidImageName"
+        {
+            let detail = event_msg.map(|s| s.to_string());
+            let remediation = if let Some(ref d) = detail {
+                format!("Check image repository, tag, and imagePullSecrets: {}", d)
+            } else {
+                "Check image repository, tag, and imagePullSecrets.".to_string()
+            };
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Error,
+                title: format!("Image pull failure ({})", reason),
+                detail,
+            });
+            return DiagnosticReport {
+                verdict: DiagnosticVerdict::ImagePullFailed,
+                summary: format!("Pod '{}' failed with {}", name, reason),
+                remediation,
+                signals,
+            };
+        }
+
+        if reason == "CrashLoopBackOff" {
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Error,
+                title: format!("CrashLoopBackOff ({})", reason),
+                detail: event_msg.map(|s| s.to_string()),
+            });
+            return DiagnosticReport {
+                verdict: DiagnosticVerdict::CrashLoopBackOff,
+                summary: format!("Pod '{}' is in CrashLoopBackOff", name),
+                remediation:
+                    "Check previous container logs with [l] or events for failure details."
+                        .to_string(),
+                signals,
+            };
+        }
+    }
+
     // Check for Scheduling failures in conditions or events
     let unschedulable_cond = pod
         .pointer("/status/conditions")
@@ -255,6 +332,58 @@ pub fn analyze_pod_health(
             remediation: "Check node capacity or adjust resource requests / tolerations.".into(),
             signals,
         };
+    }
+
+    // Check events for config errors or image errors
+    for evt in events {
+        let reason = evt.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+        let msg = evt.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        let evt_type = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        if reason == "FailedMount"
+            || (reason == "Failed"
+                && (msg.to_lowercase().contains("secret")
+                    || msg.to_lowercase().contains("configmap")))
+        {
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Error,
+                title: format!("Event: {}", reason),
+                detail: Some(msg.to_string()),
+            });
+            return DiagnosticReport {
+                verdict: DiagnosticVerdict::ConfigError,
+                summary: format!("Configuration / volume mount error: {}", msg),
+                remediation: format!(
+                    "Ensure referenced volume, Secret, or ConfigMap exists: {}",
+                    msg
+                ),
+                signals,
+            };
+        }
+
+        if reason == "Failed"
+            && (msg.contains("pull") || msg.contains("image") || msg.contains("ErrImagePull"))
+        {
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Error,
+                title: format!("Event: {}", reason),
+                detail: Some(msg.to_string()),
+            });
+            return DiagnosticReport {
+                verdict: DiagnosticVerdict::ImagePullFailed,
+                summary: format!("Image error: {}", msg),
+                remediation: format!("Verify image name, tag, and imagePullSecrets: {}", msg),
+                signals,
+            };
+        }
+
+        if evt_type == "Warning" && reason != "FailedScheduling" {
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Warning,
+                title: format!("Event: {}", reason),
+                detail: Some(msg.to_string()),
+            });
+        }
     }
 
     DiagnosticReport {
@@ -439,6 +568,50 @@ mod tests {
         );
         assert!(
             report.remediation.contains("node capacity") || report.remediation.contains("requests")
+        );
+    }
+
+    #[test]
+    fn test_diagnose_pod_summary_shape() {
+        let summary = json!({
+            "name": "missing-secret-demo-8548b65c5-bmx2r",
+            "namespace": "default",
+            "phase": "Pending",
+            "ready": "0/1",
+            "restarts": 0,
+            "waitingReason": "CreateContainerConfigError"
+        });
+
+        let report = analyze_pod_health(&summary, &[], None);
+        assert_eq!(report.verdict, DiagnosticVerdict::ConfigError);
+        assert!(report.summary.contains("CreateContainerConfigError"));
+        assert!(!report.signals.is_empty());
+    }
+
+    #[test]
+    fn test_diagnose_pod_summary_with_missing_secret_event() {
+        let summary = json!({
+            "name": "missing-secret-demo-8548b65c5-bmx2r",
+            "namespace": "default",
+            "phase": "Pending",
+            "ready": "0/1",
+            "restarts": 0,
+            "waitingReason": "CreateContainerConfigError"
+        });
+
+        let events = vec![json!({
+            "type": "Warning",
+            "reason": "Failed",
+            "message": "Error: secret \"intentionally-missing-secret\" not found"
+        })];
+
+        let report = analyze_pod_health(&summary, &events, None);
+        assert_eq!(report.verdict, DiagnosticVerdict::ConfigError);
+        assert!(report.remediation.contains("intentionally-missing-secret"));
+        assert_eq!(report.signals.len(), 1);
+        assert_eq!(
+            report.signals[0].detail.as_deref(),
+            Some("Error: secret \"intentionally-missing-secret\" not found")
         );
     }
 }

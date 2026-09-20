@@ -5055,7 +5055,12 @@ impl App {
                             if let Some(item) = table.selected_item() {
                                 let (obj_kind, obj_name) = parse_involved_object(item);
                                 if !obj_name.is_empty() {
-                                    self.trigger_instant_diagnosis(obj_kind, obj_name, sel_ns.clone()).await;
+                                    self.trigger_instant_diagnosis(
+                                        obj_kind,
+                                        obj_name,
+                                        sel_ns.clone(),
+                                    )
+                                    .await;
                                 }
                             }
                         } else if let Some(name) = sel_name.clone() {
@@ -5064,7 +5069,8 @@ impl App {
                             } else {
                                 kind_str.clone()
                             };
-                            self.trigger_instant_diagnosis(effective_kind, name, sel_ns.clone()).await;
+                            self.trigger_instant_diagnosis(effective_kind, name, sel_ns.clone())
+                                .await;
                         }
                     }
                     KeyCode::Enter => {
@@ -10347,10 +10353,10 @@ impl App {
                         && (target_ns.as_deref().map(|n| n == ns).unwrap_or(true) || ns.is_empty())
                     {
                         for item in items {
-                            let item_name = item
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .or_else(|| item.pointer("/metadata/name").and_then(|v| v.as_str()));
+                            let item_name =
+                                item.get("name").and_then(|v| v.as_str()).or_else(|| {
+                                    item.pointer("/metadata/name").and_then(|v| v.as_str())
+                                });
                             if item_name == Some(&name) {
                                 found = Some(item.clone());
                                 break;
@@ -10405,7 +10411,7 @@ impl App {
             None
         };
 
-        let pod_value = match pod_json {
+        let mut pod_value = match pod_json {
             Some(p) => p,
             None => {
                 self.set_toast(
@@ -10416,35 +10422,78 @@ impl App {
             }
         };
 
-        // 2. Correlate events for this pod
-        let mut pod_events = Vec::new();
         let pod_name = pod_value
             .get("name")
             .and_then(|v| v.as_str())
             .or_else(|| pod_value.pointer("/metadata/name").and_then(|v| v.as_str()))
-            .unwrap_or(&name);
+            .unwrap_or(&name)
+            .to_string();
 
+        let effective_ns = target_ns
+            .clone()
+            .or_else(|| {
+                pod_value
+                    .get("namespace")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        pod_value
+                            .pointer("/metadata/namespace")
+                            .and_then(|v| v.as_str())
+                    })
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "default".to_string());
+
+        // 2. Correlate cached events for this pod
+        let mut pod_events = Vec::new();
         for ((_, _, k), items) in &self.resource_cache {
             if k.eq_ignore_ascii_case("Events") || k.eq_ignore_ascii_case("event") {
                 for evt in items {
                     let involved_name =
                         evt.pointer("/involvedObject/name").and_then(|v| v.as_str());
-                    if involved_name == Some(pod_name) {
+                    if involved_name == Some(&pod_name) {
                         pod_events.push(evt.clone());
                     }
                 }
             }
         }
 
-        // 3. Optional: fetch previous logs if connected
+        // 3. Optional: fetch live pod, live events, and previous logs if connected
         let mut prev_logs: Option<String> = None;
         if let Ok(client) = self.client_cache.get(&self.active_context).await {
-            let ns_query = target_ns.as_deref().unwrap_or("default");
             let api: kube::Api<k8s_openapi::api::core::v1::Pod> =
-                kube::Api::namespaced(client, ns_query);
+                kube::Api::namespaced(client.clone(), &effective_ns);
+
+            // Fetch live pod object for full containerStatuses & condition details
+            if let Ok(full_pod) = api.get(&pod_name).await {
+                if let Ok(v) = serde_json::to_value(&full_pod) {
+                    pod_value = v;
+                }
+            }
+
+            // Fetch live events for this pod
+            let events_api: kube::Api<k8s_openapi::api::core::v1::Event> =
+                kube::Api::namespaced(client.clone(), &effective_ns);
+            let lp = kube::api::ListParams::default()
+                .fields(&format!("involvedObject.name={}", pod_name));
+            if let Ok(evt_list) = events_api.list(&lp).await {
+                for e in evt_list {
+                    if let Ok(v) = serde_json::to_value(&e) {
+                        let uid = v.pointer("/metadata/uid");
+                        if !pod_events
+                            .iter()
+                            .any(|existing| existing.pointer("/metadata/uid") == uid)
+                        {
+                            pod_events.push(v);
+                        }
+                    }
+                }
+            }
+
+            // Fetch previous logs if container terminated / restarted
             let log_params =
                 srelens_kube::logs::build_log_params(None, false, Some(50), None, false, true);
-            if let Ok(logs) = api.logs(pod_name, &log_params).await {
+            if let Ok(logs) = api.logs(&pod_name, &log_params).await {
                 if !logs.trim().is_empty() {
                     prev_logs = Some(logs);
                 }
@@ -11100,8 +11149,9 @@ impl App {
                         id: QuickActionId::DiagnoseResource,
                         key_hint: "!".to_string(),
                         title: "🔍 Instant Root-Cause Diagnosis".to_string(),
-                        description: "Correlate exit codes, OOM limits, crash traces & events in one shot"
-                            .to_string(),
+                        description:
+                            "Correlate exit codes, OOM limits, crash traces & events in one shot"
+                                .to_string(),
                     },
                     QuickActionItem {
                         id: QuickActionId::AskAi,
@@ -11567,7 +11617,8 @@ impl App {
                 use crate::ui::dialogs::QuickActionId;
                 match chosen.id {
                     QuickActionId::DiagnoseResource => {
-                        self.trigger_instant_diagnosis(resource_kind, resource_name, namespace).await;
+                        self.trigger_instant_diagnosis(resource_kind, resource_name, namespace)
+                            .await;
                     }
                     QuickActionId::AskAi => {
                         let prompt = if resource_kind.eq_ignore_ascii_case("application")
