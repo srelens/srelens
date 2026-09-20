@@ -21,6 +21,7 @@ import { defaultState } from "../lib/tabs";
 import { resetView, setLink } from "../lib/workspace";
 import { defaultMark, getMark, loadMarks, setMark } from "../lib/marks";
 import { probeCluster, resetProbes } from "../lib/probe";
+import { pinContextKey } from "../lib/clusters";
 
 // jsdom has no ResizeObserver and Radix's popper — which the kit's Tooltip, and
 // so every rail button, sits on — watches its trigger with one. The same stub
@@ -369,6 +370,39 @@ describe("Rail draws a symbol mark", () => {
         contextId: "/k/a#b%23c",
       });
     } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  });
+
+  /**
+   * Two contexts can share a stable id (see above). A window opened for one
+   * of them pins that context's key, and every lookup by stable id in that
+   * window resolves to it (`resolveContext`, #648) — the rail's included.
+   * A rail keyed by a `Map` of stable ids answered with whichever of the
+   * pair came last, so "Open in new window" from the first cluster's own
+   * window sent the second cluster's key.
+   */
+  it("opens the window for the context this window is pinned to, not the other of a colliding pair", async () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    // Kubeconfig `/k/a#b` declaring `c`, and kubeconfig `/k/a` declaring `b#c`.
+    const first = { ...ctx("prod-eu"), stableId: "/k/a#b#c", key: "/k/a%23b#c" };
+    const second = { ...ctx("prod-eu"), stableId: "/k/a#b#c", key: "/k/a#b%23c" };
+    const contexts = [first, second];
+    // The workspace names the stable id once; it is the kubeconfig listing
+    // that carries two contexts for it.
+    setState(defaultState([first]));
+    pinContextKey(first.key);
+    coreMock.invokeCommand.mockResolvedValueOnce(undefined);
+
+    try {
+      render(<Rail contexts={contexts} onConnect={vi.fn()} />);
+      await pick("prod-eu", "Open in new window");
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
+        contextId: "/k/a%23b#c",
+      });
+    } finally {
+      pinContextKey(null);
       delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
     }
   });
