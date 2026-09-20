@@ -37,6 +37,71 @@ pub struct DiagnosticReport {
     pub signals: Vec<DiagnosticSignal>,
 }
 
+pub fn make_one_line_gist(category: &str, raw_detail: &str, max_len: usize) -> String {
+    let raw = raw_detail.trim();
+    if raw.is_empty() {
+        return category.to_string();
+    }
+
+    // 1. Strip redundant boilerplates
+    let stripped = raw
+        .strip_prefix("Pod was rejected: ")
+        .or_else(|| raw.strip_prefix("Pod was rejected:"))
+        .or_else(|| raw.strip_prefix("Error syncing pod: "))
+        .or_else(|| raw.strip_prefix("Error: "))
+        .or_else(|| raw.strip_prefix("failed to "))
+        .or_else(|| raw.strip_prefix("Failed to "))
+        .or_else(|| raw.strip_prefix("The node was low on resource: "))
+        .unwrap_or(raw)
+        .trim();
+
+    // 2. If it has RPC / CRI error "desc = ...", extract the description
+    let content = if let Some(idx) = stripped.find("desc = ") {
+        stripped[idx + "desc = ".len()..].trim().trim_matches('"')
+    } else {
+        stripped
+    };
+
+    // 3. Extract the primary clause before delimiters (;, \n)
+    let clause = content.split([';', '\n']).next().unwrap_or(content).trim();
+
+    // 4. Clean and format headline with category
+    let headline =
+        if !category.is_empty() && !clause.to_lowercase().starts_with(&category.to_lowercase()) {
+            format!("{}: {}", category, clause)
+        } else {
+            clause.to_string()
+        };
+
+    // 5. Budget cap at max_len with whole-word ellipsis
+    if headline.chars().count() <= max_len {
+        headline
+    } else {
+        let mut truncated = String::new();
+        let mut cur_len = 0;
+        let target = max_len.saturating_sub(1);
+        for word in headline.split_whitespace() {
+            let word_len = word.chars().count();
+            if cur_len == 0 {
+                truncated.push_str(word);
+                cur_len += word_len;
+            } else if cur_len + 1 + word_len <= target {
+                truncated.push(' ');
+                truncated.push_str(word);
+                cur_len += 1 + word_len;
+            } else {
+                break;
+            }
+        }
+        if truncated.is_empty() {
+            let s: String = headline.chars().take(target).collect();
+            format!("{}…", s)
+        } else {
+            format!("{}…", truncated)
+        }
+    }
+}
+
 fn parse_scheduling_failure(raw: &str) -> (String, Vec<DiagnosticSignal>) {
     let mut signals = Vec::new();
 
@@ -168,164 +233,245 @@ pub fn analyze_pod_health(
 ) -> DiagnosticReport {
     let mut signals = Vec::new();
 
-    // Check container statuses for OOMKilled
-    let container_statuses = pod
+    // Check container statuses (init, regular, and ephemeral)
+    let empty_statuses = Vec::new();
+    let regular_statuses = pod
         .pointer("/status/containerStatuses")
-        .and_then(|v| v.as_array());
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty_statuses);
+    let init_statuses = pod
+        .pointer("/status/initContainerStatuses")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty_statuses);
+    let ephemeral_statuses = pod
+        .pointer("/status/ephemeralContainerStatuses")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty_statuses);
 
-    if let Some(statuses) = container_statuses {
-        for cs in statuses {
-            let name = cs.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let terminated = cs
-                .pointer("/lastState/terminated")
-                .or_else(|| cs.pointer("/state/terminated"));
+    for cs in init_statuses
+        .iter()
+        .chain(regular_statuses.iter())
+        .chain(ephemeral_statuses.iter())
+    {
+        let name = cs.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let terminated = cs
+            .pointer("/lastState/terminated")
+            .or_else(|| cs.pointer("/state/terminated"));
 
-            if let Some(term) = terminated {
-                let reason = term.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-                let exit_code = term.get("exitCode").and_then(|v| v.as_i64()).unwrap_or(0);
+        if let Some(term) = terminated {
+            let reason = term.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            let exit_code = term.get("exitCode").and_then(|v| v.as_i64()).unwrap_or(0);
 
-                if reason == "OOMKilled" || exit_code == 137 {
-                    // Look up container spec for limits
-                    let memory_limit = pod
-                        .pointer("/spec/containers")
-                        .and_then(|v| v.as_array())
-                        .and_then(|containers| {
-                            containers
-                                .iter()
-                                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
-                        })
-                        .and_then(|c| c.pointer("/resources/limits/memory"))
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("none");
-
-                    signals.push(DiagnosticSignal {
-                        severity: SignalSeverity::Error,
-                        title: format!("Container '{}' was OOMKilled", name),
-                        detail: Some(format!(
-                            "Exit code 137. Last terminated reason: OOMKilled. Memory limit: {}",
-                            memory_limit
-                        )),
-                    });
-
-                    return DiagnosticReport {
-                        verdict: DiagnosticVerdict::OOMKilled,
-                        summary: format!("Container '{}' was OOMKilled (exit code 137)", name),
-                        remediation: format!("Container '{}' exceeded memory limit ({}). Increase memory limit in pod spec.", name, memory_limit),
-                        signals,
-                    };
-                }
-            }
-
-            // Check for ConfigError (e.g. missing Secret / ConfigMap)
-            let waiting_reason = cs.pointer("/state/waiting/reason").and_then(|v| v.as_str());
-            let waiting_msg = cs
-                .pointer("/state/waiting/message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            if let Some(reason) = waiting_reason {
-                if reason == "CreateContainerConfigError" || reason == "CreateContainerError" {
-                    signals.push(DiagnosticSignal {
-                        severity: SignalSeverity::Error,
-                        title: format!("Config error in container '{}'", name),
-                        detail: Some(waiting_msg.to_string()),
-                    });
-                    return DiagnosticReport {
-                        verdict: DiagnosticVerdict::ConfigError,
-                        summary: format!("Container '{}' failed with {}", name, reason),
-                        remediation: format!(
-                            "Ensure referenced config or secret exists: {}",
-                            waiting_msg
-                        ),
-                        signals,
-                    };
-                }
-
-                if reason == "ImagePullBackOff"
-                    || reason == "ErrImagePull"
-                    || reason == "InvalidImageName"
-                {
-                    signals.push(DiagnosticSignal {
-                        severity: SignalSeverity::Error,
-                        title: format!("Image pull failed for container '{}'", name),
-                        detail: Some(waiting_msg.to_string()),
-                    });
-                    return DiagnosticReport {
-                        verdict: DiagnosticVerdict::ImagePullFailed,
-                        summary: format!("Container '{}' failed with {}", name, reason),
-                        remediation: format!(
-                            "Check image name, tag, and imagePullSecrets: {}",
-                            waiting_msg
-                        ),
-                        signals,
-                    };
-                }
-            }
-
-            // Check for CrashLoopBackOff or non-zero exit crashes
-            let is_waiting_crashloop = waiting_reason
-                .map(|r| r == "CrashLoopBackOff")
-                .unwrap_or(false);
-
-            let last_terminated = cs.pointer("/lastState/terminated");
-            let last_exit_code = last_terminated
-                .and_then(|t| t.get("exitCode"))
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let restart_count = cs.get("restartCount").and_then(|v| v.as_i64()).unwrap_or(0);
-
-            if is_waiting_crashloop || (last_exit_code != 0 && restart_count > 0) {
-                let mut panic_detail = None;
-                if let Some(logs) = previous_logs {
-                    // Look for panic or fatal lines in the logs
-                    for line in logs.lines() {
-                        let lower = line.to_lowercase();
-                        if lower.contains("panic")
-                            || lower.contains("fatal")
-                            || lower.contains("exception")
-                        {
-                            panic_detail = Some(line.trim().to_string());
-                            break;
-                        }
-                    }
-                }
+            if reason == "OOMKilled" || exit_code == 137 {
+                // Look up container spec for limits in both initContainers and containers
+                let memory_limit = pod
+                    .pointer("/spec/containers")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .chain(
+                        pod.pointer("/spec/initContainers")
+                            .and_then(|v| v.as_array())
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
+                    .and_then(|c| c.pointer("/resources/limits/memory"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("none");
 
                 signals.push(DiagnosticSignal {
                     severity: SignalSeverity::Error,
-                    title: format!("CrashLoopBackOff in container '{}'", name),
+                    title: format!("Container '{}' was OOMKilled", name),
                     detail: Some(format!(
-                        "Restarts: {}. Last exit code: {}",
-                        restart_count, last_exit_code
+                        "Exit code 137. Last terminated reason: OOMKilled. Memory limit: {}",
+                        memory_limit
                     )),
                 });
 
-                if let Some(ref detail) = panic_detail {
-                    signals.push(DiagnosticSignal {
-                        severity: SignalSeverity::Error,
-                        title: format!("Panic / Crash detected in logs for '{}'", name),
-                        detail: Some(detail.clone()),
-                    });
-                }
-
-                let remediation = if let Some(ref p) = panic_detail {
-                    format!(
-                        "Application crashed: \"{}\". Fix application error or configuration.",
-                        p
-                    )
-                } else {
-                    format!(
-                        "Container '{}' failed with exit code {}. Check previous logs with [l].",
-                        name, last_exit_code
-                    )
-                };
+                let summary = make_one_line_gist(
+                    "OOMKilled",
+                    &format!("container '{}' exceeded memory limit (exit code 137)", name),
+                    65,
+                );
 
                 return DiagnosticReport {
-                    verdict: DiagnosticVerdict::CrashLoopBackOff,
-                    summary: format!(
-                        "Container '{}' is in CrashLoopBackOff (restarts: {})",
-                        name, restart_count
+                    verdict: DiagnosticVerdict::OOMKilled,
+                    summary,
+                    remediation: format!("Container '{}' exceeded memory limit ({}). Increase memory limit in pod spec.", name, memory_limit),
+                    signals,
+                };
+            }
+        }
+
+        // Check for ConfigError (e.g. missing Secret / ConfigMap)
+        let waiting_reason = cs.pointer("/state/waiting/reason").and_then(|v| v.as_str());
+        let waiting_msg = cs
+            .pointer("/state/waiting/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if let Some(reason) = waiting_reason {
+            if reason == "CreateContainerConfigError" || reason == "CreateContainerError" {
+                signals.push(DiagnosticSignal {
+                    severity: SignalSeverity::Error,
+                    title: format!("Config error in container '{}'", name),
+                    detail: Some(waiting_msg.to_string()),
+                });
+                let fallback = format!("container '{}' config error", name);
+                let detail = if !waiting_msg.is_empty() {
+                    waiting_msg
+                } else {
+                    &fallback
+                };
+                let summary = make_one_line_gist(reason, detail, 65);
+                return DiagnosticReport {
+                    verdict: DiagnosticVerdict::ConfigError,
+                    summary,
+                    remediation: format!(
+                        "Ensure referenced config or secret exists: {}",
+                        waiting_msg
                     ),
-                    remediation,
+                    signals,
+                };
+            }
+
+            if reason == "ImagePullBackOff"
+                || reason == "ErrImagePull"
+                || reason == "InvalidImageName"
+            {
+                signals.push(DiagnosticSignal {
+                    severity: SignalSeverity::Error,
+                    title: format!("Image pull failed for container '{}'", name),
+                    detail: Some(waiting_msg.to_string()),
+                });
+                let fallback = format!("container '{}' image pull failed", name);
+                let detail = if !waiting_msg.is_empty() {
+                    waiting_msg
+                } else {
+                    &fallback
+                };
+                let summary = make_one_line_gist(reason, detail, 65);
+                return DiagnosticReport {
+                    verdict: DiagnosticVerdict::ImagePullFailed,
+                    summary,
+                    remediation: format!(
+                        "Check image name, tag, and imagePullSecrets: {}",
+                        waiting_msg
+                    ),
+                    signals,
+                };
+            }
+        }
+
+        // Check for CrashLoopBackOff or non-zero exit crashes
+        let is_waiting_crashloop = waiting_reason
+            .map(|r| r == "CrashLoopBackOff")
+            .unwrap_or(false);
+
+        let last_terminated = cs.pointer("/lastState/terminated");
+        let last_exit_code = last_terminated
+            .and_then(|t| t.get("exitCode"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let restart_count = cs.get("restartCount").and_then(|v| v.as_i64()).unwrap_or(0);
+
+        if is_waiting_crashloop || (last_exit_code != 0 && restart_count > 0) {
+            let mut panic_detail = None;
+            if let Some(logs) = previous_logs {
+                // Look for panic or fatal lines in the logs
+                for line in logs.lines() {
+                    let lower = line.to_lowercase();
+                    if lower.contains("panic")
+                        || lower.contains("fatal")
+                        || lower.contains("exception")
+                    {
+                        panic_detail = Some(line.trim().to_string());
+                        break;
+                    }
+                }
+            }
+
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Error,
+                title: format!("CrashLoopBackOff in container '{}'", name),
+                detail: Some(format!(
+                    "Restarts: {}. Last exit code: {}",
+                    restart_count, last_exit_code
+                )),
+            });
+
+            if let Some(ref detail) = panic_detail {
+                signals.push(DiagnosticSignal {
+                    severity: SignalSeverity::Error,
+                    title: format!("Panic / Crash detected in logs for '{}'", name),
+                    detail: Some(detail.clone()),
+                });
+            }
+
+            let remediation = if let Some(ref p) = panic_detail {
+                format!(
+                    "Application crashed: \"{}\". Fix application error or configuration.",
+                    p
+                )
+            } else {
+                format!(
+                    "Container '{}' failed with exit code {}. Check previous logs with [l].",
+                    name, last_exit_code
+                )
+            };
+
+            let summary = if let Some(ref p) = panic_detail {
+                make_one_line_gist(
+                    "CrashLoopBackOff",
+                    &format!("container '{}': {}", name, p),
+                    65,
+                )
+            } else {
+                make_one_line_gist(
+                    "CrashLoopBackOff",
+                    &format!(
+                        "container '{}' (restarts: {}, exit code: {})",
+                        name, restart_count, last_exit_code
+                    ),
+                    65,
+                )
+            };
+
+            return DiagnosticReport {
+                verdict: DiagnosticVerdict::CrashLoopBackOff,
+                summary,
+                remediation,
+                signals,
+            };
+        }
+
+        // Generic catch for any abnormal waiting container state (e.g. RunContainerError, PreStopHookError)
+        if let Some(reason) = waiting_reason {
+            if reason != "ContainerCreating" && reason != "PodInitializing" {
+                signals.push(DiagnosticSignal {
+                    severity: SignalSeverity::Error,
+                    title: format!("Container '{}' waiting ({})", name, reason),
+                    detail: if !waiting_msg.is_empty() {
+                        Some(waiting_msg.to_string())
+                    } else {
+                        None
+                    },
+                });
+                let fallback = format!("container '{}' waiting ({})", name, reason);
+                let detail = if !waiting_msg.is_empty() {
+                    waiting_msg
+                } else {
+                    &fallback
+                };
+                let summary = make_one_line_gist(reason, detail, 65);
+                return DiagnosticReport {
+                    verdict: DiagnosticVerdict::Failed,
+                    summary,
+                    remediation: format!(
+                        "Inspect container '{}' configuration and kubelet logs.",
+                        name
+                    ),
                     signals,
                 };
             }
@@ -356,6 +502,29 @@ pub fn analyze_pod_health(
         .and_then(|v| v.as_str())
         .unwrap_or("pod");
 
+    // Check for Pod terminating (deletionTimestamp set)
+    if pod.pointer("/metadata/deletionTimestamp").is_some() {
+        signals.push(DiagnosticSignal {
+            severity: SignalSeverity::Warning,
+            title: "Pod Terminating".to_string(),
+            detail: Some(format!(
+                "Pod '{}' has deletionTimestamp set and is waiting for termination/finalizers",
+                pod_name
+            )),
+        });
+        return DiagnosticReport {
+            verdict: DiagnosticVerdict::Failed,
+            summary: make_one_line_gist(
+                "Terminating",
+                &format!("Pod '{}' terminating (waiting for finalizers)", pod_name),
+                65,
+            ),
+            remediation: "Check terminating containers, finalizers, or unmounting volumes."
+                .to_string(),
+            signals,
+        };
+    }
+
     // 1. Check for Evicted pod (ephemeral-storage exhaustion, node memory/disk pressure)
     if status_reason.eq_ignore_ascii_case("Evicted")
         || status_message.to_lowercase().contains("evicted")
@@ -385,29 +554,26 @@ pub fn analyze_pod_health(
         });
 
         // Check if container was terminated with exit code during eviction
-        if let Some(statuses) = container_statuses {
-            for cs in statuses {
-                let c_name = cs
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("container");
-                let exit_code = cs
-                    .pointer("/lastState/terminated/exitCode")
-                    .or_else(|| cs.pointer("/state/terminated/exitCode"))
-                    .and_then(|v| v.as_i64());
-                if let Some(code) = exit_code {
-                    let desc = if code == 143 {
-                        "Terminated with SIGTERM (exit code 143) by kubelet during eviction"
-                            .to_string()
-                    } else {
-                        format!("Container '{}' exited with code {}", c_name, code)
-                    };
-                    signals.push(DiagnosticSignal {
-                        severity: SignalSeverity::Info,
-                        title: format!("Container '{}' Termination", c_name),
-                        detail: Some(desc),
-                    });
-                }
+        for cs in regular_statuses {
+            let c_name = cs
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("container");
+            let exit_code = cs
+                .pointer("/lastState/terminated/exitCode")
+                .or_else(|| cs.pointer("/state/terminated/exitCode"))
+                .and_then(|v| v.as_i64());
+            if let Some(code) = exit_code {
+                let desc = if code == 143 {
+                    "Terminated with SIGTERM (exit code 143) by kubelet during eviction".to_string()
+                } else {
+                    format!("Container '{}' exited with code {}", c_name, code)
+                };
+                signals.push(DiagnosticSignal {
+                    severity: SignalSeverity::Info,
+                    title: format!("Container '{}' Termination", c_name),
+                    detail: Some(desc),
+                });
             }
         }
 
@@ -421,7 +587,7 @@ pub fn analyze_pod_health(
 
         return DiagnosticReport {
             verdict: DiagnosticVerdict::Evicted,
-            summary: format!("Evicted: {}", cause),
+            summary: make_one_line_gist("Evicted", cause, 65),
             remediation,
             signals,
         };
@@ -436,7 +602,11 @@ pub fn analyze_pod_health(
         });
         return DiagnosticReport {
             verdict: DiagnosticVerdict::NodeLost,
-            summary: format!("Pod '{}' is in Unknown phase", pod_name),
+            summary: make_one_line_gist(
+                "NodeLost",
+                &format!("Pod '{}' in Unknown phase", pod_name),
+                65,
+            ),
             remediation: "Check node health, network connectivity, or kubelet service.".to_string(),
             signals,
         };
@@ -473,9 +643,14 @@ pub fn analyze_pod_health(
                 title: format!("Container config error ({})", reason),
                 detail,
             });
+            let summary = make_one_line_gist(
+                reason,
+                event_msg.unwrap_or(&format!("pod '{}' failed with {}", name, reason)),
+                65,
+            );
             return DiagnosticReport {
                 verdict: DiagnosticVerdict::ConfigError,
-                summary: format!("Pod '{}' failed with {}", name, reason),
+                summary,
                 remediation,
                 signals,
             };
@@ -494,9 +669,14 @@ pub fn analyze_pod_health(
                 title: format!("Image pull failure ({})", reason),
                 detail,
             });
+            let summary = make_one_line_gist(
+                reason,
+                event_msg.unwrap_or(&format!("pod '{}' failed with {}", name, reason)),
+                65,
+            );
             return DiagnosticReport {
                 verdict: DiagnosticVerdict::ImagePullFailed,
-                summary: format!("Pod '{}' failed with {}", name, reason),
+                summary,
                 remediation,
                 signals,
             };
@@ -508,9 +688,14 @@ pub fn analyze_pod_health(
                 title: format!("CrashLoopBackOff ({})", reason),
                 detail: event_msg.map(|s| s.to_string()),
             });
+            let summary = make_one_line_gist(
+                reason,
+                event_msg.unwrap_or(&format!("pod '{}' is in CrashLoopBackOff", name)),
+                65,
+            );
             return DiagnosticReport {
                 verdict: DiagnosticVerdict::CrashLoopBackOff,
-                summary: format!("Pod '{}' is in CrashLoopBackOff", name),
+                summary,
                 remediation:
                     "Check previous container logs with [l] or events for failure details."
                         .to_string(),
@@ -581,13 +766,31 @@ pub fn analyze_pod_health(
                 title: format!("Event: {}", reason),
                 detail: Some(msg.to_string()),
             });
+            let summary = make_one_line_gist(reason, msg, 65);
             return DiagnosticReport {
                 verdict: DiagnosticVerdict::ConfigError,
-                summary: format!("Configuration / volume mount error: {}", msg),
+                summary,
                 remediation: format!(
                     "Ensure referenced volume, Secret, or ConfigMap exists: {}",
                     msg
                 ),
+                signals,
+            };
+        }
+
+        if reason == "FailedCreatePodSandBox" || reason == "NetworkNotReady" {
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Error,
+                title: format!("Sandbox / Network Failure ({})", reason),
+                detail: Some(msg.to_string()),
+            });
+            let summary = make_one_line_gist(reason, msg, 65);
+            return DiagnosticReport {
+                verdict: DiagnosticVerdict::Failed,
+                summary,
+                remediation:
+                    "Check CNI network plugin, node IPAM subnet address capacity, or kubelet logs."
+                        .to_string(),
                 signals,
             };
         }
@@ -600,9 +803,10 @@ pub fn analyze_pod_health(
                 title: format!("Event: {}", reason),
                 detail: Some(msg.to_string()),
             });
+            let summary = make_one_line_gist("ImagePullFailed", msg, 65);
             return DiagnosticReport {
                 verdict: DiagnosticVerdict::ImagePullFailed,
-                summary: format!("Image error: {}", msg),
+                summary,
                 remediation: format!("Verify image name, tag, and imagePullSecrets: {}", msg),
                 signals,
             };
@@ -617,38 +821,78 @@ pub fn analyze_pod_health(
         }
     }
 
+    if phase.eq_ignore_ascii_case("Pending") {
+        if let Some(warn) = events
+            .iter()
+            .find(|e| e.get("type").and_then(|v| v.as_str()) == Some("Warning"))
+        {
+            let reason = warn
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Warning");
+            let msg = warn.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            let summary = make_one_line_gist(reason, msg, 65);
+            return DiagnosticReport {
+                verdict: DiagnosticVerdict::Failed,
+                summary,
+                remediation: "Inspect correlated warning events and node/pod status.".to_string(),
+                signals,
+            };
+        }
+        return DiagnosticReport {
+            verdict: DiagnosticVerdict::SchedulingFailed,
+            summary: make_one_line_gist(
+                "Pending",
+                &format!("Pod '{}' waiting for scheduling/admission", pod_name),
+                65,
+            ),
+            remediation: "Inspect node capacity, taints, tolerations, or cluster scheduler logs."
+                .to_string(),
+            signals,
+        };
+    }
+
     if phase.eq_ignore_ascii_case("Failed") {
-        let exit_code = container_statuses.and_then(|statuses| {
-            statuses.iter().find_map(|cs| {
-                cs.pointer("/lastState/terminated/exitCode")
-                    .or_else(|| cs.pointer("/state/terminated/exitCode"))
-                    .and_then(|v| v.as_i64())
-            })
+        let exit_code = regular_statuses.iter().find_map(|cs| {
+            cs.pointer("/lastState/terminated/exitCode")
+                .or_else(|| cs.pointer("/state/terminated/exitCode"))
+                .and_then(|v| v.as_i64())
         });
 
-        let term_reason = container_statuses
-            .and_then(|statuses| {
-                statuses.iter().find_map(|cs| {
-                    cs.pointer("/lastState/terminated/reason")
-                        .or_else(|| cs.pointer("/state/terminated/reason"))
-                        .and_then(|v| v.as_str())
-                })
+        let term_reason = regular_statuses
+            .iter()
+            .find_map(|cs| {
+                cs.pointer("/lastState/terminated/reason")
+                    .or_else(|| cs.pointer("/state/terminated/reason"))
+                    .and_then(|v| v.as_str())
             })
             .unwrap_or(status_reason);
 
-        let summary = if let Some(code) = exit_code {
+        let cat = if !status_reason.is_empty() {
+            status_reason
+        } else if !term_reason.is_empty() {
+            term_reason
+        } else {
+            "Failed"
+        };
+
+        let summary = if !status_message.is_empty() {
+            make_one_line_gist(cat, status_message, 65)
+        } else if let Some(code) = exit_code {
             if code == 143 {
-                "Pod Failed: terminated with SIGTERM (exit code 143)".to_string()
+                "Failed: terminated with SIGTERM (exit code 143)".to_string()
             } else {
                 format!(
-                    "Pod Failed: container exited with code {} (exit code {})",
+                    "Failed: container exited with code {} (exit code {})",
                     code, code
                 )
             }
-        } else if !status_message.is_empty() {
-            format!("Pod Failed: {}", status_message)
         } else {
-            format!("Pod '{}' terminated in Failed phase", pod_name)
+            make_one_line_gist(
+                cat,
+                &format!("Pod '{}' terminated in Failed phase", pod_name),
+                65,
+            )
         };
 
         signals.push(DiagnosticSignal {
@@ -676,11 +920,31 @@ pub fn analyze_pod_health(
         };
     }
 
-    DiagnosticReport {
-        verdict: DiagnosticVerdict::Healthy,
-        summary: "Pod is healthy or has no detectable failures".into(),
-        remediation: String::new(),
-        signals,
+    if phase.eq_ignore_ascii_case("Running") {
+        DiagnosticReport {
+            verdict: DiagnosticVerdict::Healthy,
+            summary: "Pod is running and healthy".into(),
+            remediation: String::new(),
+            signals,
+        }
+    } else if phase.eq_ignore_ascii_case("Succeeded") {
+        DiagnosticReport {
+            verdict: DiagnosticVerdict::Healthy,
+            summary: format!("Pod '{}' completed successfully", pod_name),
+            remediation: String::new(),
+            signals,
+        }
+    } else {
+        DiagnosticReport {
+            verdict: DiagnosticVerdict::Failed,
+            summary: make_one_line_gist(
+                if phase.is_empty() { "Unknown" } else { phase },
+                &format!("Pod '{}' in non-running phase", pod_name),
+                65,
+            ),
+            remediation: "Inspect pod status, events, and kubelet logs.".to_string(),
+            signals,
+        }
     }
 }
 
@@ -1043,5 +1307,259 @@ mod tests {
             .iter()
             .any(|s| s.title.contains("Termination")
                 || s.detail.as_deref().unwrap_or("").contains("143")));
+    }
+
+    #[test]
+    fn test_diagnose_unexpected_admission_error_gpu() {
+        let pod = json!({
+            "metadata": { "name": "gpu-pod", "namespace": "gpu-operator" },
+            "status": {
+                "phase": "Failed",
+                "reason": "UnexpectedAdmissionError",
+                "message": "Pod was rejected: Allocate failed due to no healthy devices present; cannot allocate unhealthy devices nvidia.com/gpu, which is unexpected"
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_eq!(report.verdict, DiagnosticVerdict::Failed);
+        assert!(
+            report.summary.len() <= 75,
+            "Summary too long: {} chars",
+            report.summary.len()
+        );
+        assert!(
+            report.summary.contains("Allocate failed")
+                || report.summary.contains("UnexpectedAdmissionError")
+        );
+        // Full raw detail is preserved in signals
+        assert_eq!(report.signals.len(), 1);
+        assert!(report.signals[0]
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("cannot allocate unhealthy devices nvidia.com/gpu"));
+    }
+
+    #[test]
+    fn test_diagnose_cni_sandbox_failure() {
+        let pod = json!({
+            "metadata": { "name": "web-worker", "namespace": "prod" },
+            "status": {
+                "phase": "Pending"
+            }
+        });
+        let events = vec![json!({
+            "type": "Warning",
+            "reason": "FailedCreatePodSandBox",
+            "message": "Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox: no IP addresses available in network: podnet"
+        })];
+
+        let report = analyze_pod_health(&pod, &events, None);
+        assert!(
+            report.summary.len() <= 75,
+            "Summary too long: {} chars",
+            report.summary.len()
+        );
+        assert!(report.signals.iter().any(|s| s
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("no IP addresses available")));
+    }
+
+    #[test]
+    fn test_diagnose_failed_mount_storage() {
+        let pod = json!({
+            "metadata": { "name": "db-follower", "namespace": "prod" },
+            "status": {
+                "phase": "Pending"
+            }
+        });
+        let events = vec![json!({
+            "type": "Warning",
+            "reason": "FailedMount",
+            "message": "MountVolume.SetUp failed for volume \"pvc-data\": persistentvolumeclaim \"pvc-data\" not found"
+        })];
+
+        let report = analyze_pod_health(&pod, &events, None);
+        assert_eq!(report.verdict, DiagnosticVerdict::ConfigError);
+        assert!(
+            report.summary.len() <= 75,
+            "Summary too long: {} chars",
+            report.summary.len()
+        );
+        assert!(report.signals.iter().any(|s| s
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("persistentvolumeclaim \"pvc-data\" not found")));
+    }
+
+    #[test]
+    fn test_diagnose_deadline_exceeded() {
+        let pod = json!({
+            "metadata": { "name": "batch-processor-job-4k9", "namespace": "batch" },
+            "status": {
+                "phase": "Failed",
+                "reason": "DeadlineExceeded",
+                "message": "Pod was active on the node longer than the specified deadline 3600 seconds"
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_eq!(report.verdict, DiagnosticVerdict::Failed);
+        assert!(
+            report.summary.len() <= 75,
+            "Summary too long: {} chars",
+            report.summary.len()
+        );
+        assert!(report.summary.contains("DeadlineExceeded"));
+        assert!(report.signals.iter().any(|s| s
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("3600 seconds")));
+    }
+
+    #[test]
+    fn test_diagnose_init_container_failure() {
+        let pod = json!({
+            "metadata": { "name": "app-with-init", "namespace": "default" },
+            "status": {
+                "phase": "Pending",
+                "initContainerStatuses": [{
+                    "name": "db-migrate",
+                    "ready": false,
+                    "restartCount": 3,
+                    "state": {
+                        "waiting": {
+                            "reason": "CrashLoopBackOff",
+                            "message": "back-off 10s restarting failed container"
+                        }
+                    },
+                    "lastState": {
+                        "terminated": {
+                            "exitCode": 2,
+                            "reason": "Error"
+                        }
+                    }
+                }],
+                "containerStatuses": [{
+                    "name": "main-app",
+                    "ready": false,
+                    "state": {
+                        "waiting": {
+                            "reason": "PodInitializing"
+                        }
+                    }
+                }]
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_eq!(report.verdict, DiagnosticVerdict::CrashLoopBackOff);
+        assert!(report.summary.len() <= 75);
+        assert!(report.summary.contains("db-migrate"));
+    }
+
+    #[test]
+    fn test_diagnose_terminating_pod() {
+        let pod = json!({
+            "metadata": {
+                "name": "stuck-terminating-pod",
+                "namespace": "default",
+                "deletionTimestamp": "2026-09-20T12:00:00Z"
+            },
+            "status": {
+                "phase": "Running"
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_eq!(report.verdict, DiagnosticVerdict::Failed);
+        assert!(report.summary.len() <= 75);
+        assert!(report.summary.contains("Terminating"));
+    }
+
+    #[test]
+    fn test_diagnose_pending_without_events_never_healthy() {
+        let pod = json!({
+            "metadata": { "name": "fresh-pending-pod", "namespace": "default" },
+            "status": {
+                "phase": "Pending"
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_ne!(report.verdict, DiagnosticVerdict::Healthy);
+        assert_eq!(report.verdict, DiagnosticVerdict::SchedulingFailed);
+        assert!(report.summary.len() <= 75);
+        assert!(report.summary.contains("Pending"));
+    }
+
+    #[test]
+    fn test_diagnose_succeeded_pod_healthy() {
+        let pod = json!({
+            "metadata": { "name": "backup-cronjob-2894-xx9", "namespace": "default" },
+            "status": {
+                "phase": "Succeeded"
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_eq!(report.verdict, DiagnosticVerdict::Healthy);
+        assert!(report.summary.contains("completed successfully"));
+    }
+
+    #[test]
+    fn test_diagnose_custom_phase_never_healthy() {
+        let pod = json!({
+            "metadata": { "name": "custom-state-pod", "namespace": "default" },
+            "status": {
+                "phase": "CustomErrorPhase"
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_ne!(report.verdict, DiagnosticVerdict::Healthy);
+        assert_eq!(report.verdict, DiagnosticVerdict::Failed);
+        assert!(report.summary.len() <= 75);
+    }
+
+    #[test]
+    fn test_diagnose_generic_run_container_error() {
+        let pod = json!({
+            "metadata": { "name": "bad-caps-pod", "namespace": "default" },
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [{
+                    "name": "worker",
+                    "ready": false,
+                    "state": {
+                        "waiting": {
+                            "reason": "RunContainerError",
+                            "message": "failed to create containerd task: failed to create shim task: OCI runtime create failed: container_linux.go:380: starting container process caused: permission denied"
+                        }
+                    }
+                }]
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_eq!(report.verdict, DiagnosticVerdict::Failed);
+        assert!(
+            report.summary.len() <= 75,
+            "Summary length {} > 75",
+            report.summary.len()
+        );
+        assert!(
+            report.summary.contains("RunContainerError")
+                || report.summary.contains("permission denied")
+        );
+        assert!(report.signals.iter().any(|s| s
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("OCI runtime create failed")));
     }
 }
