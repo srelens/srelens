@@ -6278,6 +6278,110 @@ mod tests {
             .any(|(cmd, _)| cmd.name == "theme cyberpunk"));
     }
 
+    /// Secondary text in the node inspector follows the selected theme.
+    /// `Theme::DIM` is the default palette's value, fixed at compile time;
+    /// a view that draws it shows default-theme grey inside every other
+    /// theme, so the runtime accessor is what the pod table must read.
+    #[test]
+    fn node_inspector_secondary_text_follows_the_active_theme() {
+        let _lock = THEME_TEST_MUTEX.lock().unwrap();
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+        use srelens_tui::theme::Theme;
+        use srelens_tui::views::node_inspector_view::{
+            render_node_inspector_view, NodeInspectorState,
+        };
+
+        // Restored on every exit, a panic included: the theme is process
+        // global, and a failed assertion here must not leave the other tests
+        // in this binary rendering solarized-dark.
+        struct RestoreTheme(usize);
+        impl Drop for RestoreTheme {
+            fn drop(&mut self) {
+                Theme::set_theme_by_index(self.0);
+            }
+        }
+        let _restore = RestoreTheme(Theme::active_index());
+
+        assert!(Theme::set_theme_by_name("solarized-dark").is_some());
+        assert_ne!(
+            Theme::dim(),
+            Theme::DIM,
+            "the test needs a theme whose dim differs from the default's"
+        );
+
+        let mut state = NodeInspectorState::new("node-1".to_string());
+        state.set_details(NodeInspectorDetails {
+            name: "node-1".to_string(),
+            status: "Ready".to_string(),
+            pods_count: 1,
+            pods: vec![NodePodItem {
+                name: "web".to_string(),
+                namespace: "default".to_string(),
+                phase: "Running".to_string(),
+                ready_containers: "1/1".to_string(),
+                restarts: 0,
+                age: "3d".to_string(),
+                cpu_requests_millicores: 100,
+                mem_requests_mib: 128,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.1.5".to_string(),
+            }],
+            ..Default::default()
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("test terminal");
+        terminal
+            .draw(|f| render_node_inspector_view(f, f.area(), &state))
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let row_of = |needle: &str| -> (String, u16) {
+            (0..buf.area.height)
+                .find_map(|y| {
+                    let line: String = (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect();
+                    line.contains(needle).then_some((line, y))
+                })
+                .unwrap_or_else(|| panic!("no row contains {needle:?}"))
+        };
+        let col = |line: &str, needle: &str| {
+            let at = line.find(needle).unwrap();
+            line[..at].chars().count() as u16
+        };
+        // The header and each row are padded to the same column widths, so
+        // a label's offset in the header is where that cell starts in the
+        // row beneath it — the way to find a cell whose text ("0", "-") is
+        // not unique on the line.
+        let (header, _) = row_of("GPU REQ");
+        let (row, y) = row_of("10.244.1.5");
+        let solarized_dim = ratatui::style::Color::Rgb(112, 131, 135);
+        let cell = |x: u16| (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg);
+
+        assert_eq!(
+            buf[(col(&row, "10.244.1.5"), y)].fg,
+            solarized_dim,
+            "the pod IP is secondary text"
+        );
+        assert_eq!(
+            buf[(col(&row, "3d"), y)].fg,
+            solarized_dim,
+            "the pod age is secondary text"
+        );
+        assert_eq!(
+            cell(col(&header, "REST")),
+            ("0".to_string(), solarized_dim),
+            "a zero restart count is secondary text"
+        );
+        assert_eq!(
+            cell(col(&header, "GPU REQ")),
+            ("-".to_string(), solarized_dim),
+            "the no-GPU placeholder is secondary text"
+        );
+    }
+
     #[tokio::test]
     async fn test_theme_picker_live_preview_revert_and_commit() {
         let _lock = THEME_TEST_MUTEX.lock().unwrap();

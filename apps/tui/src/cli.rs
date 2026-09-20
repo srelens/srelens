@@ -32,7 +32,7 @@ pub struct Cli {
     #[arg(long = "mcp-allow-destructive")]
     pub mcp_allow_destructive: bool,
 
-    /// Allow secret-reading capabilities with --mcp-allow-sensitive-reads
+    /// Allow secret-reading capabilities (e.g. k8s.getSecret) with --mcp-stdio
     #[arg(long = "mcp-allow-sensitive-reads")]
     pub mcp_allow_sensitive_reads: bool,
 

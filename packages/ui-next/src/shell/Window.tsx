@@ -17,7 +17,15 @@ import {
 } from "@srelens/core";
 import { Button, Checkbox, Drawer, LoadingState, TabStrip, TextInput, type ContextMenuItem, type StripTab } from "@srelens/ui-kit";
 import { contextLabelFor } from "../lib/agentSuggestions";
-import { setContexts, setKubeconfigFiles, useContexts, useContextsError, useContextsStatus } from "../lib/clusters";
+import {
+  pinContextKey,
+  resolveContext,
+  setContexts,
+  setKubeconfigFiles,
+  useContexts,
+  useContextsError,
+  useContextsStatus,
+} from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { loadRecentLogSubjects } from "../lib/logRecents";
 import { getMark, getContextLabel, loadMarks, useMark } from "../lib/marks";
@@ -170,7 +178,7 @@ export function Window({
   const { tabs, activeId, workspace } = useTabs();
   useMark("", "");
   const activeIdCluster = useActiveCluster();
-  const activeCtx = contexts.find((c) => c.stableId === activeIdCluster) ?? null;
+  const activeCtx = resolveContext(contexts, activeIdCluster) ?? null;
   // The console dock's own scope label — `Window`'s job because it is the one
   // place that already knows both the active tab's route and the active
   // cluster's name; `Console` itself only reads `scope` back off the provider.
@@ -259,17 +267,26 @@ export function Window({
         failure = outcome.error ?? "";
         listed = true;
         const ctxQuery = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("context") : null;
+        // The key outlives its resolution into a stable id below: workspaces
+        // hold the id, two contexts can share one, and every later lookup by
+        // id in this window must land on the context the query named rather
+        // than the first of the pair (see `pinContextKey`).
+        if (ctxQuery && windowLabel !== "main") pinContextKey(ctxQuery);
         // Empty workspaces from a parse that kept the document shell are the
         // same as no save: seeding against them cannot pick a target workspace.
         let saved = usableTabsState(loadTabsState(undefined, undefined, windowLabel));
 
         if (!saved && ctxQuery && windowLabel !== "main") {
-          // Classic Sidebar puts a display name in `?context=`; Rail puts a
-          // `stableId`. Workspaces key clusters on stable ids, so resolve the
-          // query first — looking up `clusters.includes(ctxQuery)` with a name
-          // misses the right workspace and then seeds the wrong one.
+          // Both designs put a context KEY in `?context=` — not a display
+          // name, and not a `stableId`: a path `a` with context `b#c` and a
+          // path `a#b` with context `c` share a stable ID, so resolving by one
+          // could pick the wrong cluster for this window (#623). Workspaces
+          // still key clusters on stable ids, so resolve the query to a
+          // context first — looking up `clusters.includes(ctxQuery)` with
+          // anything but a stable id misses the right workspace and then seeds
+          // the wrong one.
           const targetContext = found.find(
-            (context) => context.stableId === ctxQuery,
+            (context) => context.key === ctxQuery,
           );
           if (targetContext) {
             let mainSaved = usableTabsState(loadTabsState(undefined, undefined, "main"));
@@ -325,7 +342,7 @@ export function Window({
         } else if (
           ctxQuery &&
           windowLabel !== "main" &&
-          !found.some((context) => context.stableId === ctxQuery)
+          !found.some((context) => context.key === ctxQuery)
         ) {
           if (failure !== "") {
             // Own saved state already existed; still retain the query across a
@@ -403,7 +420,7 @@ export function Window({
     const query = pendingCtxQuery.current;
     if (!booted || !query) return;
     const target = contexts.find(
-      (context) => context.stableId === query,
+      (context) => context.key === query,
     );
     if (target) {
       pendingCtxQuery.current = null;

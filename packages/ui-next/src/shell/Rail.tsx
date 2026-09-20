@@ -177,7 +177,16 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
               label: "Open in new window",
               icon: Icons.openTab,
               onPick: () => {
-                void invokeCommand("open_context_window", { contextId: item.id }).catch((e) => {
+                // The window's identity is the context KEY, not the `stableId`
+                // this rail keys marks and workspaces on: a path `a` with
+                // context `b#c` and a path `a#b` with context `c` share a
+                // stable ID, so the second cluster's window focused the
+                // first's and could never be opened (#623). `stableId` stays
+                // the persisted identity; only the window label and the
+                // `?context=` query move to the key, and neither is persisted.
+                const contextId = byId.get(item.id)?.key;
+                if (!contextId) return;
+                void invokeCommand("open_context_window", { contextId }).catch((e) => {
                   notify.error(`Couldn't open window for ${item.name}`, describeError(e).detail);
                 });
               },

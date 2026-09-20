@@ -138,6 +138,44 @@ fn render_node(width: u16, height: u16, state: &NodeInspectorState) -> String {
     })
 }
 
+/// The REST column is sized from the number it draws. The thresholds this
+/// replaced padded a four-digit count as five and gave a seven-digit count
+/// five cells: `pad_display` pads but never truncates, so the excess pushed
+/// every later column of that row out of line with the header.
+#[test]
+fn node_inspector_sizes_the_restart_column_from_a_seven_digit_count() {
+    let mut details = node_details("node-1");
+    let mut restarted = pod("default", "crashy", "Running");
+    restarted.restarts = 1_000_000;
+    details.pods = vec![restarted, pod("kube-system", "quiet", "Running")];
+    let state = node_state(details);
+
+    let lines = common::render_lines(200, 40, |f| render_node_inspector_view(f, f.area(), &state));
+    let header = &lines[row_of(&lines, "NAMESPACE")];
+    let crashy = &lines[row_of(&lines, "crashy")];
+    let quiet = &lines[row_of(&lines, "quiet")];
+
+    assert_eq!(
+        col(crashy, "1000000"),
+        col(header, "REST"),
+        "the count starts under its header:\n{header}\n{crashy}"
+    );
+    // Every column after REST lines up with the header in both rows — the
+    // one carrying the wide count and the one that does not.
+    for (heading, cell) in [("CPU REQ", "100m"), ("AGE", "3d")] {
+        assert_eq!(
+            col(crashy, cell),
+            col(header, heading),
+            "{heading} drifted on the wide row:\n{header}\n{crashy}"
+        );
+        assert_eq!(
+            col(quiet, cell),
+            col(header, heading),
+            "{heading} drifted on the narrow row:\n{header}\n{quiet}"
+        );
+    }
+}
+
 #[test]
 fn node_inspector_starts_loading_and_draws_the_loading_placeholder() {
     let state = NodeInspectorState::new("node-1".to_string());

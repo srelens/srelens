@@ -1,12 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const { invokeMock, listenMock, relaunchMock, getVersionMock, onCloseRequestedMock, windowDestroyMock } = vi.hoisted(() => ({
+const { invokeMock, listenMock, relaunchMock, getVersionMock, onCloseRequestedMock, windowDestroyMock, windowCloseMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
   listenMock: vi.fn(),
   relaunchMock: vi.fn(),
   getVersionMock: vi.fn(),
   onCloseRequestedMock: vi.fn(),
   windowDestroyMock: vi.fn(),
+  windowCloseMock: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
@@ -17,6 +18,7 @@ vi.mock("@tauri-apps/api/window", () => ({
     label: "ctx-test",
     onCloseRequested: onCloseRequestedMock,
     destroy: windowDestroyMock,
+    close: windowCloseMock,
   }),
 }));
 
@@ -30,7 +32,25 @@ beforeEach(() => {
   getVersionMock.mockReset();
   onCloseRequestedMock.mockReset();
   windowDestroyMock.mockReset();
+  windowCloseMock.mockReset();
 });
+
+/** Register a close interceptor and hand back the listener Tauri would call. */
+async function closeInterceptor(
+  handler: () => Promise<void> | void,
+  timeoutMs: number,
+  maxRefusals?: number,
+) {
+  let closeHandler: ((event: { preventDefault: () => void }) => Promise<void>) | undefined;
+  onCloseRequestedMock.mockImplementation(async (fn) => {
+    closeHandler = fn;
+    return vi.fn();
+  });
+  onWindowCloseRequested(handler, timeoutMs, maxRefusals);
+  await Promise.resolve();
+  expect(closeHandler).toBeDefined();
+  return (event = { preventDefault: vi.fn() }) => closeHandler!(event);
+}
 
 describe("transport", () => {
   it("invokeCapability forwards id+input to the tauri command", async () => {
@@ -133,6 +153,72 @@ describe("transport", () => {
     expect(first.preventDefault).toHaveBeenCalled();
     expect(second.preventDefault).toHaveBeenCalled();
     await Promise.race([pending, new Promise((r) => setTimeout(r, 80))]);
+  });
+
+  /**
+   * A cleanup that keeps timing out must not cost the user the window.
+   *
+   * The first refusal is the stall guard doing its job — the flush may still
+   * land, and destroying over it drops the settings write. The second is the
+   * user telling us the first answer was not good enough: the close was
+   * already prevented, so the titlebar button reads as inert, and refusing
+   * forever leaves a window that cannot be closed at all. Same decision as the
+   * classic path's bounded flush (#425).
+   */
+  it("onWindowCloseRequested destroys the window on a second timed-out attempt", async () => {
+    windowDestroyMock.mockResolvedValue(undefined);
+    const close = await closeInterceptor(() => new Promise(() => {}), 20);
+
+    await close();
+    expect(windowDestroyMock).not.toHaveBeenCalled();
+
+    await close();
+    expect(windowDestroyMock).toHaveBeenCalledTimes(1);
+  });
+
+  /** A handler that rejects every time cannot wedge the window either. */
+  it("onWindowCloseRequested destroys after a second failed cleanup", async () => {
+    windowDestroyMock.mockResolvedValue(undefined);
+    const close = await closeInterceptor(() => Promise.reject(new Error("disk gone")), 20);
+
+    await close();
+    expect(windowDestroyMock).not.toHaveBeenCalled();
+
+    await close();
+    expect(windowDestroyMock).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The bound counts attempts over the window's whole life, not per burst: a
+   * flush that succeeded once and then wedged still gets its one refusal and
+   * no more.
+   */
+  it("onWindowCloseRequested honours a wider refusal bound before giving up", async () => {
+    windowDestroyMock.mockResolvedValue(undefined);
+    const close = await closeInterceptor(() => new Promise(() => {}), 20, 2);
+
+    await close();
+    await close();
+    expect(windowDestroyMock).not.toHaveBeenCalled();
+
+    await close();
+    expect(windowDestroyMock).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * destroy() is refused when `core:window:allow-destroy` was not granted —
+   * the ungranted-permission case #425 was about. close() re-emits the event,
+   * so the guard has to let that one through rather than intercepting itself
+   * into a loop.
+   */
+  it("onWindowCloseRequested falls back to close() when destroy is refused", async () => {
+    windowDestroyMock.mockRejectedValue(new Error("not allowed"));
+    windowCloseMock.mockResolvedValue(undefined);
+    const close = await closeInterceptor(() => Promise.resolve(), 20);
+
+    await close();
+    expect(windowDestroyMock).toHaveBeenCalledTimes(1);
+    expect(windowCloseMock).toHaveBeenCalledTimes(1);
   });
 
   it("currentWindowLabel returns the label of the current window or main on web", () => {

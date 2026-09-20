@@ -844,7 +844,7 @@ fn render_pods_table(
 
     if d.pods.is_empty() {
         let empty_p = Paragraph::new("\n  No pods currently scheduled on this node.")
-            .style(Style::default().fg(Theme::DIM));
+            .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty_p, inner);
         return;
     }
@@ -890,13 +890,13 @@ fn render_pods_table(
         max_ip = max_ip.max(ip_len);
         max_status = max_status.max(UnicodeWidthStr::width(pod.phase.as_str()));
         max_ready = max_ready.max(UnicodeWidthStr::width(pod.ready_containers.as_str()));
-        let rest_len = if pod.restarts >= 1000 {
-            5
-        } else if pod.restarts >= 100 {
-            3
-        } else {
-            pod.restarts.to_string().len()
-        };
+        // From the string the row actually draws, like every other column
+        // here. The thresholds this replaces guessed at it and were wrong in
+        // both directions: a four-digit count was padded as if it were five,
+        // and a count of seven digits or more overran the width — `pad_display`
+        // pads but never truncates, so the excess pushed every later column
+        // out of line.
+        let rest_len = UnicodeWidthStr::width(pod.restarts.to_string().as_str());
         max_rest = max_rest.max(rest_len);
 
         let cpu_len = if pod.cpu_requests_millicores >= 1000 {
@@ -1080,7 +1080,10 @@ fn render_pods_table(
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            ("-".to_string(), Style::default().fg(Theme::DIM).bg(row_bg))
+            (
+                "-".to_string(),
+                Style::default().fg(Theme::dim()).bg(row_bg),
+            )
         };
 
         let ns_clean = super::sanitize_span_text(&pod.namespace);
@@ -1115,7 +1118,7 @@ fn render_pods_table(
             ),
             Span::styled(
                 pad_display(&ip_clean, ip_w),
-                Style::default().fg(Theme::DIM).bg(row_bg),
+                Style::default().fg(Theme::dim()).bg(row_bg),
             ),
             Span::styled(
                 pad_display(&pod.phase, status_w),
@@ -1131,7 +1134,7 @@ fn render_pods_table(
                     .fg(if pod.restarts > 0 {
                         Theme::YELLOW
                     } else {
-                        Theme::DIM
+                        Theme::dim()
                     })
                     .bg(row_bg),
             ),
@@ -1146,7 +1149,7 @@ fn render_pods_table(
             Span::styled(pad_display(&gpu_str, gpu_w), gpu_style),
             Span::styled(
                 pad_display(&age_clean, age_w),
-                Style::default().fg(Theme::DIM).bg(row_bg),
+                Style::default().fg(Theme::dim()).bg(row_bg),
             ),
         ]);
         lines.push(row);

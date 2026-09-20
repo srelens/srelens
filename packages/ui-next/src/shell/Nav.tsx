@@ -8,6 +8,7 @@ import { Mark, ResourceTree, Sidebar, StatusPill, type ResourceNode, type Status
 import { saveNavigationWidth, setNavigationWidth, useNavigationWidth } from "../lib/navigationWidth";
 import { Icons } from "../lib/icons";
 import { useMark } from "../lib/marks";
+import { resolveContext } from "../lib/clusters";
 import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { crdNodes, glyph, INVESTIGATE, kindNodes, routeForNode } from "../lib/tree";
 import { useResource } from "../lib/useResource";
@@ -73,7 +74,7 @@ function nodeForRoute(nodes: ResourceNode[], crds: CrdRef[], route: string): str
 export function Nav({ contexts }: NavProps) {
   const extensions = useExtensions();
   const activeCluster = useActiveCluster();
-  const ctx = contexts.find((c) => c.stableId === activeCluster) ?? null;
+  const ctx = resolveContext(contexts, activeCluster) ?? null;
   // App routes carry the stable ID, so a shared one cannot be routed; app scope itself keys on `key` (#623).
   const scopeId = ctx && contexts.filter((c) => c.stableId === ctx.stableId).length === 1 ? ctx.key : undefined;
   const view = useWorkspaceView();

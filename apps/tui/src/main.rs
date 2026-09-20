@@ -513,15 +513,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(client) = client {
                                 match srelens_kube::manifest::split_documents(&new_yaml) {
                                     Ok(docs) if !docs.is_empty() => {
+                                        // The documents are consumed by the apply, so the
+                                        // copy the invalidation reads is taken first. One
+                                        // result comes back per document, in order.
+                                        let applied_from = docs.clone();
                                         let results = srelens_kube::manifest::apply_documents(&client, docs, fallback_ns, true).await;
                                         let applied_docs: Vec<_> = results.iter().filter(|d| d.applied).collect();
                                         let failed_docs: Vec<_> = results.iter().filter(|d| !d.applied).collect();
 
-                                        // Invalidate cache for every document that was applied
-                                        for doc in &applied_docs {
-                                            let doc_ns = res_ns.as_deref().unwrap_or("");
-                                            app.invalidate_resource_cache_for(&doc.kind, doc_ns);
-                                        }
+                                        // Every applied document, in ITS namespace — not the
+                                        // view's (`app::applied_document_scopes`).
+                                        app.invalidate_applied_documents(&applied_from, fallback_ns, &results);
 
                                         if failed_docs.is_empty() && !applied_docs.is_empty() {
                                             let updated_names: Vec<String> = applied_docs.iter().map(|d| format!("{}/{}", d.kind, d.name)).collect();
