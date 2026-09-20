@@ -14,3 +14,7 @@ export const subscribe = impl.subscribe;
 export const relaunchApp = impl.relaunchApp;
 export const appVersion = impl.appVersion;
 export const setWebviewZoom = impl.setWebviewZoom;
+export const onWindowCloseRequested = impl.onWindowCloseRequested;
+export const currentWindowLabel: () => string = () =>
+  isTauri() ? tauri.currentWindowLabel() : web.currentWindowLabel();
+

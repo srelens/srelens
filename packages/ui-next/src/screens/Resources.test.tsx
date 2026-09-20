@@ -148,7 +148,7 @@ import { getView, resetView, setNamespaces } from "../lib/workspace";
 
 const CTX: ClusterContext = {
   name: "prod-eu",
-  stableId: "prod",
+  stableId: "prod", key: "prod",
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,
@@ -163,7 +163,7 @@ const CTX: ClusterContext = {
  */
 const STAGE: ClusterContext = {
   name: "stage-eu",
-  stableId: "stage",
+  stableId: "stage", key: "stage",
   cluster: "stage",
   server: "https://stage",
   isCurrent: false,
@@ -494,6 +494,31 @@ describe("Resources", () => {
     await waitFor(() => expect(rowNames()).toEqual(["left"]));
     expect(headers()).toContain("Phase");
     expect(listCrds).toHaveBeenCalledWith("prod-eu");
+  });
+
+  it("says when a custom-resource list was capped", async () => {
+    listCrds.mockResolvedValue({ crds: [WIDGETS] });
+    listCustomResource.mockResolvedValue({
+      items: [{ name: "left", namespace: "default", age: "1d", columns: ["Ready"] }],
+      truncated: true,
+    });
+
+    open("/k/widgets.example.com");
+
+    await waitFor(() => expect(rowNames()).toEqual(["left"]));
+    expect(screen.getByText(/Showing the first 1 widget/i)).toBeTruthy();
+    expect(screen.getByText(/shared list row cap/i)).toBeTruthy();
+  });
+
+  it("does not claim a capped list when the custom-resource list failed", async () => {
+    listCrds.mockResolvedValue({ crds: [WIDGETS] });
+    listCustomResource.mockResolvedValue({ error: "forbidden" });
+
+    open("/k/widgets.example.com");
+
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(screen.queryByText(/shared list row cap/i)).toBeNull();
+    expect(screen.queryByText(/Showing the first/i)).toBeNull();
   });
 
   it("tells the reader what a custom kind is, in a rail beside its list", async () => {

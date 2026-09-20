@@ -76,7 +76,10 @@ export interface KindDescriptor<Row extends ListRow = ListRow> {
   source: "watch" | "poll";
   scope: "namespaced" | "cluster";
   /** Required for `poll`; unused for `watch`. */
-  load?: (context: string, namespace: string) => Promise<{ rows?: Row[]; error?: string }>;
+  load?: (
+    context: string,
+    namespace: string,
+  ) => Promise<{ rows?: Row[]; truncated?: boolean; error?: string }>;
   /** Extra per-row data merged onto the row of the same identity — pod
    *  metrics, node metrics. Keyed by {@link rowKey}, never by name: see
    *  {@link RowKey}. */

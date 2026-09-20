@@ -66,7 +66,7 @@ import { resetView, setLink, type LinkState } from "../lib/workspace";
 
 const CTX: ClusterContext = {
   name: "prod-eu",
-  stableId: "prod",
+  stableId: "prod", key: "prod",
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,
@@ -1181,7 +1181,7 @@ describe("Overview — the rail's incidents and node versions", () => {
   });
 
   it("shows versions from this cluster without querying other workspace clusters", async () => {
-    const other = { ...CTX, name: "other", stableId: "other" };
+    const other = { ...CTX, name: "other", stableId: "other", key: "other" };
     setContexts([CTX, other]);
     store.setState(defaultState([CTX, other]));
     core.listNodes.mockResolvedValue({ nodes: [aNode("n1"), aNode("n2"), aNode("n3", { version: "v1.32.5" })] });
@@ -1649,7 +1649,7 @@ describe("Overview — coming back to the tab", () => {
     core.listNodes.mockImplementation((context: string) =>
       Promise.resolve({ nodes: [aNode(`${context}-1`)] }),
     );
-    const other: ClusterContext = { ...CTX, name: "staging-eu", stableId: "staging" };
+    const other: ClusterContext = { ...CTX, name: "staging-eu", stableId: "staging", key: "staging" };
     setContexts([CTX, other]);
     store.setState(defaultState([CTX, other]));
 
@@ -1692,7 +1692,7 @@ describe("Overview — coming back to the tab", () => {
  */
 describe("Overview — the cluster a node action was picked on", () => {
   const MOVED = "stage-eu";
-  const STAGE: ClusterContext = { ...CTX, name: MOVED, stableId: "stage", isCurrent: false };
+  const STAGE: ClusterContext = { ...CTX, name: MOVED, stableId: "stage", key: "stage", isCurrent: false };
 
   const box = () => dialog() as HTMLElement;
   const tick = (verb: string) =>

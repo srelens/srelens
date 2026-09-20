@@ -1,6 +1,6 @@
 import { extensionLogoIcon, extensionPageIcon } from "../extensions/ExtensionLogo";
 import { useExtensions } from "../extensions/Extensions";
-import { extensionRoute } from "@srelens/core";
+import { extensionEnabledFor, extensionClusterRoute as extensionRoute } from "@srelens/core";
 import { symbolFor } from "../lib/markSymbols";
 import { useMemo, useState } from "react";
 import { listCrds, type ClusterContext, type CrdRef } from "@srelens/core";
@@ -8,6 +8,7 @@ import { Mark, ResourceTree, Sidebar, StatusPill, type ResourceNode, type Status
 import { saveNavigationWidth, setNavigationWidth, useNavigationWidth } from "../lib/navigationWidth";
 import { Icons } from "../lib/icons";
 import { useMark } from "../lib/marks";
+import { resolveContext } from "../lib/clusters";
 import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { crdNodes, glyph, INVESTIGATE, kindNodes, routeForNode } from "../lib/tree";
 import { useResource } from "../lib/useResource";
@@ -73,7 +74,9 @@ function nodeForRoute(nodes: ResourceNode[], crds: CrdRef[], route: string): str
 export function Nav({ contexts }: NavProps) {
   const extensions = useExtensions();
   const activeCluster = useActiveCluster();
-  const ctx = contexts.find((c) => c.stableId === activeCluster) ?? null;
+  const ctx = resolveContext(contexts, activeCluster) ?? null;
+  // App routes carry the stable ID, so a shared one cannot be routed; app scope itself keys on `key` (#623).
+  const scopeId = ctx && contexts.filter((c) => c.stableId === ctx.stableId).length === 1 ? ctx.key : undefined;
   const view = useWorkspaceView();
   const [query, setQuery] = useState("");
   const mark = useMark(ctx?.stableId ?? "", ctx?.name ?? "");
@@ -112,14 +115,14 @@ export function Nav({ contexts }: NavProps) {
   const nodes = useMemo<ResourceNode[]>(
     () => [
       ...kindNodes().slice(0, 1),
-      ...(ctx && extensions.data && extensions.data.plugins.some(p => p.enabled && p.manifest.contributions.pages.length)
+      ...(ctx && scopeId !== undefined && extensions.data && extensions.data.plugins.some(p => p.enabled && extensionEnabledFor(p, scopeId) && p.manifest.contributions.pages.length)
         ? [{
             id: "extensions", label: "Apps", icon: Icons.apps,
-            children: extensions.data.plugins.filter(p => p.enabled && p.manifest.contributions.pages.length).map(p => ({
+            children: extensions.data.plugins.filter(p => p.enabled && extensionEnabledFor(p, scopeId) && p.manifest.contributions.pages.length).map(p => ({
               id: `extension:${p.manifest.id}`, label: p.manifest.name, icon: extensionLogoIcon(p.manifest.id, p.manifest.name),
               children: p.manifest.contributions.pages.flatMap((page, index, pages) => {
                 const leaf = (item: typeof page) => ({
-                  id: `route:${extensionRoute(ctx.name, p.manifest.id, item.id)}`,
+                  id: `route:${extensionRoute(ctx.stableId, p.manifest.id, item.id)}`,
                   label: item.title, icon: extensionPageIcon(item.title),
                 });
                 if (!page.group) return [leaf(page)];
@@ -139,7 +142,7 @@ export function Nav({ contexts }: NavProps) {
         children: INVESTIGATE.map((i) => ({ id: `route:${i.route}`, label: i.label, icon: glyph(i.id) })),
       },
     ],
-    [crds, crdChildren, ctx, extensions.data],
+    [crds, crdChildren, ctx, scopeId, extensions.data],
   );
 
   const link = ctx

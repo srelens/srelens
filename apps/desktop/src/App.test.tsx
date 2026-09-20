@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import React from "react";
 
@@ -237,10 +237,11 @@ vi.mock("./components/NewResourceEditor", () => ({
 import { App } from "./App";
 import { HANDOFF_KEY } from "./design";
 import { flushSaveOpenTabs } from "@srelens/core";
+import { notify } from "@srelens/core/lib/notify";
 
 const context = (name: string) => ({
   name,
-  stableId: `/k/config#${name}`,
+  stableId: `/k/config#${name}`, key: `/k/config#${name}`,
   cluster: name,
   server: "https://example",
   isCurrent: false,
@@ -647,6 +648,148 @@ describe("App", () => {
     await waitFor(() => expect(sessionStorage.getItem(HANDOFF_KEY)).toBeNull());
     expect(screen.queryByTestId("browser")).toBeNull();
     expect(screen.queryByTestId("overview")).toBeNull();
+  });
+
+  // A context window carries the cluster it was opened for in `?context=`, and
+  // that identifier is the context's `key` — from both designs. Not the
+  // `stableId`: a kubeconfig `a` declaring `b#c` and a kubeconfig `a#b`
+  // declaring `c` produce the same stable id, so a window keyed on one could
+  // open on the other (#623). Not a display name either. Classic tabs are
+  // keyed by display name, so the query has to be resolved against the listed
+  // contexts before it becomes a tab — seeded raw, a key names no cluster, and
+  // the first `refreshContexts` prunes the window's only tab because
+  // `resolveStoredKey` matches names and never ids.
+  const withContextQuery = (value: string) => {
+    localStorage.clear();
+    vi.mocked(notify.error).mockClear();
+    window.history.replaceState({}, "", `/?context=${encodeURIComponent(value)}`);
+  };
+
+  afterEach(() => {
+    window.history.replaceState({}, "", "/");
+    localStorage.clear();
+  });
+
+  it("opens the overview for the context a window's key query names", async () => {
+    // `/k/config#prod` is `context("prod")`'s key — what both Rail and
+    // classic Sidebar put in the query when they open a window for prod.
+    withContextQuery("/k/config#prod");
+    render(<App />);
+    expect((await screen.findByTestId("overview")).textContent).toBe("prod");
+  });
+
+  /**
+   * Two contexts can share a `stableId`; none share a `key`. Resolving the
+   * query by the stable id opened this window on whichever of the pair was
+   * listed first, and left the other unopenable (#623).
+   */
+  it("resolves the query by key, so two clusters sharing a stable id do not swap", async () => {
+    listContextsMock.mockResolvedValue({
+      contexts: [
+        { name: "left", stableId: "a#b#c", key: "a#b%23c", cluster: "left", server: "", isCurrent: false },
+        { name: "right", stableId: "a#b#c", key: "a%23b#c", cluster: "right", server: "", isCurrent: false },
+      ],
+    });
+    withContextQuery("a%23b#c");
+    render(<App />);
+    expect((await screen.findByTestId("overview")).textContent).toBe("right");
+  });
+
+  it("does not treat a display name as a window identity", async () => {
+    // A name that equals another cluster's key must not open that other
+    // cluster. The query is an id only; a bare display name is "not listed".
+    withContextQuery("prod");
+    render(<App />);
+    await waitFor(() =>
+      expect(vi.mocked(notify.error)).toHaveBeenCalledWith(
+        "Couldn't open that cluster",
+        "It is not among the listed kube contexts.",
+      ),
+    );
+    expect(screen.queryByTestId("overview")).toBeNull();
+  });
+
+  it("says the cluster could not be opened when the query names no listed context", async () => {
+    // An empty window is not an answer: the reader asked for a cluster, and
+    // which of the two facts this is — the list failed, or the list answered
+    // and it is not there — decides whether retrying could help.
+    withContextQuery("ghost");
+    render(<App />);
+    await waitFor(() =>
+      expect(vi.mocked(notify.error)).toHaveBeenCalledWith(
+        "Couldn't open that cluster",
+        "It is not among the listed kube contexts.",
+      ),
+    );
+    expect(screen.queryByTestId("overview")).toBeNull();
+  });
+
+  it("reports a failed context list as a failed list, not as a missing cluster", async () => {
+    listContextsMock.mockResolvedValue({ contexts: [], error: "kubeconfig unreadable" });
+    withContextQuery("/k/config#prod");
+    render(<App />);
+    await waitFor(() =>
+      expect(vi.mocked(notify.error)).toHaveBeenCalledWith(
+        "Couldn't open that cluster",
+        "kubeconfig unreadable",
+      ),
+    );
+  });
+
+  it("opens a readable context even when another kubeconfig failed to list", async () => {
+    listContextsMock.mockResolvedValue({
+      contexts: [
+        { name: "prod", stableId: "/k/config#prod", key: "/k/config#prod", cluster: "prod", server: "", isCurrent: false },
+      ],
+      error: "other kubeconfig unreadable",
+    });
+    withContextQuery("/k/config#prod");
+    render(<App />);
+    expect((await screen.findByTestId("overview")).textContent).toBe("prod");
+    expect(vi.mocked(notify.error)).not.toHaveBeenCalled();
+  });
+
+  it("clears a restored session when the window's ?context= target is gone", async () => {
+    // ClusterHotbar can leave other clusters' tabs in a context window's save.
+    // When the requested target is cleanly absent, those must not stay active.
+    listContextsMock.mockResolvedValue({ contexts: [context("prod")] });
+    withContextQuery("/k/config#gone");
+    localStorage.setItem(
+      "srelens.openTabs",
+      JSON.stringify({
+        tabs: [{ id: 1, cluster: "prod", kind: "overview", namespace: "default" }],
+        activeTabId: 1,
+      }),
+    );
+    render(<App />);
+    await waitFor(() =>
+      expect(vi.mocked(notify.error)).toHaveBeenCalledWith(
+        "Couldn't open that cluster",
+        "It is not among the listed kube contexts.",
+      ),
+    );
+    expect(screen.queryByTestId("overview")).toBeNull();
+  });
+
+  it("opens the overview once a failed context list later succeeds", async () => {
+    (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+    listContextsMock.mockResolvedValue({ contexts: [], error: "kubeconfig unreadable" });
+    withContextQuery("/k/config#prod");
+    render(<App />);
+    await waitFor(() => expect(vi.mocked(notify.error)).toHaveBeenCalled());
+    expect(screen.queryByTestId("overview")).toBeNull();
+
+    listContextsMock.mockResolvedValue({
+      contexts: [
+        { name: "prod", stableId: "/k/config#prod", key: "/k/config#prod", cluster: "prod", server: "", isCurrent: false },
+      ],
+    });
+    await waitFor(() => expect(tauri.handlers.has("kubeconfig-changed")).toBe(true));
+    act(() => {
+      tauri.handlers.get("kubeconfig-changed")?.({ payload: null });
+    });
+    expect((await screen.findByTestId("overview")).textContent).toBe("prod");
+    delete (window as unknown as { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   });
 });
 

@@ -53,7 +53,7 @@ export async function startLogStream(
   options: LogStreamOptions = {},
 ): Promise<LogStream> {
   if (targets.length === 0) throw new Error("cannot start live logs without a pod target");
-  const channel = `logs:line:${++streamSeq}`;
+  const channel = `logs:line:${++streamSeq}-${Math.random().toString(36).slice(2, 10)}`;
   const dispose = await subscribe(channel, (p) => {
     // The backend emits either a log line (`{source, line}`) or a status
     // (`{source, status}`). Both carry a source, so the `status` key is what

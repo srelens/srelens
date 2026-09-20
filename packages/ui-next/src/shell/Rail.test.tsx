@@ -2,12 +2,26 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ClusterContext } from "@srelens/core";
+import { notify } from "@srelens/core";
+
+const coreMock = vi.hoisted(() => ({
+  invokeCommand: vi.fn(),
+}));
+
+vi.mock("@srelens/core", async (orig) => {
+  const actual = await orig<typeof import("@srelens/core")>();
+  return {
+    ...actual,
+    invokeCommand: coreMock.invokeCommand,
+  };
+});
 import { Rail } from "./Rail";
 import { activeCluster, activeRoute, currentWorkspace, openTab, setState } from "../lib/tabsStore";
 import { defaultState } from "../lib/tabs";
 import { resetView, setLink } from "../lib/workspace";
 import { defaultMark, getMark, loadMarks, setMark } from "../lib/marks";
 import { probeCluster, resetProbes } from "../lib/probe";
+import { pinContextKey } from "../lib/clusters";
 
 // jsdom has no ResizeObserver and Radix's popper — which the kit's Tooltip, and
 // so every rail button, sits on — watches its trigger with one. The same stub
@@ -22,7 +36,7 @@ if (!("ResizeObserver" in globalThis)) {
 
 const ctx = (name: string): ClusterContext => ({
   name,
-  stableId: name,
+  stableId: name, key: name,
   cluster: name,
   server: `https://${name}.example`,
   isCurrent: false,
@@ -138,7 +152,7 @@ describe("Rail", () => {
    * tells a relabel from an id written onto the tab.
    */
   it("leaves no tab labelled with the cluster it switched away from", async () => {
-    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage" };
+    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage", key: "id-stage" };
     const contexts = [ctx("prod-eu"), STAGING];
     setState(defaultState(contexts));
     openTab("/overview", { clusterName: "prod-eu" });
@@ -156,7 +170,7 @@ describe("Rail", () => {
   /** The menu's `Open` is the same gesture by another route, and had the same
    *  hole — fixing one and leaving the other is how the two disagree. */
   it("leaves no tab labelled with the previous cluster from the menu either", async () => {
-    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage" };
+    const STAGING = { ...ctx("staging-eu"), stableId: "id-stage", key: "id-stage" };
     const contexts = [ctx("prod-eu"), STAGING];
     setState(defaultState(contexts));
     openTab("/overview", { clusterName: "prod-eu" });
@@ -305,6 +319,92 @@ describe("Rail draws a symbol mark", () => {
     const { container } = setup();
     expect(container.querySelector('[data-slot="chip-mark"] svg')).toBeNull();
     expect(screen.getByText("PE")).toBeDefined();
+  });
+
+  it("opens context window from the menu in desktop mode and notifies on failure", async () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    const errorSpy = vi.spyOn(notify, "error").mockImplementation(() => {});
+    coreMock.invokeCommand.mockRejectedValueOnce(new Error("OS refused window"));
+
+    try {
+      setup();
+      await pick("prod-eu", "Open in new window");
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", { contextId: "prod-eu" });
+      await waitFor(() => {
+        expect(errorSpy).toHaveBeenCalledWith("Couldn't open window for prod-eu", "OS refused window");
+      });
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+      errorSpy.mockRestore();
+    }
+  });
+
+  /**
+   * The window is opened under the context's `key`, never its `stableId`.
+   *
+   * A kubeconfig `a` declaring `b#c` and a kubeconfig `a#b` declaring `c` share
+   * a stable id, so a window keyed on it focused the first cluster's window
+   * when the reader asked for the second, and the second could never be opened
+   * (#623). The rail still keys marks and workspaces on `stableId` — that one
+   * is persisted and must not move.
+   */
+  it("opens the window under the context key rather than the colliding stable id", async () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    const colliding = {
+      ...ctx("prod-eu"),
+      stableId: "/k/a#b#c",
+      key: "/k/a#b%23c",
+    };
+    const contexts = [colliding];
+    setState(defaultState(contexts));
+    // The shared mock returns undefined unless a test says otherwise, and the
+    // rail attaches a rejection handler to what it gets back.
+    coreMock.invokeCommand.mockResolvedValueOnce(undefined);
+
+    try {
+      render(<Rail contexts={contexts} onConnect={vi.fn()} />);
+      await pick("prod-eu", "Open in new window");
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
+        contextId: "/k/a#b%23c",
+      });
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  });
+
+  /**
+   * Two contexts can share a stable id (see above). A window opened for one
+   * of them pins that context's key, and every lookup by stable id in that
+   * window resolves to it (`resolveContext`, #648) — the rail's included.
+   * A rail keyed by a `Map` of stable ids answered with whichever of the
+   * pair came last, so "Open in new window" from the first cluster's own
+   * window sent the second cluster's key.
+   */
+  it("opens the window for the context this window is pinned to, not the other of a colliding pair", async () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    // Kubeconfig `/k/a#b` declaring `c`, and kubeconfig `/k/a` declaring `b#c`.
+    const first = { ...ctx("prod-eu"), stableId: "/k/a#b#c", key: "/k/a%23b#c" };
+    const second = { ...ctx("prod-eu"), stableId: "/k/a#b#c", key: "/k/a#b%23c" };
+    const contexts = [first, second];
+    // The workspace names the stable id once; it is the kubeconfig listing
+    // that carries two contexts for it.
+    setState(defaultState([first]));
+    pinContextKey(first.key);
+    coreMock.invokeCommand.mockResolvedValueOnce(undefined);
+
+    try {
+      render(<Rail contexts={contexts} onConnect={vi.fn()} />);
+      await pick("prod-eu", "Open in new window");
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
+        contextId: "/k/a%23b#c",
+      });
+    } finally {
+      pinContextKey(null);
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
   });
 });
 

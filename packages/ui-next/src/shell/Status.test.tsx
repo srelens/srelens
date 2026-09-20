@@ -52,7 +52,7 @@ vi.mock("../lib/helmOps", () => ({
 }));
 
 const ctx = {
-  name: "prod-eu", stableId: "prod", cluster: "c", server: "", isCurrent: false,
+  name: "prod-eu", stableId: "prod", key: "prod", cluster: "c", server: "", isCurrent: false,
   sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 };
 

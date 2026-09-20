@@ -38,7 +38,7 @@ const CONFIG = "/home/dana/.kube/config";
 
 const PROD: ClusterContext = {
   name: "prod-eu",
-  stableId: "prod-eu",
+  stableId: "prod-eu", key: "prod-eu",
   cluster: "prod",
   server: "https://prod-eu.example:6443",
   isCurrent: true,
@@ -61,7 +61,7 @@ const PROD: ClusterContext = {
  */
 const STAGING: ClusterContext = {
   name: "staging-eu",
-  stableId: `${CONFIG}#staging-eu`,
+  stableId: `${CONFIG}#staging-eu`, key: `${CONFIG}#staging-eu`,
   cluster: "staging",
   server: "https://staging-eu.example:6443",
   isCurrent: false,
@@ -79,7 +79,7 @@ const STAGING: ClusterContext = {
  */
 const EDGE: ClusterContext = {
   name: "edge-1",
-  stableId: "/home/dana/work/edge.yaml#edge-1",
+  stableId: "/home/dana/work/edge.yaml#edge-1", key: "/home/dana/work/edge.yaml#edge-1",
   cluster: "edge",
   server: "https://edge-1.example:6443",
   isCurrent: false,
@@ -97,7 +97,7 @@ const EDGE: ClusterContext = {
  */
 const LOCAL: ClusterContext = {
   name: "kind-dev",
-  stableId: "kind-dev",
+  stableId: "kind-dev", key: "kind-dev",
   cluster: "kind-dev",
   server: "https://127.0.0.1:6443",
   isCurrent: false,

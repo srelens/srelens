@@ -15,6 +15,7 @@ import {
   vaultStatus,
   vaultUnlockPassword,
   type VaultStatus,
+  on,
 } from "@srelens/core";
 import {
   Button,
@@ -546,10 +547,34 @@ export function LockGate({ children, brandMarkSrc, onReady }: LockGateProps) {
   const autoPrompted = useRef(false);
   // And `onReady` fires once per window, not once per read — see the prop.
   const readyNotified = useRef(false);
+  // Bumped on every process-wide lock so an in-flight `vaultStatus` that
+  // captured "unlocked" before the key was discarded cannot lower the cover
+  // after `vault-locked` has already raised it.
+  const lockGeneration = useRef(0);
   // Read at call time rather than closed over by `read`, which is re-created
   // every render and called from handlers that were not.
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
+
+  // Sync lock/unlock across context windows. The vault is process-wide; the
+  // local `srelens:vault-unlocked` DOM event never leaves the webview that
+  // unlocked, so both sides listen on the backend broadcast.
+  useEffect(() => {
+    if (!desktop) return;
+    const offLocked = on("vault-locked", () => {
+      lockGeneration.current += 1;
+      readyNotified.current = false;
+      lockWorkspace();
+    });
+    const offUnlocked = on("vault-unlocked", () => {
+      lockGeneration.current += 1;
+      void read({ mayOpen: true });
+    });
+    return () => {
+      offLocked();
+      offUnlocked();
+    };
+  }, [desktop]);
 
   const covered = raised || checking;
 
@@ -563,8 +588,10 @@ export function LockGate({ children, brandMarkSrc, onReady }: LockGateProps) {
    * the very thing the reader asked for.
    */
   async function read({ mayOpen }: { mayOpen: boolean }): Promise<VaultStatus | null> {
+    const generation = lockGeneration.current;
     try {
       const next = await vaultStatus();
+      if (generation !== lockGeneration.current) return null;
       setStatus(next);
       setStatusError(null);
       rememberMode(next.mode);
@@ -584,6 +611,7 @@ export function LockGate({ children, brandMarkSrc, onReady }: LockGateProps) {
       }
       return next;
     } catch (error) {
+      if (generation !== lockGeneration.current) return null;
       // **Fails closed.** "The backend did not answer" is not "the vault is
       // open": without this raise a refused launch read left `sealed` false,
       // `checking` went to false behind it, and the window came up live over a

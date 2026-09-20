@@ -1,8 +1,41 @@
 #[cfg(test)]
 mod tests {
-    use srelens_tui::commands::{command_suggestions, resolve_command, CommandTarget, ResourceKind};
-    use srelens_tui::views::ResourceTableState;
     use serde_json::json;
+    use srelens_tui::commands::{
+        command_suggestions, resolve_command, CommandTarget, ResourceKind,
+    };
+    use srelens_tui::views::ResourceTableState;
+
+    fn isolate_ai_settings() -> SettingsGuard {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("a scratch directory for AI settings");
+        let previous = std::env::var("SRELENS_AI_SETTINGS_PATH").ok();
+        std::env::set_var(
+            "SRELENS_AI_SETTINGS_PATH",
+            dir.path().join("ai_settings.json"),
+        );
+        SettingsGuard {
+            _lock: lock,
+            _dir: dir,
+            previous,
+        }
+    }
+
+    struct SettingsGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+        previous: Option<String>,
+    }
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("SRELENS_AI_SETTINGS_PATH", value),
+                None => std::env::remove_var("SRELENS_AI_SETTINGS_PATH"),
+            }
+        }
+    }
 
     #[test]
     fn test_resolve_command_aliases() {
@@ -46,10 +79,7 @@ mod tests {
             resolve_command(":ai"),
             Some(CommandTarget::Resource(ResourceKind::Assistant))
         ));
-        assert!(matches!(
-            resolve_command(":q"),
-            Some(CommandTarget::Quit)
-        ));
+        assert!(matches!(resolve_command(":q"), Some(CommandTarget::Quit)));
     }
 
     #[test]
@@ -69,7 +99,9 @@ mod tests {
 
     #[test]
     fn test_crd_resolution_and_matching() {
-        use srelens_tui::commands::{command_suggestions_with_crds, resolve_command_with_crds, CrdMeta};
+        use srelens_tui::commands::{
+            command_suggestions_with_crds, resolve_command_with_crds, CrdMeta,
+        };
 
         let cilium_crd = CrdMeta {
             crd_name: "ciliumloadbalancerippools.cilium.io".to_string(),
@@ -81,6 +113,7 @@ mod tests {
             namespaced: false,
             short_names: vec!["ippool".to_string(), "lbippool".to_string()],
             printer_columns: vec![],
+            created_at: None,
         };
         let crds = vec![cilium_crd];
 
@@ -118,16 +151,25 @@ mod tests {
 
         table.set_items(items, "");
         assert_eq!(table.filtered_indices.len(), 3);
-        assert_eq!(table.selected_resource_name().as_deref(), Some("nginx-auth"));
+        assert_eq!(
+            table.selected_resource_name().as_deref(),
+            Some("nginx-auth")
+        );
 
         // Navigate down
         table.select_next();
-        assert_eq!(table.selected_resource_name().as_deref(), Some("postgres-db"));
+        assert_eq!(
+            table.selected_resource_name().as_deref(),
+            Some("postgres-db")
+        );
 
         // Filter by "redis"
         table.apply_filter("redis");
         assert_eq!(table.filtered_indices.len(), 1);
-        assert_eq!(table.selected_resource_name().as_deref(), Some("redis-cache"));
+        assert_eq!(
+            table.selected_resource_name().as_deref(),
+            Some("redis-cache")
+        );
 
         // Clear filter
         table.apply_filter("");
@@ -136,20 +178,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_informer_cache_instant_screen_switching() {
-        use std::collections::{HashMap, HashSet};
-        use std::path::PathBuf;
-        use std::sync::Arc;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             active_context: "prod-cluster".to_string(),
@@ -216,7 +260,11 @@ mod tests {
         app.handle_stream_event("watch:prod-cluster:default:pods".to_string(), pod_payload);
 
         // Verify cache ingested the snapshot
-        let cached = app.resource_cache.get(&("prod-cluster".to_string(), "default".to_string(), "pods".to_string()));
+        let cached = app.resource_cache.get(&(
+            "prod-cluster".to_string(),
+            "default".to_string(),
+            "pods".to_string(),
+        ));
         assert!(cached.is_some());
         assert_eq!(cached.unwrap().len(), 2);
 
@@ -235,21 +283,23 @@ mod tests {
     #[tokio::test]
     async fn test_command_mode_ctrl_w_and_word_deletion() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -309,59 +359,65 @@ mod tests {
         };
 
         // 1. Enter command mode by typing ':'
-        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.input_mode, InputMode::Command);
         assert_eq!(app.command_buffer, "");
 
         // 2. Type "pods -n default"
         for c in "pods -n default".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
         assert_eq!(app.command_buffer, "pods -n default");
 
         // 3. Press Option+Backspace (macOS) -> should rubout "default" to "pods -n "
-        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT))
+            .await;
         assert_eq!(app.command_buffer, "pods -n ");
         assert_eq!(app.input_mode, InputMode::Command);
 
         // 4. Press Ctrl+Backspace (Windows/Linux) -> should rubout "-n" to "pods "
-        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL))
+            .await;
         assert_eq!(app.command_buffer, "pods ");
 
         // 5. Press Ctrl+W (Unix/Vim) -> should rubout "pods" to ""
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL))
+            .await;
         assert_eq!(app.command_buffer, "");
         assert_eq!(app.input_mode, InputMode::Command); // still in command mode!
 
         // 6. Press Option+Backspace on empty buffer -> should exit command mode to Normal!
-        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT))
+            .await;
         assert_eq!(app.input_mode, InputMode::Normal);
     }
 
     #[tokio::test]
     async fn test_ai_settings_navigation_and_editing() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::ai_config::AiProvider;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
         use srelens_tui::views::SettingField;
-        use srelens_tui::ai_config::AiProvider;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
 
+        let _ai_guard = isolate_ai_settings();
         let (tx, _rx) = unbounded_channel();
-        let temp_dir = tempfile::tempdir().unwrap();
-        let test_cfg = temp_dir.path().join("ai_settings.json");
-        std::env::set_var("SRELENS_AI_SETTINGS_PATH", &test_cfg);
 
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -429,7 +485,8 @@ mod tests {
         }
 
         // 2. Select next provider (OpenAI)
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.current_provider(), AiProvider::OpenAi);
         } else {
@@ -437,84 +494,113 @@ mod tests {
         }
 
         // 3. Toggle OpenAI as active provider with [Space]
-        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.settings.default_provider, AiProvider::OpenAi);
         }
 
         // 4. Tab to API Key field
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.selected_field, SettingField::ApiKey);
         }
 
         // 5. Press 'e' to edit API Key
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.is_editing, true);
         }
 
         // Type "sk-test-openai-key"
         for c in "sk-test-openai-key".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
 
         // Press Enter to confirm edit
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.is_editing, false);
-            assert_eq!(s.settings.get_api_key(AiProvider::OpenAi).as_deref(), Some("sk-test-openai-key"));
+            assert_eq!(
+                s.settings.get_api_key(AiProvider::OpenAi).as_deref(),
+                Some("sk-test-openai-key")
+            );
         }
 
         // 6. Press 's' to save settings to memory/disk
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.ai_settings.default_provider, AiProvider::OpenAi);
-        assert_eq!(app.ai_settings.get_api_key(AiProvider::OpenAi).as_deref(), Some("sk-test-openai-key"));
+        assert_eq!(
+            app.ai_settings.get_api_key(AiProvider::OpenAi).as_deref(),
+            Some("sk-test-openai-key")
+        );
 
         // 7. Test navigating all the way to Cursor Agent
         // Currently at OpenAi (index 1), press 'j' 3 times to get to Cursor (index 4)
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await; // Gemini (2)
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await; // OpenAICompatible (3)
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await; // Cursor (4)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await; // Gemini (2)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await; // OpenAICompatible (3)
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await; // Cursor (4)
 
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.current_provider(), AiProvider::Cursor);
         }
 
         // Select Cursor as active provider
-        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.ai_settings.default_provider, AiProvider::Cursor);
 
         // 8. Currently at ApiKey, Tab twice to get to Timeout field
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // Model
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // Timeout
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await; // Model
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await; // Timeout
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.selected_field, SettingField::Timeout);
         }
 
         // Press 'e' to edit Timeout
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.is_editing, true);
         }
 
         // Backspace default 120 and type 240
-        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+            .await;
         for c in "240".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .await;
 
         assert_eq!(app.ai_settings.get_timeout_seconds(AiProvider::Cursor), 240);
 
         // 9. Test pasting into an edit buffer
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // ProviderToggle
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // ApiKey
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)).await; // Open edit dialog
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await; // ProviderToggle
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await; // ApiKey
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))
+            .await; // Open edit dialog
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.is_editing, true);
         }
@@ -522,32 +608,37 @@ mod tests {
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.edit_buffer, "pasted-cursor-api-key-12345");
         }
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Settings(s) = &app.active_view {
             assert_eq!(s.is_editing, false);
-            assert_eq!(s.settings.get_api_key(AiProvider::Cursor).as_deref(), Some("pasted-cursor-api-key-12345"));
+            assert_eq!(
+                s.settings.get_api_key(AiProvider::Cursor).as_deref(),
+                Some("pasted-cursor-api-key-12345")
+            );
         }
-        std::env::remove_var("SRELENS_AI_SETTINGS_PATH");
     }
 
     #[tokio::test]
     async fn test_assistant_typing_s_and_ctrl_s_shortcut() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -607,31 +698,37 @@ mod tests {
         };
 
         // 1. In Assistant view, typing 's' when input is empty should type 's' into prompt, NOT jump to settings!
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::Assistant));
         assert_eq!(app.assistant_state.input, "s");
 
         // Type "how me pods"
         for c in "how me pods".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
         assert_eq!(app.assistant_state.input, "show me pods");
 
         // 2. Test word deletion in Assistant view:
         // Option + Backspace (macOS) -> rubs out "pods" -> "show me "
-        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT))
+            .await;
         assert_eq!(app.assistant_state.input, "show me ");
 
         // Ctrl + Backspace (Windows/Linux) -> rubs out "me" -> "show "
-        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL))
+            .await;
         assert_eq!(app.assistant_state.input, "show ");
 
         // Ctrl + w (Unix/Vim) -> rubs out "show" -> ""
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL))
+            .await;
         assert_eq!(app.assistant_state.input, "");
 
         // 3. Pressing Ctrl+s should open Settings!
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .await;
         assert!(matches!(app.active_view, ActiveView::Settings(_)));
     }
 
@@ -750,6 +847,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_assistant_conversation_persistence_across_view_switches() {
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
         use srelens_tui::views::assistant_view::ToolCallStatus;
@@ -757,15 +857,14 @@ mod tests {
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -825,14 +924,17 @@ mod tests {
         };
 
         // 1. User starts turn in Assistant view
-        app.assistant_state.start_turn("Which nodes have GPUs?".to_string());
+        app.assistant_state
+            .start_turn("Which nodes have GPUs?".to_string());
         app.assistant_state.add_tool_call_start(
             "call_gpu_1".to_string(),
             "bash".to_string(),
             "kubectl get nodes -l nvidia.com/gpu".to_string(),
         );
-        app.assistant_state.finish_tool_call("call_gpu_1", ToolCallStatus::Success);
-        app.assistant_state.append_stream_chunk("Node worker-gpu-1 has an NVIDIA A100 GPU.");
+        app.assistant_state
+            .finish_tool_call("call_gpu_1", ToolCallStatus::Success);
+        app.assistant_state
+            .append_stream_chunk("Node worker-gpu-1 has an NVIDIA A100 GPU.");
         app.assistant_state.finish_turn();
 
         assert_eq!(app.assistant_state.messages.len(), 3);
@@ -843,7 +945,8 @@ mod tests {
         assert!(matches!(app.active_view, ActiveView::Table(_)));
 
         // 3. While in Pods view, a background stream chunk or status update arrives
-        app.assistant_state.append_stream_chunk(" Also, driver version is 535.129.");
+        app.assistant_state
+            .append_stream_chunk(" Also, driver version is 535.129.");
 
         // 4. User navigates back to Assistant view (via Tab or switch_view_to_kind)
         app.switch_view_to_kind(ResourceKind::Assistant).await;
@@ -851,8 +954,13 @@ mod tests {
 
         // 5. Verify entire conversation is intact!
         assert_eq!(app.assistant_state.messages.len(), 3);
-        assert_eq!(app.assistant_state.messages[1].content, "Which nodes have GPUs?");
-        assert!(app.assistant_state.messages[2].content.contains("Node worker-gpu-1 has an NVIDIA A100 GPU. Also, driver version is 535.129."));
+        assert_eq!(
+            app.assistant_state.messages[1].content,
+            "Which nodes have GPUs?"
+        );
+        assert!(app.assistant_state.messages[2].content.contains(
+            "Node worker-gpu-1 has an NVIDIA A100 GPU. Also, driver version is 535.129."
+        ));
         assert_eq!(app.assistant_state.messages[2].tool_calls[0].tool, "bash");
     }
 
@@ -862,7 +970,11 @@ mod tests {
 
         let mut ai = AssistantViewState::new();
         ai.start_turn("Test query".to_string());
-        ai.add_tool_call_start("c1".to_string(), "bash".to_string(), "kubectl get nodes".to_string());
+        ai.add_tool_call_start(
+            "c1".to_string(),
+            "bash".to_string(),
+            "kubectl get nodes".to_string(),
+        );
         ai.finish_tool_call("c1", ToolCallStatus::Success);
         ai.append_stream_chunk("Cluster has 3 nodes.");
         ai.set_token_usage(TokenUsage {
@@ -884,7 +996,11 @@ mod tests {
         // 2. Test saving to custom file
         let temp_dir = tempfile::tempdir().unwrap();
         let export_path = temp_dir.path().join("saved_chat.md");
-        let result = ai.save_conversation_to_file("Cursor Agent", "default", Some(export_path.to_str().unwrap()));
+        let result = ai.save_conversation_to_file(
+            "Cursor Agent",
+            "default",
+            Some(export_path.to_str().unwrap()),
+        );
         assert!(result.is_ok());
         let saved_content = std::fs::read_to_string(&export_path).unwrap();
         assert_eq!(saved_content, md);
@@ -893,7 +1009,9 @@ mod tests {
         ai.clear_conversation();
         assert_eq!(ai.messages.len(), 1);
         assert_eq!(ai.messages[0].role, "assistant");
-        assert!(ai.messages[0].content.contains("Hello! I am your SRElens AI Assistant"));
+        assert!(ai.messages[0]
+            .content
+            .contains("Hello! I am your SRElens AI Assistant"));
         assert!(ai.messages[0].tool_calls.is_empty());
     }
 
@@ -937,12 +1055,18 @@ mod tests {
         }"#;
         let v_hook: serde_json::Value = serde_json::from_str(json_hook_only).unwrap();
         let extracted_hook = extract_tool_call_start_info(&v_hook);
-        assert!(extracted_hook.is_none(), "hookAdditionalContexts without a ToolCall key should be ignored");
+        assert!(
+            extracted_hook.is_none(),
+            "hookAdditionalContexts without a ToolCall key should be ignored"
+        );
     }
 
     #[tokio::test]
     async fn test_regex_search_single_item_combines_enter_to_go_to_resource() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
         use srelens_tui::views::resource_table::ResourceTableState;
@@ -950,29 +1074,35 @@ mod tests {
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut table = ResourceTableState::new(ResourceKind::Namespaces);
-        table.set_items(vec![
-            serde_json::json!({ "name": "default" }),
-            serde_json::json!({ "name": "kube-system" }),
-            serde_json::json!({ "name": "production" }),
-        ], "");
+        table.set_items(
+            vec![
+                serde_json::json!({ "name": "default" }),
+                serde_json::json!({ "name": "kube-system" }),
+                serde_json::json!({ "name": "production" }),
+            ],
+            "",
+        );
 
         let mut app = App {
             kubeconfig_paths: vec![],
             active_context: "prod-cluster".to_string(),
             active_namespace: "default".to_string(),
             contexts: vec![],
-            namespaces: vec!["default".to_string(), "kube-system".to_string(), "production".to_string()],
+            namespaces: vec![
+                "default".to_string(),
+                "kube-system".to_string(),
+                "production".to_string(),
+            ],
             active_view: ActiveView::Table(table),
             nav_stack: Vec::new(),
             input_mode: InputMode::Normal,
@@ -1025,12 +1155,14 @@ mod tests {
         };
 
         // 1. Enter filter mode with '/'
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.input_mode, InputMode::Filter);
 
         // 2. Type regex "prod.*" -> filters down to exactly 1 item: "production"
         for c in "prod.*".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
         if let ActiveView::Table(t) = &app.active_view {
             assert_eq!(t.filtered_indices.len(), 1);
@@ -1040,7 +1172,8 @@ mod tests {
         // 3. Press Enter ONCE.
         // Because only 1 item remained in search, it should immediately exit filter mode
         // AND drill-down to that resource (switching namespace to 'production' and view to Pods)!
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(app.active_namespace, "production");
         if let ActiveView::Table(t) = &app.active_view {
@@ -1055,17 +1188,23 @@ mod tests {
         use srelens_tui::views::resource_table::ResourceTableState;
 
         let mut table = ResourceTableState::new(ResourceKind::Pods);
-        table.set_items(vec![
-            serde_json::json!({ "name": "api-gateway-7f89d", "namespace": "prod" }),
-            serde_json::json!({ "name": "auth-service-5d6b", "namespace": "prod" }),
-            serde_json::json!({ "name": "db-postgres-0", "namespace": "database" }),
-            serde_json::json!({ "name": "frontend-webapp-1", "namespace": "staging" }),
-        ], "");
+        table.set_items(
+            vec![
+                serde_json::json!({ "name": "api-gateway-7f89d", "namespace": "prod" }),
+                serde_json::json!({ "name": "auth-service-5d6b", "namespace": "prod" }),
+                serde_json::json!({ "name": "db-postgres-0", "namespace": "database" }),
+                serde_json::json!({ "name": "frontend-webapp-1", "namespace": "staging" }),
+            ],
+            "",
+        );
 
         // Pattern matching start of string ^api
         table.apply_filter("^api");
         assert_eq!(table.filtered_indices.len(), 1);
-        assert_eq!(table.selected_resource_name().as_deref(), Some("api-gateway-7f89d"));
+        assert_eq!(
+            table.selected_resource_name().as_deref(),
+            Some("api-gateway-7f89d")
+        );
 
         // Alternation regex api|frontend
         table.apply_filter("api|frontend");
@@ -1074,12 +1213,18 @@ mod tests {
         // Character class with digit
         table.apply_filter(r"postgres-\d");
         assert_eq!(table.filtered_indices.len(), 1);
-        assert_eq!(table.selected_resource_name().as_deref(), Some("db-postgres-0"));
+        assert_eq!(
+            table.selected_resource_name().as_deref(),
+            Some("db-postgres-0")
+        );
     }
 
     #[tokio::test]
     async fn test_port_forward_keybinding_on_pods() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::{InputMode, Modal};
         use srelens_tui::views::resource_table::ResourceTableState;
@@ -1087,19 +1232,18 @@ mod tests {
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut table = ResourceTableState::new(ResourceKind::Pods);
-        table.set_items(vec![
-            serde_json::json!({
+        table.set_items(
+            vec![serde_json::json!({
                 "name": "my-api-pod-xyz",
                 "namespace": "default",
                 "spec": {
@@ -1108,8 +1252,9 @@ mod tests {
                         "ports": [{ "containerPort": 3000 }]
                     }]
                 }
-            }),
-        ], "");
+            })],
+            "",
+        );
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -1169,9 +1314,14 @@ mod tests {
         };
 
         // Press 'f' (or 'F') on the selected pod -> opens PortForward modal with detected port 3000
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .await;
         match &app.modal {
-            Some(Modal::PortForward { pod_name, container_port, .. }) => {
+            Some(Modal::PortForward {
+                pod_name,
+                container_port,
+                ..
+            }) => {
                 assert_eq!(pod_name, "my-api-pod-xyz");
                 assert_eq!(*container_port, 3000);
             }
@@ -1179,7 +1329,8 @@ mod tests {
         }
 
         // Press Enter to submit the modal
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_none());
     }
 
@@ -1198,7 +1349,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // 1. Initially no forwards
         assert_eq!(app.forward_manager.list().len(), 0);
@@ -1210,7 +1363,8 @@ mod tests {
             "default".to_string(),
             0, // random local port
             80,
-        ).await;
+        )
+        .await;
 
         let forwards = app.forward_manager.list();
         assert_eq!(forwards.len(), 1);
@@ -1231,14 +1385,16 @@ mod tests {
         }
 
         // 4. Press 'd' to open confirm modal for stopping
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .await;
         assert!(matches!(
             app.modal,
             Some(Modal::Confirm { ref action_name, .. }) if action_name == &format!("stop-pf:{}", fwd_id)
         ));
 
         // 5. Confirm stop with Enter
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_none());
 
         // 6. Verify stopped in manager
@@ -1266,17 +1422,22 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Populate table with a pod
         let mut table = ResourceTableState::new(ResourceKind::Pods);
-        table.set_items(vec![json!({
-            "name": "nginx-web",
-            "namespace": "default",
-            "status": "Running",
-            "ready": "1/1",
-            "age": "5m"
-        })], "");
+        table.set_items(
+            vec![json!({
+                "name": "nginx-web",
+                "namespace": "default",
+                "status": "Running",
+                "ready": "1/1",
+                "age": "5m"
+            })],
+            "",
+        );
         app.active_view = ActiveView::Table(table);
 
         // Initially no forwards
@@ -1289,7 +1450,8 @@ mod tests {
             "default".to_string(),
             0,
             80,
-        ).await;
+        )
+        .await;
 
         let forwards = app.forward_manager.list();
         assert_eq!(forwards.len(), 1);
@@ -1315,13 +1477,28 @@ mod tests {
 
         let expected_pf = format!("[PF: {}→80]", loc);
         let expected_btn = format!("[ ✕ Close PF: {} ]", loc);
-        assert!(content.contains(&expected_pf), "Content did not contain {}: {}", expected_pf, content);
-        assert!(content.contains("[PF: 1 active]"), "Content did not contain [PF: 1 active]: {}", content);
-        assert!(content.contains(&expected_btn), "Content did not contain Close button {}: {}", expected_btn, content);
+        assert!(
+            content.contains(&expected_pf),
+            "Content did not contain {}: {}",
+            expected_pf,
+            content
+        );
+        assert!(
+            content.contains("[PF: 1 active]"),
+            "Content did not contain [PF: 1 active]: {}",
+            content
+        );
+        assert!(
+            content.contains(&expected_btn),
+            "Content did not contain Close button {}: {}",
+            expected_btn,
+            content
+        );
         assert!(app.close_pf_button_rect.borrow().is_some());
 
         // 2. Press 'F' (Shift+F) to close the active port forward
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT))
+            .await;
 
         // 3. Verify closed in manager and table
         assert_eq!(app.forward_manager.list().len(), 0);
@@ -1367,16 +1544,21 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let mut table = ResourceTableState::new(ResourceKind::Pods);
-        table.set_items(vec![json!({
-            "name": "redis-master",
-            "namespace": "default",
-            "status": "Running",
-            "ready": "1/1",
-            "age": "1d"
-        })], "");
+        table.set_items(
+            vec![json!({
+                "name": "redis-master",
+                "namespace": "default",
+                "status": "Running",
+                "ready": "1/1",
+                "age": "1d"
+            })],
+            "",
+        );
         app.active_view = ActiveView::Table(table);
 
         app.execute_start_port_forward(
@@ -1385,13 +1567,17 @@ mod tests {
             "default".to_string(),
             6379,
             6379,
-        ).await;
+        )
+        .await;
 
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| app.render(f)).unwrap();
 
-        let btn_rect = app.close_pf_button_rect.borrow().expect("Close button rect should be present");
+        let btn_rect = app
+            .close_pf_button_rect
+            .borrow()
+            .expect("Close button rect should be present");
 
         // Click on the close button
         let mouse_event = MouseEvent {
@@ -1408,6 +1594,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_pod_metrics_usage_update_and_column_extraction() {
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
         use srelens_tui::views::resource_table::{extract_field_str, ResourceTableState};
@@ -1415,19 +1604,18 @@ mod tests {
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut table = ResourceTableState::new(ResourceKind::Pods);
-        table.set_items(vec![
-            serde_json::json!({
+        table.set_items(
+            vec![serde_json::json!({
                 "name": "copy-controller-7b44647bcd-rzd8x",
                 "namespace": "copy-controller",
                 "phase": "Running",
@@ -1435,8 +1623,9 @@ mod tests {
                 "restarts": 1,
                 "node": "data-processing-prod",
                 "age": "70d",
-            }),
-        ], "");
+            })],
+            "",
+        );
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -1510,7 +1699,8 @@ mod tests {
                 "cpuMillicores": 15,
                 "memoryMiB": 128
             }
-        ]).to_string();
+        ])
+        .to_string();
 
         app.handle_pod_metrics_update(&metrics_json);
 
@@ -1526,9 +1716,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_native_mcp_agent_invoker_and_tool_execution() {
+        use srelens_kube::client_cache::ClientCache;
         use srelens_llm::ToolInvoker;
         use srelens_tui::agent::{build_mcp_server, McpToolInvoker};
-        use srelens_kube::client_cache::ClientCache;
         use std::path::PathBuf;
 
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
@@ -1537,39 +1727,60 @@ mod tests {
 
         // 1. Tool listing returns all k8s capabilities with provider-safe names
         let tools = invoker.list_tools().await.expect("tools list succeeds");
-        assert!(tools.len() >= 30, "expected at least 30 K8s tools, got {}", tools.len());
+        assert!(
+            tools.len() >= 30,
+            "expected at least 30 K8s tools, got {}",
+            tools.len()
+        );
 
-        let list_pods_tool = tools.iter().find(|t| t.name == "k8s_listPods").expect("k8s_listPods tool exists");
-        assert!(list_pods_tool.read_only, "k8s_listPods should be marked read-only");
+        let list_pods_tool = tools
+            .iter()
+            .find(|t| t.name == "k8s_listPods")
+            .expect("k8s_listPods tool exists");
+        assert!(
+            list_pods_tool.read_only,
+            "k8s_listPods should be marked read-only"
+        );
 
         // 2. Tool invocation executes through srelens_mcp in-process
-        let res = invoker.call_tool("k8s_listPods", &serde_json::json!({
-            "context": "nonexistent-cluster",
-            "namespace": "default"
-        })).await.expect("call_tool returns result");
+        let res = invoker
+            .call_tool(
+                "k8s_listPods",
+                &serde_json::json!({
+                    "context": "nonexistent-cluster",
+                    "namespace": "default"
+                }),
+            )
+            .await
+            .expect("call_tool returns result");
 
         // Should return a response without panicking (even on nonexistent cluster it surfaces error message)
-        assert!(!res.content.is_empty(), "result content should not be empty");
+        assert!(
+            !res.content.is_empty(),
+            "result content should not be empty"
+        );
     }
 
     #[tokio::test]
     async fn test_assistant_mouse_selection_copy_and_bracketed_paste() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -1633,43 +1844,49 @@ mod tests {
         assert_eq!(app.assistant_state.input, "paste line 1 paste line 2");
 
         // 2. Test mouse selection and copy with 'c'
-        *app.assistant_state.plain_lines.borrow_mut() = vec![
-            "Pod crash occurred in container backend: OutOfMemory".to_string()
-        ];
+        *app.assistant_state.plain_lines.borrow_mut() =
+            vec!["Pod crash occurred in container backend: OutOfMemory".to_string()];
         app.assistant_state.start_selection(0, 41); // start of "OutOfMemory"
         app.assistant_state.update_selection(0, 52);
         app.assistant_state.finish_selection(0, 52);
 
-        assert_eq!(app.assistant_state.get_selected_text().as_deref(), Some("OutOfMemory"));
+        assert_eq!(
+            app.assistant_state.get_selected_text().as_deref(),
+            Some("OutOfMemory")
+        );
 
         // Pressing Ctrl+c copies selection and toasts
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .await;
         assert!(app.toast.is_some());
         assert!(app.toast.as_ref().unwrap().0.contains("Copied selection"));
 
         // Pressing Esc clears selection
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.assistant_state.selection, None);
     }
 
     #[tokio::test]
     async fn test_assistant_bottom_bar_hints_only_cmd_and_help() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -1729,30 +1946,34 @@ mod tests {
         };
 
         // When input is empty, typing '?' opens help modal
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.show_help, true);
         app.show_help = false;
 
         // When typing question in prompt, '?' is typed into prompt, NOT triggering help modal!
         app.assistant_state.input = "how to fix".to_string();
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.show_help, false);
         assert_eq!(app.assistant_state.input, "how to fix?");
     }
 
     #[tokio::test]
     async fn test_assistant_mouse_click_tool_chip_and_tab_view_toggle() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        use ratatui::layout::Rect;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
-        use ratatui::layout::Rect;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
 
         use srelens_tui::commands::ResourceKind;
         use srelens_tui::views::resource_table::ResourceTableState;
@@ -1761,7 +1982,9 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -1770,7 +1993,9 @@ mod tests {
             contexts: vec![],
             namespaces: vec!["default".to_string()],
             active_view: ActiveView::Assistant,
-            nav_stack: vec![ActiveView::Table(ResourceTableState::new(ResourceKind::Nodes))],
+            nav_stack: vec![ActiveView::Table(ResourceTableState::new(
+                ResourceKind::Nodes,
+            ))],
             input_mode: InputMode::Normal,
             command_buffer: String::new(),
             command_suggestion_idx: 0,
@@ -1821,7 +2046,12 @@ mod tests {
         };
 
         // Set viewport and simulate tool chip line at index 2
-        app.assistant_state.last_viewport_rect.set(Rect { x: 0, y: 0, width: 80, height: 24 });
+        app.assistant_state.last_viewport_rect.set(Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        });
         app.assistant_state.tool_chip_lines.borrow_mut().push(2);
 
         // 1. Left clicking on row 2 toggles expand_tools!
@@ -1840,11 +2070,13 @@ mod tests {
         assert_eq!(app.assistant_state.expand_tools, false);
 
         // 2. Ctrl+t also toggles expand_tools
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await;
         assert_eq!(app.assistant_state.expand_tools, true);
 
         // 3. Pressing Tab toggles back to previous view (Nodes)!
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::Table(t) if t.kind == ResourceKind::Nodes));
     }
 
@@ -1852,24 +2084,26 @@ mod tests {
     async fn test_header_context_chips_mouse_click_and_hotbar() {
         use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
-        use tokio::sync::mpsc::unbounded_channel;
-        use std::path::PathBuf;
-        use std::sync::Arc;
-        use std::collections::{HashMap, HashSet};
         use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
         use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
-        use srelens_tui::ui::InputMode;
         use srelens_tui::commands::ResourceKind;
         use srelens_tui::ui::dialogs::Modal;
+        use srelens_tui::ui::InputMode;
         use srelens_tui::views::resource_table::ResourceTableState;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -1879,6 +2113,8 @@ mod tests {
                 srelens_kube::contexts::ContextDto {
                     name: "prod-eu".to_string(),
                     stable_id: "kube/prod-eu".to_string(),
+
+                    key: "kube/prod-eu".to_string(),
                     cluster: "prod-cluster".to_string(),
                     server: "https://127.0.0.1:6443".to_string(),
                     namespace: "default".to_string(),
@@ -1891,6 +2127,8 @@ mod tests {
                 srelens_kube::contexts::ContextDto {
                     name: "kind-dev".to_string(),
                     stable_id: "kube/kind-dev".to_string(),
+
+                    key: "kube/kind-dev".to_string(),
                     cluster: "kind-cluster".to_string(),
                     server: "https://127.0.0.1:6444".to_string(),
                     namespace: "default".to_string(),
@@ -1954,8 +2192,24 @@ mod tests {
         };
 
         // Simulate header chips at columns 12..25 (prod-eu) and 26..40 (kind-dev) on row 0
-        app.context_chip_rects.borrow_mut().push((Rect { x: 12, y: 0, width: 14, height: 1 }, "prod-eu".to_string()));
-        app.context_chip_rects.borrow_mut().push((Rect { x: 27, y: 0, width: 14, height: 1 }, "kind-dev".to_string()));
+        app.context_chip_rects.borrow_mut().push((
+            Rect {
+                x: 12,
+                y: 0,
+                width: 14,
+                height: 1,
+            },
+            "prod-eu".to_string(),
+        ));
+        app.context_chip_rects.borrow_mut().push((
+            Rect {
+                x: 27,
+                y: 0,
+                width: 14,
+                height: 1,
+            },
+            "kind-dev".to_string(),
+        ));
 
         // Clicking on kind-dev chip switches context!
         assert_eq!(app.active_context, "prod-eu");
@@ -1973,10 +2227,26 @@ mod tests {
         assert!(matches!(app.modal, Some(Modal::ContextPicker { .. })));
 
         // Filter contexts by typing 'prod'
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), crossterm::event::KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), crossterm::event::KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), crossterm::event::KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(
+            KeyCode::Char('p'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
+        app.handle_key_event(KeyEvent::new(
+            KeyCode::Char('r'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
+        app.handle_key_event(KeyEvent::new(
+            KeyCode::Char('o'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
+        app.handle_key_event(KeyEvent::new(
+            KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
 
         if let Some(Modal::ContextPicker { filter, .. }) = &app.modal {
             assert_eq!(filter, "prod");
@@ -1985,28 +2255,34 @@ mod tests {
         }
 
         // Hitting Enter selects the filtered prod-eu context!
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(
+            KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         assert_eq!(app.active_context, "prod-eu");
         assert!(app.modal.is_none());
     }
 
     #[tokio::test]
     async fn test_per_cluster_assistant_state_isolation() {
-        use tokio::sync::mpsc::unbounded_channel;
-        use std::path::PathBuf;
-        use std::sync::Arc;
-        use std::collections::{HashMap, HashSet};
         use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
         use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::mpsc::unbounded_channel;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -2016,6 +2292,8 @@ mod tests {
                 srelens_kube::contexts::ContextDto {
                     name: "data-processing-prod-eu-dus1".to_string(),
                     stable_id: "kube/prod".to_string(),
+
+                    key: "kube/prod".to_string(),
                     cluster: "prod-cluster".to_string(),
                     server: "https://127.0.0.1:6443".to_string(),
                     namespace: "default".to_string(),
@@ -2028,6 +2306,8 @@ mod tests {
                 srelens_kube::contexts::ContextDto {
                     name: "harvester-amd-eu-dus1".to_string(),
                     stable_id: "kube/harvester".to_string(),
+
+                    key: "kube/harvester".to_string(),
                     cluster: "harvester-cluster".to_string(),
                     server: "https://127.0.0.1:6444".to_string(),
                     namespace: "kube-system".to_string(),
@@ -2074,7 +2354,9 @@ mod tests {
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("data-processing-prod-eu-dus1"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "data-processing-prod-eu-dus1",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -2096,56 +2378,74 @@ mod tests {
         app.assistant_state.finish_turn();
 
         assert_eq!(app.assistant_state.messages.len(), 3);
-        assert!(app.assistant_state.messages.iter().any(|m| m.content.contains("32 nodes on data-processing-prod-eu-dus1")));
+        assert!(app.assistant_state.messages.iter().any(|m| m
+            .content
+            .contains("32 nodes on data-processing-prod-eu-dus1")));
 
         // 2. Switch context to harvester-amd-eu-dus1
-        app.switch_context("harvester-amd-eu-dus1".to_string()).await;
+        app.switch_context("harvester-amd-eu-dus1".to_string())
+            .await;
         assert_eq!(app.active_context, "harvester-amd-eu-dus1");
         assert_eq!(app.active_namespace, "kube-system"); // uses ctx.namespace!
 
         // The assistant state for harvester should be fresh, NOT showing data-processing nodes!
         assert_eq!(app.assistant_state.context_name, "harvester-amd-eu-dus1");
         assert_eq!(app.assistant_state.messages.len(), 1);
-        assert!(!app.assistant_state.messages.iter().any(|m| m.content.contains("32 nodes on data-processing-prod-eu-dus1")));
+        assert!(!app.assistant_state.messages.iter().any(|m| m
+            .content
+            .contains("32 nodes on data-processing-prod-eu-dus1")));
 
         // User chats in harvester
         app.assistant_state.start_turn("Show me pods".to_string());
-        app.assistant_state.add_assistant_message("7 pods on harvester-amd-eu-dus1".to_string());
+        app.assistant_state
+            .add_assistant_message("7 pods on harvester-amd-eu-dus1".to_string());
         app.assistant_state.finish_turn();
         assert_eq!(app.assistant_state.messages.len(), 3);
 
         // 3. Switch back to data-processing-prod-eu-dus1
-        app.switch_context("data-processing-prod-eu-dus1".to_string()).await;
+        app.switch_context("data-processing-prod-eu-dus1".to_string())
+            .await;
         assert_eq!(app.active_context, "data-processing-prod-eu-dus1");
         assert_eq!(app.active_namespace, "default");
 
         // The original conversation from data-processing is completely restored!
-        assert_eq!(app.assistant_state.context_name, "data-processing-prod-eu-dus1");
-        assert!(app.assistant_state.messages.iter().any(|m| m.content.contains("32 nodes on data-processing-prod-eu-dus1")));
-        assert!(!app.assistant_state.messages.iter().any(|m| m.content.contains("7 pods on harvester-amd-eu-dus1")));
+        assert_eq!(
+            app.assistant_state.context_name,
+            "data-processing-prod-eu-dus1"
+        );
+        assert!(app.assistant_state.messages.iter().any(|m| m
+            .content
+            .contains("32 nodes on data-processing-prod-eu-dus1")));
+        assert!(!app
+            .assistant_state
+            .messages
+            .iter()
+            .any(|m| m.content.contains("7 pods on harvester-amd-eu-dus1")));
     }
 
     #[tokio::test]
     async fn test_deep_link_navigation_and_copy_shortcuts() {
-        use tokio::sync::mpsc::unbounded_channel;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::deep_link::DeepLink;
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::resource_table::ResourceTableState;
+        use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
-        use std::collections::{HashMap, HashSet};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_tui::app::{ActiveView, App};
-        use srelens_tui::ui::InputMode;
-        use srelens_tui::commands::ResourceKind;
-        use srelens_tui::views::resource_table::ResourceTableState;
-        use srelens_tui::deep_link::DeepLink;
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tokio::sync::mpsc::unbounded_channel;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut table = ResourceTableState::new(ResourceKind::Pods);
         table.set_items(
@@ -2178,6 +2478,8 @@ mod tests {
                 srelens_kube::contexts::ContextDto {
                     name: "prod-eu".to_string(),
                     stable_id: "kube/prod".to_string(),
+
+                    key: "kube/prod".to_string(),
                     cluster: "prod-cluster".to_string(),
                     server: "https://127.0.0.1:6443".to_string(),
                     namespace: "production".to_string(),
@@ -2190,6 +2492,8 @@ mod tests {
                 srelens_kube::contexts::ContextDto {
                     name: "staging-us".to_string(),
                     stable_id: "kube/staging".to_string(),
+
+                    key: "kube/staging".to_string(),
                     cluster: "staging-cluster".to_string(),
                     server: "https://127.0.0.1:6444".to_string(),
                     namespace: "staging-ns".to_string(),
@@ -2200,7 +2504,11 @@ mod tests {
                     auth_kind: "token".to_string(),
                 },
             ],
-            namespaces: vec!["default".to_string(), "production".to_string(), "staging-ns".to_string()],
+            namespaces: vec![
+                "default".to_string(),
+                "production".to_string(),
+                "staging-ns".to_string(),
+            ],
             active_view: ActiveView::Table(table),
             nav_stack: vec![],
             input_mode: InputMode::Normal,
@@ -2236,7 +2544,9 @@ mod tests {
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod-eu"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "prod-eu",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -2253,16 +2563,20 @@ mod tests {
         };
 
         // 1. Pressing 'c' on the selected row copies the resource name!
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .await;
         assert!(app.toast.is_some());
         let toast = app.toast.as_ref().unwrap();
         assert!(toast.0.contains("Copied 'payment-api-pod-1' to clipboard"));
 
         // Pressing '<Ctrl+y>' copies the canonical deep link URL!
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL))
+            .await;
         assert!(app.toast.is_some());
         let toast = app.toast.as_ref().unwrap();
-        assert!(toast.0.contains("Copied deep link: srelens://resource/prod-eu/production/Pod/payment-api-pod-1"));
+        assert!(toast.0.contains(
+            "Copied deep link: srelens://resource/prod-eu/production/Pod/payment-api-pod-1"
+        ));
 
         // 2. In-app navigation via :open <url>
         let cmd = ":open srelens://resource/staging-us/staging-ns/Deployments/frontend";
@@ -2272,36 +2586,47 @@ mod tests {
         // Context, namespace, and view all switched seamlessly!
         assert_eq!(app.active_context, "staging-us");
         assert_eq!(app.active_namespace, "staging-ns");
-        assert!(matches!(app.active_view, ActiveView::Table(ref t) if t.kind == ResourceKind::Deployments));
+        assert!(
+            matches!(app.active_view, ActiveView::Table(ref t) if t.kind == ResourceKind::Deployments)
+        );
         assert!(app.toast.is_some());
-        assert!(app.toast.as_ref().unwrap().0.contains("Navigated to Deployments 'frontend'"));
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Navigated to Deployments 'frontend'"));
 
         // 3. Cluster deep link: srelens://cluster/prod-eu
         let link = DeepLink::parse("srelens://cluster/prod-eu").unwrap();
-        app.navigate_deep_link(&link).await.expect("navigate cluster");
+        app.navigate_deep_link(&link)
+            .await
+            .expect("navigate cluster");
         assert_eq!(app.active_context, "prod-eu");
     }
 
     #[tokio::test]
     async fn test_live_cluster_overview_and_capacity_gauges() {
-        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::overview_view::ClusterOverviewData;
+        use srelens_tui::views::resource_table::ResourceTableState;
+        use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
-        use std::collections::{HashMap, HashSet};
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_tui::app::{ActiveView, App};
-        use srelens_tui::ui::InputMode;
-        use srelens_tui::commands::ResourceKind;
-        use srelens_tui::views::resource_table::ResourceTableState;
-        use srelens_tui::views::overview_view::ClusterOverviewData;
+        use tokio::sync::mpsc::unbounded_channel;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             kubeconfig_paths: vec![],
@@ -2414,13 +2739,29 @@ mod tests {
         }
 
         // 4. Test copying from Overview: 'c' copies summary report, '<Ctrl+y>' copies cluster deep link
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('c'), crossterm::event::KeyModifiers::NONE)).await;
-        let toast = app.toast.as_ref().expect("toast after pressing c in overview");
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
+        let toast = app
+            .toast
+            .as_ref()
+            .expect("toast after pressing c in overview");
         assert_eq!(toast.0, "Copied cluster overview summary to clipboard");
 
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('y'), crossterm::event::KeyModifiers::CONTROL)).await;
-        let toast = app.toast.as_ref().expect("toast after pressing Ctrl+y in overview");
-        assert!(toast.0.contains("Copied deep link: srelens://cluster/data-processing-prod-eu-dus1"));
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('y'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ))
+        .await;
+        let toast = app
+            .toast
+            .as_ref()
+            .expect("toast after pressing Ctrl+y in overview");
+        assert!(toast
+            .0
+            .contains("Copied deep link: srelens://cluster/data-processing-prod-eu-dus1"));
     }
 
     #[tokio::test]
@@ -2434,7 +2775,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // 1. Switch to Events view
         app.switch_view_to_kind(ResourceKind::Events).await;
@@ -2479,8 +2822,15 @@ mod tests {
         }
 
         // 2. Press 'w' to toggle Warning Triage ON
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('w'), crossterm::event::KeyModifiers::NONE)).await;
-        let toast = app.toast.as_ref().expect("toast after toggling warning triage");
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
+        let toast = app
+            .toast
+            .as_ref()
+            .expect("toast after toggling warning triage");
         assert!(toast.0.contains("Warning Triage: ON (2 warnings)"));
 
         if let ActiveView::Table(ref table) = app.active_view {
@@ -2489,16 +2839,33 @@ mod tests {
         }
 
         // 3. Test Copy on Event: 'c' copies event message, '<Ctrl+y>' copies deep link
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('c'), crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         let toast = app.toast.as_ref().expect("toast after pressing c on event");
         assert!(toast.0.contains("Copied event message to clipboard"));
 
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('y'), crossterm::event::KeyModifiers::CONTROL)).await;
-        let toast = app.toast.as_ref().expect("toast after pressing Ctrl+y on event");
-        assert!(toast.0.contains("Copied deep link: srelens://resource/prod-cluster/prod/Pod/api-backend-xyz"));
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('y'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ))
+        .await;
+        let toast = app
+            .toast
+            .as_ref()
+            .expect("toast after pressing Ctrl+y on event");
+        assert!(toast.0.contains(
+            "Copied deep link: srelens://resource/prod-cluster/prod/Pod/api-backend-xyz"
+        ));
 
         // 4. Press Enter on the event row -> jumps to Pod table with filter applied!
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         if let ActiveView::Table(ref table) = app.active_view {
             assert_eq!(table.kind, ResourceKind::Pods);
             assert_eq!(app.filter_buffer, "api-backend-xyz");
@@ -2507,9 +2874,17 @@ mod tests {
         }
 
         // 5. First Esc clears filter, second Esc pops nav stack back to Events view
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         assert_eq!(app.filter_buffer, "");
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         if let ActiveView::Table(ref table) = app.active_view {
             assert_eq!(table.kind, ResourceKind::Events);
         } else {
@@ -2517,8 +2892,15 @@ mod tests {
         }
 
         // 6. Press 'w' again to toggle Warning Triage OFF
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('w'), crossterm::event::KeyModifiers::NONE)).await;
-        let toast = app.toast.as_ref().expect("toast after toggling warning triage off");
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
+        let toast = app
+            .toast
+            .as_ref()
+            .expect("toast after toggling warning triage off");
         assert!(toast.0.contains("Warning Triage: OFF (all 3 events)"));
 
         if let ActiveView::Table(ref table) = app.active_view {
@@ -2541,7 +2923,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let es_meta = CrdMeta {
             crd_name: "externalsecrets.external-secrets.io".to_string(),
@@ -2596,6 +2980,7 @@ mod tests {
                     description: None,
                 },
             ],
+            created_at: None,
         };
 
         app.crds = vec![es_meta.clone()];
@@ -2638,7 +3023,10 @@ mod tests {
             }),
         ];
 
-        app.handle_crd_instances_update("crd_instances:ExternalSecret", &serde_json::to_string(&items).unwrap());
+        app.handle_crd_instances_update(
+            "crd_instances:ExternalSecret",
+            &serde_json::to_string(&items).unwrap(),
+        );
 
         if let ActiveView::Table(ref table) = app.active_view {
             // Verify columns match kubectl get externalsecrets
@@ -2663,15 +3051,48 @@ mod tests {
 
             // Test field extraction
             let row0 = &table.raw_items[0];
-            assert_eq!(extract_field_str(row0, "printer:.spec.secretStoreRef.kind"), "SecretStore");
-            assert_eq!(extract_field_str(row0, "printer:.spec.secretStoreRef.name"), "trv-acc-ident-pipeline-prod");
-            assert_eq!(extract_field_str(row0, "printer:.status.conditions[?(@.type==\"Ready\")].reason"), "SecretSyncedError");
-            assert_eq!(extract_field_str(row0, "printer:.status.conditions[?(@.type==\"Ready\")].status"), "False");
+            assert_eq!(
+                extract_field_str(row0, "printer:.spec.secretStoreRef.kind"),
+                "SecretStore"
+            );
+            assert_eq!(
+                extract_field_str(row0, "printer:.spec.secretStoreRef.name"),
+                "trv-acc-ident-pipeline-prod"
+            );
+            assert_eq!(
+                extract_field_str(
+                    row0,
+                    "printer:.status.conditions[?(@.type==\"Ready\")].reason"
+                ),
+                "SecretSyncedError"
+            );
+            assert_eq!(
+                extract_field_str(
+                    row0,
+                    "printer:.status.conditions[?(@.type==\"Ready\")].status"
+                ),
+                "False"
+            );
 
             let row1 = &table.raw_items[1];
-            assert_eq!(extract_field_str(row1, "printer:.spec.secretStoreRef.name"), "harvester-token");
-            assert_eq!(extract_field_str(row1, "printer:.status.conditions[?(@.type==\"Ready\")].reason"), "SecretSynced");
-            assert_eq!(extract_field_str(row1, "printer:.status.conditions[?(@.type==\"Ready\")].status"), "True");
+            assert_eq!(
+                extract_field_str(row1, "printer:.spec.secretStoreRef.name"),
+                "harvester-token"
+            );
+            assert_eq!(
+                extract_field_str(
+                    row1,
+                    "printer:.status.conditions[?(@.type==\"Ready\")].reason"
+                ),
+                "SecretSynced"
+            );
+            assert_eq!(
+                extract_field_str(
+                    row1,
+                    "printer:.status.conditions[?(@.type==\"Ready\")].status"
+                ),
+                "True"
+            );
         } else {
             panic!("Expected ActiveView::Table for ExternalSecret");
         }
@@ -2684,7 +3105,11 @@ mod tests {
         }
 
         // Press Esc to clear filter and restore all items
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         if let srelens_tui::app::ActiveView::Table(ref table) = app.active_view {
             assert_eq!(table.filtered_indices.len(), 2);
             assert_eq!(table.raw_items.len(), 2);
@@ -2693,29 +3118,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_table_copy_and_bulk_mark_copy() {
-        use std::collections::{HashMap, HashSet};
-        use std::path::PathBuf;
-        use std::sync::Arc;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
 
         let mut table = ResourceTableState::new(ResourceKind::Pods);
-        table.set_items(vec![
-            serde_json::json!({
-                "metadata": { "name": "pod-1", "namespace": "default" }
-            }),
-            serde_json::json!({
-                "metadata": { "name": "pod-2", "namespace": "default" }
-            }),
-        ], "");
+        table.set_items(
+            vec![
+                serde_json::json!({
+                    "metadata": { "name": "pod-1", "namespace": "default" }
+                }),
+                serde_json::json!({
+                    "metadata": { "name": "pod-2", "namespace": "default" }
+                }),
+            ],
+            "",
+        );
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             active_context: "prod".to_string(),
@@ -2758,7 +3188,9 @@ mod tests {
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "prod",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -2775,9 +3207,18 @@ mod tests {
         };
 
         // 1. Press 'c' -> Copies selected pod name
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('c'), crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         assert!(app.toast.is_some());
-        assert!(app.toast.as_ref().unwrap().0.contains("Copied 'pod-1' to clipboard"));
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Copied 'pod-1' to clipboard"));
 
         // 2. Mark both pods with Space and press 'c' -> Copies both names
         if let ActiveView::Table(ref mut t) = app.active_view {
@@ -2785,21 +3226,45 @@ mod tests {
             t.select_next();
             t.toggle_mark_selected();
         }
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('c'), crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         assert!(app.toast.is_some());
-        assert!(app.toast.as_ref().unwrap().0.contains("Copied 2 resource names to clipboard"));
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Copied 2 resource names to clipboard"));
 
         // 3. Press 'C' (Shift+c) -> Copies full YAML
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('C'), crossterm::event::KeyModifiers::SHIFT)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('C'),
+            crossterm::event::KeyModifiers::SHIFT,
+        ))
+        .await;
         assert!(app.toast.is_some());
-        assert!(app.toast.as_ref().unwrap().0.contains("Copied resource YAML to clipboard"));
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Copied resource YAML to clipboard"));
     }
 
     #[tokio::test]
     async fn test_yaml_view_mouse_drag_selection_and_copy() {
         use srelens_tui::views::yaml_view::YamlViewState;
-        let yaml_text = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test-pod\nspec:\n  containers: []";
-        let mut yaml_state = YamlViewState::new("test-pod".to_string(), "Pod".to_string(), Some("default".to_string()), yaml_text.to_string());
+        let yaml_text =
+            "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test-pod\nspec:\n  containers: []";
+        let mut yaml_state = YamlViewState::new(
+            "test-pod".to_string(),
+            "Pod".to_string(),
+            Some("default".to_string()),
+            yaml_text.to_string(),
+        );
 
         // 1. Initial state: no selection
         assert!(yaml_state.selected_text().is_none());
@@ -2821,27 +3286,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_resource_and_rollout_restart_modal_action_format() {
-        use std::collections::{HashMap, HashSet};
-        use std::path::PathBuf;
-        use std::sync::Arc;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::dialogs::Modal;
         use srelens_tui::ui::InputMode;
+        use std::collections::{HashMap, HashSet};
+        use std::path::PathBuf;
+        use std::sync::Arc;
 
         let mut table = ResourceTableState::new(ResourceKind::Deployments);
-        table.set_items(vec![
-            serde_json::json!({
+        table.set_items(
+            vec![serde_json::json!({
                 "metadata": { "name": "nginx-deploy", "namespace": "prod" }
-            }),
-        ], "");
+            })],
+            "",
+        );
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             active_context: "prod".to_string(),
@@ -2884,7 +3352,9 @@ mod tests {
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "prod",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -2901,9 +3371,18 @@ mod tests {
         };
 
         // 1. Press 'Ctrl+d' on Deployment -> Delete confirmation modal
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('d'), crossterm::event::KeyModifiers::CONTROL)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ))
+        .await;
         assert!(app.modal.is_some());
-        if let Some(Modal::Confirm { action_name, is_destructive, .. }) = &app.modal {
+        if let Some(Modal::Confirm {
+            action_name,
+            is_destructive,
+            ..
+        }) = &app.modal
+        {
             assert_eq!(action_name, "delete:Deployment:prod:nginx-deploy");
             assert!(is_destructive);
         } else {
@@ -2914,9 +3393,18 @@ mod tests {
         app.modal = None;
 
         // 2. Press 'r' on Deployment -> Restart confirmation modal
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('r'), crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('r'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         assert!(app.modal.is_some());
-        if let Some(Modal::Confirm { action_name, is_destructive, .. }) = &app.modal {
+        if let Some(Modal::Confirm {
+            action_name,
+            is_destructive,
+            ..
+        }) = &app.modal
+        {
             assert_eq!(action_name, "restart:Deployment:prod:nginx-deploy");
             assert!(!is_destructive);
         } else {
@@ -2967,7 +3455,10 @@ mod tests {
             "error done"
         );
         // Plain lines pass through untouched.
-        assert_eq!(sanitize_log_line("2026-09-03 INFO ok"), "2026-09-03 INFO ok");
+        assert_eq!(
+            sanitize_log_line("2026-09-03 INFO ok"),
+            "2026-09-03 INFO ok"
+        );
 
         let mut state = LogsViewState::new("p".into(), "ns".into(), None, "ch".into());
         state.push_line("a\tb".to_string());
@@ -2990,7 +3481,10 @@ mod tests {
             "Back-off        restarting container failed"
         );
         // Plain text takes the fast path untouched.
-        assert_eq!(sanitize_span_text("Scaled up replica set"), "Scaled up replica set");
+        assert_eq!(
+            sanitize_span_text("Scaled up replica set"),
+            "Scaled up replica set"
+        );
 
         let desc = DescribeViewState::new(
             "web-0".into(),
@@ -3029,10 +3523,30 @@ mod tests {
         let text = apply_screen_selection(&mut buf, (14, 0), (19, 1));
         assert_eq!(text, "istio-ingress\nistio-system  istiod");
         // Selected cells are reverse-video; unselected ones are not.
-        assert!(buf.cell(Position::new(14, 0)).unwrap().style().add_modifier.contains(Modifier::REVERSED));
-        assert!(buf.cell(Position::new(0, 1)).unwrap().style().add_modifier.contains(Modifier::REVERSED));
-        assert!(!buf.cell(Position::new(0, 0)).unwrap().style().add_modifier.contains(Modifier::REVERSED));
-        assert!(!buf.cell(Position::new(0, 2)).unwrap().style().add_modifier.contains(Modifier::REVERSED));
+        assert!(buf
+            .cell(Position::new(14, 0))
+            .unwrap()
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED));
+        assert!(buf
+            .cell(Position::new(0, 1))
+            .unwrap()
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED));
+        assert!(!buf
+            .cell(Position::new(0, 0))
+            .unwrap()
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED));
+        assert!(!buf
+            .cell(Position::new(0, 2))
+            .unwrap()
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED));
 
         // A backwards drag (cursor above anchor) selects the same range.
         let mut buf2 = Buffer::with_lines(vec!["abc", "def"]);
@@ -3074,7 +3588,9 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             active_context: "prod-cluster".to_string(),
@@ -3117,7 +3633,9 @@ mod tests {
             close_pf_button_rect: std::cell::RefCell::new(None),
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "prod",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3134,15 +3652,29 @@ mod tests {
         };
 
         // 1. Press 'x' on Deployment -> Opens Action Palette
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('x'), crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         assert!(app.modal.is_some());
 
-        if let Some(Modal::ActionPalette { resource_kind, resource_name, actions, .. }) = &app.modal {
+        if let Some(Modal::ActionPalette {
+            resource_kind,
+            resource_name,
+            actions,
+            ..
+        }) = &app.modal
+        {
             assert_eq!(resource_kind, "Deployment");
             assert_eq!(resource_name, "payment-service");
             assert!(actions.iter().any(|a| a.id == QuickActionId::AskAi));
-            assert!(actions.iter().any(|a| a.id == QuickActionId::RelationshipTree));
-            assert!(actions.iter().any(|a| a.id == QuickActionId::RolloutRestart));
+            assert!(actions
+                .iter()
+                .any(|a| a.id == QuickActionId::RelationshipTree));
+            assert!(actions
+                .iter()
+                .any(|a| a.id == QuickActionId::RolloutRestart));
             assert!(actions.iter().any(|a| a.id == QuickActionId::Scale));
             assert!(actions.iter().any(|a| a.id == QuickActionId::JumpToPods));
             assert!(actions.iter().any(|a| a.id == QuickActionId::Delete));
@@ -3152,13 +3684,26 @@ mod tests {
 
         // 2. Type "rest" to filter actions
         for c in "rest".chars() {
-            app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char(c), crossterm::event::KeyModifiers::NONE)).await;
+            app.handle_key_event(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            ))
+            .await;
         }
 
         // 3. Press Enter on filtered "Rollout Restart"
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         assert!(app.modal.is_some());
-        if let Some(Modal::Confirm { action_name, is_destructive, .. }) = &app.modal {
+        if let Some(Modal::Confirm {
+            action_name,
+            is_destructive,
+            ..
+        }) = &app.modal
+        {
             assert_eq!(action_name, "restart:Deployment:prod:payment-service");
             assert!(!is_destructive);
         } else {
@@ -3194,7 +3739,9 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             active_context: "prod-cluster".to_string(),
@@ -3237,7 +3784,9 @@ mod tests {
             close_pf_button_rect: std::cell::RefCell::new(None),
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("shop"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "shop",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3254,13 +3803,32 @@ mod tests {
         };
 
         // 1. Press 't' on Pod -> Opens Tree View
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('t'), crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('t'),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         assert!(matches!(app.active_view, ActiveView::Tree(_)));
 
         // 2. Simulate lineage resolution result delivery
-        let mut root = LineageNode::new("Deployment", "cart-api", Some("shop".into()), LineageRelation::Owner);
-        let mut rs = LineageNode::new("ReplicaSet", "cart-api-987", Some("shop".into()), LineageRelation::Owner);
-        let pod = LineageNode::new("Pod", "cart-api-987-xyz", Some("shop".into()), LineageRelation::Target);
+        let mut root = LineageNode::new(
+            "Deployment",
+            "cart-api",
+            Some("shop".into()),
+            LineageRelation::Owner,
+        );
+        let mut rs = LineageNode::new(
+            "ReplicaSet",
+            "cart-api-987",
+            Some("shop".into()),
+            LineageRelation::Owner,
+        );
+        let pod = LineageNode::new(
+            "Pod",
+            "cart-api-987-xyz",
+            Some("shop".into()),
+            LineageRelation::Target,
+        );
         rs.children.push(pod);
         root.children.push(rs);
 
@@ -3278,31 +3846,39 @@ mod tests {
         }
 
         // 3. Press 'Esc' to pop back to Table view
-        app.handle_key_event(crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE)).await;
+        app.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+        .await;
         assert!(matches!(app.active_view, ActiveView::Table(_)));
     }
 
     #[tokio::test]
     async fn test_node_inspector_enter_navigation_and_pod_jump() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::node_inspector::{
+            NodeConditionInfo, NodeInspectorDetails, NodePodItem, NodeTaintInfo,
+        };
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
         use srelens_tui::ui::{InputMode, Modal};
+        use srelens_tui::views::resource_table::ResourceTableState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_tui::commands::ResourceKind;
-        use srelens_tui::views::resource_table::ResourceTableState;
-        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem, NodeConditionInfo, NodeTaintInfo};
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut node_table = ResourceTableState::new(ResourceKind::Nodes);
         let node_json = serde_json::json!({
@@ -3354,7 +3930,9 @@ mod tests {
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "default",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3371,16 +3949,20 @@ mod tests {
         };
 
         // 1. Pressing 'x' on Node table opens Action Palette with 'InspectNode'
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .await;
         if let Some(Modal::ActionPalette { actions, .. }) = &app.modal {
-            assert!(actions.iter().any(|a| a.id == srelens_tui::ui::dialogs::QuickActionId::InspectNode));
+            assert!(actions
+                .iter()
+                .any(|a| a.id == srelens_tui::ui::dialogs::QuickActionId::InspectNode));
         } else {
             panic!("Expected ActionPalette modal");
         }
         app.modal = None;
 
         // 2. Pressing Enter on 'gpu-node-alpha' opens Node Inspector
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::NodeInspector(_)));
 
         // 3. Deliver Node Inspector results with GPU details
@@ -3419,21 +4001,17 @@ mod tests {
             gpu_requests_count: 1,
             gpu_memory_total_mib: Some(15360),
             gpu_memory_requests_mib: 7168,
-            conditions: vec![
-                NodeConditionInfo {
-                    type_: "Ready".to_string(),
-                    status: "True".to_string(),
-                    reason: None,
-                    message: None,
-                },
-            ],
-            taints: vec![
-                NodeTaintInfo {
-                    key: "nvidia.com/gpu".to_string(),
-                    value: Some("present".to_string()),
-                    effect: "NoSchedule".to_string(),
-                }
-            ],
+            conditions: vec![NodeConditionInfo {
+                type_: "Ready".to_string(),
+                status: "True".to_string(),
+                reason: None,
+                message: None,
+            }],
+            taints: vec![NodeTaintInfo {
+                key: "nvidia.com/gpu".to_string(),
+                value: Some("present".to_string()),
+                effect: "NoSchedule".to_string(),
+            }],
             pods: vec![
                 NodePodItem {
                     name: "vllm-serve-7b".to_string(),
@@ -3479,7 +4057,8 @@ mod tests {
         }
 
         // 4. Pressing Enter on selected pod 'vllm-serve-7b' jumps to Pods table
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::Table(_)));
         if let ActiveView::Table(t) = &app.active_view {
             assert_eq!(t.kind, ResourceKind::Pods);
@@ -3492,24 +4071,26 @@ mod tests {
     async fn test_mouse_row_selection_and_scrolling_in_table_and_node_inspector() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::layout::Rect;
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
         use srelens_tui::ui::InputMode;
+        use srelens_tui::views::resource_table::ResourceTableState;
         use std::collections::HashMap;
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_tui::commands::ResourceKind;
-        use srelens_tui::views::resource_table::ResourceTableState;
-        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut node_table = ResourceTableState::new(ResourceKind::Nodes);
         let mut items = Vec::new();
@@ -3566,7 +4147,9 @@ mod tests {
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "default",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3619,7 +4202,8 @@ mod tests {
         }
 
         // 4. Test Node Inspector mouse selection
-        let mut ni_state = srelens_tui::views::node_inspector_view::NodeInspectorState::new("node-1".to_string());
+        let mut ni_state =
+            srelens_tui::views::node_inspector_view::NodeInspectorState::new("node-1".to_string());
         let mock_pods = vec![
             NodePodItem {
                 name: "pod-0".to_string(),
@@ -3708,27 +4292,34 @@ mod tests {
     #[tokio::test]
     async fn test_text_search_in_describe_yaml_and_logs() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
+        use srelens_tui::views::describe_view::DescribeViewState;
+        use srelens_tui::views::logs_view::LogsViewState;
+        use srelens_tui::views::yaml_view::YamlViewState;
         use std::collections::HashMap;
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_tui::views::describe_view::DescribeViewState;
-        use srelens_tui::views::yaml_view::YamlViewState;
-        use srelens_tui::views::logs_view::LogsViewState;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let desc_text = "Name: my-pod\nNamespace: default\nContainers:\n  app:\n    Image: nginx:latest\nEvents:\n  Type: Normal\n  Reason: Started";
-        let desc_view = DescribeViewState::new("my-pod".to_string(), "Pod".to_string(), Some("default".to_string()), desc_text.to_string());
+        let desc_view = DescribeViewState::new(
+            "my-pod".to_string(),
+            "Pod".to_string(),
+            Some("default".to_string()),
+            desc_text.to_string(),
+        );
 
         let mut app = App {
             active_context: "prod".to_string(),
@@ -3771,7 +4362,9 @@ mod tests {
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "default",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -3788,12 +4381,14 @@ mod tests {
         };
 
         // 1. In Describe mode: press '/' to enter search mode
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.input_mode, InputMode::Filter);
 
         // Type "normal"
         for c in "normal".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
         assert_eq!(app.filter_buffer, "normal");
 
@@ -3804,25 +4399,34 @@ mod tests {
         }
 
         // Press Enter to finalize search and return to Normal mode
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.input_mode, InputMode::Normal);
 
         // Press Esc to clear search
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Describe(d) = &app.active_view {
             assert!(d.search_query.is_empty());
         }
 
         // 2. In YAML mode: test '/' search and n/N cycling
         let yaml_text = "apiVersion: v1\nkind: Service\nmetadata:\n  name: my-svc\nspec:\n  ports:\n  - port: 80\n    targetPort: 8080\n  - port: 443\n    targetPort: 8443";
-        let yaml_view = YamlViewState::new("my-svc".to_string(), "Service".to_string(), Some("default".to_string()), yaml_text.to_string());
+        let yaml_view = YamlViewState::new(
+            "my-svc".to_string(),
+            "Service".to_string(),
+            Some("default".to_string()),
+            yaml_text.to_string(),
+        );
         app.active_view = ActiveView::Yaml(yaml_view);
 
         // Press '/' and search "port"
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.input_mode, InputMode::Filter);
         for c in "port".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
         if let ActiveView::Yaml(y) = &app.active_view {
             assert_eq!(y.search_matches.len(), 5); // ports, port 80, targetPort 8080, port 443, targetPort 8443
@@ -3830,31 +4434,41 @@ mod tests {
         }
 
         // Press Enter to lock search
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.input_mode, InputMode::Normal);
 
         // Press 'n' to go to next match
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::Yaml(y) = &app.active_view {
             assert_eq!(y.current_match_idx, Some(1));
         }
 
         // Press 'N' to go back to prev match
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::Yaml(y) = &app.active_view {
             assert_eq!(y.current_match_idx, Some(0));
         }
 
         // 3. In Logs mode: test '/' search
-        let mut logs_view = LogsViewState::new("my-pod".to_string(), "default".to_string(), None, "chan-1".to_string());
+        let mut logs_view = LogsViewState::new(
+            "my-pod".to_string(),
+            "default".to_string(),
+            None,
+            "chan-1".to_string(),
+        );
         logs_view.push_line("INFO Server listening on :8080".to_string());
         logs_view.push_line("WARN High memory pressure detected".to_string());
         logs_view.push_line("ERROR Connection reset by peer".to_string());
         app.active_view = ActiveView::Logs(logs_view);
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .await;
         for c in "error".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
         if let ActiveView::Logs(l) = &app.active_view {
             assert_eq!(l.search_matches.len(), 1);
@@ -3865,8 +4479,8 @@ mod tests {
     #[tokio::test]
     async fn test_slash_commands_and_ai_playbooks() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ai_skills::expand_slash_command;
+        use srelens_tui::app::{ActiveView, App};
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -3876,27 +4490,36 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         app.active_view = ActiveView::Assistant;
         app.active_context = "test-cluster".to_string();
         app.active_namespace = "production".to_string();
 
         // 1. Typing '/' triggers slash suggestions popup
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.assistant_state.input, "/");
         assert!(!app.assistant_state.slash_suggestions.is_empty());
         assert!(app.assistant_state.slash_suggestions.len() >= 9);
 
         // 2. Typing 'c' then 'r' narrows suggestions to crashloop
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.assistant_state.input, "/cr");
         assert_eq!(app.assistant_state.slash_suggestions.len(), 1);
-        assert_eq!(app.assistant_state.slash_suggestions[0].command, "crashloop");
+        assert_eq!(
+            app.assistant_state.slash_suggestions[0].command,
+            "crashloop"
+        );
 
         // 3. Pressing Tab applies the suggestion with trailing space
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.assistant_state.input, "/crashloop ");
         assert!(app.assistant_state.slash_suggestions.is_empty());
 
@@ -3905,24 +4528,36 @@ mod tests {
         app.assistant_state.update_slash_suggestions();
         assert_eq!(app.assistant_state.slash_suggestion_idx, 0);
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.assistant_state.slash_suggestion_idx, 1);
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.assistant_state.slash_suggestion_idx, 0);
 
         // 5. Pressing Esc closes suggestions popup without leaving Assistant view
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert!(app.assistant_state.slash_suggestions.is_empty());
         assert!(matches!(app.active_view, ActiveView::Assistant));
 
         // 6. Test Playbook expansion (targeted vs discovery fallback)
-        let targeted = expand_slash_command("crashloop", Some("api-gateway-7f"), "test-cluster", "production").unwrap();
+        let targeted = expand_slash_command(
+            "crashloop",
+            Some("api-gateway-7f"),
+            "test-cluster",
+            "production",
+        )
+        .unwrap();
         assert!(targeted.contains("Focus on Pod 'api-gateway-7f' in namespace 'production'"));
         assert!(targeted.contains("PREVIOUS container's logs"));
 
-        let discovery = expand_slash_command("crashloop", None, "test-cluster", "production").unwrap();
-        assert!(discovery.contains("Scan namespace 'production' for any pods experiencing this issue"));
+        let discovery =
+            expand_slash_command("crashloop", None, "test-cluster", "production").unwrap();
+        assert!(
+            discovery.contains("Scan namespace 'production' for any pods experiencing this issue")
+        );
 
         let node_playbook = expand_slash_command("nodepressure", None, "test-cluster", "").unwrap();
         assert!(node_playbook.contains("MemoryPressure, DiskPressure, PIDPressure"));
@@ -3931,13 +4566,17 @@ mod tests {
         assert!(cluster_briefing.contains("executive briefing"));
 
         // 7. Test utility command execution via Enter
-        app.assistant_state.add_assistant_message("Previous message".to_string());
+        app.assistant_state
+            .add_assistant_message("Previous message".to_string());
         assert!(!app.assistant_state.messages.is_empty());
 
         app.assistant_state.input = "/clear".to_string();
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.assistant_state.messages.len(), 1);
-        assert!(app.assistant_state.messages[0].content.contains("Hello! I am your SRElens AI Assistant"));
+        assert!(app.assistant_state.messages[0]
+            .content
+            .contains("Hello! I am your SRElens AI Assistant"));
         assert_eq!(app.assistant_state.input, "");
     }
 
@@ -3954,21 +4593,39 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // 1. Pod palette has PlaybookCrashLoop, PlaybookPending, PlaybookOom
-        app.open_action_palette("Pod".to_string(), "my-failing-pod".to_string(), Some("default".to_string()));
+        app.open_action_palette(
+            "Pod".to_string(),
+            "my-failing-pod".to_string(),
+            Some("default".to_string()),
+        );
         if let Some(Modal::ActionPalette { actions, .. }) = &app.modal {
-            assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookCrashLoop));
-            assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookPending));
+            assert!(actions
+                .iter()
+                .any(|a| a.id == QuickActionId::PlaybookCrashLoop));
+            assert!(actions
+                .iter()
+                .any(|a| a.id == QuickActionId::PlaybookPending));
             assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookOom));
         } else {
             panic!("Expected ActionPalette modal");
         }
 
         // 2. Select PlaybookCrashLoop and execute
-        if let Some(Modal::ActionPalette { ref mut selected_idx, ref actions, .. }) = app.modal {
-            let idx = actions.iter().position(|a| a.id == QuickActionId::PlaybookCrashLoop).unwrap();
+        if let Some(Modal::ActionPalette {
+            ref mut selected_idx,
+            ref actions,
+            ..
+        }) = app.modal
+        {
+            let idx = actions
+                .iter()
+                .position(|a| a.id == QuickActionId::PlaybookCrashLoop)
+                .unwrap();
             *selected_idx = idx;
         }
         app.execute_action_palette().await;
@@ -3977,21 +4634,35 @@ mod tests {
         assert_eq!(app.assistant_state.input, "/crashloop my-failing-pod");
 
         // 3. Workload palette has PlaybookRollout
-        app.open_action_palette("Deployment".to_string(), "web-app".to_string(), Some("prod".to_string()));
+        app.open_action_palette(
+            "Deployment".to_string(),
+            "web-app".to_string(),
+            Some("prod".to_string()),
+        );
         if let Some(Modal::ActionPalette { actions, .. }) = &app.modal {
-            assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookRollout));
+            assert!(actions
+                .iter()
+                .any(|a| a.id == QuickActionId::PlaybookRollout));
         }
 
         // 4. Service palette has PlaybookEndpoints
-        app.open_action_palette("Service".to_string(), "api-svc".to_string(), Some("prod".to_string()));
+        app.open_action_palette(
+            "Service".to_string(),
+            "api-svc".to_string(),
+            Some("prod".to_string()),
+        );
         if let Some(Modal::ActionPalette { actions, .. }) = &app.modal {
-            assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookEndpoints));
+            assert!(actions
+                .iter()
+                .any(|a| a.id == QuickActionId::PlaybookEndpoints));
         }
 
         // 5. Node palette has PlaybookNodePressure
         app.open_action_palette("Node".to_string(), "worker-01".to_string(), None);
         if let Some(Modal::ActionPalette { actions, .. }) = &app.modal {
-            assert!(actions.iter().any(|a| a.id == QuickActionId::PlaybookNodePressure));
+            assert!(actions
+                .iter()
+                .any(|a| a.id == QuickActionId::PlaybookNodePressure));
         }
     }
 
@@ -4011,7 +4682,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Initially connecting
         assert_eq!(app.cluster_version, "Connecting...");
@@ -4047,7 +4720,8 @@ mod tests {
         assert!(content.contains("Retry connection"));
 
         // Press 'r' in unreachable table view to retry connection
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .await;
         assert!(!app.cluster_unreachable);
 
         // Simulate successful cluster response
@@ -4071,7 +4745,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let overview_data = ClusterOverviewData {
             context_name: "prod-ctx".to_string(),
@@ -4091,18 +4767,25 @@ mod tests {
         app.active_view = ActiveView::Overview(OverviewViewState::with_data(overview_data));
 
         // 1. Press 's' to trigger summarise cluster health
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .await;
 
         assert!(matches!(app.active_view, ActiveView::Assistant));
-        assert!(app.assistant_state.messages.iter().any(|m| m.role == "user" && m.content == "Summarise the health of this cluster"));
+        assert!(app
+            .assistant_state
+            .messages
+            .iter()
+            .any(|m| m.role == "user" && m.content == "Summarise the health of this cluster"));
 
         // 2. Press Esc to go back to Overview (clear busy state for second prompt in unit test)
         app.assistant_state.is_busy = false;
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::Overview(_)));
 
         // 3. Press Ctrl+a to trigger summarise cluster health
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .await;
         assert!(matches!(app.active_view, ActiveView::Assistant));
     }
 
@@ -4123,7 +4806,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let mut table = ResourceTableState::new(ResourceKind::Events);
         let events = vec![
@@ -4157,13 +4842,15 @@ mod tests {
         assert!(content.contains("BackOff"));
 
         // 1. Focus the Reason Rail with 'R'
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::Table(t) = &app.active_view {
             assert!(t.reason_rail_focused);
         }
 
         // 2. Press Enter to select the top reason (FailedScheduling: 2 occurrences)
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Table(t) = &app.active_view {
             assert!(!t.reason_rail_focused);
             assert_eq!(t.active_reason_filter.as_deref(), Some("FailedScheduling"));
@@ -4171,7 +4858,8 @@ mod tests {
         }
 
         // 3. Press Esc to clear reason filter
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Table(t) = &app.active_view {
             assert_eq!(t.active_reason_filter, None);
             assert_eq!(t.filtered_indices.len(), 4);
@@ -4198,12 +4886,15 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let mut table = ResourceTableState::new(ResourceKind::Pods);
-        table.set_items(vec![
-            json!({ "name": "web-pod-1", "namespace": "default", "status": "Running" }),
-        ], "");
+        table.set_items(
+            vec![json!({ "name": "web-pod-1", "namespace": "default", "status": "Running" })],
+            "",
+        );
         app.active_view = ActiveView::Table(table);
 
         // Prepopulate metrics history for web-pod-1
@@ -4218,10 +4909,12 @@ mod tests {
             cpu_millicores: 500,
             memory_mib: 768,
         });
-        app.pod_metrics_history.insert("web-pod-1".to_string(), history);
+        app.pod_metrics_history
+            .insert("web-pod-1".to_string(), history);
 
         // 1. Press 'm' to open Metrics Timeline modal
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))
+            .await;
 
         assert!(matches!(app.modal, Some(Modal::MetricsTimeline(_))));
 
@@ -4248,31 +4941,32 @@ mod tests {
         assert!(content.contains("Memory Usage"));
 
         // 3. Switch range to 10m via key '2'
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
+            .await;
         if let Some(Modal::MetricsTimeline(ref panel)) = app.modal {
             assert_eq!(panel.range, MetricsTimeRange::TenMin);
         }
 
         // 4. Press Tab to cycle range
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         if let Some(Modal::MetricsTimeline(ref panel)) = app.modal {
             assert_eq!(panel.range, MetricsTimeRange::ThirtyMin);
         }
 
         // 5. Press Esc to close modal
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_none());
     }
 
     #[tokio::test]
     async fn test_caveman_mode_activation_and_levels() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ai_skills::CavemanLevel;
+        use srelens_tui::app::{ActiveView, App};
 
-        let temp_dir = tempfile::tempdir().unwrap();
-        let test_cfg = temp_dir.path().join("ai_settings.json");
-        std::env::set_var("SRELENS_AI_SETTINGS_PATH", &test_cfg);
+        let _ai_guard = isolate_ai_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -4282,7 +4976,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         app.active_view = ActiveView::Assistant;
 
@@ -4291,39 +4987,70 @@ mod tests {
 
         // 1. Enter `/caveman ultra`
         app.assistant_state.input = "/caveman ultra".to_string();
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
 
         assert_eq!(app.assistant_state.caveman_level, Some(CavemanLevel::Ultra));
-        assert_eq!(app.ai_settings.get_caveman_level(), Some(CavemanLevel::Ultra));
-        assert!(app.assistant_state.messages.last().unwrap().content.contains("Caveman mode active"));
-        assert!(app.assistant_state.messages.last().unwrap().content.contains("ultra"));
+        assert_eq!(
+            app.ai_settings.get_caveman_level(),
+            Some(CavemanLevel::Ultra)
+        );
+        assert!(app
+            .assistant_state
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Caveman mode active"));
+        assert!(app
+            .assistant_state
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("ultra"));
 
         // 2. Switch to `lite`
         app.assistant_state.input = "/caveman lite".to_string();
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
 
         assert_eq!(app.assistant_state.caveman_level, Some(CavemanLevel::Lite));
-        assert_eq!(app.ai_settings.get_caveman_level(), Some(CavemanLevel::Lite));
-        assert!(app.assistant_state.messages.last().unwrap().content.contains("lite"));
+        assert_eq!(
+            app.ai_settings.get_caveman_level(),
+            Some(CavemanLevel::Lite)
+        );
+        assert!(app
+            .assistant_state
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("lite"));
 
         // 3. Disable via `/caveman off`
         app.assistant_state.input = "/caveman off".to_string();
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
 
         assert_eq!(app.assistant_state.caveman_level, None);
         assert_eq!(app.ai_settings.get_caveman_level(), None);
-        assert!(app.assistant_state.messages.last().unwrap().content.contains("Caveman mode disabled"));
+        assert!(app
+            .assistant_state
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Caveman mode disabled"));
     }
 
     #[tokio::test]
     async fn test_caveman_natural_language_triggers() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ai_skills::CavemanLevel;
+        use srelens_tui::app::{ActiveView, App};
 
-        let temp_dir = tempfile::tempdir().unwrap();
-        let test_cfg = temp_dir.path().join("ai_settings.json");
-        std::env::set_var("SRELENS_AI_SETTINGS_PATH", &test_cfg);
+        let _ai_guard = isolate_ai_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -4333,33 +5060,42 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         app.active_view = ActiveView::Assistant;
 
         // 1. Natural trigger: "caveman mode"
         app.assistant_state.input = "caveman mode".to_string();
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
 
         assert_eq!(app.assistant_state.caveman_level, Some(CavemanLevel::Full));
-        assert_eq!(app.ai_settings.get_caveman_level(), Some(CavemanLevel::Full));
+        assert_eq!(
+            app.ai_settings.get_caveman_level(),
+            Some(CavemanLevel::Full)
+        );
 
         // 2. Natural trigger: "stop caveman"
         app.assistant_state.input = "stop caveman".to_string();
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
 
         assert_eq!(app.assistant_state.caveman_level, None);
         assert_eq!(app.ai_settings.get_caveman_level(), None);
 
         // 3. Natural trigger: "talk like caveman"
         app.assistant_state.input = "talk like caveman".to_string();
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
 
         assert_eq!(app.assistant_state.caveman_level, Some(CavemanLevel::Full));
 
         // 4. Natural trigger: "normal mode"
         app.assistant_state.input = "normal mode".to_string();
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
 
         assert_eq!(app.assistant_state.caveman_level, None);
     }
@@ -4368,12 +5104,10 @@ mod tests {
     async fn test_caveman_header_title_rendering() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ai_skills::CavemanLevel;
+        use srelens_tui::app::{ActiveView, App};
 
-        let temp_dir = tempfile::tempdir().unwrap();
-        let test_cfg = temp_dir.path().join("ai_settings.json");
-        std::env::set_var("SRELENS_AI_SETTINGS_PATH", &test_cfg);
+        let _ai_guard = isolate_ai_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -4383,7 +5117,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         app.active_view = ActiveView::Assistant;
         app.assistant_state.caveman_level = Some(CavemanLevel::Ultra);
@@ -4411,12 +5147,10 @@ mod tests {
     #[tokio::test]
     async fn test_caveman_inline_query_and_prompt_injection() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ai_skills::CavemanLevel;
+        use srelens_tui::app::{ActiveView, App};
 
-        let temp_dir = tempfile::tempdir().unwrap();
-        let test_cfg = temp_dir.path().join("ai_settings.json");
-        std::env::set_var("SRELENS_AI_SETTINGS_PATH", &test_cfg);
+        let _ai_guard = isolate_ai_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -4426,22 +5160,37 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         app.active_view = ActiveView::Assistant;
 
         // Type inline command + question
-        app.assistant_state.input = "/caveman ultra why is auth-pod stuck in CrashLoopBackOff?".to_string();
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.assistant_state.input =
+            "/caveman ultra why is auth-pod stuck in CrashLoopBackOff?".to_string();
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
 
         // Level should be set to Ultra
         assert_eq!(app.assistant_state.caveman_level, Some(CavemanLevel::Ultra));
-        assert_eq!(app.ai_settings.get_caveman_level(), Some(CavemanLevel::Ultra));
+        assert_eq!(
+            app.ai_settings.get_caveman_level(),
+            Some(CavemanLevel::Ultra)
+        );
 
         // Assistant state should have registered the clean user query in turn
-        let last_user_msg = app.assistant_state.messages.iter().rev().find(|m| m.role == "user");
+        let last_user_msg = app
+            .assistant_state
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user");
         assert!(last_user_msg.is_some());
-        assert_eq!(last_user_msg.unwrap().content, "why is auth-pod stuck in CrashLoopBackOff?");
+        assert_eq!(
+            last_user_msg.unwrap().content,
+            "why is auth-pod stuck in CrashLoopBackOff?"
+        );
 
         // Verify that the prompt instructions for Ultra level are present
         let ultra_prompt = CavemanLevel::Ultra.prompt_instructions();
@@ -4463,42 +5212,48 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         app.active_view = ActiveView::Assistant;
 
         let query = "Tell me about the pending pod in monitoring namespace?";
         for c in query.chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
 
         assert_eq!(app.assistant_state.input, query);
 
         // Also test uppercase 'N'
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.assistant_state.input, format!("{}N", query));
     }
 
     #[tokio::test]
     async fn test_node_inspector_multi_container_pod_logs_picker() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::{ContainerAction, InputMode, Modal};
+        use srelens_tui::views::node_inspector_view::NodeInspectorState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
-        use srelens_tui::views::node_inspector_view::NodeInspectorState;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut ni_state = NodeInspectorState::new("worker-node-1".to_string());
         let details = NodeInspectorDetails {
@@ -4538,21 +5293,19 @@ mod tests {
             gpu_memory_requests_mib: 0,
             conditions: vec![],
             taints: vec![],
-            pods: vec![
-                NodePodItem {
-                    name: "prom-agent-istio-forwarder-shard-1-0".to_string(),
-                    namespace: "monitoring".to_string(),
-                    phase: "Running".to_string(),
-                    ready_containers: "2/2".to_string(),
-                    restarts: 0,
-                    age: "5d".to_string(),
-                    cpu_requests_millicores: 200,
-                    mem_requests_mib: 512,
-                    gpu_requests: 0,
-                    gpu_mem_requests_mib: 0,
-                    pod_ip: "10.244.2.10".to_string(),
-                },
-            ],
+            pods: vec![NodePodItem {
+                name: "prom-agent-istio-forwarder-shard-1-0".to_string(),
+                namespace: "monitoring".to_string(),
+                phase: "Running".to_string(),
+                ready_containers: "2/2".to_string(),
+                restarts: 0,
+                age: "5d".to_string(),
+                cpu_requests_millicores: 200,
+                mem_requests_mib: 512,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.2.10".to_string(),
+            }],
         };
         ni_state.set_details(details);
 
@@ -4574,7 +5327,11 @@ mod tests {
             }
         });
         resource_cache.insert(
-            ("prod".to_string(), "monitoring".to_string(), "Pods".to_string()),
+            (
+                "prod".to_string(),
+                "monitoring".to_string(),
+                "Pods".to_string(),
+            ),
             vec![pod_json],
         );
 
@@ -4619,7 +5376,9 @@ mod tests {
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "default",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -4636,14 +5395,24 @@ mod tests {
         };
 
         // 1. Press 'l' on the highlighted pod in NodeInspector
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+            .await;
 
         // Verify that Modal::ContainerPicker opened with all containers
         match &app.modal {
-            Some(Modal::ContainerPicker { pod_name, namespace, containers, selected_idx, action }) => {
+            Some(Modal::ContainerPicker {
+                pod_name,
+                namespace,
+                containers,
+                selected_idx,
+                action,
+            }) => {
                 assert_eq!(pod_name, "prom-agent-istio-forwarder-shard-1-0");
                 assert_eq!(namespace.as_deref(), Some("monitoring"));
-                assert_eq!(containers, &vec!["prometheus", "config-reloader", "init-config-reloader"]);
+                assert_eq!(
+                    containers,
+                    &vec!["prometheus", "config-reloader", "init-config-reloader"]
+                );
                 assert_eq!(*selected_idx, 0);
                 assert!(matches!(action, ContainerAction::Logs));
             }
@@ -4651,7 +5420,8 @@ mod tests {
         }
 
         // 2. Navigate down in the container picker (j selects "config-reloader")
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await;
         if let Some(Modal::ContainerPicker { selected_idx, .. }) = &app.modal {
             assert_eq!(*selected_idx, 1);
         } else {
@@ -4659,7 +5429,8 @@ mod tests {
         }
 
         // 3. Press Enter to select "config-reloader"
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_none());
 
         // Verify that ActiveView is now Logs with chosen container
@@ -4677,30 +5448,33 @@ mod tests {
         assert!(matches!(app.nav_stack[0], ActiveView::NodeInspector(_)));
 
         // 5. Press Esc to return back to NodeInspector
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::NodeInspector(_)));
     }
 
     #[tokio::test]
     async fn test_node_inspector_single_container_pod_logs_direct() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::InputMode;
+        use srelens_tui::views::node_inspector_view::NodeInspectorState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
-        use srelens_tui::views::node_inspector_view::NodeInspectorState;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut ni_state = NodeInspectorState::new("worker-node-1".to_string());
         let details = NodeInspectorDetails {
@@ -4740,21 +5514,19 @@ mod tests {
             gpu_memory_requests_mib: 0,
             conditions: vec![],
             taints: vec![],
-            pods: vec![
-                NodePodItem {
-                    name: "nginx-standalone".to_string(),
-                    namespace: "default".to_string(),
-                    phase: "Running".to_string(),
-                    ready_containers: "1/1".to_string(),
-                    restarts: 0,
-                    age: "1d".to_string(),
-                    cpu_requests_millicores: 100,
-                    mem_requests_mib: 128,
-                    gpu_requests: 0,
-                    gpu_mem_requests_mib: 0,
-                    pod_ip: "10.244.2.11".to_string(),
-                },
-            ],
+            pods: vec![NodePodItem {
+                name: "nginx-standalone".to_string(),
+                namespace: "default".to_string(),
+                phase: "Running".to_string(),
+                ready_containers: "1/1".to_string(),
+                restarts: 0,
+                age: "1d".to_string(),
+                cpu_requests_millicores: 100,
+                mem_requests_mib: 128,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.2.11".to_string(),
+            }],
         };
         ni_state.set_details(details);
 
@@ -4771,7 +5543,11 @@ mod tests {
             }
         });
         resource_cache.insert(
-            ("prod".to_string(), "default".to_string(), "Pods".to_string()),
+            (
+                "prod".to_string(),
+                "default".to_string(),
+                "Pods".to_string(),
+            ),
             vec![pod_json],
         );
 
@@ -4816,7 +5592,9 @@ mod tests {
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "default",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -4833,7 +5611,8 @@ mod tests {
         };
 
         // Press 'l' on single-container pod
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+            .await;
 
         // No modal should be displayed, should directly enter Logs view for "nginx"
         assert!(app.modal.is_none());
@@ -4851,25 +5630,54 @@ mod tests {
     async fn test_workloads_command_resolution_and_aliases() {
         use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
 
-        assert_eq!(resolve_command(":workloads"), Some(CommandTarget::Resource(ResourceKind::Workloads)));
-        assert_eq!(resolve_command(":wl"), Some(CommandTarget::Resource(ResourceKind::Workloads)));
-        assert_eq!(resolve_command(":workload"), Some(CommandTarget::Resource(ResourceKind::Workloads)));
-        assert_eq!(resolve_command("workloads"), Some(CommandTarget::Resource(ResourceKind::Workloads)));
-        assert_eq!(resolve_command("wl"), Some(CommandTarget::Resource(ResourceKind::Workloads)));
+        assert_eq!(
+            resolve_command(":workloads"),
+            Some(CommandTarget::Resource(ResourceKind::Workloads))
+        );
+        assert_eq!(
+            resolve_command(":wl"),
+            Some(CommandTarget::Resource(ResourceKind::Workloads))
+        );
+        assert_eq!(
+            resolve_command(":workload"),
+            Some(CommandTarget::Resource(ResourceKind::Workloads))
+        );
+        assert_eq!(
+            resolve_command("workloads"),
+            Some(CommandTarget::Resource(ResourceKind::Workloads))
+        );
+        assert_eq!(
+            resolve_command("wl"),
+            Some(CommandTarget::Resource(ResourceKind::Workloads))
+        );
     }
 
     #[tokio::test]
     async fn test_workloads_columns_and_segment_filtering() {
+        use serde_json::json;
         use srelens_tui::commands::ResourceKind;
         use srelens_tui::views::resource_table::{
             default_columns_for_kind, extract_field_str, ResourceTableState, WorkloadSegment,
         };
-        use serde_json::json;
 
         // Verify columns
         let cols = default_columns_for_kind(&ResourceKind::Workloads);
         let col_names: Vec<&str> = cols.iter().map(|c| c.name).collect();
-        assert_eq!(col_names, vec!["NAMESPACE", "KIND", "NAME", "READY", "STATUS", "RESTARTS", "CPU", "MEM", "AGE", "IMAGE"]);
+        assert_eq!(
+            col_names,
+            vec![
+                "NAMESPACE",
+                "KIND",
+                "NAME",
+                "READY",
+                "STATUS",
+                "RESTARTS",
+                "CPU",
+                "MEM",
+                "AGE",
+                "IMAGE"
+            ]
+        );
 
         // Verify segment cycling
         let mut seg = WorkloadSegment::All;
@@ -4940,24 +5748,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_workloads_rebuild_aggregation_and_status_verdicts() {
-        use std::path::PathBuf;
-        use std::sync::Arc;
+        use serde_json::json;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srelens_tui::commands::ResourceKind;
-        use srelens_tui::views::resource_table::ResourceTableState;
         use srelens_tui::app::{ActiveView, App};
-        use srelens_tui::ui::InputMode;
+        use srelens_tui::commands::ResourceKind;
         use srelens_tui::theme::{status_style, Theme};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::resource_table::ResourceTableState;
         use std::collections::{HashMap, HashSet};
-        use serde_json::json;
+        use std::path::PathBuf;
+        use std::sync::Arc;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut resource_cache = HashMap::new();
 
@@ -5051,7 +5861,9 @@ mod tests {
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "default",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -5078,7 +5890,11 @@ mod tests {
         assert_eq!(table.raw_items.len(), 14);
 
         let find_item = |name: &str| -> &serde_json::Value {
-            table.raw_items.iter().find(|i| i["name"] == name).expect(name)
+            table
+                .raw_items
+                .iter()
+                .find(|i| i["name"] == name)
+                .expect(name)
         };
 
         // Check Deployments
@@ -5123,27 +5939,33 @@ mod tests {
     #[tokio::test]
     async fn test_workloads_tab_segment_cycle_and_enter_drilldown() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use std::path::PathBuf;
-        use std::sync::Arc;
+        use serde_json::json;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
         use srelens_streams::watch::WatchManager;
-        use srelens_tui::commands::ResourceKind;
-        use srelens_tui::views::resource_table::{ResourceTableState, WorkloadSegment};
         use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
         use srelens_tui::ui::InputMode;
+        use srelens_tui::views::resource_table::{ResourceTableState, WorkloadSegment};
         use std::collections::{HashMap, HashSet};
-        use serde_json::json;
+        use std::path::PathBuf;
+        use std::sync::Arc;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut resource_cache = HashMap::new();
         resource_cache.insert(
-            ("prod".to_string(), "default".to_string(), "deployments".to_string()),
+            (
+                "prod".to_string(),
+                "default".to_string(),
+                "deployments".to_string(),
+            ),
             vec![json!({ "name": "nginx-dep", "namespace": "default", "ready": "1/1" })],
         );
         resource_cache.insert(
@@ -5192,7 +6014,9 @@ mod tests {
             cluster_unreachable: false,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "default",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -5217,7 +6041,8 @@ mod tests {
         }
 
         // 1. Press Tab -> Cycles to Deployment
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Table(t) = &app.active_view {
             assert_eq!(t.workload_segment, WorkloadSegment::Deployment);
             assert_eq!(t.filtered_indices.len(), 1);
@@ -5225,7 +6050,8 @@ mod tests {
         }
 
         // 2. Press Enter on Deployment -> Drills down to Pods table filtered by "nginx-dep"
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Table(t) = &app.active_view {
             assert_eq!(t.kind, ResourceKind::Pods);
             assert_eq!(app.filter_buffer, "nginx-dep");
@@ -5234,16 +6060,21 @@ mod tests {
         }
 
         // 3. Pop back to Workloads
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await; // clears filter
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await; // pops nav stack
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await; // clears filter
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await; // pops nav stack
         if let ActiveView::Table(t) = &app.active_view {
             assert_eq!(t.kind, ResourceKind::Workloads);
         }
 
         // 4. Press Tab 3 times -> StatefulSet -> DaemonSet -> Pod
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // StatefulSet
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // DaemonSet
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await; // Pod
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await; // StatefulSet
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await; // DaemonSet
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await; // Pod
         if let ActiveView::Table(t) = &app.active_view {
             assert_eq!(t.workload_segment, WorkloadSegment::Pod);
             assert_eq!(t.filtered_indices.len(), 1);
@@ -5330,7 +6161,10 @@ mod tests {
         let sre_hc = Theme::set_theme_by_name("sre-high-contrast");
         assert!(sre_hc.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::SreHighContrast);
-        assert_eq!(Theme::active_palette().label, ratatui::style::Color::Rgb(203, 213, 225));
+        assert_eq!(
+            Theme::active_palette().label,
+            ratatui::style::Color::Rgb(203, 213, 225)
+        );
 
         let sre_alias = Theme::set_theme_by_name("contrast");
         assert!(sre_alias.is_some());
@@ -5427,15 +6261,125 @@ mod tests {
 
         let drac_suggs = command_suggestions("theme drac");
         assert!(!drac_suggs.is_empty());
-        assert!(drac_suggs.iter().any(|(cmd, _)| cmd.name == "theme dracula"));
+        assert!(drac_suggs
+            .iter()
+            .any(|(cmd, _)| cmd.name == "theme dracula"));
 
         let fino_suggs = command_suggestions("theme fin");
         assert!(!fino_suggs.is_empty());
-        assert!(fino_suggs.iter().any(|(cmd, _)| cmd.name == "theme fino-time"));
+        assert!(fino_suggs
+            .iter()
+            .any(|(cmd, _)| cmd.name == "theme fino-time"));
 
         let cyber_suggs = command_suggestions("theme cyber");
         assert!(!cyber_suggs.is_empty());
-        assert!(cyber_suggs.iter().any(|(cmd, _)| cmd.name == "theme cyberpunk"));
+        assert!(cyber_suggs
+            .iter()
+            .any(|(cmd, _)| cmd.name == "theme cyberpunk"));
+    }
+
+    /// Secondary text in the node inspector follows the selected theme.
+    /// `Theme::DIM` is the default palette's value, fixed at compile time;
+    /// a view that draws it shows default-theme grey inside every other
+    /// theme, so the runtime accessor is what the pod table must read.
+    #[test]
+    fn node_inspector_secondary_text_follows_the_active_theme() {
+        let _lock = THEME_TEST_MUTEX.lock().unwrap();
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
+        use srelens_tui::theme::Theme;
+        use srelens_tui::views::node_inspector_view::{
+            render_node_inspector_view, NodeInspectorState,
+        };
+
+        // Restored on every exit, a panic included: the theme is process
+        // global, and a failed assertion here must not leave the other tests
+        // in this binary rendering solarized-dark.
+        struct RestoreTheme(usize);
+        impl Drop for RestoreTheme {
+            fn drop(&mut self) {
+                Theme::set_theme_by_index(self.0);
+            }
+        }
+        let _restore = RestoreTheme(Theme::active_index());
+
+        assert!(Theme::set_theme_by_name("solarized-dark").is_some());
+        assert_ne!(
+            Theme::dim(),
+            Theme::DIM,
+            "the test needs a theme whose dim differs from the default's"
+        );
+
+        let mut state = NodeInspectorState::new("node-1".to_string());
+        state.set_details(NodeInspectorDetails {
+            name: "node-1".to_string(),
+            status: "Ready".to_string(),
+            pods_count: 1,
+            pods: vec![NodePodItem {
+                name: "web".to_string(),
+                namespace: "default".to_string(),
+                phase: "Running".to_string(),
+                ready_containers: "1/1".to_string(),
+                restarts: 0,
+                age: "3d".to_string(),
+                cpu_requests_millicores: 100,
+                mem_requests_mib: 128,
+                gpu_requests: 0,
+                gpu_mem_requests_mib: 0,
+                pod_ip: "10.244.1.5".to_string(),
+            }],
+            ..Default::default()
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("test terminal");
+        terminal
+            .draw(|f| render_node_inspector_view(f, f.area(), &state))
+            .expect("draw");
+        let buf = terminal.backend().buffer();
+        let row_of = |needle: &str| -> (String, u16) {
+            (0..buf.area.height)
+                .find_map(|y| {
+                    let line: String = (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect();
+                    line.contains(needle).then_some((line, y))
+                })
+                .unwrap_or_else(|| panic!("no row contains {needle:?}"))
+        };
+        let col = |line: &str, needle: &str| {
+            let at = line.find(needle).unwrap();
+            line[..at].chars().count() as u16
+        };
+        // The header and each row are padded to the same column widths, so
+        // a label's offset in the header is where that cell starts in the
+        // row beneath it — the way to find a cell whose text ("0", "-") is
+        // not unique on the line.
+        let (header, _) = row_of("GPU REQ");
+        let (row, y) = row_of("10.244.1.5");
+        let solarized_dim = ratatui::style::Color::Rgb(112, 131, 135);
+        let cell = |x: u16| (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg);
+
+        assert_eq!(
+            buf[(col(&row, "10.244.1.5"), y)].fg,
+            solarized_dim,
+            "the pod IP is secondary text"
+        );
+        assert_eq!(
+            buf[(col(&row, "3d"), y)].fg,
+            solarized_dim,
+            "the pod age is secondary text"
+        );
+        assert_eq!(
+            cell(col(&header, "REST")),
+            ("0".to_string(), solarized_dim),
+            "a zero restart count is secondary text"
+        );
+        assert_eq!(
+            cell(col(&header, "GPU REQ")),
+            ("-".to_string(), solarized_dim),
+            "the no-GPU placeholder is secondary text"
+        );
     }
 
     #[tokio::test]
@@ -5455,7 +6399,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Ensure starting at default Mocha (index 0)
         Theme::set_theme_by_index(0);
@@ -5472,8 +6418,13 @@ mod tests {
         ));
 
         // 1. Live preview navigation: Down arrow changes active theme immediately
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
-        if let Some(Modal::ThemePicker { selected_idx, initial_theme_idx }) = app.modal {
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        if let Some(Modal::ThemePicker {
+            selected_idx,
+            initial_theme_idx,
+        }) = app.modal
+        {
             assert_eq!(selected_idx, 1);
             assert_eq!(initial_theme_idx, 0);
             assert_eq!(Theme::active_index(), 1); // Live preview applied!
@@ -5481,26 +6432,32 @@ mod tests {
             panic!("Expected ThemePicker modal");
         }
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await;
         if let Some(Modal::ThemePicker { selected_idx, .. }) = app.modal {
             assert_eq!(selected_idx, 2);
             assert_eq!(Theme::active_index(), 2);
         }
 
         // 2. Cancellation: Esc reverts back to initial_theme_idx (0) and closes modal
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_none());
         assert_eq!(Theme::active_index(), 0); // Reverted!
 
         // 3. Commitment: Open again, navigate to Nord (index 3), press Enter
         Theme::set_theme_by_index(0);
         app.execute_view_target(CommandTarget::ThemePicker).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await; // 1
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await; // 2
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await; // 3
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await; // 1
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await; // 2
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await; // 3
         assert_eq!(Theme::active_index(), 3);
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_none());
         assert_eq!(Theme::active_index(), 3); // Committed!
         assert_eq!(app.ai_settings.theme, Some("nord".to_string()));
@@ -5524,7 +6481,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Add CRDs starting with "no" to simulate user's environment
         app.crds = vec![
@@ -5538,6 +6497,7 @@ mod tests {
                 namespaced: false,
                 short_names: vec!["nfg".to_string()],
                 printer_columns: vec![],
+                created_at: None,
             },
             CrdMeta {
                 crd_name: "nodefeaturerules.nfd.k8s.bin".to_string(),
@@ -5549,51 +6509,66 @@ mod tests {
                 namespaced: false,
                 short_names: vec!["nfr".to_string()],
                 printer_columns: vec![],
+                created_at: None,
             },
         ];
 
         // 1. Enter command mode by pressing ':'
-        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.input_mode, InputMode::Command);
         assert_eq!(app.command_buffer, "");
         assert_eq!(app.command_suggestion_idx, 0);
 
         // 2. Type "no"
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+            .await;
         assert_eq!(app.command_buffer, "no");
         assert_eq!(app.command_suggestion_idx, 0);
 
         // 3. Press Down arrow -> Moves selection cursor to index 1 (nodefeaturegroups) WITHOUT altering command_buffer!
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.command_buffer, "no"); // Query preserved!
         assert_eq!(app.command_suggestion_idx, 1);
 
         // 4. Press Down arrow again -> Moves selection cursor to index 2 (nodefeaturerules)
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.command_buffer, "no"); // Query preserved!
         assert_eq!(app.command_suggestion_idx, 2);
 
         // 5. Press Up arrow -> Moves selection cursor back to index 1 (nodefeaturegroups)
-        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.command_buffer, "no"); // Query preserved!
         assert_eq!(app.command_suggestion_idx, 1);
 
         // 6. Press Enter -> Runs selected suggestion (nodefeaturegroups)
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.input_mode, InputMode::Normal);
         if let ActiveView::Table(t) = &app.active_view {
-            assert!(matches!(&t.kind, ResourceKind::CustomResource(crd) if crd.plural == "nodefeaturegroups"));
+            assert!(
+                matches!(&t.kind, ResourceKind::CustomResource(crd) if crd.plural == "nodefeaturegroups")
+            );
         } else {
             panic!("Expected active view to be Custom CRD table for nodefeaturegroups");
         }
 
         // 7. Verify Tab completes selected suggestion
-        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await; // select index 1
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await; // select index 1
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.command_buffer, "nodefeaturegroups");
     }
 
@@ -5617,6 +6592,7 @@ mod tests {
             namespaced: false,
             short_names: vec![],
             printer_columns: vec![],
+            created_at: None,
         };
 
         // 1. Test fallback when no CRD is present
@@ -5665,10 +6641,15 @@ mod tests {
         assert!(suggestions.len() >= 2);
         // CRD should be ranked first because its primary name starts with "sett"
         assert_eq!(suggestions[0].0.name, "settings");
-        assert!(matches!(&suggestions[0].0.target, CommandTarget::CustomResource(ref c) if c.plural == "settings"));
+        assert!(
+            matches!(&suggestions[0].0.target, CommandTarget::CustomResource(ref c) if c.plural == "settings")
+        );
         // AI Settings should also be present via alias
         assert_eq!(suggestions[1].0.name, "ai-settings");
-        assert!(matches!(&suggestions[1].0.target, CommandTarget::Resource(ResourceKind::Settings)));
+        assert!(matches!(
+            &suggestions[1].0.target,
+            CommandTarget::Resource(ResourceKind::Settings)
+        ));
 
         // 4. Test interactive UI selection in App
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -5679,53 +6660,72 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         app.crds = crds.clone();
 
         // 4a. Type ":sett" and press Enter immediately (Index 0 = CRD selected by default)
-        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+            .await;
         for c in "sett".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
         assert_eq!(app.command_suggestion_idx, 0);
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.input_mode, InputMode::Normal);
         // Must open CRD table view, NOT AI Settings!
         if let ActiveView::Table(t) = &app.active_view {
-            assert!(matches!(&t.kind, ResourceKind::CustomResource(ref c) if c.plural == "settings"));
+            assert!(
+                matches!(&t.kind, ResourceKind::CustomResource(ref c) if c.plural == "settings")
+            );
         } else {
             panic!("Expected active view to be Custom CRD table for Setting");
         }
 
         // 4b. Type ":sett", press Down arrow (Index 1 = AI Settings), and press Enter
-        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+            .await;
         for c in "sett".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.command_suggestion_idx, 1);
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.input_mode, InputMode::Normal);
         // Must open AI Settings view!
         assert!(matches!(app.active_view, ActiveView::Settings(_)));
 
         // 4c. Verify Tab completion for CRD vs AI Settings
-        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+            .await;
         for c in "sett".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
         // At index 0 (CRD), pressing Tab completes to "settings"
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.command_buffer, "settings");
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+            .await;
         for c in "sett".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+                .await;
         }
         // At index 1 (AI Settings), pressing Tab completes to "ai-settings"
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.command_buffer, "ai-settings");
     }
 
@@ -5744,7 +6744,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Put app into NodeInspector view
         let mut state = NodeInspectorState::new("worker-1".to_string());
@@ -5756,9 +6758,17 @@ mod tests {
         app.active_view = ActiveView::NodeInspector(state);
 
         // 1. Pressing 'c' should NOT instantly cordon, but open Modal::InputConfirm requiring "confirm"
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .await;
         match &app.modal {
-            Some(Modal::InputConfirm { title, action_name, required_input, current_input, is_destructive, .. }) => {
+            Some(Modal::InputConfirm {
+                title,
+                action_name,
+                required_input,
+                current_input,
+                is_destructive,
+                ..
+            }) => {
                 assert!(title.contains("Cordon Node"));
                 assert_eq!(action_name, "cordon:worker-1");
                 assert_eq!(required_input, "confirm");
@@ -5769,19 +6779,24 @@ mod tests {
         }
 
         // 2. Pressing Enter without typing "confirm" does NOT submit
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_some());
 
         // 3. Type partial letters
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .await;
         if let Some(Modal::InputConfirm { current_input, .. }) = &app.modal {
             assert_eq!(current_input, "con");
         }
 
         // 4. Press Esc cancels
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_none());
 
         // 5. Test Uncordon dialog when node is already unschedulable
@@ -5790,29 +6805,41 @@ mod tests {
                 d.unschedulable = true;
             }
         }
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .await;
         match &app.modal {
-            Some(Modal::InputConfirm { title, action_name, required_input, is_destructive, .. }) => {
+            Some(Modal::InputConfirm {
+                title,
+                action_name,
+                required_input,
+                is_destructive,
+                ..
+            }) => {
                 assert!(title.contains("Uncordon Node"));
                 assert_eq!(action_name, "uncordon:worker-1");
                 assert_eq!(required_input, "confirm");
                 assert!(!*is_destructive);
             }
-            other => panic!("Expected Modal::InputConfirm for uncordon, got: {:?}", other),
+            other => panic!(
+                "Expected Modal::InputConfirm for uncordon, got: {:?}",
+                other
+            ),
         }
 
         // 6. Type "confirm" and press Enter
         for ch in "confirm".chars() {
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)).await;
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+                .await;
         }
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_none());
     }
 
     #[tokio::test]
     async fn test_nodes_view_cordoned_status_and_dynamic_spacing() {
-        use srelens_tui::views::resource_table::{extract_field_str, ResourceTableState};
         use srelens_tui::theme::{status_style, Theme};
+        use srelens_tui::views::resource_table::{extract_field_str, ResourceTableState};
 
         let mut node_table = ResourceTableState::new(ResourceKind::Nodes);
         let nodes = vec![
@@ -5876,19 +6903,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_topology_command_resolution_and_flow_navigation() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::topology::{
+            EdgeKind, Health, Lane, Provenance, TopologyEdge, TopologyGraphOut, TopologyNode,
+        };
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::topology_view::TopologyViewState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
-        use srelens_tui::ui::InputMode;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
-        use srelens_tui::views::topology_view::TopologyViewState;
-        use srelens_kube::topology::{EdgeKind, Health, Lane, Provenance, TopologyEdge, TopologyGraphOut, TopologyNode};
 
         // 1. Verify command resolution aliases
         assert_eq!(
@@ -5985,7 +7014,11 @@ mod tests {
             },
         ];
 
-        let graph = TopologyGraphOut { nodes, edges, probe: None };
+        let graph = TopologyGraphOut {
+            nodes,
+            edges,
+            probe: None,
+        };
 
         let mut topo_state = TopologyViewState::new(vec!["default".to_string()]);
         topo_state.set_graph(graph);
@@ -5995,7 +7028,9 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             active_context: "prod".to_string(),
@@ -6038,7 +7073,9 @@ mod tests {
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "default",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -6060,46 +7097,53 @@ mod tests {
         }
 
         // Navigate right to External lane with Right
-        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Topology(t) = &app.active_view {
             assert_eq!(t.selected_node().unwrap().name, "redis-cart:6379");
         }
 
         // Navigate left back to Workloads with Left
-        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Topology(t) = &app.active_view {
             assert_eq!(t.selected_node().unwrap().name, "cart-deploy");
         }
 
         // Press Enter on cart-deploy: drills down into Pods table pre-filtered by cart-deploy!
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
-        assert!(matches!(&app.active_view, ActiveView::Table(tbl) if tbl.kind == ResourceKind::Pods));
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert!(
+            matches!(&app.active_view, ActiveView::Table(tbl) if tbl.kind == ResourceKind::Pods)
+        );
         assert_eq!(app.filter_buffer, "cart-deploy");
 
         // Press Esc: clears the filter buffer first
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert_eq!(app.filter_buffer, "");
 
         // Press Esc again: pops back to Topology view!
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert!(matches!(&app.active_view, ActiveView::Topology(_)));
     }
 
     #[tokio::test]
     async fn test_gpuinfo_command_resolution_and_node_pod_vram_selection() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::client_cache::ClientCache;
+        use srelens_kube::gpu_info::{format_vram_mib, GpuClusterInfo, GpuNodeInfo, GpuPodItem};
+        use srelens_streams::logs::LogStreamManager;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::gpu_view::{GpuPane, GpuViewState};
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
-        use srelens_tui::ui::InputMode;
-        use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
-        use srelens_streams::logs::LogStreamManager;
-        use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
-        use srelens_tui::views::gpu_view::{GpuPane, GpuViewState};
-        use srelens_kube::gpu_info::{GpuClusterInfo, GpuNodeInfo, GpuPodItem, format_vram_mib};
 
         // 1. Verify command resolution aliases
         assert_eq!(
@@ -6193,7 +7237,9 @@ mod tests {
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut app = App {
             active_context: "prod".to_string(),
@@ -6236,7 +7282,9 @@ mod tests {
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "default",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -6258,7 +7306,10 @@ mod tests {
             assert_eq!(node.name, "gpu-node-alpha");
             assert_eq!(node.gpu_capacity, 8);
             assert_eq!(node.gpu_requests, 2);
-            assert_eq!(format_vram_mib(node.vram_capacity_total_mib.unwrap()), "640 GiB");
+            assert_eq!(
+                format_vram_mib(node.vram_capacity_total_mib.unwrap()),
+                "640 GiB"
+            );
             assert_eq!(format_vram_mib(node.vram_requests_total_mib), "160 GiB");
 
             // Right side shows pods asking for VRAM on gpu-node-alpha
@@ -6268,13 +7319,17 @@ mod tests {
         }
 
         // 4. Navigate down to gpu-node-beta with 'j'
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::GpuInfo(g) = &app.active_view {
             let node = g.selected_node().unwrap();
             assert_eq!(node.name, "gpu-node-beta");
             assert_eq!(node.gpu_capacity, 1);
             assert_eq!(node.gpu_requests, 1);
-            assert_eq!(format_vram_mib(node.vram_capacity_total_mib.unwrap()), "15 GiB");
+            assert_eq!(
+                format_vram_mib(node.vram_capacity_total_mib.unwrap()),
+                "15 GiB"
+            );
 
             // Right side immediately updates to whisper-worker on gpu-node-beta!
             let pod = g.selected_pod().unwrap();
@@ -6283,40 +7338,47 @@ mod tests {
         }
 
         // 5. Tab toggles pane to Pods
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         if let ActiveView::GpuInfo(g) = &app.active_view {
             assert_eq!(g.focused_pane, GpuPane::Pods);
         }
 
         // 6. Enter on whisper-worker pod opens Describe view!
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
-        assert!(matches!(&app.active_view, ActiveView::Describe(d) if d.resource_name == "whisper-worker"));
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
+        assert!(
+            matches!(&app.active_view, ActiveView::Describe(d) if d.resource_name == "whisper-worker")
+        );
 
         // 7. Esc pops back to GpuInfo view!
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert!(matches!(&app.active_view, ActiveView::GpuInfo(_)));
     }
 
     #[tokio::test]
     async fn test_multi_pod_logs_from_marked_items_and_workload() {
-        use srelens_tui::commands::ResourceKind;
-        use srelens_tui::views::resource_table::ResourceTableState;
-        use srelens_tui::app::{App, ActiveView};
-        use srelens_tui::ui::InputMode;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
         use srelens_streams::logs::LogStreamManager;
-        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::ResourceKind;
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::resource_table::ResourceTableState;
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tokio::sync::mpsc::unbounded_channel;
 
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut table = ResourceTableState::new(ResourceKind::Pods);
         let pod1 = serde_json::json!({
@@ -6381,7 +7443,9 @@ mod tests {
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("prod"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "prod",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -6404,7 +7468,8 @@ mod tests {
         );
 
         // Press 'l' on marked pods -> starts multi-pod log stream!
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::Logs(ref logs) = app.active_view {
             assert!(logs.is_multi_pod);
             assert_eq!(logs.known_sources.len(), 2);
@@ -6444,39 +7509,60 @@ mod tests {
         }
 
         // Esc returns back to table
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::Table(_)));
     }
 
     #[tokio::test]
     async fn test_top_hotspots_commands_and_sorting() {
-        use srelens_tui::commands::{resolve_command, ResourceKind, CommandTarget};
-        use srelens_tui::views::top_view::{TopTab, TopSortBy, TopPodRow, TopNodeRow};
-        use srelens_tui::app::{App, ActiveView};
-        use srelens_tui::ui::InputMode;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_kube::client_cache::ClientCache;
-        use srelens_streams::watch::WatchManager;
         use srelens_streams::logs::LogStreamManager;
-        use tokio::sync::mpsc::unbounded_channel;
+        use srelens_streams::watch::WatchManager;
+        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
+        use srelens_tui::ui::InputMode;
+        use srelens_tui::views::top_view::{TopNodeRow, TopPodRow, TopSortBy, TopTab};
         use std::collections::{HashMap, HashSet};
         use std::path::PathBuf;
         use std::sync::Arc;
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use tokio::sync::mpsc::unbounded_channel;
 
         // 1. Verify command resolutions
-        assert_eq!(resolve_command("top"), Some(CommandTarget::Resource(ResourceKind::TopPods)));
-        assert_eq!(resolve_command(":top"), Some(CommandTarget::Resource(ResourceKind::TopPods)));
-        assert_eq!(resolve_command(":toppods"), Some(CommandTarget::Resource(ResourceKind::TopPods)));
-        assert_eq!(resolve_command(":top pods"), Some(CommandTarget::Resource(ResourceKind::TopPods)));
-        assert_eq!(resolve_command(":topnodes"), Some(CommandTarget::Resource(ResourceKind::TopNodes)));
-        assert_eq!(resolve_command(":top nodes"), Some(CommandTarget::Resource(ResourceKind::TopNodes)));
+        assert_eq!(
+            resolve_command("top"),
+            Some(CommandTarget::Resource(ResourceKind::TopPods))
+        );
+        assert_eq!(
+            resolve_command(":top"),
+            Some(CommandTarget::Resource(ResourceKind::TopPods))
+        );
+        assert_eq!(
+            resolve_command(":toppods"),
+            Some(CommandTarget::Resource(ResourceKind::TopPods))
+        );
+        assert_eq!(
+            resolve_command(":top pods"),
+            Some(CommandTarget::Resource(ResourceKind::TopPods))
+        );
+        assert_eq!(
+            resolve_command(":topnodes"),
+            Some(CommandTarget::Resource(ResourceKind::TopNodes))
+        );
+        assert_eq!(
+            resolve_command(":top nodes"),
+            Some(CommandTarget::Resource(ResourceKind::TopNodes))
+        );
 
         // 2. Setup App with Top view
         let (tx, _rx) = unbounded_channel();
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
         let watch_manager = Arc::new(WatchManager::new(client_cache.clone()));
         let logs_manager = Arc::new(LogStreamManager::new(client_cache.clone()));
-        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(client_cache.clone()));
+        let forward_manager = Arc::new(srelens_streams::forward::ForwardManager::new(
+            client_cache.clone(),
+        ));
 
         let mut top_state = srelens_tui::views::top_view::TopViewState::new(TopTab::Pods);
         let pod_rows = vec![
@@ -6501,16 +7587,14 @@ mod tests {
                 mem_lim_mib: 1024,
             },
         ];
-        let node_rows = vec![
-            TopNodeRow {
-                name: "node-1".to_string(),
-                status: "Ready".to_string(),
-                cpu_millicores: 2000,
-                cpu_alloc_millicores: 4000,
-                mem_mib: 8000,
-                mem_alloc_mib: 16000,
-            },
-        ];
+        let node_rows = vec![TopNodeRow {
+            name: "node-1".to_string(),
+            status: "Ready".to_string(),
+            cpu_millicores: 2000,
+            cpu_alloc_millicores: 4000,
+            mem_mib: 8000,
+            mem_alloc_mib: 16000,
+        }];
         top_state.set_data(pod_rows, node_rows);
 
         let mut app = App {
@@ -6554,7 +7638,9 @@ mod tests {
             toast: None,
             ai_settings: srelens_tui::AiSettings::default(),
             tui_config: srelens_tui::TuiConfig::default(),
-            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context("default"),
+            assistant_state: srelens_tui::views::assistant_view::AssistantViewState::for_context(
+                "default",
+            ),
             assistant_states: HashMap::new(),
             pod_metrics_tick_counter: 0,
             node_metrics_tick_counter: 0,
@@ -6576,46 +7662,55 @@ mod tests {
         }
 
         // Press 'm' to sort by Memory (descending) -> low-cpu-pod has 800MiB vs 400MiB
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::Top(ref top) = app.active_view {
             assert_eq!(top.sort_by, TopSortBy::Memory);
             assert_eq!(top.selected_pod().unwrap().name, "low-cpu-pod");
         }
 
         // Press 'S' to reverse direction (ascending) -> high-cpu-pod has 400MiB
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
+            .await;
         if let ActiveView::Top(ref top) = app.active_view {
             assert_eq!(top.selected_pod().unwrap().name, "high-cpu-pod");
         }
 
         // Press Tab to toggle to Nodes tab
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Top(ref top) = app.active_view {
             assert_eq!(top.active_tab, TopTab::Nodes);
             assert_eq!(top.selected_node().unwrap().name, "node-1");
         }
 
         // Press '1' to switch back to Pods tab
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::Top(ref top) = app.active_view {
             assert_eq!(top.active_tab, TopTab::Pods);
         }
 
         // Press 'd' to Describe the selected pod
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::Describe(_)));
 
         // Esc pops back to Top view
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::Top(_)));
     }
 
     #[tokio::test]
     async fn test_helm_detail_view_state_and_values_diff() {
-        use srelens_tui::views::helm_detail_view::{HelmDetailTab, HelmDetailViewState, ValuesDiffMode, DiffKind};
         use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
+        use srelens_tui::views::helm_detail_view::{
+            DiffKind, HelmDetailTab, HelmDetailViewState, ValuesDiffMode,
+        };
 
-        let mut detail_state = HelmDetailViewState::new("ingress-nginx".to_string(), "default".to_string());
+        let mut detail_state =
+            HelmDetailViewState::new("ingress-nginx".to_string(), "default".to_string());
         assert_eq!(detail_state.active_tab, HelmDetailTab::Overview);
 
         // Tab transitions
@@ -6676,27 +7771,43 @@ mod tests {
         // Verify resource parsing from manifest
         let counts = detail_state.parse_manifest_resource_counts();
         assert_eq!(counts.len(), 2);
-        let dep_count = counts.iter().find(|(k, _)| k == "Deployment").map(|(_, c)| *c);
+        let dep_count = counts
+            .iter()
+            .find(|(k, _)| k == "Deployment")
+            .map(|(_, c)| *c);
         let svc_count = counts.iter().find(|(k, _)| k == "Service").map(|(_, c)| *c);
         assert_eq!(dep_count, Some(1));
         assert_eq!(svc_count, Some(2));
         // Verify values diff: Custom vs Computed (default mode)
         detail_state.set_tab(HelmDetailTab::ValuesDiff);
-        assert_eq!(detail_state.values_diff_mode, ValuesDiffMode::CustomVsComputed);
+        assert_eq!(
+            detail_state.values_diff_mode,
+            ValuesDiffMode::CustomVsComputed
+        );
         let diff_lines = detail_state.compute_values_diff();
         assert!(!diff_lines.is_empty());
 
         // Toggle to CustomVsDefault
         detail_state.toggle_diff_mode();
-        assert_eq!(detail_state.values_diff_mode, ValuesDiffMode::CustomVsDefault);
+        assert_eq!(
+            detail_state.values_diff_mode,
+            ValuesDiffMode::CustomVsDefault
+        );
         let diff_lines = detail_state.compute_values_diff();
         assert!(!diff_lines.is_empty());
-        assert!(diff_lines.iter().any(|l| matches!(l.kind, DiffKind::Remove) && l.text.contains("replicaCount: 1")));
-        assert!(diff_lines.iter().any(|l| matches!(l.kind, DiffKind::Add) && l.text.contains("replicaCount: 3")));
+        assert!(diff_lines
+            .iter()
+            .any(|l| matches!(l.kind, DiffKind::Remove) && l.text.contains("replicaCount: 1")));
+        assert!(diff_lines
+            .iter()
+            .any(|l| matches!(l.kind, DiffKind::Add) && l.text.contains("replicaCount: 3")));
 
         // Toggle diff mode to RevisionVsPrevious
         detail_state.toggle_diff_mode();
-        assert_eq!(detail_state.values_diff_mode, ValuesDiffMode::RevisionVsPrevious);
+        assert_eq!(
+            detail_state.values_diff_mode,
+            ValuesDiffMode::RevisionVsPrevious
+        );
 
         // Previous revision detail
         let prev_detail = HelmReleaseDetail {
@@ -6708,7 +7819,8 @@ mod tests {
             chart_version: "4.8.2".to_string(),
             app_version: "1.9.3".to_string(),
             updated: "2026-08-15T10:00:00Z".to_string(),
-            values_yaml: "controller:\n  replicaCount: 2\n  service:\n    type: LoadBalancer\n".to_string(),
+            values_yaml: "controller:\n  replicaCount: 2\n  service:\n    type: LoadBalancer\n"
+                .to_string(),
             chart_values_yaml: "controller:\n  replicaCount: 1\n".to_string(),
             computed_values_yaml: "controller:\n  replicaCount: 2\n".to_string(),
             manifest: "".to_string(),
@@ -6717,8 +7829,12 @@ mod tests {
         };
         detail_state.set_previous_detail(prev_detail);
         let rev_diff = detail_state.compute_values_diff();
-        assert!(rev_diff.iter().any(|l| matches!(l.kind, DiffKind::Remove) && l.text.contains("replicaCount: 2")));
-        assert!(rev_diff.iter().any(|l| matches!(l.kind, DiffKind::Add) && l.text.contains("replicaCount: 3")));
+        assert!(rev_diff
+            .iter()
+            .any(|l| matches!(l.kind, DiffKind::Remove) && l.text.contains("replicaCount: 2")));
+        assert!(rev_diff
+            .iter()
+            .any(|l| matches!(l.kind, DiffKind::Add) && l.text.contains("replicaCount: 3")));
 
         // Revision selection
         detail_state.set_tab(HelmDetailTab::Revisions);
@@ -6733,11 +7849,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_helm_views_navigation_and_interactions() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::Modal;
         use srelens_tui::views::helm_detail_view::{HelmDetailTab, ValuesDiffMode};
         use srelens_tui::views::helm_view::{HelmReleaseItem, HelmViewState};
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -6747,7 +7863,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // 1. Setup Helm releases in HelmViewState
         let mut helm_state = HelmViewState::new();
@@ -6776,13 +7894,15 @@ mod tests {
         app.active_view = ActiveView::Helm(helm_state);
 
         // Navigate releases down
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Helm(ref helm) = app.active_view {
             assert_eq!(helm.selected_release().unwrap().name, "ingress-nginx");
         }
 
         // 2. Press Enter to open Deep Inspector on Overview tab
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         match &app.active_view {
             ActiveView::HelmDetail(detail) => {
                 assert_eq!(detail.release_name, "ingress-nginx");
@@ -6793,19 +7913,22 @@ mod tests {
         }
 
         // 3. Tab navigation inside HelmDetail
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         if let ActiveView::HelmDetail(ref detail) = app.active_view {
             assert_eq!(detail.active_tab, HelmDetailTab::ValuesDiff);
         }
 
         // Toggle diff mode with 'm' (CustomVsComputed -> CustomVsDefault)
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::HelmDetail(ref detail) = app.active_view {
             assert_eq!(detail.values_diff_mode, ValuesDiffMode::CustomVsDefault);
         }
 
         // Jump to Revisions tab with '3'
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::HelmDetail(ref mut detail) = app.active_view {
             assert_eq!(detail.active_tab, HelmDetailTab::Revisions);
             // Mock history
@@ -6843,10 +7966,14 @@ mod tests {
         }
 
         // Select revision 1 and press 'r' to rollback to it
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .await;
         match &app.modal {
-            Some(Modal::Confirm { title, action_name, .. }) => {
+            Some(Modal::Confirm {
+                title, action_name, ..
+            }) => {
                 assert!(title.contains("Rollback Helm Release [ingress-nginx]"));
                 assert_eq!(action_name, "helm-rollback:ingress-nginx:ingress:1");
             }
@@ -6855,7 +7982,8 @@ mod tests {
         app.modal = None;
 
         // 4. Press Esc to return back to Helm release list
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::Helm(_)));
 
         // Returning to the list refreshes it; complete that refresh before rollback.
@@ -6863,14 +7991,24 @@ mod tests {
             ActiveView::Helm(helm) => helm.releases.clone(),
             _ => unreachable!(),
         };
-        let summaries = releases.into_iter().map(|r| srelens_kube::helm::HelmReleaseSummary {
-            name: r.name, namespace: r.namespace, revision: r.revision, status: r.status,
-            chart: r.chart, chart_version: r.chart_version, app_version: r.app_version, updated: r.updated,
-        }).collect();
+        let summaries = releases
+            .into_iter()
+            .map(|r| srelens_kube::helm::HelmReleaseSummary {
+                name: r.name,
+                namespace: r.namespace,
+                revision: r.revision,
+                status: r.status,
+                chart: r.chart,
+                chart_version: r.chart_version,
+                app_version: r.app_version,
+                updated: r.updated,
+            })
+            .collect();
         app.handle_helm_releases_result("test-ctx", "default", Ok(summaries));
 
         // 5. From Helm list, press 'r' to trigger rollback modal to revision - 1
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .await;
         match &app.modal {
             Some(Modal::Confirm { action_name, .. }) => {
                 assert_eq!(action_name, "helm-rollback:ingress-nginx:ingress:1");
@@ -6880,9 +8018,12 @@ mod tests {
         app.modal = None;
 
         // 6. From Helm list, press Ctrl+D to trigger uninstall modal
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .await;
         match &app.modal {
-            Some(Modal::Confirm { title, action_name, .. }) => {
+            Some(Modal::Confirm {
+                title, action_name, ..
+            }) => {
                 assert!(title.contains("Uninstall Helm Release [ingress-nginx]"));
                 assert_eq!(action_name, "helm-uninstall:ingress-nginx:ingress");
             }
@@ -6904,8 +8045,8 @@ mod tests {
 
     #[tokio::test]
     async fn helm_detail_search_matches_and_navigates_across_tabs() {
-        use srelens_tui::views::helm_detail_view::{HelmDetailTab, HelmDetailViewState};
         use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
+        use srelens_tui::views::helm_detail_view::{HelmDetailTab, HelmDetailViewState};
 
         let mut detail_state = HelmDetailViewState::new("app".to_string(), "default".to_string());
         let mock_detail = HelmReleaseDetail {
@@ -6963,7 +8104,10 @@ mod tests {
 
         // Scroll to bottom
         detail_state.scroll_to_bottom();
-        assert_eq!(detail_state.scroll_offset, detail_state.manifest_line_count() - 1);
+        assert_eq!(
+            detail_state.scroll_offset,
+            detail_state.manifest_line_count() - 1
+        );
 
         // Switch to Notes tab (tab 5) - should automatically recompute search for "token" in notes!
         detail_state.set_tab(HelmDetailTab::Notes);
@@ -6981,12 +8125,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_views_navigation_and_interactions() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::Modal;
         use srelens_tui::views::argo_detail_view::ArgoDetailTab;
         use srelens_tui::views::argo_view::ArgoViewState;
-        use srelens_kube::argo::ArgoApplication;
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -6996,7 +8140,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let app1 = ArgoApplication::from_json(&serde_json::json!({
             "metadata": {
@@ -7035,6 +8181,8 @@ mod tests {
             "metadata": {
                 "name": "auth-api",
                 "namespace": "argocd",
+                "uid": "auth-api-uid",
+                "resourceVersion": "981",
             },
             "spec": {
                 "project": "default",
@@ -7061,22 +8209,19 @@ mod tests {
 
         let mut argo_state = ArgoViewState::new();
         let apps = vec![app1, app2];
-        argo_state.set_applications(
-            apps.clone(),
-            apps,
-            true,
-            Some("mgmt-hub".to_string()),
-        );
+        argo_state.set_applications(apps.clone(), apps, true, Some("mgmt-hub".to_string()));
         app.active_view = ActiveView::Argo(argo_state);
 
         // 1. Navigate down
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
         if let ActiveView::Argo(ref argo) = app.active_view {
             assert_eq!(argo.selected_application().unwrap().name, "auth-api");
         }
 
         // 2. Open detail view on Enter
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         match &app.active_view {
             ActiveView::ArgoDetail(detail) => {
                 assert_eq!(detail.app_name, "auth-api");
@@ -7087,36 +8232,47 @@ mod tests {
         }
 
         // 3. Cycle tabs with Tab key
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         if let ActiveView::ArgoDetail(ref detail) = app.active_view {
             assert_eq!(detail.active_tab, ArgoDetailTab::ManagedResources);
         }
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         if let ActiveView::ArgoDetail(ref detail) = app.active_view {
             assert_eq!(detail.active_tab, ArgoDetailTab::Drift);
         }
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .await;
         if let ActiveView::ArgoDetail(ref detail) = app.active_view {
             assert_eq!(detail.active_tab, ArgoDetailTab::RevisionHistory);
         }
 
         // Jump directly with number keys
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::ArgoDetail(ref detail) = app.active_view {
             assert_eq!(detail.active_tab, ArgoDetailTab::Overview);
         }
 
         // 4. Test SRE Emergency Lever: 's' key triggers Sync modal confirmation
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_some());
-        if let Some(Modal::Confirm { ref action_name, .. }) = app.modal {
+        if let Some(Modal::Confirm {
+            ref action_name, ..
+        }) = app.modal
+        {
             assert!(action_name.starts_with("argo_sync:"));
-            let val: serde_json::Value = serde_json::from_str(action_name.strip_prefix("argo_sync:").unwrap()).unwrap();
+            let val: serde_json::Value =
+                serde_json::from_str(action_name.strip_prefix("argo_sync:").unwrap()).unwrap();
             assert_eq!(val["ctx"], "mgmt-hub");
             assert_eq!(val["ns"], "argocd");
             assert_eq!(val["name"], "auth-api");
+            assert_eq!(val["uid"], "auth-api-uid");
+            assert_eq!(val["resource_version"], "981");
             assert_eq!(val["prune"], false);
         } else {
             panic!("Expected Modal::Confirm for argo_sync");
@@ -7124,14 +8280,21 @@ mod tests {
         app.modal = None;
 
         // Test Prune Sync Lever: 'S' key triggers Sync with prune=true modal
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT))
+            .await;
         assert!(app.modal.is_some());
-        if let Some(Modal::Confirm { ref action_name, .. }) = app.modal {
+        if let Some(Modal::Confirm {
+            ref action_name, ..
+        }) = app.modal
+        {
             assert!(action_name.starts_with("argo_sync:"));
-            let val: serde_json::Value = serde_json::from_str(action_name.strip_prefix("argo_sync:").unwrap()).unwrap();
+            let val: serde_json::Value =
+                serde_json::from_str(action_name.strip_prefix("argo_sync:").unwrap()).unwrap();
             assert_eq!(val["ctx"], "mgmt-hub");
             assert_eq!(val["ns"], "argocd");
             assert_eq!(val["name"], "auth-api");
+            assert_eq!(val["uid"], "auth-api-uid");
+            assert_eq!(val["resource_version"], "981");
             assert_eq!(val["prune"], true);
         } else {
             panic!("Expected Modal::Confirm for argo_sync with prune");
@@ -7139,14 +8302,22 @@ mod tests {
         app.modal = None;
 
         // Test Auto-Sync Pause Lever: 'p' key triggers Pause/Resume modal
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_some());
-        if let Some(Modal::Confirm { ref action_name, .. }) = app.modal {
+        if let Some(Modal::Confirm {
+            ref action_name, ..
+        }) = app.modal
+        {
             assert!(action_name.starts_with("argo_toggle_auto:"));
-            let val: serde_json::Value = serde_json::from_str(action_name.strip_prefix("argo_toggle_auto:").unwrap()).unwrap();
+            let val: serde_json::Value =
+                serde_json::from_str(action_name.strip_prefix("argo_toggle_auto:").unwrap())
+                    .unwrap();
             assert_eq!(val["ctx"], "mgmt-hub");
             assert_eq!(val["ns"], "argocd");
             assert_eq!(val["name"], "auth-api");
+            assert_eq!(val["uid"], "auth-api-uid");
+            assert_eq!(val["resource_version"], "981");
             assert_eq!(val["enable"], true);
         } else {
             panic!("Expected Modal::Confirm for argo_toggle_auto");
@@ -7154,7 +8325,8 @@ mod tests {
         app.modal = None;
 
         // 5. Esc exits detail view back to Argo list view
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .await;
         match &app.active_view {
             ActiveView::Argo(state) => {
                 assert_eq!(state.selected_application().unwrap().name, "auth-api");
@@ -7176,19 +8348,34 @@ mod tests {
         // When configured in TuiConfig
         cfg.argo_hub_context = Some("platform-mgmt".to_string());
         cfg.argo_hub_kubeconfig = Some(PathBuf::from("/etc/kube/mgmt.yaml"));
-        assert_eq!(cfg.resolved_argo_hub_context(), Some("platform-mgmt".to_string()));
-        assert_eq!(cfg.resolved_argo_hub_kubeconfig(), Some(PathBuf::from("/etc/kube/mgmt.yaml")));
+        assert_eq!(
+            cfg.resolved_argo_hub_context(),
+            Some("platform-mgmt".to_string())
+        );
+        assert_eq!(
+            cfg.resolved_argo_hub_kubeconfig(),
+            Some(PathBuf::from("/etc/kube/mgmt.yaml"))
+        );
 
         // Environment variables override config
         std::env::set_var("SRELENS_ARGO_HUB_CONTEXT", "env-override-hub");
         std::env::set_var("SRELENS_ARGO_HUB_KUBECONFIG", "/env/kubeconfig");
-        assert_eq!(cfg.resolved_argo_hub_context(), Some("env-override-hub".to_string()));
-        assert_eq!(cfg.resolved_argo_hub_kubeconfig(), Some(PathBuf::from("/env/kubeconfig")));
+        assert_eq!(
+            cfg.resolved_argo_hub_context(),
+            Some("env-override-hub".to_string())
+        );
+        assert_eq!(
+            cfg.resolved_argo_hub_kubeconfig(),
+            Some(PathBuf::from("/env/kubeconfig"))
+        );
 
         // Clean up environment variables
         std::env::remove_var("SRELENS_ARGO_HUB_CONTEXT");
         std::env::remove_var("SRELENS_ARGO_HUB_KUBECONFIG");
-        assert_eq!(cfg.resolved_argo_hub_context(), Some("platform-mgmt".to_string()));
+        assert_eq!(
+            cfg.resolved_argo_hub_context(),
+            Some("platform-mgmt".to_string())
+        );
     }
 
     #[tokio::test]
@@ -7203,7 +8390,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         app.active_namespace = "default".to_string();
 
         // :argo argocd should switch to Argo and set filter_query to argocd
@@ -7236,12 +8425,16 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let eks_arn_ctx = "arn:aws:eks:us-east-1:123456789012:cluster/prod";
         let payload = serde_json::json!({
             "ctx": eks_arn_ctx,
             "ns": "argocd",
             "name": "payment-service",
+            "uid": "payment-service-uid",
+            "resource_version": "12",
             "prune": false,
             "dry_run": false,
         });
@@ -7253,9 +8446,15 @@ mod tests {
         });
 
         // Confirming should safely parse the ARN without splitting on ARN colons
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_none());
-        assert!(app.toast.as_ref().unwrap().0.contains("Triggering sync for 'payment-service'..."));
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Triggering sync for 'payment-service'..."));
     }
 
     fn render_to_string(app: &mut srelens_tui::app::App, width: u16, height: u16) -> String {
@@ -7280,9 +8479,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_view_renders_loading_error_empty_hub_and_table_states() {
+        use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::views::argo_view::ArgoViewState;
-        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -7292,7 +8491,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Loading state
         app.active_view = ActiveView::Argo(ArgoViewState::new());
@@ -7351,9 +8552,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_detail_view_renders_all_tabs() {
+        use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::views::argo_detail_view::{ArgoDetailTab, ArgoDetailViewState};
-        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -7363,7 +8564,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let argo_app = ArgoApplication::from_json(&serde_json::json!({
             "metadata": {"name": "payments-api", "namespace": "prod", "creationTimestamp": "2026-01-01T00:00:00Z"},
@@ -7394,7 +8597,8 @@ mod tests {
             ArgoDetailTab::Drift,
             ArgoDetailTab::RevisionHistory,
         ] {
-            let mut detail = ArgoDetailViewState::new("payments-api".to_string(), "prod".to_string(), None);
+            let mut detail =
+                ArgoDetailViewState::new("payments-api".to_string(), "prod".to_string(), None);
             detail.set_application(argo_app.clone());
             detail.set_tab(tab);
             app.active_view = ActiveView::ArgoDetail(detail);
@@ -7419,11 +8623,18 @@ mod tests {
             "status": {"sync": {"status": "Synced"}, "health": {"status": "Healthy"}}
         }));
         for (tab, expected) in [
-            (ArgoDetailTab::ManagedResources, "No managed Kubernetes resources reported by ArgoCD."),
+            (
+                ArgoDetailTab::ManagedResources,
+                "No managed Kubernetes resources reported by ArgoCD.",
+            ),
             (ArgoDetailTab::Drift, "No Drift Detected"),
-            (ArgoDetailTab::RevisionHistory, "No synchronization history available."),
+            (
+                ArgoDetailTab::RevisionHistory,
+                "No synchronization history available.",
+            ),
         ] {
-            let mut detail = ArgoDetailViewState::new("clean-app".to_string(), "prod".to_string(), None);
+            let mut detail =
+                ArgoDetailViewState::new("clean-app".to_string(), "prod".to_string(), None);
             detail.set_application(clean_app.clone());
             detail.set_tab(tab);
             app.active_view = ActiveView::ArgoDetail(detail);
@@ -7436,10 +8647,10 @@ mod tests {
     #[tokio::test]
     async fn test_argo_sync_and_toggle_auto_confirm_modals_render() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::dialogs::Modal;
         use srelens_tui::views::argo_view::ArgoViewState;
-        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -7449,7 +8660,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let argo_app = ArgoApplication::from_json(&serde_json::json!({
             "metadata": {"name": "payments-api", "namespace": "prod"},
@@ -7462,9 +8675,14 @@ mod tests {
         app.active_view = ActiveView::Argo(state);
 
         // 's' opens a sync confirmation
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+            .await;
         match &app.modal {
-            Some(Modal::Confirm { action_name, is_destructive, .. }) => {
+            Some(Modal::Confirm {
+                action_name,
+                is_destructive,
+                ..
+            }) => {
                 assert!(action_name.starts_with("argo_sync:"));
                 assert!(!is_destructive);
             }
@@ -7481,7 +8699,8 @@ mod tests {
         app.modal = None;
 
         // 'p' opens an auto-sync toggle confirmation
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))
+            .await;
         match &app.modal {
             Some(Modal::Confirm { action_name, .. }) => {
                 assert!(action_name.starts_with("argo_toggle_auto:"));
@@ -7497,10 +8716,10 @@ mod tests {
     #[tokio::test]
     async fn test_argo_list_and_detail_key_handlers_exercise_side_panels_safely() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::views::argo_detail_view::ArgoDetailTab;
         use srelens_tui::views::argo_view::ArgoViewState;
-        use srelens_kube::argo::ArgoApplication;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -7510,7 +8729,9 @@ mod tests {
             None,
             vec![],
             tx,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // No repoURL, so the 'g' handler below hits the safe "no repo
         // configured" branch instead of actually spawning a browser process.
@@ -7538,26 +8759,47 @@ mod tests {
 
         // List view: hard refresh, reload, config hub, toggle-show-all,
         // deep-link copy, and git-open with an empty repoURL.
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE)).await;
-        assert!(app.toast.as_ref().unwrap().0.contains("Triggering hard refresh"));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE))
+            .await;
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Triggering hard refresh"));
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
-        assert!(app.toast.as_ref().unwrap().0.contains("Refreshing ArgoCD applications"));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .await;
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Refreshing ArgoCD applications"));
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)).await;
-        assert!(app.toast.as_ref().unwrap().0.contains("no repoURL configured"));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+            .await;
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("no repoURL configured"));
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::Argo(ref s) = app.active_view {
             assert!(s.show_all_hub_apps);
         } else {
             panic!("expected ActiveView::Argo");
         }
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .await;
         assert!(app.toast.as_ref().unwrap().0.contains("Copied deep link"));
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::TuiConfig(_)));
 
         // Back to the Argo list (config hub pushed it onto nav_stack), then
@@ -7565,63 +8807,81 @@ mod tests {
         if let Some(prev) = app.nav_stack.pop() {
             app.active_view = prev;
         }
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::ArgoDetail(_)));
 
         // Detail view: tab navigation (number keys, arrows, BackTab),
         // resource selection, hard refresh, reload, and deep-link copy.
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
+            .await;
         if let ActiveView::ArgoDetail(ref d) = app.active_view {
             assert_eq!(d.active_tab, ArgoDetailTab::ManagedResources);
         }
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .await;
         if let ActiveView::ArgoDetail(ref d) = app.active_view {
             assert_eq!(d.active_tab, ArgoDetailTab::Drift);
         }
-        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .await;
         if let ActiveView::ArgoDetail(ref d) = app.active_view {
             assert_eq!(d.active_tab, ArgoDetailTab::ManagedResources);
         }
-        app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))
+            .await;
         if let ActiveView::ArgoDetail(ref d) = app.active_view {
             assert_eq!(d.active_tab, ArgoDetailTab::Overview);
         }
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
+            .await;
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).await;
-        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+            .await;
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE)).await;
-        assert!(app.toast.as_ref().unwrap().0.contains("Triggering hard refresh"));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE))
+            .await;
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Triggering hard refresh"));
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)).await;
-        assert!(app.toast.as_ref().unwrap().0.contains("Refreshing application details"));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))
+            .await;
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("Refreshing application details"));
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+            .await;
         assert!(app.toast.as_ref().unwrap().0.contains("Copied deep link"));
 
         // Describe (Enter/d) and YAML (y/v) on the selected Managed Resource,
         // then the action palette (x).
-        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::Describe(_)));
 
         if let Some(prev) = app.nav_stack.pop() {
             app.active_view = prev;
         }
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .await;
         assert!(matches!(app.active_view, ActiveView::Yaml(_)));
 
         if let Some(prev) = app.nav_stack.pop() {
             app.active_view = prev;
         }
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).await;
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .await;
         assert!(app.modal.is_some());
     }
 }
-
-
-
-
-
-

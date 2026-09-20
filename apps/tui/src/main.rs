@@ -24,73 +24,32 @@ mod agent;
 mod ai_config;
 mod ai_skills;
 mod app;
+mod cli;
 mod commands;
 mod deep_link;
 mod event;
+mod mcp_server;
 mod sink;
 mod theme;
 mod tui_config;
 mod ui;
 mod views;
 
+use srelens_tui::self_update;
+
 use app::{App, SuspendAction};
+use cli::{Cli, CliCommand};
 use commands::ResourceKind;
 use deep_link::DeepLink;
 use event::{AppEvent, EventHandler};
 use srelens_kube::kube;
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "srelens-tui",
-    version,
-    about = "Kubernetes control room in your terminal — built in Rust with k9s navigation"
-)]
-pub struct Cli {
-    /// Kubernetes namespace to scope the initial view
-    #[arg(short, long)]
-    pub namespace: Option<String>,
-
-    /// Scope to all namespaces on launch
-    #[arg(short = 'A', long)]
-    pub all_namespaces: bool,
-
-    /// Kubernetes context to activate
-    #[arg(short, long)]
-    pub context: Option<String>,
-
-    /// Custom kubeconfig path
-    #[arg(short, long)]
-    pub kubeconfig: Option<PathBuf>,
-
-    /// Deep link URL (srelens://...) or resource target (e.g. pods, nodes, pods/my-pod)
-    pub target: Option<String>,
-
-    #[command(subcommand)]
-    pub command: Option<CliCommand>,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum CliCommand {
-    /// Print cluster overview & reachability information
-    Info,
-    /// Check toolbox diagnostics (kubectl, helm, krew)
-    Toolbox,
-    /// Print version information
-    Version,
-    /// Update srelens-tui to the latest release
-    Update {
-        /// Report what an update would do, without changing anything
-        #[arg(long)]
-        check: bool,
-        /// Which releases to consider: stable, or the rolling dev
-        /// pre-releases. Defaults to the channel this binary came from.
-        #[arg(long, value_parser = ["stable", "dev"])]
-        channel: Option<String>,
-    },
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install rustls crypto provider immediately so any reqwest client (e.g. update check)
+    // has a provider available without panicking.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // BEFORE parsing: clap exits during `--version` and `--help`, which is
     // exactly what someone whose binary vanished is likely to type first.
     //
@@ -128,9 +87,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => srelens_registry::all_kubeconfig_paths(),
     };
 
+    // Run headless Model Context Protocol (MCP) server over stdio if requested via --mcp-stdio flag
+    if cli.mcp_stdio {
+        let server = mcp_server::build_stdio_mcp_server(
+            kubeconfig_paths,
+            cli.mcp_allow_destructive,
+            cli.mcp_allow_sensitive_reads,
+        );
+        mcp_server::run_mcp_stdio(server, tokio::io::stdin(), tokio::io::stdout()).await?;
+        return Ok(());
+    }
+
     // Handle non-interactive CLI subcommands if requested
     if let Some(cmd) = cli.command {
         match cmd {
+            CliCommand::Mcp {
+                allow_destructive,
+                allow_sensitive_reads,
+            } => {
+                let server = mcp_server::build_stdio_mcp_server(
+                    kubeconfig_paths,
+                    allow_destructive,
+                    allow_sensitive_reads,
+                );
+                mcp_server::run_mcp_stdio(server, tokio::io::stdin(), tokio::io::stdout()).await?;
+                return Ok(());
+            }
             CliCommand::Version => {
                 println!("srelens-tui v{}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
@@ -235,7 +217,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if parsed_target.is_none() && app.tui_config.show_feature_banner {
         app.modal = Some(ui::Modal::FeatureBanner {
             show_on_startup: true,
+            update_available: app.tui_config.update_available.clone(),
         });
+    }
+
+    if app.tui_config.check_updates {
+        app.spawn_update_check();
     }
 
     if let Some(link) = parsed_target {
@@ -332,6 +319,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.handle_cluster_overview_update(&msg);
                             } else if title == "crds_updated" {
                                 app.handle_crds_update(&msg);
+                            } else if title == "update_available" {
+                                app.handle_update_available(&msg);
                             } else if title.starts_with("crd_instances:") {
                                 app.handle_crd_instances_update(&title, &msg);
                             } else if action.starts_with("ai_") {
@@ -386,6 +375,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.handle_pod_metrics_update(&msg);
                             } else if title == "node_metrics_updated" {
                                 app.handle_node_metrics_update(&msg);
+                            } else if title.starts_with("yaml_applied") {
+                                app.handle_yaml_applied(&title, &msg);
                             } else {
                                 if title.starts_with("helm_rollback:") || title.starts_with("helm_uninstall:") {
                                     app.refresh_helm_releases();
@@ -401,6 +392,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(err) => {
                             if title == "cluster_info_updated" || title == "cluster_info_failed" {
                                 app.handle_cluster_info_failure(&err);
+                            } else if title == "crds_updated" || title == "crds_failed" {
+                                app.handle_crds_failed(&err);
+                            } else if title.starts_with("crd_instances:") || title.starts_with("crd_instances_failed:") {
+                                app.handle_crd_instances_failed(&title, &err);
                             } else if title == "cluster_overview_updated" {
                                 // Best-effort: ignore if cluster overview cannot connect
                             } else if title == "pod_metrics_updated" || title == "node_metrics_updated" {
@@ -414,6 +409,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 target_state.append_stream_chunk(&format!("\n[Error: {}]", err));
                                 target_state.finish_turn();
                                 app.set_toast(err, theme::Theme::status_error());
+                            } else if title.starts_with("yaml_error") {
+                                app.handle_yaml_error(&err);
                             } else {
                                 app.set_toast(err, theme::Theme::status_error());
                             }
@@ -446,6 +443,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AppEvent::ArgoActionResult { action, result } => {
                     app.handle_argo_action_result(&action, result);
+                }
+                AppEvent::BgpResult { context, result } => {
+                    app.handle_bgp_result(&context, result);
                 }
             }
 
@@ -484,112 +484,103 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 2. Run external action
             match action {
                 SuspendAction::EditYaml => {
-                    if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
-                        match yaml.spawn_editor() {
-                            Ok(Some(new_yaml)) => {
-                                yaml.update_content(new_yaml.clone());
+                    let (editor_res, res_kind, res_ns) = if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
+                        (yaml.spawn_editor(), yaml.resource_kind.clone(), yaml.namespace.clone())
+                    } else {
+                        (Ok(None), String::new(), None)
+                    };
 
-                                let ctx = app.active_context.clone();
-                                let active_ns = app.active_namespace.clone();
-                                let cache = app.client_cache.clone();
-                                let ny = new_yaml.clone();
-                                let event_tx = app.event_tx.clone();
-                                tokio::spawn(async move {
-                                    let client = match cache.get(&ctx).await {
-                                        Ok(c) => c,
-                                        Err(e) => {
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "yaml_error".to_string(),
-                                                result: Err(format!("Cluster connect error: {}", e)),
-                                            });
-                                            return;
-                                        }
-                                    };
+                    match editor_res {
+                        Ok(Some(new_yaml)) => {
+                            let ctx = app.active_context.clone();
+                            let active_ns = app.active_namespace.clone();
+                            let fallback_ns = res_ns.as_deref().or_else(|| {
+                                if active_ns.is_empty() || active_ns == "all" {
+                                    None
+                                } else {
+                                    Some(active_ns.as_str())
+                                }
+                            });
 
-                                    let docs = match srelens_kube::manifest::split_documents(&ny) {
-                                        Ok(d) if !d.is_empty() => d,
-                                        Ok(_) => {
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "yaml_error".to_string(),
-                                                result: Err("No YAML documents found in file".to_string()),
-                                            });
-                                            return;
-                                        }
-                                        Err(e) => {
-                                            let _ = event_tx.send(AppEvent::ActionResult {
-                                                title: "yaml_error".to_string(),
-                                                result: Err(format!("YAML parse error: {}", e)),
-                                            });
-                                            return;
-                                        }
-                                    };
+                            let client = match app.client_cache.get(&ctx).await {
+                                Ok(c) => Some(c),
+                                Err(e) => {
+                                    app.handle_yaml_error(&format!("Cluster connect error: {}", e));
+                                    None
+                                }
+                            };
 
-                                    for mut doc in docs {
-                                        let r = match srelens_kube::manifest::resource_ref(&doc) {
-                                            Some(r) => r,
-                                            None => {
-                                                let _ = event_tx.send(AppEvent::ActionResult {
-                                                    title: "yaml_error".to_string(),
-                                                    result: Err("Document missing apiVersion, kind, or metadata.name".to_string()),
-                                                });
-                                                continue;
+                            if let Some(client) = client {
+                                match srelens_kube::manifest::split_documents(&new_yaml) {
+                                    Ok(docs) if !docs.is_empty() => {
+                                        // The documents are consumed by the apply, so the
+                                        // copy the invalidation reads is taken first. One
+                                        // result comes back per document, in order.
+                                        let applied_from = docs.clone();
+                                        let results = srelens_kube::manifest::apply_documents(&client, docs, fallback_ns, true).await;
+                                        let applied_docs: Vec<_> = results.iter().filter(|d| d.applied).collect();
+                                        let failed_docs: Vec<_> = results.iter().filter(|d| !d.applied).collect();
+
+                                        // Every applied document, in ITS namespace — not the
+                                        // view's (`app::applied_document_scopes`).
+                                        app.invalidate_applied_documents(&applied_from, fallback_ns, &results);
+
+                                        if failed_docs.is_empty() && !applied_docs.is_empty() {
+                                            let updated_names: Vec<String> = applied_docs.iter().map(|d| format!("{}/{}", d.kind, d.name)).collect();
+                                            let msg = format!("Updated {} in cluster", updated_names.join(", "));
+                                            if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
+                                                yaml.commit_content(new_yaml);
                                             }
-                                        };
-
-                                        // Strip server-managed status and metadata noise before applying
-                                        if let Some(obj) = doc.as_object_mut() {
-                                            obj.remove("status");
-                                            if let Some(meta) = obj.get_mut("metadata").and_then(|m| m.as_object_mut()) {
-                                                meta.remove("managedFields");
-                                                meta.remove("resourceVersion");
-                                                meta.remove("generation");
-                                                meta.remove("uid");
-                                                meta.remove("creationTimestamp");
+                                            app.handle_yaml_applied(
+                                                &format!("yaml_applied:{}:{}", res_kind, res_ns.as_deref().unwrap_or("")),
+                                                &msg,
+                                            );
+                                        } else if !applied_docs.is_empty() {
+                                            let applied_names: Vec<String> = applied_docs.iter().map(|d| format!("{}/{}", d.kind, d.name)).collect();
+                                            let error_msgs: Vec<String> = failed_docs
+                                                .iter()
+                                                .map(|d| {
+                                                    let err = d.error.as_deref().unwrap_or("unknown apply error");
+                                                    if !d.kind.is_empty() && !d.name.is_empty() {
+                                                        format!("{}/{}: {}", d.kind, d.name, err)
+                                                    } else {
+                                                        err.to_string()
+                                                    }
+                                                })
+                                                .collect();
+                                            if let app::ActiveView::Yaml(yaml) = &mut app.active_view {
+                                                yaml.commit_content(new_yaml);
                                             }
-                                        }
-
-                                        let (group, version) = srelens_kube::manifest::parse_api_version(&r.api_version);
-                                        let gvk_info = srelens_kube::manifest::gvk_for(&r.kind);
-                                        let is_namespaced = gvk_info.map(|(_, ns)| ns).unwrap_or_else(|| {
-                                            r.namespace.as_ref().map(|s| !s.is_empty()).unwrap_or(true)
-                                        });
-
-                                        let ar = kube::core::ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk(&group, &version, &r.kind));
-                                        let api: kube::Api<kube::core::DynamicObject> = if is_namespaced {
-                                            let target_ns = r.namespace.as_deref()
-                                                .filter(|s| !s.is_empty())
-                                                .unwrap_or(if active_ns.is_empty() || active_ns == "all" { "default" } else { &active_ns });
-                                            kube::Api::namespaced_with(client.clone(), target_ns, &ar)
+                                            app.handle_yaml_partial_applied(&applied_names.join(", "), &error_msgs.join("; "));
                                         } else {
-                                            kube::Api::all_with(client.clone(), &ar)
-                                        };
-
-                                        let params = kube::api::PatchParams::apply("srelens").force();
-                                        match api.patch(&r.name, &params, &kube::api::Patch::Apply(&doc)).await {
-                                            Ok(_) => {
-                                                let _ = event_tx.send(AppEvent::ActionResult {
-                                                    title: "yaml_applied".to_string(),
-                                                    result: Ok(format!("Updated {}/{} in cluster", r.kind, r.name)),
-                                                });
-                                            }
-                                            Err(e) => {
-                                                let clean_err = srelens_kube::manifest::clean_kube_error(e);
-                                                let _ = event_tx.send(AppEvent::ActionResult {
-                                                    title: "yaml_error".to_string(),
-                                                    result: Err(format!("Apply error: {}", clean_err)),
-                                                });
-                                            }
+                                            let errors: Vec<String> = failed_docs
+                                                .iter()
+                                                .map(|d| {
+                                                    let err = d.error.as_deref().unwrap_or("unknown apply error");
+                                                    if !d.kind.is_empty() && !d.name.is_empty() {
+                                                        format!("{}/{}: {}", d.kind, d.name, err)
+                                                    } else {
+                                                        err.to_string()
+                                                    }
+                                                })
+                                                .collect();
+                                            app.handle_yaml_error(&errors.join("; "));
                                         }
                                     }
-                                });
-                                app.set_toast("Applying changes to cluster...".to_string(), theme::Theme::status_ok());
+                                    Ok(_) => {
+                                        app.handle_yaml_error("No YAML documents found in file");
+                                    }
+                                    Err(e) => {
+                                        app.handle_yaml_error(&format!("YAML parse error: {}", e));
+                                    }
+                                }
                             }
-                            Ok(None) => {
-                                app.set_toast("No changes made in $EDITOR".to_string(), theme::Theme::status_dim());
-                            }
-                            Err(e) => {
-                                app.set_toast(format!("Editor error: {}", e), theme::Theme::status_error());
-                            }
+                        }
+                        Ok(None) => {
+                            app.set_toast("No changes made in $EDITOR".to_string(), theme::Theme::status_dim());
+                        }
+                        Err(e) => {
+                            app.set_toast(format!("Editor error: {}", e), theme::Theme::status_error());
                         }
                     }
                 }

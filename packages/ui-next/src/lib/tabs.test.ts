@@ -5,7 +5,7 @@ import type { ClusterContext } from "@srelens/core";
 import { CLOSED_CAP, defaultState, makeTab, newId, reconcile, type TabsState, type Workspace } from "./tabs";
 
 const ctx = (stableId: string, name = stableId): ClusterContext => ({
-  name, stableId, cluster: name, server: `https://${name}`, isCurrent: false,
+  name, stableId, key: stableId, cluster: name, server: `https://${name}`, isCurrent: false,
   sourceFile: "/home/dana/.kube/config", authKind: "client certificate",
 });
 
@@ -200,4 +200,10 @@ describe("reconcile", () => {
     const state: TabsState = { workspaces: [w], currentId: "w1" };
     expect(reconcile(state, [ctx("a")])).toBe(state);
   });
+});
+
+it("keeps an app tab's cluster label when the rail changes", async () => {
+ const {relabel}=await import("./tabs");
+ const tab=makeTab("/extension-clusters/id%3Aprod/org.app/page/",{clusterName:"Production"});
+ expect(relabel(tab,"Staging").sub).toBe("Production");
 });

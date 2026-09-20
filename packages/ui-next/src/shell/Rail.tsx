@@ -15,10 +15,12 @@ import {
 import { friendly } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import { getMark, resetMark, setMark, useEditableMark } from "../lib/marks";
+import { resolveContext } from "../lib/clusters";
 import { openCluster, pauseCluster, reconnectCluster } from "../lib/openCluster";
 import { useInfos } from "../lib/probe";
 import { openTab, setWorkspaceClusters, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { useWorkspaceView } from "../lib/workspace";
+import { describeError, invokeCommand, isTauri, notify } from "@srelens/core";
 
 export interface RailProps {
   contexts: ClusterContext[];
@@ -72,8 +74,12 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
   const { links } = useWorkspaceView();
   const [editing, setEditing] = useState<string | null>(null);
 
-  const byId = new Map(contexts.map((c) => [c.stableId, c]));
-  const target = editing === null ? null : (byId.get(editing) ?? null);
+  // By stable id, but never through a `Map` of them: two contexts can share
+  // one (a kubeconfig `a` declaring `b#c` beside `a#b` declaring `c`), and a
+  // map keeps whichever came last. `resolveContext` prefers the context this
+  // window was opened for (#648), so the rail agrees with the screens.
+  const byId = (id: string) => resolveContext(contexts, id);
+  const target = editing === null ? null : (byId(editing) ?? null);
 
   // One subscription each, standing in for the per-item hooks — see above.
   const value = useEditableMark(target?.stableId ?? "", target?.name ?? "");
@@ -83,13 +89,16 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
   // the app. The dialog is already gone by then, since `target` cannot resolve;
   // this forgets which cluster it was about, so a context that comes back does
   // not bring a dialog nobody asked for back with it.
-  const stale = editing !== null && !byId.has(editing);
+  const stale = editing !== null && !byId(editing);
   useEffect(() => {
     if (stale) setEditing(null);
   }, [stale]);
 
   const ordered = useOrderedContexts(
-    workspace.clusters.flatMap(id => byId.get(id) ? [byId.get(id)!] : []),
+    workspace.clusters.flatMap((id) => {
+      const context = byId(id);
+      return context ? [context] : [];
+    }),
     contexts,
   );
   const items: ClusterRailItem[] = [];
@@ -148,7 +157,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
 
   /** Selecting a cluster has the same destination as opening it from Home or Connections. */
   function select(id: string) {
-    const context = byId.get(id);
+    const context = byId(id);
     if (context) openCluster(context);
   }
 
@@ -161,7 +170,7 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
   }
 
   function toggleConnection(id: string) {
-    const context = byId.get(id);
+    const context = byId(id);
     if (!context) return;
     if (workspace.pausedClusters?.includes(id)) reconnectCluster(context);
     else pauseCluster(workspace.id, id);
@@ -170,7 +179,28 @@ export function Rail({ contexts, onConnect, error }: RailProps) {
   function menuFor(item: ClusterRailItem): ContextMenuItem[] {
     return [
       { label: `Open ${item.name}`, onPick: () => select(item.id) },
-      // The ellipsis is the promise that this one asks something more before
+      ...(isTauri()
+        ? [
+            {
+              label: "Open in new window",
+              icon: Icons.openTab,
+              onPick: () => {
+                // The window's identity is the context KEY, not the `stableId`
+                // this rail keys marks and workspaces on: a path `a` with
+                // context `b#c` and a path `a#b` with context `c` share a
+                // stable ID, so the second cluster's window focused the
+                // first's and could never be opened (#623). `stableId` stays
+                // the persisted identity; only the window label and the
+                // `?context=` query move to the key, and neither is persisted.
+                const contextId = byId(item.id)?.key;
+                if (!contextId) return;
+                void invokeCommand("open_context_window", { contextId }).catch((e) => {
+                  notify.error(`Couldn't open window for ${item.name}`, describeError(e).detail);
+                });
+              },
+            } as ContextMenuItem,
+          ]
+        : []),
       // anything happens — it opens the dialog below.
       { label: "Customise…", icon: Icons.edit, onPick: () => setEditing(item.id) },
       { kind: "sep" },

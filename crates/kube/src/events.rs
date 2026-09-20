@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use srelens_capability::{Annotations, Capability, CapabilityError};
 
 use crate::client_cache::ClientCache;
-use crate::connect::request_timeout;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListEventsIn {
@@ -63,6 +62,10 @@ pub struct EventSummary {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ListEventsOut {
     pub events: Vec<EventSummary>,
+    /// True when the list was cut at [`crate::list_cap::APP_LIST_CAP`] and more
+    /// events remain on the API server (#609).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 pub(crate) fn summarise(ev: Event) -> EventSummary {
@@ -141,12 +144,19 @@ pub fn list_events_capability(cache: Arc<ClientCache>) -> Capability {
                     .map_err(CapabilityError::Handler)?;
                 let api: kube::Api<Event> = crate::scoped_api(client, &input.namespace);
                 let params = event_list_params(&input.object_kind, &input.object_name);
-                let list = tokio::time::timeout(request_timeout(), api.list(&params))
+                // No outer timeout: `list_capped` spends `request_timeout()` on
+                // each page, which is what that budget measures. Wrapping the
+                // walk gave four pages one request's time, and a busy
+                // namespace — the one that needs paging — was the likeliest to
+                // be cut off by it. The error mapping — an API error's own
+                // words, a sentence of ours only for a timeout — is
+                // `into_capability_error`'s.
+                let (items, truncated) = crate::list_cap::list_capped(&api, params)
                     .await
-                    .map_err(|_| CapabilityError::Handler("list events timed out".into()))?
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
+                    .map_err(|e| e.into_capability_error("list events"))?;
                 Ok(ListEventsOut {
-                    events: list.items.into_iter().map(summarise).collect(),
+                    events: items.into_iter().map(summarise).collect(),
+                    truncated,
                 })
             }
         },
@@ -187,6 +197,47 @@ mod tests {
         let value = serde_json::to_value(summarise(ev)).unwrap();
         assert_eq!(value["objectApiVersion"], "source.toolkit.fluxcd.io/v1");
         assert_eq!(value["source"], "source-controller");
+    }
+
+    /// The whole-walk timeout this PR removed, re-created at the capability
+    /// level: three pages that each answer inside the per-request budget but
+    /// together outlast it. `k8s.listEvents` completes; a handler that wrapped
+    /// the walk in one `request_timeout()` would have cut it off.
+    #[tokio::test]
+    async fn list_events_walks_pages_that_together_outlast_one_request_budget() {
+        let _budget = crate::list_cap::test_support::hold_request_timeout(1);
+        let per_page = std::time::Duration::from_millis(450);
+        let event = |name: &str| serde_json::json!({"metadata":{"name":name,"namespace":"default"},"involvedObject":{}});
+        let page = |items: Vec<serde_json::Value>, next: Option<&str>| {
+            serde_json::json!({"apiVersion":"v1","kind":"EventList",
+                "metadata":{"continue":next},"items":items})
+        };
+        let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+            vec![
+                page(vec![event("a")], Some("p2")),
+                page(vec![event("b")], Some("p3")),
+                page(vec![event("c")], None),
+            ],
+            per_page,
+        );
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache.preload("fake", client).await;
+        let capability = list_events_capability(cache);
+
+        let started = std::time::Instant::now();
+        let out =
+            (capability.handler)(serde_json::json!({"context": "fake", "namespace": "default"}))
+                .await
+                .expect("every page answered inside the per-request budget");
+
+        assert!(
+            started.elapsed() > crate::connect::request_timeout(),
+            "the walk must have outlasted one request's budget to prove anything"
+        );
+        // A false `truncated` is omitted on the wire (`skip_serializing_if`).
+        assert_ne!(out["truncated"], true, "{out}");
+        assert_eq!(out["events"].as_array().map(Vec::len), Some(3), "{out}");
+        assert_eq!(uris.lock().unwrap().len(), 3);
     }
 
     #[test]
@@ -277,5 +328,21 @@ mod tests {
             Some("involvedObject.name=web-1,involvedObject.kind=Pod")
         );
         assert_eq!(event_list_params("", "").field_selector, None);
+    }
+
+    #[test]
+    fn list_events_out_omits_truncated_when_false() {
+        let raw = serde_json::to_value(ListEventsOut {
+            events: vec![],
+            truncated: false,
+        })
+        .unwrap();
+        assert!(raw.get("truncated").is_none());
+        let cut = serde_json::to_value(ListEventsOut {
+            events: vec![],
+            truncated: true,
+        })
+        .unwrap();
+        assert_eq!(cut["truncated"], true);
     }
 }

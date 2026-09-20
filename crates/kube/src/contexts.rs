@@ -28,6 +28,9 @@ pub struct ContextDto {
     /// anything the app remembers per context must key on this instead (#265).
     #[serde(rename = "stableId")]
     pub stable_id: String,
+    /// The identity an app's cluster list holds: `stableId` with `#` and `%` encoded in the
+    /// file and the name, so no two contexts share it (`ResolvedContext::key`).
+    pub key: String,
     pub cluster: String,
     pub server: String,
     /// The context's default namespace from the kubeconfig
@@ -187,6 +190,7 @@ fn build_context_dto(rc: ResolvedContext) -> ContextDto {
     ContextDto {
         is_current: rc.is_current,
         stable_id: rc.stable_id(),
+        key: rc.key(),
         source_file: rc.source.display().to_string(),
         name: rc.display_name,
         cluster: rc.cluster,
@@ -464,6 +468,7 @@ mod tests {
                 "cluster",
                 "isCurrent",
                 "isLocal",
+                "key",
                 "name",
                 "namespace",
                 "server",
@@ -478,6 +483,7 @@ mod tests {
         assert_eq!(json["authKind"], "exec plugin · gcloud");
         assert_eq!(json["sourceFile"], "/home/dana/.kube/config");
         assert_eq!(json["stableId"], "/home/dana/.kube/config#prod-eu");
+        assert_eq!(json["key"], "/home/dana/.kube/config#prod-eu");
         assert_eq!(json["isCurrent"], false);
         assert_eq!(json["isLocal"], false);
         assert_eq!(json["name"], "prod-eu");

@@ -1,10 +1,14 @@
 import { ExtensionDetails } from "./ExtensionDetails";
+import { ExtensionBindings, ReviewManifest } from "./ExtensionBindings";
+import { plainText } from "./displayText";
 import { ExtensionRequirements } from "./ExtensionRequirements";
+import { refreshContextIds, useContextLookup } from "./contextIds";
 import { ExtensionLogo } from "./ExtensionLogo";
-import { useContext, useState } from "react";
+import { useContext, useRef, useState } from "react";
 import {
   configureExtensions,
   contributionKind,
+  extensionEnabledFor,
   isTauri,
   validateExtension,
   type ExtensionChange,
@@ -16,11 +20,12 @@ import { ExtensionCatalog } from "./ExtensionCatalog";
 import { ExtensionControls } from "./ExtensionControls";
 export { ExtensionControlsProvider } from "./ExtensionControls";
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
-export { ExtensionResults } from "./ExtensionResults";
+export { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 
 
-import { useExtensions } from "./inventoryStore";
+import { extensionLabel as label, useExtensions } from "./inventoryStore";
 export { useExtensions } from "./inventoryStore";
+export { SHARED_CONTEXT_ID_MESSAGE, refreshContextIds, useContextId, useContextLookup } from "./contextIds";
 
 export function ExtensionManager() {
   const { Button, Tabs } = useContext(ExtensionControls);
@@ -38,6 +43,12 @@ export function ExtensionManager() {
     signature?: number[];
     name: string;
     permissions: string[];
+    /** The parsed manifest, whose bindings the review summarizes; undefined when it is not JSON. */
+    manifest?: unknown;
+    /** The manifest as the review shows it in full. */
+    text: string;
+    /** Numbers reviews, so a new one opens with its manifest collapsed. */
+    id: number;
     /** Undefined while the host is still checking the manifest. */
     errors?: ExtensionValidationError[];
     /** Why the check itself failed, as opposed to the problems it found. */
@@ -48,6 +59,7 @@ export function ExtensionManager() {
      */
     request: object;
   } | null>(null);
+  const reviews = useRef(0);
   const [settings, setSettings] = useState<{ id: string; text: string } | null>(
     null,
   );
@@ -70,8 +82,13 @@ export function ExtensionManager() {
   /** Opens the permission review, and offers to install only once the host finds no problems. */
   async function reviewManifest(manifest: string, signature?: number[]) {
     let parsed: { name?: unknown; permissions?: unknown } = {};
+    let value: unknown;
+    // Shown indented, as Details shows an installed app: the same values the host checks,
+    // readable whether the manifest came from the Catalog or was pasted on one line.
+    let text = manifest;
     try {
-      const value: unknown = JSON.parse(manifest);
+      value = JSON.parse(manifest);
+      text = JSON.stringify(value, null, 2);
       if (value && typeof value === "object") parsed = value as typeof parsed;
     } catch {
       // The host reports invalid JSON with a code and path, like any other problem.
@@ -83,7 +100,16 @@ export function ExtensionManager() {
     const name = typeof parsed.name === "string" ? parsed.name : "This manifest";
     const request = {};
     setError("");
-    setReview({ request, source: manifest, signature, name, permissions });
+    setReview({
+      request,
+      id: ++reviews.current,
+      source: manifest,
+      signature,
+      name,
+      permissions,
+      manifest: value,
+      text,
+    });
     try {
       const { errors } = await validateExtension(manifest, permissions, signature);
       setReview((current) => (current?.request === request ? { ...current, errors } : current));
@@ -129,10 +155,31 @@ export function ExtensionManager() {
         {review && (
           <section className="extension-install extension-permission-review" aria-label="Review app permissions">
             <p>
-              <strong>{review.name}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) requests:{" "}
-              {review.permissions.join(", ") || "no permissions"}. Installing an existing ID
-              replaces its manifest and refreshes its open pages.
+              {/* The name and the permission IDs are the manifest's own text, and a
+                  manifest the host has not accepted may hold text that displays as
+                  another app's or reorders this sentence. Neither is drawn until the
+                  check comes back with no problems; nothing can be installed before
+                  then either. */}
+              {review.errors?.length === 0 ? (
+                <>
+                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) requests:{" "}
+                  {review.permissions.map(plainText).join(", ") || "no permissions"}. Installing an existing ID
+                  replaces its manifest and refreshes its open pages.
+                </>
+              ) : (
+                <>
+                  <strong>This manifest</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) has
+                  not passed the host's checks, so its name and the permissions it requests are not shown.
+                </>
+              )}
             </p>
+            {/* What each permission covers, under the same rule as the name: drawn only once
+                the host has accepted the manifest. The full text can be read at any time,
+                with its invisible characters escaped. */}
+            {review.errors?.length === 0 && (
+              <ExtensionBindings manifest={review.manifest} permissions={review.permissions} />
+            )}
+            <ReviewManifest key={review.id} text={review.text} />
             {review.checkError ? (
               <ErrorNotice
                 title="Could not check the manifest"
@@ -207,19 +254,19 @@ export function ExtensionManager() {
       </div>
       </details>
 
-      <p className="extension-message extension-catalog-meta">Apps are installed app-wide and available across clusters. Each page checks the APIs it needs when opened.</p>
+      <p className="extension-message extension-catalog-meta">Apps are installed app-wide and are available on every cluster unless an app's Details limit it to chosen clusters. Each page checks the APIs it needs when opened.</p>
       {state.plugins.length === 0 && (
         <p className="extension-message">No apps installed.</p>
       )}
       {state.plugins.map((plugin) => (
         <section className="extension-installed" key={plugin.manifest.id}>
           <div className="extension-toolbar">
-            <ExtensionLogo id={plugin.manifest.id} name={plugin.manifest.name} size={24} />
-            <strong>{plugin.manifest.name}</strong>
+            <ExtensionLogo id={plugin.manifest.id} name={label(plugin)} size={24} />
+            <strong>{label(plugin)}</strong>
             <span>{plugin.manifest.version} · {!plugin.signatureProof ? "Unsigned local" : plugin.quarantined ? "Signature not verified" : "Signed by srelens"}</span>
             <label>
               <input
-                aria-label={`Enable ${plugin.manifest.name}`}
+                aria-label={`Enable ${label(plugin)}`}
                 type="checkbox"
                 checked={plugin.enabled}
                 disabled={busy || Boolean(plugin.quarantined)}
@@ -235,7 +282,7 @@ export function ExtensionManager() {
             </label>
             <Button
               variant="secondary"
-              aria-label={`Details for ${plugin.manifest.name}`}
+              aria-label={`Details for ${label(plugin)}`}
               aria-expanded={details === plugin.manifest.id}
               onClick={() => setDetails(details === plugin.manifest.id ? null : plugin.manifest.id)}
             >
@@ -276,7 +323,7 @@ export function ExtensionManager() {
       ))}
       {removing && (
         <section className="extension-install" role="alertdialog" aria-label="Remove app" onKeyDown={e=>{if(e.key==="Escape" && !busy)setRemoving(null);}}>
-          <strong>Remove {removing.manifest.name}?</strong>
+          <strong>Remove {label(removing)}?</strong>
           <p>This removes the app and its saved settings.</p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={()=>setRemoving(null)}>Cancel</Button>
           <Button variant="danger" disabled={busy} onClick={()=>{void change({action:"remove",id:removing.manifest.id}).then(removed=>{if(removed)setRemoving(null);});}}>Remove app</Button>
@@ -321,12 +368,29 @@ export function ExtensionManager() {
     </div>
   );
 }
-export function useExtensionContributions(kind: string, group?: string) {
+/** The detail tabs and detail links apps offer for a kind, on a cluster they are enabled for. */
+export function useExtensionContributions(context: string, kind: string, group?: string) {
   const inventory = useExtensions();
-  const plugins = inventory.data?.plugins.filter((p) => p.enabled) ?? [];
+  // App scope keys on the context's key, not its name (#265) or stable ID (#623).
+  const lookup = useContextLookup(context);
+  const contextId = lookup.status === "found" ? lookup.id : undefined;
   const qualified = contributionKind(kind, group);
+  const enabled = inventory.data?.plugins.filter((p) => p.enabled) ?? [];
+  const offersHere = (plugin: InstalledExtension) =>
+    [...plugin.manifest.contributions.detailTabs, ...plugin.manifest.contributions.detailLinks].some((c) =>
+      c.forKinds?.includes(qualified),
+    );
+  const plugins = enabled.filter((p) => extensionEnabledFor(p, contextId));
   return {
     inventory,
+    /**
+     * Why a limited app that offers something here cannot be checked: the clusters could
+     * not be listed (with a retry).
+     */
+    lookupProblem:
+      lookup.status === "failed" && enabled.some((p) => p.contexts && offersHere(p))
+        ? { title: "Could not list clusters", message: lookup.error, retry: () => void refreshContextIds() }
+        : undefined,
     tabs: plugins.flatMap((plugin) =>
       plugin.manifest.contributions.detailTabs
         .filter((c) => c.forKinds?.includes(qualified))
@@ -362,7 +426,7 @@ export function ExtensionResourceSlot({
   name: string;
 }) {
   const { Button, Tabs } = useContext(ExtensionControls);
-  const { inventory, tabs, links } = useExtensionContributions(kind, group);
+  const { inventory, tabs, links, lookupProblem } = useExtensionContributions(context, kind, group);
   const [selected, setSelected] = useState("");
   const active = [...tabs, ...links].some((c) => c.id === selected)
     ? selected
@@ -374,10 +438,24 @@ export function ExtensionResourceSlot({
       : tabs;
   if (inventory.status === "error")
     return <ErrorNotice message={inventory.error} retry={inventory.reload} />;
-  if (!tabs.length && !links.length) return null;
+  // An uncheckable cluster hides limited apps' views; say why instead of dropping them silently.
+  const lookupNotice = lookupProblem !== undefined && (
+    lookupProblem.retry ? (
+      <ErrorNotice title={lookupProblem.title} message={lookupProblem.message} retry={lookupProblem.retry} />
+    ) : (
+      <div className="extension-error" role="alert">
+        <div>
+          <strong>{lookupProblem.title}</strong>
+          <p>{lookupProblem.message}</p>
+        </div>
+      </div>
+    )
+  );
+  if (!tabs.length && !links.length) return lookupNotice || null;
   const ns = contributionKind(kind, group) === "/Namespace" ? name : (namespace ?? "");
   return (
     <section className="extension-installed extension-resource-slot">
+      {lookupNotice}
       <div className="extension-toolbar">
         <strong>Apps</strong>
         {links.length > 0 && (

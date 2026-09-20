@@ -12,6 +12,7 @@ import { useConsole } from "../console";
 import { getHelmOps, subscribeHelmOps } from "../lib/helmOps";
 import { useInfo } from "../lib/probe";
 import { getSessions, subscribeSessions } from "../lib/sessions";
+import { resolveContext } from "../lib/clusters";
 import { openTab, useActiveCluster, useTabs } from "../lib/tabsStore";
 import { useWorkspaceSealed } from "./LockGate";
 // The words and their tones live beside `LinkState` rather than here: the
@@ -94,7 +95,7 @@ export function Status({ contexts }: { contexts: ClusterContext[] }) {
 
   // Found rather than assumed: the active id is persisted and the context list
   // is whatever the machine has now, so an id can outlive the context it named.
-  const ctx = contexts.find((c) => c.stableId === activeId);
+  const ctx = resolveContext(contexts, activeId);
   // Absence of a probe is not evidence of a failed connection.
   const state = activeId ? links[activeId]?.state : undefined;
   const paused = activeId !== null && (workspace.pausedClusters ?? []).includes(activeId);

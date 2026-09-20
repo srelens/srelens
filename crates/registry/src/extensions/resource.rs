@@ -23,8 +23,10 @@ struct Action {
 async fn resolve(
     path: PathBuf,
     core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
     selection: Selection,
 ) -> Result<ResourceIn, CapabilityError> {
+    let resolved = request_context(&cache, &selection.context).await;
     let state = tokio::task::spawn_blocking(move || read(&path))
         .await
         .map_err(|e| CapabilityError::Handler(e.to_string()))?
@@ -38,7 +40,8 @@ async fn resolve(
                 "App was disabled, removed or updated; refresh the view".into(),
             )
         })?;
-    validate_app(&plugin.manifest, &plugin.grants, core)
+    plugin.check_scope(&resolved)?;
+    validate_app(&plugin.manifest, &plugin.grants, core.clone())
         .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
     let binding = plugin
         .manifest
@@ -55,7 +58,11 @@ async fn resolve(
             .to_owned()
     };
     let resource = ResourceIn {
-        context: selection.context,
+        // The pinned ID of the context scope was checked as (see `request_context`).
+        context: resolved
+            .ok()
+            .and_then(|context| context.pinned_id())
+            .unwrap_or(selection.context),
         namespace: selection.namespace,
         name: selection.name,
         group: field("group"),
@@ -65,11 +72,20 @@ async fn resolve(
         namespaced: binding.arguments["namespaced"] == true,
     };
     resource.validate().map_err(CapabilityError::InvalidInput)?;
+    // Before `k8s.getCustomResource` or `k8s.gitOpsAction` sees it: a whole built-in object,
+    // such as a Deployment with its environment, must not come back through an app (#601).
+    crd::require(&core, &resource.context, binding).await?;
     Ok(resource)
 }
-pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
+pub(super) fn register(
+    reg: &mut Registry,
+    path: PathBuf,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+) {
     let p = path.clone();
     let c = core.clone();
+    let k = cache.clone();
     reg.register(Capability::typed::<Selection, Value, _, _>(
         "extensions.resource",
         "Inspect the selected resource of an enabled app",
@@ -77,8 +93,9 @@ pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
         move |selection| {
             let p = p.clone();
             let c = c.clone();
+            let k = k.clone();
             async move {
-                let resource = resolve(p, c.clone(), selection).await?;
+                let resource = resolve(p, c.clone(), k, selection).await?;
                 c.invoke(
                     "k8s.getCustomResource",
                     serde_json::to_value(resource).unwrap(),
@@ -88,8 +105,8 @@ pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
         },
     ));
     reg.register(Capability::typed::<Action, Value, _, _>("extensions.action", "Request a host-owned GitOps action on an app resource; requires explicit confirmation", Annotations::MUTATING, move |input| {
-        let p = path.clone(); let c = core.clone(); async move {
-            let resource = resolve(p,c.clone(),input.resource).await?;
+        let p = path.clone(); let c = core.clone(); let k = cache.clone(); async move {
+            let resource = resolve(p,c.clone(),k,input.resource).await?;
             c.invoke("k8s.gitOpsAction", json!({"resource":resource,"action":input.action,"uid":input.uid,"resourceVersion":input.resource_version})).await
         }
     }));
@@ -111,6 +128,7 @@ mod tests {
         let resolved = resolve(
             path.clone(),
             core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
             serde_json::from_value(payload.clone()).unwrap(),
         )
         .await
@@ -130,11 +148,109 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            resolve(path, core, serde_json::from_value(payload).unwrap())
-                .await
-                .is_err()
+        assert!(resolve(
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            serde_json::from_value(payload).unwrap()
+        )
+        .await
+        .is_err());
+    }
+    #[tokio::test]
+    async fn a_selection_goes_to_the_cluster_its_scope_was_checked_against() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let core = super::super::tests::fake_core();
+        let revision = super::super::tests::install(&path, core.clone());
+        let config = super::super::tests::kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let binding = read(&path).unwrap().plugins[0].manifest.capabilities[0]
+            .name
+            .clone();
+        let selection = json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"default","namespace":"team","name":"app"});
+        let resolved = resolve(
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![config.clone()]),
+            serde_json::from_value(selection).unwrap(),
+        )
+        .await
+        .unwrap();
+        // Inspection and actions go out under the ID scope was checked as, so the capability
+        // cannot resolve the name again to a cluster that took it since.
+        assert_eq!(
+            resolved.context,
+            format!("srelens-context:{}#default", config.display())
         );
+    }
+    /// Neither `k8s.getCustomResource` nor `k8s.gitOpsAction` is reached for a binding that
+    /// is not a CustomResourceDefinition on the cluster, stored or installed (#601).
+    #[tokio::test]
+    async fn resources_and_actions_are_refused_without_a_matching_crd() {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let mut core = (*super::super::tests::fake_core()).clone();
+        for id in ["k8s.getCustomResource", "k8s.gitOpsAction"] {
+            let mut cap = core.get(id).unwrap().clone();
+            cap.handler = Arc::new(|args| {
+                CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move { Ok(args) })
+            });
+            core.register(cap);
+        }
+        // The cluster serves Argo CD's CRD, but not one for the aggregated group below.
+        super::super::tests::serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
+        let core = Arc::new(core);
+        let mut source: Value = serde_json::from_str(&super::super::tests::manifest()).unwrap();
+        source["capabilities"][0]["arguments"]["group"] = json!("apps.openshift.io");
+        mutate(
+            &path,
+            core.clone(),
+            Configure::Install {
+                signature: None,
+                manifest: source.to_string(),
+                grants: vec!["k8s.listCustomResource".into()],
+            },
+        )
+        .unwrap();
+        let state = read(&path).unwrap();
+        let binding = state.plugins[0].manifest.capabilities[0].name.clone();
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            path.clone(),
+            core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        let selected = |revision: u64| json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"cluster/a","namespace":"team","name":"app"});
+        let revision = state.plugins[0].revision;
+        let refused = reg
+            .invoke("extensions.resource", selected(revision))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("No CustomResourceDefinition applications.apps.openshift.io"),
+            "{refused}"
+        );
+        let action =
+            json!({"resource":selected(revision),"action":"sync","uid":"u","resourceVersion":"2"});
+        assert!(reg.invoke("extensions.action", action).await.is_err());
+
+        // A stored binding of apps/v1 deployments cannot return a Deployment either.
+        let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let arguments = &mut stored["plugins"][0]["manifest"]["capabilities"][0]["arguments"];
+        arguments["group"] = json!("apps");
+        arguments["plural"] = json!("deployments");
+        arguments["kind"] = json!("Deployment");
+        stored["plugins"][0]["enabled"] = json!(true);
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert!(reg
+            .invoke("extensions.resource", selected(revision))
+            .await
+            .is_err());
+        assert_eq!(CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
     #[tokio::test]
     async fn action_dispatch_uses_bound_api_and_mcp_cannot_bypass_confirmation() {
@@ -149,13 +265,19 @@ mod tests {
             cap.handler = Arc::new(|args| Box::pin(async move { Ok(args) }));
             core.register(cap);
         }
+        super::super::tests::serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
         let core = Arc::new(core);
         let revision = super::super::tests::install(&path, core.clone());
         let binding = read(&path).unwrap().plugins[0].manifest.capabilities[0]
             .name
             .clone();
         let mut reg = Registry::new();
-        register(&mut reg, path.clone(), core.clone());
+        register(
+            &mut reg,
+            path.clone(),
+            core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
         let selected = json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"cluster/a","namespace":"team","name":"app"});
         let payload = json!({"resource":selected,"action":"sync","uid":"u","resourceVersion":"2"});
         let result = reg
@@ -180,10 +302,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            resolve(path, core, serde_json::from_value(selected).unwrap())
-                .await
-                .is_err()
-        );
+        assert!(resolve(
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            serde_json::from_value(selected).unwrap()
+        )
+        .await
+        .is_err());
     }
 }

@@ -459,6 +459,17 @@ describe("every real DETAILS_BODY entry lands in an unbroken run", () => {
     CronJob: object("CronJob", { schedule: "0 2 * * *" }, {}),
     ConfigMap: { ...object("ConfigMap", {}, {}), data: { "app.conf": "k=v" } } as K8sObject,
     Secret: { ...object("Secret", {}, {}), type: "Opaque", data: { token: "cmVkYWN0ZWQ=" } } as K8sObject,
+    Ingress: object("Ingress", {
+      ingressClassName: "nginx",
+      rules: [
+        {
+          host: "app.example.com",
+          http: {
+            paths: [{ path: "/", backend: { service: { name: "web", port: { number: 80 } } } }],
+          },
+        },
+      ],
+    }),
   };
 
   it("covers every entry in the table, so the sweep cannot silently shrink", () => {

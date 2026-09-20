@@ -33,9 +33,15 @@ srelens speaks MCP over two transports:
     prompt a click in the UI would, in whichever srelens window is open.
     This is the mode with a human in the loop.
   - **`srelens --mcp-http <addr>`** spawns a **separate, headless** process.
-    It does not attach to a running GUI — if the GUI's own toggle already
-    holds the port, this second process fails to bind rather than sharing
-    it. There is no window and therefore no dialog: a gated call is refused
+    `<addr>` must be a loopback address — `127.0.0.1:8765` (the default) or
+    `[::1]:8765`; anything else, such as `0.0.0.0:8765`, is refused at
+    startup with an error naming the address, and nothing listens, unless
+    you also pass `--mcp-expose-http` (see [Security model](#security-model)
+    before you do). The startup message reports the address actually bound
+    and whether it is loopback or exposed. It does not attach to a running
+    GUI — if the GUI's own toggle already holds the port, this second
+    process fails to bind rather than sharing it. There is no window and
+    therefore no dialog: a gated call is refused
     unless the process was started with `--mcp-allow-destructive` /
     `--mcp-allow-sensitive-reads` and the individual call carries
     `"_confirm": true`. Once a call is pre-authorised that way, it proceeds
@@ -51,6 +57,30 @@ automation where you deliberately pre-authorise gated calls with the flags
 above; it is not a way to reach a human reviewer, since headless means
 exactly that.
 
+### Request size limits
+
+Both transports refuse a request over **4 MiB** (4,194,304 bytes,
+`MAX_REQUEST_BYTES` in `crates/mcp/src/lib.rs`) before handing it to a tool:
+
+- **stdio** counts the bytes of one line, without its `\n` or `\r\n` ending. A longer line
+  is read and dropped as it arrives, never buffered whole, and answered with
+  a JSON-RPC error whose `id` is `null`, since the request was never parsed:
+  `{"code": -32600, "message": "request exceeds the 4194304-byte limit on one
+  stdio line", "data": {"field": "request", "limit": 4194304}}`. The session
+  carries on with the next line.
+- **HTTP** counts the request body. A larger body is refused with
+  `413 Payload Too Large` before the JSON-RPC handler runs.
+
+Within that, some tool arguments have limits of their own, checked while the
+arguments are decoded and refused as invalid input naming the field and its
+limit. On `extensions.validate` and `extensions.configure`, a `signature` must
+be exactly 64 bytes, a `manifest` at most 256 KiB, and a `settings` object at
+most 64 KiB as compact JSON.
+
+The desktop app's own WebView calls capabilities through a Tauri command, not
+through MCP, so the 4 MiB transport limit does not apply there; the per-field
+limits do.
+
 ## Security model
 
 - **HTTP requires a bearer token.** The transport never serves
@@ -62,12 +92,43 @@ exactly that.
   while the server is stopped just replaces the stored token; it does not
   start the server.) Revoking also stops the server — it must never run
   without a valid token.
+- **The HTTP transport binds loopback only.** The in-app server always binds
+  `127.0.0.1`. Headless `srelens --mcp-http <addr>` refuses any address
+  that is not loopback (`127.0.0.0/8` or `::1`) with an error naming it,
+  and exits without listening. This is the network boundary; the Host check
+  below is not one, because a non-browser client can send any `Host` it
+  likes.
 - A **Host header check** rejects requests whose `Host` isn't a loopback
-  value (`127.0.0.1`, `::1`, or `localhost`). Binding loopback alone doesn't
+  value (a loopback IP such as `127.0.0.1` or `::1`, or `localhost`) —
+  every address the bind rule above accepts. Binding loopback alone doesn't
   stop a page on another domain from resolving to 127.0.0.1 and posting to
   the port; the Host check does. It applies to every route, including the
   unauthenticated `/healthz`, so nothing here answers a caller that isn't
   genuinely local.
+- **`--mcp-expose-http` exposes the headless server beyond loopback.** Pass
+  it with `--mcp-http` to bind a non-loopback address, such as
+  `0.0.0.0:8765` or a LAN interface. Understand the risk before you do:
+  - The server speaks **plain HTTP**. There is no TLS in srelens and the
+    flag does not require any, so the bearer token and every tool result —
+    cluster data included — cross the network in the clear. Anyone who can
+    observe the traffic can read them and replay the token; anyone who can
+    reach the address and holds the token can call every tool the process
+    allows. `/healthz` answers anyone who can reach it.
+  - The Host check widens to fit: an exposed server also accepts a `Host`
+    that is an IP literal (`192.168.1.5:8765`, `[fd00::5]:8765`), because
+    that is what a client that connected by IP sends. A hostname other than
+    `localhost` is still refused, since DNS rebinding always presents a
+    hostname. Connect to an exposed server by IP.
+  - Gated tools still need the process flags and `"_confirm": true`; the
+    flag changes where the server listens, nothing else.
+
+  Use it only on a network you trust end to end — a private lab network,
+  a VPN, a container network you control. To reach the server from
+  elsewhere, do not expose it: keep the loopback bind and put an SSH tunnel
+  or a TLS-terminating reverse proxy in front. A proxy that forwards to
+  `http://127.0.0.1:8765` with `Host: 127.0.0.1:8765` (nginx's default for
+  `proxy_pass`) passes the Host check without any flag, and TLS then covers
+  the token on the wire.
 - **stdio needs no token** — the client spawned the `srelens --mcp-stdio`
   process itself and already holds your privileges.
 - **To supply your own token**, set `SRELENS_MCP_TOKEN` to 64 hex
@@ -90,7 +151,7 @@ exactly that.
   | Flag | Authorizes |
   | --- | --- |
   | `--mcp-allow-destructive` | anything that changes state — delete, drain, scale, apply, helm install, installing local tooling |
-  | `--mcp-allow-sensitive-reads` | reads that return secret material, i.e. `k8s.getSecret` |
+  | `--mcp-allow-sensitive-reads` | reads that return secret material — `k8s.getSecret`, or the SSH node diagnostics, whose host logs and process arguments can carry credentials (the full set is under "sensitive read" in [mcp-catalog.md](mcp-catalog.md)) |
 
   So an agent allowed to read a Secret still cannot drain a node, and an
   agent allowed to drain nodes cannot read your Secrets. Both flags apply to
@@ -110,10 +171,18 @@ exactly that.
     write, `yaml` on `k8s.applyManifest`, and `values` on the helm
     capabilities. These carry secret material under key names that look
     perfectly ordinary (`username`, `ca.crt`), so matching key names alone
-    would miss them.
+    would miss them;
+  - `settings` on `extensions.configure` keeps its setting names but loses
+    every value. An app's settings are free-form and nothing marks one as
+    secret, so a value under `credential` or `certificate` would otherwise be
+    written verbatim — for a denied call too;
+  - a recorded error message is scrubbed of every value the rules above
+    removed, because a capability that refuses an argument tends to echo it
+    (`invalid type: string "…", expected a map`).
 
   Identifying fields like `context`, `namespace`, `name` and `kind` survive,
-  so you can still see which cluster and object an agent touched.
+  so you can still see which cluster and object an agent touched, and the
+  `action` and app `id` of an `extensions.configure` call survive with them.
 - The bearer token lives in your **OS keychain** where one is available,
   falling back to a `0600` file otherwise (headless Linux, minimal window
   managers). Settings → MCP only speaks up about this when it has fallen

@@ -245,8 +245,8 @@ fn logs_view_starts_empty_and_following() {
     assert!(state.follow);
     assert!(!state.timestamps);
     assert!(!state.previous);
-    // Machine text does not wrap by default; `w` turns it on.
-    assert!(!state.wrap);
+    // Wrap is enabled by default; `w` turns it off.
+    assert!(state.wrap);
     assert_eq!(state.horizontal_scroll, 0);
     assert_eq!(state.scroll_offset, 0);
     assert!(state.search_query.is_empty());
@@ -311,12 +311,9 @@ fn logs_view_toggle_follow_jumps_back_to_the_bottom() {
 }
 
 #[test]
-fn a_long_log_entry_is_one_row_by_default_and_scrolls_sideways() {
-    // A pod that logs one long JSON entry. Wrapped, that is a wall that
-    // pushes the short lines around it out of view; and the wrapped renderer
-    // scrolls by entry, so an entry taller than the viewport has middle rows
-    // nothing can reach. Unwrapped, it is one row, and `l` reveals the rest.
+fn a_long_log_entry_scrolls_sideways_when_unwrapped() {
     let mut state = logs();
+    state.toggle_wrap(); // switch to unwrapped mode
     state.follow = false;
     state.push_line("before".to_string());
     let long = format!("{{\"payload\":\"{}\",\"tail\":\"END\"}}", "x".repeat(400));
@@ -338,14 +335,15 @@ fn a_long_log_entry_is_one_row_by_default_and_scrolls_sideways() {
 #[test]
 fn logs_view_flag_toggles_flip_each_flag_independently() {
     let mut state = logs();
+    assert!(state.wrap);
     state.toggle_timestamps();
     state.toggle_previous();
     state.toggle_wrap();
-    assert!(state.timestamps && state.previous && state.wrap);
+    assert!(state.timestamps && state.previous && !state.wrap);
     state.toggle_timestamps();
-    assert!(!state.timestamps && state.previous && state.wrap);
+    assert!(!state.timestamps && state.previous && !state.wrap);
     state.toggle_wrap();
-    assert!(!state.wrap);
+    assert!(state.wrap);
 }
 
 #[test]
@@ -429,7 +427,7 @@ fn logs_view_renders_a_waiting_placeholder_when_there_are_no_lines() {
     let state = logs();
     let text = common::render_text(120, 40, |f| render_logs_view(f, f.area(), &state));
     assert!(
-        text.contains("Logs: web-0 (default/app) [Ftpw] [1/0 lines]"),
+        text.contains("Logs: web-0 (default/app) [FtpW] [1/0 lines]"),
         "{text}"
     );
     assert!(text.contains("Waiting for logs..."));
@@ -446,7 +444,7 @@ fn logs_view_renders_numbered_lines_and_the_flag_letters_when_following() {
     state.toggle_previous();
     let text = common::render_text(120, 40, |f| render_logs_view(f, f.area(), &state));
     assert!(
-        text.contains("Logs: api (prod/all) [FTPw] [3/3 lines]"),
+        text.contains("Logs: api (prod/all) [FTPW] [3/3 lines]"),
         "{text}"
     );
     assert!(text.contains("    1 │ message 1"));
@@ -521,8 +519,7 @@ fn logs_view_title_reports_zero_matches_and_wraps_long_lines_when_asked() {
     let mut state = logs();
     state.push_line("x".repeat(100));
     state.set_search_query("nothing");
-    // Asked for with `w`, the 100-char line wraps onto line 2 with hanging indent.
-    state.toggle_wrap();
+    // Default is wrap: true, the 100-char line wraps onto line 2 with hanging indent.
     let wrapped = common::render_lines(60, 20, |f| render_logs_view(f, f.area(), &state));
     assert!(wrapped[1].starts_with("│    1 │ xxxx"), "{}", wrapped[1]);
     assert!(
@@ -551,7 +548,8 @@ fn logs_view_title_reports_zero_matches_and_wraps_long_lines_when_asked() {
 
 #[test]
 fn logs_view_horizontal_scroll_when_unwrapped() {
-    let mut state = logs(); // unwrapped is the default
+    let mut state = logs();
+    state.toggle_wrap(); // switch to unwrapped mode
     state.push_line("0123456789abcdefghij".to_string());
 
     // At h_scroll = 0: contains initial digits
@@ -573,8 +571,7 @@ fn logs_view_horizontal_scroll_when_unwrapped() {
 
 #[test]
 fn logs_view_wrapped_follow_shows_bottom_rows() {
-    let mut state = logs();
-    state.toggle_wrap();
+    let mut state = logs(); // wrapped by default
     // In a 60-column terminal, inner width is 58. Gutter is 8. Message width is 50.
     // Pushing a line of 120 chars wraps onto 3 visual lines.
     state.push_line("START_".to_string() + &"a".repeat(110) + "_END");
@@ -1862,6 +1859,7 @@ fn crd(namespaced: bool, columns: &[(&str, &str, i32)]) -> ResourceKind {
                 description: None,
             })
             .collect(),
+        created_at: None,
     })
 }
 

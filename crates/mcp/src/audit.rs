@@ -33,9 +33,10 @@ impl AuditSink for NoopAudit {
 
 /// Redact argument VALUES while keeping keys, so an operator can see the shape
 /// of a call without its secrets. Sensitive-annotated tools redact everything;
-/// otherwise a value goes only if its key names a credential or holds a
-/// caller-supplied payload. Recursively walks nested objects and arrays to find
-/// and redact credentials at any depth.
+/// otherwise a value goes only if its key names a credential, holds a
+/// caller-supplied payload, or is a map of settings whose names are the shape
+/// and whose values are the secrets. Recursively walks nested objects and
+/// arrays to find and redact credentials at any depth.
 pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// Substring-matched: a key admitting it holds a credential, at any depth
     /// and in any casing (`apiToken`, `tls.key`, `rootPassword`).
@@ -52,6 +53,18 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// point is to keep the shape of a call auditable while dropping the part
     /// that carries secrets.
     const PAYLOAD_FIELDS: [&str; 4] = ["data", "stringdata", "yaml", "values"];
+    /// Fields holding a map of caller-chosen names to caller-chosen values,
+    /// where the NAMES are the auditable shape and every VALUE is treated as a
+    /// secret: `settings` on `extensions.configure` (#605). An app's settings
+    /// are free-form JSON and nothing marks one as sensitive, so a value under
+    /// `credential` or `certificate` — which no needle matches — would
+    /// otherwise be written verbatim, even for a denied call, and persist
+    /// through rotation. The map is redacted as a sensitive capability's
+    /// arguments are: keys kept, values blanked. Anything but a map is blanked
+    /// whole, since a denied call is audited before its arguments are checked
+    /// against the schema. Matched exactly, like `PAYLOAD_FIELDS`, and no other
+    /// capability takes a `settings` argument (`settings.set` takes `values`).
+    const KEYED_PAYLOAD_FIELDS: [&str; 1] = ["settings"];
 
     match args {
         Value::Object(map) => {
@@ -64,6 +77,13 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
                 if sensitive || is_credential_key {
                     // Redact this value entirely
                     out.insert(k.clone(), json!("<redacted>"));
+                } else if KEYED_PAYLOAD_FIELDS.contains(&lower.as_str()) {
+                    // Keep the names, drop every value.
+                    let redacted = match v {
+                        Value::Object(_) => redact(v, true),
+                        _ => json!("<redacted>"),
+                    };
+                    out.insert(k.clone(), redacted);
                 } else {
                     // Recurse into the value to find nested credentials
                     out.insert(k.clone(), redact(v, false));
@@ -78,6 +98,78 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
         // Scalars stay as-is (no redaction needed)
         other => other.clone(),
     }
+}
+
+/// Scrub from an error message every value that `redact` dropped from `args`.
+///
+/// A capability that refuses an argument tends to echo it — the registry maps
+/// serde's error to a string as-is, and for a scalar `settings` that reads
+/// `invalid type: string "hunter2", expected a map` — and `handle_request`
+/// records the message beside the redacted arguments, which would put the
+/// value straight back in the log. So every string or number that is in
+/// `args` and not in `redacted` is replaced wherever it appears, longest
+/// first so a value that contains another is not left half visible, and in
+/// the escaped form serde's `{:?}` prints as well as verbatim. Values the
+/// redaction kept are left alone, so a message naming the app or the
+/// namespace still says which one.
+///
+/// Over-scrubbing is the safe direction: a hidden value that happens to be an
+/// ordinary word costs a few characters of an error text, where the
+/// alternative is a credential on disk.
+///
+/// The arguments are untrusted and can be large (up to
+/// [`crate::MAX_REQUEST_BYTES`] on either transport), and a denied call is scrubbed too, so this stays near-linear
+/// in the number of values: membership is a hash lookup, and each distinct
+/// hidden value is replaced once.
+pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
+    use std::collections::HashSet;
+
+    fn leaves(v: &Value, out: &mut HashSet<String>) {
+        match v {
+            Value::String(s) => {
+                out.insert(s.clone());
+            }
+            Value::Number(n) => {
+                out.insert(n.to_string());
+            }
+            Value::Object(m) => m.values().for_each(|v| leaves(v, out)),
+            Value::Array(a) => a.iter().for_each(|v| leaves(v, out)),
+            Value::Bool(_) | Value::Null => {}
+        }
+    }
+    let mut kept = HashSet::new();
+    leaves(redacted, &mut kept);
+    let mut all = HashSet::new();
+    leaves(args, &mut all);
+    let hidden: Vec<String> = all
+        .into_iter()
+        .filter(|s| !s.is_empty() && !kept.contains(s))
+        .collect();
+
+    if hidden.is_empty() {
+        return error.to_string();
+    }
+
+    let mut patterns = Vec::new();
+    for value in hidden {
+        let escaped = format!("{value:?}");
+        let escaped = escaped[1..escaped.len() - 1].to_string();
+        if escaped != value {
+            patterns.push(escaped);
+        }
+        patterns.push(value);
+    }
+
+    patterns.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    patterns.dedup();
+
+    let ac = aho_corasick::AhoCorasick::builder()
+        .match_kind(aho_corasick::MatchKind::LeftmostFirst)
+        .build(&patterns)
+        .expect("AhoCorasick failed to build");
+
+    let replacements = vec!["<redacted>"; patterns.len()];
+    ac.replace_all(error, &replacements)
 }
 
 /// The most recent `limit` entries, newest first.
@@ -498,6 +590,193 @@ mod tests {
         assert_eq!(out["release"], json!("web"));
         assert_eq!(out["chart"], json!("bitnami/nginx"));
         assert_eq!(out["values"], json!("<redacted>"));
+    }
+
+    /// Issue #605. An app's settings are free-form JSON and nothing marks a
+    /// value as secret, so a `settings` action on `extensions.configure` with
+    /// a value under `credential` or `certificate` — no needle matches either —
+    /// was written to the log verbatim, and stayed in `audit.jsonl.1` after
+    /// rotation. The setting NAMES are the auditable shape (which knobs an
+    /// agent turned); the values are the secret material and every one goes,
+    /// at any depth, alongside the action and app ID an operator needs.
+    #[test]
+    fn redacts_every_extension_setting_value_but_keeps_the_action_id_and_setting_keys() {
+        let args = json!({
+            "action": "settings",
+            "id": "org.example.argocd",
+            "settings": {
+                "credential": "hunter2",
+                "endpoint": "https://argo.example",
+                "tls": { "certificate": "-----BEGIN CERTIFICATE-----" }
+            }
+        });
+        let out = redact(&args, false);
+        assert_eq!(
+            out["action"],
+            json!("settings"),
+            "the action must stay visible"
+        );
+        assert_eq!(
+            out["id"],
+            json!("org.example.argocd"),
+            "the app ID must stay visible"
+        );
+        let settings = out["settings"]
+            .as_object()
+            .expect("setting keys must survive");
+        assert_eq!(
+            settings.len(),
+            3,
+            "every setting key must survive, got {settings:?}"
+        );
+        assert_eq!(settings["credential"], json!("<redacted>"));
+        assert_eq!(
+            settings["endpoint"],
+            json!("<redacted>"),
+            "no setting value is known safe"
+        );
+        assert_eq!(
+            settings["tls"],
+            json!("<redacted>"),
+            "a nested map goes whole"
+        );
+        let line = out.to_string();
+        assert!(!line.contains("hunter2"), "the credential leaked: {line}");
+        assert!(
+            !line.contains("BEGIN CERTIFICATE"),
+            "the certificate leaked: {line}"
+        );
+        assert!(
+            !line.contains("argo.example"),
+            "a setting value leaked: {line}"
+        );
+    }
+
+    /// A denied call is audited before its arguments are ever deserialized, so
+    /// `settings` need not be the object the capability's schema demands. A
+    /// scalar or array there is blanked whole rather than walked, where the
+    /// scalars would come through untouched.
+    #[test]
+    fn redacts_a_settings_payload_that_is_not_an_object_whole() {
+        for settings in [
+            json!("hunter2"),
+            json!(["hunter2"]),
+            json!([{ "v": "hunter2" }]),
+        ] {
+            let args =
+                json!({ "action": "settings", "id": "org.example.argocd", "settings": settings });
+            let out = redact(&args, false);
+            assert_eq!(out["settings"], json!("<redacted>"), "got {out}");
+            assert!(!out.to_string().contains("hunter2"), "leaked: {out}");
+        }
+    }
+
+    /// PR #625 review. A capability that refuses an argument tends to echo it:
+    /// the registry maps serde's error straight to a string, and for a scalar
+    /// `settings` that is `invalid type: string "hunter2", expected a map`.
+    /// `handle_request` records the error beside the redacted arguments, which
+    /// put the value straight back in the log. Every value redaction hid must
+    /// be scrubbed from the message; everything it kept is left alone.
+    #[test]
+    fn redact_error_scrubs_the_values_redaction_hid_and_nothing_else() {
+        let args =
+            json!({ "action": "settings", "id": "org.example.argocd", "settings": "hunter2" });
+        let redacted = redact(&args, false);
+        let error = "invalid input: invalid type: string \"hunter2\", expected a map";
+
+        let out = redact_error(error, &args, &redacted);
+
+        assert!(!out.contains("hunter2"), "the refused value leaked: {out}");
+        assert!(
+            out.contains("expected a map"),
+            "the rest of the message survives: {out}"
+        );
+
+        let visible = redact_error("no app org.example.argocd is installed", &args, &redacted);
+        assert_eq!(
+            visible, "no app org.example.argocd is installed",
+            "kept values are not scrubbed"
+        );
+    }
+
+    /// serde prints the value it echoes with `{:?}`, so a value holding a quote
+    /// or a newline appears escaped, not verbatim; a number appears bare.
+    #[test]
+    fn redact_error_scrubs_escaped_and_numeric_values_too() {
+        let args =
+            json!({ "action": "settings", "id": "org.example.argocd", "settings": "hun\"ter\n2" });
+        let redacted = redact(&args, false);
+        let error = "invalid input: invalid type: string \"hun\\\"ter\\n2\", expected a map";
+        let out = redact_error(error, &args, &redacted);
+        assert!(!out.contains("ter"), "the escaped value leaked: {out}");
+
+        let args = json!({ "action": "settings", "id": "org.example.argocd", "settings": { "pin": 4711 } });
+        let redacted = redact(&args, false);
+        let out = redact_error(
+            "handler error: pin 4711 is not four digits",
+            &args,
+            &redacted,
+        );
+        assert!(!out.contains("4711"), "the numeric value leaked: {out}");
+    }
+
+    /// PR #625 review. The arguments of a denied call are untrusted and, on
+    /// either transport, up to 4 MiB. A `settings` map of very many
+    /// short values gives `redact_error` one hidden value per setting and one
+    /// `<redacted>` kept leaf per setting, and a linear membership scan per
+    /// hidden value made the scrub quadratic in the number of settings — a
+    /// denial that took billions of comparisons to record. Ten-character values
+    /// match `<redacted>`'s length, so a scan compares bytes, not just lengths.
+    #[test]
+    fn redact_error_stays_near_linear_in_the_number_of_hidden_values() {
+        let settings: serde_json::Map<String, Value> = (0..100_000)
+            .map(|i| (format!("k{i}"), json!(format!("v{i:09}"))))
+            .collect();
+        let args =
+            json!({ "action": "settings", "id": "org.example.argocd", "settings": settings });
+        let redacted = redact(&args, false);
+        let error =
+            "`extensions.configure` mutates the cluster and no consent mechanism is configured";
+
+        let started = std::time::Instant::now();
+        let out = redact_error(error, &args, &redacted);
+        let took = started.elapsed();
+
+        assert_eq!(out, error, "nothing hidden appears in this message");
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "scrubbing 100k hidden values took {took:?}; the scan is not linear"
+        );
+    }
+
+    /// The other `extensions.configure` actions carry no settings, and their
+    /// audit shape is unchanged: an operator can still read which app was
+    /// installed with which grants, enabled, or limited to which clusters.
+    #[test]
+    fn other_configure_actions_keep_their_audit_shape() {
+        let install = redact(
+            &json!({ "action": "install", "manifest": "{\"id\":\"org.example.argocd\"}", "grants": ["k8s.listCustomResource"] }),
+            false,
+        );
+        assert_eq!(install["action"], json!("install"));
+        assert_eq!(
+            install["manifest"],
+            json!("{\"id\":\"org.example.argocd\"}")
+        );
+        assert_eq!(install["grants"], json!(["k8s.listCustomResource"]));
+
+        let enable = redact(
+            &json!({ "action": "enable", "id": "org.example.argocd", "enabled": false }),
+            false,
+        );
+        assert_eq!(enable["id"], json!("org.example.argocd"));
+        assert_eq!(enable["enabled"], json!(false));
+
+        let clusters = redact(
+            &json!({ "action": "clusters", "id": "org.example.argocd", "contexts": ["prod", "staging"] }),
+            false,
+        );
+        assert_eq!(clusters["contexts"], json!(["prod", "staging"]));
     }
 
     /// Deliberately nests under `spec`/`template` rather than `data`: those are

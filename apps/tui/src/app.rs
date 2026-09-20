@@ -20,15 +20,14 @@ use srelens_streams::logs::LogStreamManager;
 use srelens_streams::watch::WatchManager;
 
 use crate::commands::{
-    command_suggestions_with_crds, resolve_command_with_crds, CommandTarget, CrdMeta,
-    ResourceKind,
+    command_suggestions_with_crds, resolve_command_with_crds, CommandTarget, CrdMeta, ResourceKind,
 };
 use crate::event::AppEvent;
 use crate::sink::TuiSink;
 use crate::theme::Theme;
 use crate::ui::{
-    render_header, render_help_modal, render_modal, render_statusbar, ContainerAction,
-    HeaderProps, InputMode, Modal, StatusBarProps,
+    render_header, render_help_modal, render_modal, render_statusbar, ContainerAction, HeaderProps,
+    InputMode, Modal, StatusBarProps,
 };
 use crate::views::*;
 
@@ -51,6 +50,7 @@ pub enum ActiveView {
     NodeInspector(node_inspector_view::NodeInspectorState),
     Topology(topology_view::TopologyViewState),
     GpuInfo(gpu_view::GpuViewState),
+    Bgp(bgp_view::BgpViewState),
     Top(top_view::TopViewState),
 }
 
@@ -104,8 +104,10 @@ pub struct App {
     pub helm_refreshing: bool,
     pub argo_tick_counter: usize,
     pub argo_refreshing: bool,
-    pub node_metrics_history: HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
-    pub pod_metrics_history: HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
+    pub node_metrics_history:
+        HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
+    pub pod_metrics_history:
+        HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
     pub cluster_overview_data: Option<crate::views::overview_view::ClusterOverviewData>,
     /// Global drag-to-copy selection as (anchor, cursor) screen cells. Active
     /// in every view without its own selection handler (YAML and Assistant
@@ -118,10 +120,22 @@ pub struct App {
 
 pub enum SuspendAction {
     EditYaml,
-    PodShell { pod: String, namespace: Option<String>, container: Option<String> },
-    DebugShell { pod: String, namespace: Option<String>, container: Option<String> },
-    NodeShell { node: String },
-    NodeSsh { destination: String },
+    PodShell {
+        pod: String,
+        namespace: Option<String>,
+        container: Option<String>,
+    },
+    DebugShell {
+        pod: String,
+        namespace: Option<String>,
+        container: Option<String>,
+    },
+    NodeShell {
+        node: String,
+    },
+    NodeSsh {
+        destination: String,
+    },
 }
 
 /// Deletes the preceding word from a string buffer, matching Unix readline / k9s / vim `<Ctrl+w>`.
@@ -182,9 +196,66 @@ pub fn open_browser_url(url: &str) -> Result<(), String> {
 /// - Windows / Linux: `<Ctrl+Backspace>`
 /// - Terminal fallback: `<Ctrl+h>`
 pub fn is_word_delete_key(key: &KeyEvent) -> bool {
-    (key.code == KeyCode::Char('w') || key.code == KeyCode::Char('W')) && key.modifiers.contains(KeyModifiers::CONTROL)
-        || (key.code == KeyCode::Backspace && (key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT)))
+    (key.code == KeyCode::Char('w') || key.code == KeyCode::Char('W'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        || (key.code == KeyCode::Backspace
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT)))
         || (key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+/// The confirmation payload for an Argo CD write on `app`: the context to send
+/// it to, the Application as listed — namespace, name, `uid` and
+/// `resourceVersion` — and the operation's own fields from `extra`.
+///
+/// The identity and version travel with the confirmation so the write is
+/// pinned to the object the operator reviewed: if it is deleted and recreated
+/// under the same name, or changes, while the dialog is open, the API server
+/// refuses the write instead of applying it to something unreviewed (#620).
+fn argo_confirm_payload(
+    ctx: &str,
+    app: &srelens_kube::argo::ArgoApplication,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "ctx": ctx,
+        "ns": app.namespace,
+        "name": app.name,
+        "uid": app.uid,
+        "resource_version": app.resource_version,
+    });
+    if let (Some(payload), serde_json::Value::Object(extra)) = (payload.as_object_mut(), extra) {
+        payload.extend(extra);
+    }
+    payload
+}
+
+/// Reads back what [`argo_confirm_payload`] wrote: the context, and the
+/// Application the operator reviewed. `None` when the payload names no
+/// Application. A missing identity is read as empty, which the caller refuses.
+fn parse_argo_confirm_payload(
+    payload: &serde_json::Value,
+) -> Option<(String, srelens_kube::argo::ReviewedApplication)> {
+    let field = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let name = field("name");
+    if name.is_empty() {
+        return None;
+    }
+    Some((
+        field("ctx"),
+        srelens_kube::argo::ReviewedApplication {
+            namespace: field("ns"),
+            name,
+            uid: field("uid"),
+            resource_version: field("resource_version"),
+        },
+    ))
 }
 
 impl App {
@@ -208,6 +279,7 @@ impl App {
             .map(|rc| ContextDto {
                 name: rc.display_name.clone(),
                 stable_id: rc.stable_id().to_string(),
+                key: rc.key(),
                 cluster: rc.cluster.clone(),
                 server: rc.server.clone(),
                 namespace: rc.namespace.clone(),
@@ -229,8 +301,12 @@ impl App {
         });
 
         let current_ctx_dto = contexts.iter().find(|c| c.name == active_context);
-        let cluster_name = current_ctx_dto.map(|c| c.cluster.clone()).unwrap_or_else(|| "kubernetes".to_string());
-        let server_url = current_ctx_dto.map(|c| c.server.clone()).unwrap_or_default();
+        let cluster_name = current_ctx_dto
+            .map(|c| c.cluster.clone())
+            .unwrap_or_else(|| "kubernetes".to_string());
+        let server_url = current_ctx_dto
+            .map(|c| c.server.clone())
+            .unwrap_or_default();
 
         let has_explicit_ns = initial_namespace.is_some();
         let active_namespace = if all_namespaces {
@@ -282,7 +358,7 @@ impl App {
             resource_cache: HashMap::new(),
             active_log_channel: None,
             last_active_namespace,
-            crds: Vec::new(),
+            crds: crate::commands::load_cached_crds(&active_context),
             is_running: true,
             requires_terminal_suspend: None,
             context_chip_rects: std::cell::RefCell::new(Vec::new()),
@@ -363,7 +439,9 @@ impl App {
         }
 
         // Detect cluster unreachable after 8 seconds of attempting to connect
-        if (!self.is_connected || self.cluster_version == "Connecting..." || self.cluster_version == "unknown")
+        if (!self.is_connected
+            || self.cluster_version == "Connecting..."
+            || self.cluster_version == "unknown")
             && self.connection_attempt_start.elapsed() >= Duration::from_secs(8)
             && !self.cluster_unreachable
         {
@@ -396,7 +474,10 @@ impl App {
         // Periodically refresh node metrics every ~4 seconds
         let need_node_metrics = if let ActiveView::Table(table) = &self.active_view {
             table.kind == ResourceKind::Nodes
-        } else if matches!(self.active_view, ActiveView::NodeInspector(_) | ActiveView::Top(_)) {
+        } else if matches!(
+            self.active_view,
+            ActiveView::NodeInspector(_) | ActiveView::Top(_)
+        ) {
             true
         } else if let Some(Modal::MetricsTimeline(ref panel)) = self.modal {
             panel.target_kind == "Node"
@@ -474,7 +555,10 @@ impl App {
                 cpu_millicores: m.cpu_millicores.max(0) as u64,
                 memory_mib: m.memory_mib.max(0) as u64,
             };
-            let history = self.pod_metrics_history.entry(m.name.clone()).or_insert_with(std::collections::VecDeque::new);
+            let history = self
+                .pod_metrics_history
+                .entry(m.name.clone())
+                .or_insert_with(std::collections::VecDeque::new);
             history.push_back(sample);
             if history.len() > 720 {
                 history.pop_front();
@@ -506,7 +590,10 @@ impl App {
                             } else {
                                 format!("{}Mi", mem)
                             };
-                            obj.insert("cpu".to_string(), serde_json::Value::String(format!("{}m", cpu)));
+                            obj.insert(
+                                "cpu".to_string(),
+                                serde_json::Value::String(format!("{}m", cpu)),
+                            );
                             obj.insert("memory".to_string(), serde_json::Value::String(mem_str));
                         }
                     }
@@ -526,7 +613,10 @@ impl App {
                             } else {
                                 format!("{}Mi", mem)
                             };
-                            obj.insert("cpu".to_string(), serde_json::Value::String(format!("{}m", cpu)));
+                            obj.insert(
+                                "cpu".to_string(),
+                                serde_json::Value::String(format!("{}m", cpu)),
+                            );
                             obj.insert("memory".to_string(), serde_json::Value::String(mem_str));
                         }
                     }
@@ -536,7 +626,11 @@ impl App {
         }
 
         // 2. Also update in-memory resource_cache so switching views retains metrics
-        let key = (self.active_context.clone(), self.active_namespace.clone(), "pods".to_string());
+        let key = (
+            self.active_context.clone(),
+            self.active_namespace.clone(),
+            "pods".to_string(),
+        );
         if let Some(cached_items) = self.resource_cache.get_mut(&key) {
             for item in cached_items.iter_mut() {
                 let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -547,7 +641,10 @@ impl App {
                         } else {
                             format!("{}Mi", mem)
                         };
-                        obj.insert("cpu".to_string(), serde_json::Value::String(format!("{}m", cpu)));
+                        obj.insert(
+                            "cpu".to_string(),
+                            serde_json::Value::String(format!("{}m", cpu)),
+                        );
                         obj.insert("memory".to_string(), serde_json::Value::String(mem_str));
                     }
                 }
@@ -563,7 +660,10 @@ impl App {
         let mut unified: Vec<serde_json::Value> = Vec::new();
 
         // 1. Deployments
-        if let Some(items) = self.resource_cache.get(&(ctx.clone(), ns.clone(), "deployments".to_string())) {
+        if let Some(items) =
+            self.resource_cache
+                .get(&(ctx.clone(), ns.clone(), "deployments".to_string()))
+        {
             for it in items {
                 let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(&ns);
@@ -597,7 +697,10 @@ impl App {
         }
 
         // 2. StatefulSets
-        if let Some(items) = self.resource_cache.get(&(ctx.clone(), ns.clone(), "statefulsets".to_string())) {
+        if let Some(items) =
+            self.resource_cache
+                .get(&(ctx.clone(), ns.clone(), "statefulsets".to_string()))
+        {
             for it in items {
                 let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(&ns);
@@ -631,12 +734,31 @@ impl App {
         }
 
         // 3. DaemonSets
-        if let Some(items) = self.resource_cache.get(&(ctx.clone(), ns.clone(), "daemonsets".to_string())) {
+        if let Some(items) =
+            self.resource_cache
+                .get(&(ctx.clone(), ns.clone(), "daemonsets".to_string()))
+        {
             for it in items {
                 let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(&ns);
-                let desired = it.get("desired").and_then(|v| v.as_i64()).or_else(|| it.get("desired").and_then(|v| v.as_str()).and_then(|s| s.parse::<i64>().ok())).unwrap_or(0);
-                let ready_num = it.get("ready").and_then(|v| v.as_i64()).or_else(|| it.get("ready").and_then(|v| v.as_str()).and_then(|s| s.parse::<i64>().ok())).unwrap_or(0);
+                let desired = it
+                    .get("desired")
+                    .and_then(|v| v.as_i64())
+                    .or_else(|| {
+                        it.get("desired")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<i64>().ok())
+                    })
+                    .unwrap_or(0);
+                let ready_num = it
+                    .get("ready")
+                    .and_then(|v| v.as_i64())
+                    .or_else(|| {
+                        it.get("ready")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<i64>().ok())
+                    })
+                    .unwrap_or(0);
                 let ready_str = format!("{}/{}", ready_num, desired);
                 let age = it.get("age").and_then(|v| v.as_str()).unwrap_or("");
                 let created_at = it.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
@@ -666,14 +788,23 @@ impl App {
         }
 
         // 4. Pods
-        if let Some(items) = self.resource_cache.get(&(ctx.clone(), ns.clone(), "pods".to_string())) {
+        if let Some(items) = self
+            .resource_cache
+            .get(&(ctx.clone(), ns.clone(), "pods".to_string()))
+        {
             for it in items {
                 let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(&ns);
-                let phase = it.get("phase").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                let phase = it
+                    .get("phase")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown");
                 let ready = it.get("ready").and_then(|v| v.as_str()).unwrap_or("0/0");
                 let restarts = it.get("restarts").and_then(|v| v.as_i64()).unwrap_or(0);
-                let waiting_reason = it.get("waitingReason").and_then(|v| v.as_str()).unwrap_or("");
+                let waiting_reason = it
+                    .get("waitingReason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let age = it.get("age").and_then(|v| v.as_str()).unwrap_or("");
                 let created_at = it.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
                 let image = it.get("image").and_then(|v| v.as_str()).unwrap_or("");
@@ -712,11 +843,17 @@ impl App {
         }
 
         // 5. CronJobs
-        if let Some(items) = self.resource_cache.get(&(ctx.clone(), ns.clone(), "cronjobs".to_string())) {
+        if let Some(items) =
+            self.resource_cache
+                .get(&(ctx.clone(), ns.clone(), "cronjobs".to_string()))
+        {
             for it in items {
                 let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let namespace = it.get("namespace").and_then(|v| v.as_str()).unwrap_or(&ns);
-                let suspended = it.get("suspended").and_then(|v| v.as_bool()).unwrap_or(false);
+                let suspended = it
+                    .get("suspended")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let active = it.get("active").and_then(|v| v.as_i64()).unwrap_or(0);
                 let age = it.get("age").and_then(|v| v.as_str()).unwrap_or("");
                 let created_at = it.get("createdAt").and_then(|v| v.as_str()).unwrap_or("");
@@ -757,9 +894,18 @@ impl App {
             name_a.cmp(name_b)
         });
 
-        let has_any_cache = ["deployments", "statefulsets", "daemonsets", "pods", "cronjobs"]
-            .iter()
-            .any(|k| self.resource_cache.contains_key(&(ctx.clone(), ns.clone(), k.to_string())));
+        let has_any_cache = [
+            "deployments",
+            "statefulsets",
+            "daemonsets",
+            "pods",
+            "cronjobs",
+        ]
+        .iter()
+        .any(|k| {
+            self.resource_cache
+                .contains_key(&(ctx.clone(), ns.clone(), k.to_string()))
+        });
 
         if let ActiveView::Table(table) = &mut self.active_view {
             if table.kind == ResourceKind::Workloads {
@@ -813,7 +959,10 @@ impl App {
                 cpu_millicores: m.cpu_millicores.max(0) as u64,
                 memory_mib: m.memory_mib.max(0) as u64,
             };
-            let history = self.node_metrics_history.entry(m.name.clone()).or_insert_with(std::collections::VecDeque::new);
+            let history = self
+                .node_metrics_history
+                .entry(m.name.clone())
+                .or_insert_with(std::collections::VecDeque::new);
             history.push_back(sample);
             if history.len() > 720 {
                 history.pop_front();
@@ -851,17 +1000,19 @@ impl App {
                 Ok(client) => match client.apiserver_version().await {
                     Ok(v) => {
                         let version = v.git_version;
-                        let node_count = kube::Api::<k8s_openapi::api::core::v1::Node>::all(client.clone())
-                            .list_metadata(&kube::api::ListParams::default())
-                            .await
-                            .map(|list| list.items.len())
-                            .unwrap_or(0);
+                        let node_count =
+                            kube::Api::<k8s_openapi::api::core::v1::Node>::all(client.clone())
+                                .list_metadata(&kube::api::ListParams::default())
+                                .await
+                                .map(|list| list.items.len())
+                                .unwrap_or(0);
 
-                        let pod_count = kube::Api::<k8s_openapi::api::core::v1::Pod>::all(client.clone())
-                            .list_metadata(&kube::api::ListParams::default())
-                            .await
-                            .map(|list| list.items.len())
-                            .unwrap_or(0);
+                        let pod_count =
+                            kube::Api::<k8s_openapi::api::core::v1::Pod>::all(client.clone())
+                                .list_metadata(&kube::api::ListParams::default())
+                                .await
+                                .map(|list| list.items.len())
+                                .unwrap_or(0);
 
                         let _ = event_tx.send(AppEvent::ActionResult {
                             title: "cluster_info_updated".to_string(),
@@ -891,64 +1042,108 @@ impl App {
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
-            if let Ok(client) = cache.get(&ctx).await {
-                let gvk = kube::core::GroupVersionKind::gvk("apiextensions.k8s.io", "v1", "CustomResourceDefinition");
+            let fetch = async {
+                let client = cache.get(&ctx).await.map_err(|e| e.to_string())?;
+                let gvk = kube::core::GroupVersionKind::gvk(
+                    "apiextensions.k8s.io",
+                    "v1",
+                    "CustomResourceDefinition",
+                );
                 let ar = kube::core::ApiResource::from_gvk(&gvk);
                 let api: kube::Api<kube::core::DynamicObject> = kube::Api::all_with(client, &ar);
-                if let Ok(list) = api.list(&kube::api::ListParams::default()).await {
-                    let mut crds = Vec::new();
-                    for o in list.items {
-                        let spec = &o.data["spec"];
-                        let group = spec["group"].as_str().unwrap_or_default().to_string();
-                        let kind = spec["names"]["kind"].as_str().unwrap_or_default().to_string();
-                        let plural = spec["names"]["plural"].as_str().unwrap_or_default().to_string();
-                        let singular = spec["names"]["singular"].as_str().unwrap_or_default().to_string();
-                        let namespaced = spec["scope"].as_str().unwrap_or("Namespaced") == "Namespaced";
-                        let short_names: Vec<String> = spec["names"]["shortNames"]
-                            .as_array()
-                            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                            .unwrap_or_default();
+                let list = api
+                    .list(&kube::api::ListParams::default())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut crds = Vec::new();
+                for o in list.items {
+                    let spec = &o.data["spec"];
+                    let group = spec["group"].as_str().unwrap_or_default().to_string();
+                    let kind = spec["names"]["kind"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let plural = spec["names"]["plural"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let singular = spec["names"]["singular"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    let namespaced = spec["scope"].as_str().unwrap_or("Namespaced") == "Namespaced";
+                    let short_names: Vec<String> = spec["names"]["shortNames"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
 
-                        let (version, printer_columns) = spec["versions"]
-                            .as_array()
-                            .and_then(|vs| {
-                                let ver_obj = vs.iter()
-                                    .find(|v| v["storage"].as_bool().unwrap_or(false))
-                                    .or_else(|| vs.iter().find(|v| v["served"].as_bool().unwrap_or(false)))?;
-                                let ver_name = ver_obj["name"].as_str()?.to_string();
-                                let cols = ver_obj["additionalPrinterColumns"]
-                                    .as_array()
-                                    .or_else(|| spec["additionalPrinterColumns"].as_array())
-                                    .map(|arr| {
-                                        arr.iter().filter_map(|col| {
+                    let (version, printer_columns) = spec["versions"]
+                        .as_array()
+                        .and_then(|vs| {
+                            let ver_obj = vs
+                                .iter()
+                                .find(|v| v["storage"].as_bool().unwrap_or(false))
+                                .or_else(|| {
+                                    vs.iter().find(|v| v["served"].as_bool().unwrap_or(false))
+                                })?;
+                            let ver_name = ver_obj["name"].as_str()?.to_string();
+                            let cols = ver_obj["additionalPrinterColumns"]
+                                .as_array()
+                                .or_else(|| spec["additionalPrinterColumns"].as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|col| {
                                             Some(crate::commands::PrinterColumn {
                                                 name: col["name"].as_str()?.to_string(),
                                                 json_path: col["jsonPath"].as_str()?.to_string(),
-                                                col_type: col["type"].as_str().unwrap_or("string").to_string(),
-                                                priority: col["priority"].as_i64().unwrap_or(0) as i32,
-                                                description: col["description"].as_str().map(String::from),
+                                                col_type: col["type"]
+                                                    .as_str()
+                                                    .unwrap_or("string")
+                                                    .to_string(),
+                                                priority: col["priority"].as_i64().unwrap_or(0)
+                                                    as i32,
+                                                description: col["description"]
+                                                    .as_str()
+                                                    .map(String::from),
                                             })
-                                        }).collect()
-                                    })
-                                    .unwrap_or_default();
-                                Some((ver_name, cols))
-                            })
-                            .unwrap_or_else(|| ("v1".to_string(), Vec::new()));
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            Some((ver_name, cols))
+                        })
+                        .unwrap_or_else(|| ("v1".to_string(), Vec::new()));
 
-                        if !group.is_empty() && !kind.is_empty() && !plural.is_empty() {
-                            crds.push(CrdMeta {
-                                crd_name: o.metadata.name.unwrap_or_default(),
-                                group,
-                                version,
-                                kind,
-                                plural,
-                                singular,
-                                namespaced,
-                                short_names,
-                                printer_columns,
-                            });
-                        }
+                    let iso = srelens_kube::creation_timestamp_iso(
+                        o.metadata.creation_timestamp.as_ref(),
+                    );
+                    let created_at = if iso.is_empty() { None } else { Some(iso) };
+
+                    if !group.is_empty() && !kind.is_empty() && !plural.is_empty() {
+                        crds.push(CrdMeta {
+                            crd_name: o.metadata.name.unwrap_or_default(),
+                            group,
+                            version,
+                            kind,
+                            plural,
+                            singular,
+                            namespaced,
+                            short_names,
+                            printer_columns,
+                            created_at,
+                        });
                     }
+                }
+                Ok::<Vec<CrdMeta>, String>(crds)
+            };
+
+            match tokio::time::timeout(std::time::Duration::from_secs(15), fetch).await {
+                Ok(Ok(crds)) => {
+                    crate::commands::save_cached_crds(&ctx, &crds);
                     if let Ok(json_str) = serde_json::to_string(&crds) {
                         let _ = event_tx.send(AppEvent::ActionResult {
                             title: "crds_updated".to_string(),
@@ -956,13 +1151,79 @@ impl App {
                         });
                     }
                 }
+                Ok(Err(err)) => {
+                    let _ = event_tx.send(AppEvent::ActionResult {
+                        title: "crds_failed".to_string(),
+                        result: Err(err),
+                    });
+                }
+                Err(_) => {
+                    let _ = event_tx.send(AppEvent::ActionResult {
+                        title: "crds_failed".to_string(),
+                        result: Err("CRD discovery timed out after 15s".to_string()),
+                    });
+                }
             }
         });
     }
 
+    pub fn crds_to_table_items(&self) -> Vec<serde_json::Value> {
+        self.crds
+            .iter()
+            .map(|c| {
+                let age = if let Some(ts) = &c.created_at {
+                    if let Ok(parsed_ts) = ts.parse::<srelens_kube::k8s_openapi::jiff::Timestamp>()
+                    {
+                        srelens_kube::humanize_age(Some(
+                            &srelens_kube::k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                                parsed_ts,
+                            ),
+                        ))
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+                serde_json::json!({
+                    "name": c.crd_name,
+                    "group": c.group,
+                    "version": c.version,
+                    "scope": if c.namespaced { "Namespaced" } else { "Cluster" },
+                    "age": age,
+                    "createdAt": c.created_at.clone().unwrap_or_default(),
+                    "kind": c.kind,
+                    "plural": c.plural,
+                })
+            })
+            .collect()
+    }
+
     pub fn handle_crds_update(&mut self, json_str: &str) {
         if let Ok(crds) = serde_json::from_str::<Vec<CrdMeta>>(json_str) {
+            crate::commands::save_cached_crds(&self.active_context, &crds);
             self.crds = crds;
+
+            let is_crd_view = matches!(self.active_view, ActiveView::Table(ref table) if table.kind == ResourceKind::CustomResourceDefinitions);
+            if is_crd_view {
+                let items = self.crds_to_table_items();
+                if let ActiveView::Table(ref mut table) = self.active_view {
+                    table.set_items(items, &self.filter_buffer);
+                    table.is_loading = false;
+                }
+            }
+        }
+    }
+
+    pub fn handle_crds_failed(&mut self, err: &str) {
+        if let ActiveView::Table(ref mut table) = self.active_view {
+            if table.kind == ResourceKind::CustomResourceDefinitions {
+                table.is_loading = false;
+                self.set_toast(
+                    format!("Failed to load CRDs: {}", err),
+                    Theme::status_error(),
+                );
+            }
         }
     }
 
@@ -971,18 +1232,32 @@ impl App {
             let crd_kind = title.strip_prefix("crd_instances:").unwrap_or(title);
             let ctx = self.active_context.clone();
             let ns = self.active_namespace.clone();
-            self.resource_cache.insert((ctx.clone(), ns.clone(), crd_kind.to_string()), items.clone());
-            if let Some(discovered) = self.crds.iter().find(|c| c.kind == crd_kind || c.plural == crd_kind || c.crd_name == crd_kind) {
-                self.resource_cache.insert((ctx, ns, discovered.crd_name.clone()), items.clone());
+            self.resource_cache.insert(
+                (ctx.clone(), ns.clone(), crd_kind.to_string()),
+                items.clone(),
+            );
+            if let Some(discovered) = self
+                .crds
+                .iter()
+                .find(|c| c.kind == crd_kind || c.plural == crd_kind || c.crd_name == crd_kind)
+            {
+                self.resource_cache
+                    .insert((ctx, ns, discovered.crd_name.clone()), items.clone());
             }
 
             if let ActiveView::Table(table) = &mut self.active_view {
                 if let ResourceKind::CustomResource(crd) = &mut table.kind {
                     if crd.kind == crd_kind || crd.plural == crd_kind || crd.crd_name == crd_kind {
                         if crd.printer_columns.is_empty() {
-                            if let Some(discovered) = self.crds.iter().find(|c| c.crd_name == crd.crd_name || (c.group == crd.group && c.kind == crd.kind)) {
+                            if let Some(discovered) = self.crds.iter().find(|c| {
+                                c.crd_name == crd.crd_name
+                                    || (c.group == crd.group && c.kind == crd.kind)
+                            }) {
                                 crd.printer_columns = discovered.printer_columns.clone();
-                                table.columns = crate::views::resource_table::default_columns_for_kind(&table.kind);
+                                table.columns =
+                                    crate::views::resource_table::default_columns_for_kind(
+                                        &table.kind,
+                                    );
                             }
                         }
                         table.set_items(items, &self.filter_buffer);
@@ -990,6 +1265,175 @@ impl App {
                 }
             }
         }
+    }
+
+    pub fn handle_crd_instances_failed(&mut self, title: &str, err: &str) {
+        let crd_kind = title.strip_prefix("crd_instances_failed:").unwrap_or(title);
+        if let ActiveView::Table(table) = &mut self.active_view {
+            if let ResourceKind::CustomResource(crd) = &table.kind {
+                if crd.kind == crd_kind || crd.plural == crd_kind || crd.crd_name == crd_kind {
+                    table.is_loading = false;
+                    self.set_toast(
+                        format!("Failed to list {}: {}", crd_kind, err),
+                        Theme::status_error(),
+                    );
+                }
+            }
+        }
+    }
+
+    pub fn handle_yaml_applied(&mut self, title: &str, msg: &str) {
+        let (mut kind, mut ns) = if let Some(stripped) = title.strip_prefix("yaml_applied:") {
+            let parts: Vec<&str> = stripped.split(':').collect();
+            let k = parts.first().unwrap_or(&"").to_string();
+            let n = parts.get(1).unwrap_or(&"").to_string();
+            (k, n)
+        } else {
+            (String::new(), String::new())
+        };
+
+        if let ActiveView::Yaml(yaml) = &mut self.active_view {
+            yaml.commit_content(yaml.yaml_content.clone());
+            if kind.is_empty() {
+                kind = yaml.resource_kind.clone();
+            }
+            if ns.is_empty() {
+                ns = yaml.namespace.clone().unwrap_or_default();
+            }
+        }
+
+        self.invalidate_resource_cache_for(&kind, &ns);
+        self.set_toast(msg.to_string(), Theme::status_ok());
+    }
+
+    /// Invalidate the cached lists an apply changed: one `(kind, namespace)`
+    /// per applied document, in that document's own namespace. See
+    /// `applied_document_scopes`.
+    pub fn invalidate_applied_documents(
+        &mut self,
+        docs: &[serde_json::Value],
+        fallback_ns: Option<&str>,
+        results: &[srelens_kube::manifest::ApplyDoc],
+    ) {
+        for (kind, ns) in applied_document_scopes(docs, fallback_ns, results) {
+            self.invalidate_resource_cache_for(&kind, &ns);
+        }
+    }
+
+    pub fn invalidate_resource_cache_for(&mut self, kind: &str, ns: &str) {
+        if kind.is_empty() {
+            return;
+        }
+        let ctx = self.active_context.clone();
+        let candidate_namespaces = [ns.to_string(), self.active_namespace.clone(), String::new()];
+        let crd_match = self
+            .crds
+            .iter()
+            .find(|c| c.kind.eq_ignore_ascii_case(kind) || c.plural.eq_ignore_ascii_case(kind))
+            .cloned();
+
+        for c_ns in &candidate_namespaces {
+            self.resource_cache
+                .remove(&(ctx.clone(), c_ns.clone(), kind.to_string()));
+            if let Some(ref crd) = crd_match {
+                self.resource_cache
+                    .remove(&(ctx.clone(), c_ns.clone(), crd.crd_name.clone()));
+                self.resource_cache
+                    .remove(&(ctx.clone(), c_ns.clone(), crd.plural.clone()));
+            }
+        }
+
+        if let Some(crd) = crd_match {
+            self.fetch_crd_instances(crd);
+        }
+    }
+
+    pub fn handle_yaml_partial_applied(&mut self, applied_summary: &str, error_summary: &str) {
+        if let ActiveView::Yaml(yaml) = &mut self.active_view {
+            yaml.commit_content(yaml.yaml_content.clone());
+        }
+        self.set_toast(
+            format!(
+                "Partial apply: updated {}; failed {}",
+                applied_summary, error_summary
+            ),
+            Theme::status_error(),
+        );
+    }
+
+    pub fn handle_yaml_error(&mut self, err: &str) {
+        if let ActiveView::Yaml(yaml) = &mut self.active_view {
+            yaml.revert_content();
+        }
+        self.set_toast(
+            format!("Apply failed (reverted): {}", err),
+            Theme::status_error(),
+        );
+    }
+
+    pub fn spawn_update_check(&self) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let event_tx = self.event_tx.clone();
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        tokio::task::spawn_blocking(move || {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let channel = crate::self_update::Channel::of_version(&current_version);
+                let exe = std::env::current_exe()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("srelens-tui"));
+                let target = crate::self_update::installed_path(&exe);
+
+                let client = match reqwest::blocking::Client::builder()
+                    .user_agent(format!("srelens-tui/{}", current_version))
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build()
+                {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+
+                let fetch = |url: &str| -> Result<Vec<u8>, crate::self_update::UpdateError> {
+                    let response = client
+                        .get(url)
+                        .send()
+                        .map_err(|e| crate::self_update::UpdateError::Download(e.to_string()))?;
+                    if !response.status().is_success() {
+                        return Err(crate::self_update::UpdateError::Download(format!(
+                            "{} for {url}",
+                            response.status()
+                        )));
+                    }
+                    response
+                        .bytes()
+                        .map(|b| b.to_vec())
+                        .map_err(|e| crate::self_update::UpdateError::Download(e.to_string()))
+                };
+
+                if let Ok(crate::self_update::Check::Available(plan)) =
+                    crate::self_update::plan(&current_version, channel, false, target, &fetch)
+                {
+                    let _ = event_tx.send(crate::event::AppEvent::ActionResult {
+                        title: "update_available".to_string(),
+                        result: Ok(plan.latest),
+                    });
+                }
+            }));
+        });
+    }
+
+    pub fn handle_update_available(&mut self, version: &str) {
+        self.tui_config.update_available = Some(version.to_string());
+        if let Some(Modal::FeatureBanner {
+            ref mut update_available,
+            ..
+        }) = self.modal
+        {
+            *update_available = Some(version.to_string());
+        }
+        self.set_toast(
+            format!("▲ Update available: {} (run 'srelens-tui update')", version),
+            Theme::status_warn(),
+        );
     }
 
     pub fn handle_cluster_info_update(&mut self, payload: &str) {
@@ -1032,7 +1476,9 @@ impl App {
     }
 
     pub fn handle_cluster_overview_update(&mut self, payload: &str) {
-        if let Ok(data) = serde_json::from_str::<crate::views::overview_view::ClusterOverviewData>(payload) {
+        if let Ok(data) =
+            serde_json::from_str::<crate::views::overview_view::ClusterOverviewData>(payload)
+        {
             if data.context_name == self.active_context {
                 self.cluster_version = data.k8s_version.clone();
                 self.node_count = data.node_count;
@@ -1052,7 +1498,10 @@ impl App {
 
 fn is_physical_gpu_key(k: &str) -> bool {
     let lower = k.to_lowercase();
-    (lower == "nvidia.com/gpu" || lower == "amd.com/gpu" || lower == "intel.com/gpu" || lower.ends_with("/gpu"))
+    (lower == "nvidia.com/gpu"
+        || lower == "amd.com/gpu"
+        || lower == "intel.com/gpu"
+        || lower.ends_with("/gpu"))
         && !lower.contains("mem")
         && !lower.contains("core")
         && !lower.contains("vgpu")
@@ -1065,7 +1514,12 @@ fn is_gpu_memory_key(k: &str) -> bool {
 
 fn parse_gpu_mem_mib(s: &str) -> i64 {
     let s = s.trim();
-    let num = |suffix: &str| s.trim_end_matches(suffix).trim().parse::<f64>().unwrap_or(0.0);
+    let num = |suffix: &str| {
+        s.trim_end_matches(suffix)
+            .trim()
+            .parse::<f64>()
+            .unwrap_or(0.0)
+    };
     if s.ends_with("Ki") || s.ends_with("ki") || s.ends_with('k') || s.ends_with('K') {
         (num("Ki").max(num("ki")).max(num("k")).max(num("K")) / 1024.0) as i64
     } else if s.ends_with("Mi") || s.ends_with("mi") || s.ends_with('m') || s.ends_with('M') {
@@ -1187,15 +1641,22 @@ impl App {
             // Check NodeMetrics (if metrics-server is available)
             let gvk = kube::core::GroupVersionKind::gvk("metrics.k8s.io", "v1beta1", "NodeMetrics");
             let ar = kube::core::ApiResource::from_gvk(&gvk);
-            let node_metrics_api: kube::Api<kube::core::DynamicObject> = kube::Api::all_with(client.clone(), &ar);
+            let node_metrics_api: kube::Api<kube::core::DynamicObject> =
+                kube::Api::all_with(client.clone(), &ar);
             let mut got_node_metrics = false;
-            if let Ok(list) = node_metrics_api.list(&kube::api::ListParams::default()).await {
+            if let Ok(list) = node_metrics_api
+                .list(&kube::api::ListParams::default())
+                .await
+            {
                 if !list.items.is_empty() {
                     got_node_metrics = true;
                     for o in list.items {
                         let usage = &o.data["usage"];
-                        data.used_cpu_millicores += srelens_kube::metrics::cpu_millicores(usage["cpu"].as_str().unwrap_or("0"));
-                        data.used_mem_mib += srelens_kube::metrics::mem_mib(usage["memory"].as_str().unwrap_or("0"));
+                        data.used_cpu_millicores += srelens_kube::metrics::cpu_millicores(
+                            usage["cpu"].as_str().unwrap_or("0"),
+                        );
+                        data.used_mem_mib +=
+                            srelens_kube::metrics::mem_mib(usage["memory"].as_str().unwrap_or("0"));
                     }
                 }
             }
@@ -1208,7 +1669,11 @@ impl App {
                 let mut pod_req_mem = 0i64;
 
                 for pod in pods.items {
-                    let phase = pod.status.as_ref().and_then(|s| s.phase.as_deref()).unwrap_or("Unknown");
+                    let phase = pod
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.phase.as_deref())
+                        .unwrap_or("Unknown");
                     let mut is_unhealthy = false;
 
                     if let Some(status) = &pod.status {
@@ -1217,13 +1682,21 @@ impl App {
                                 if let Some(state) = &cs.state {
                                     if let Some(waiting) = &state.waiting {
                                         let r = waiting.reason.as_deref().unwrap_or_default();
-                                        if r == "CrashLoopBackOff" || r == "OOMKilled" || r == "Error" || r == "ImagePullBackOff" || r == "CreateContainerConfigError" {
+                                        if r == "CrashLoopBackOff"
+                                            || r == "OOMKilled"
+                                            || r == "Error"
+                                            || r == "ImagePullBackOff"
+                                            || r == "CreateContainerConfigError"
+                                        {
                                             is_unhealthy = true;
                                             break;
                                         }
                                     }
                                     if let Some(terminated) = &state.terminated {
-                                        if terminated.exit_code != 0 || terminated.reason.as_deref() == Some("OOMKilled") || terminated.reason.as_deref() == Some("Error") {
+                                        if terminated.exit_code != 0
+                                            || terminated.reason.as_deref() == Some("OOMKilled")
+                                            || terminated.reason.as_deref() == Some("Error")
+                                        {
                                             is_unhealthy = true;
                                             break;
                                         }
@@ -1286,7 +1759,15 @@ impl App {
     }
 
     pub async fn switch_context(&mut self, new_context: String) {
-        if self.active_context == new_context {
+        self.switch_context_internal(new_context, false).await;
+    }
+
+    pub async fn switch_context_forced(&mut self, new_context: String) {
+        self.switch_context_internal(new_context, true).await;
+    }
+
+    async fn switch_context_internal(&mut self, new_context: String, force: bool) {
+        if !force && self.active_context == new_context {
             return;
         }
 
@@ -1298,15 +1779,30 @@ impl App {
         self.resource_cache.clear();
         self.current_watch_channel = None;
 
-        // 1. Save outgoing context's assistant view state into map
-        let old_state = std::mem::replace(
-            &mut self.assistant_state,
-            AssistantViewState::for_context(&new_context),
-        );
-        self.assistant_states.insert(self.active_context.clone(), old_state);
+        if self.active_context != new_context {
+            // 1. Save outgoing context's assistant view state into map
+            let old_state = std::mem::replace(
+                &mut self.assistant_state,
+                AssistantViewState::for_context(&new_context),
+            );
+            self.assistant_states
+                .insert(self.active_context.clone(), old_state);
 
-        // 2. Switch context and namespace
-        self.active_context = new_context;
+            // 2. Switch context and namespace
+            self.active_context = new_context;
+
+            // 3. Restore or initialize assistant state for the target context
+            if let Some(saved_state) = self.assistant_states.remove(&self.active_context) {
+                self.assistant_state = saved_state;
+                self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
+            } else {
+                self.assistant_state = AssistantViewState::for_context(&self.active_context);
+                self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
+            }
+        } else {
+            self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
+        }
+
         if let Some(ctx) = self.contexts.iter().find(|c| c.name == self.active_context) {
             self.cluster_name = ctx.cluster.clone();
             self.server_url = ctx.server.clone();
@@ -1315,15 +1811,6 @@ impl App {
             } else {
                 self.active_namespace = String::new();
             }
-        }
-
-        // 3. Restore or initialize assistant state for the target context
-        if let Some(saved_state) = self.assistant_states.remove(&self.active_context) {
-            self.assistant_state = saved_state;
-            self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
-        } else {
-            self.assistant_state = AssistantViewState::for_context(&self.active_context);
-            self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
         }
 
         self.cluster_version = "Connecting...".to_string();
@@ -1351,9 +1838,13 @@ impl App {
             argo.is_loading = true;
             self.refresh_argo_applications();
         }
-        self.set_toast(format!("Switched to context '{}'", self.active_context), Theme::status_ok());
+        self.set_toast(
+            format!("Switched to context '{}'", self.active_context),
+            Theme::status_ok(),
+        );
         self.refresh_cluster_info();
         self.refresh_cluster_overview();
+        self.crds = crate::commands::load_cached_crds(&self.active_context);
         self.refresh_crds();
         self.restart_active_watch().await;
     }
@@ -1364,15 +1855,24 @@ impl App {
             if let Some(prev) = self.nav_stack.pop() {
                 self.active_view = prev;
             } else {
-                self.active_view = ActiveView::Table(crate::views::ResourceTableState::new(crate::app::ResourceKind::Pods));
+                self.active_view = ActiveView::Table(crate::views::ResourceTableState::new(
+                    crate::app::ResourceKind::Pods,
+                ));
             }
         }
         if !new_namespace.is_empty() {
             self.last_active_namespace = new_namespace.clone();
         }
         self.active_namespace = new_namespace.clone();
-        let display_ns = if self.active_namespace.is_empty() { "all" } else { &self.active_namespace };
-        self.set_toast(format!("Switched to namespace [{}]", display_ns), Theme::status_ok());
+        let display_ns = if self.active_namespace.is_empty() {
+            "all"
+        } else {
+            &self.active_namespace
+        };
+        self.set_toast(
+            format!("Switched to namespace [{}]", display_ns),
+            Theme::status_ok(),
+        );
         self.restart_active_watch().await;
     }
 
@@ -1393,7 +1893,17 @@ impl App {
                 let paths = self.kubeconfig_paths.clone();
                 self.active_watch_channels.insert(node_ch.clone());
                 self.active_watch_pool.push(node_ch.clone());
-                let _ = self.watch_manager.start(sink, ctx.clone(), "".to_string(), "nodes".to_string(), node_ch, paths).await;
+                let _ = self
+                    .watch_manager
+                    .start(
+                        sink,
+                        ctx.clone(),
+                        "".to_string(),
+                        "nodes".to_string(),
+                        node_ch,
+                        paths,
+                    )
+                    .await;
             } else if let Some(pos) = self.active_watch_pool.iter().position(|c| c == &node_ch) {
                 let c = self.active_watch_pool.remove(pos);
                 self.active_watch_pool.push(c);
@@ -1411,7 +1921,17 @@ impl App {
                 let paths = self.kubeconfig_paths.clone();
                 self.active_watch_channels.insert(pod_ch.clone());
                 self.active_watch_pool.push(pod_ch.clone());
-                let _ = self.watch_manager.start(sink, ctx.clone(), ns.clone(), "pods".to_string(), pod_ch, paths).await;
+                let _ = self
+                    .watch_manager
+                    .start(
+                        sink,
+                        ctx.clone(),
+                        ns.clone(),
+                        "pods".to_string(),
+                        pod_ch,
+                        paths,
+                    )
+                    .await;
             } else if let Some(pos) = self.active_watch_pool.iter().position(|c| c == &pod_ch) {
                 let c = self.active_watch_pool.remove(pos);
                 self.active_watch_pool.push(c);
@@ -1447,6 +1967,16 @@ impl App {
             return;
         }
 
+        let is_crd_table = matches!(self.active_view, ActiveView::Table(ref table) if table.kind == ResourceKind::CustomResourceDefinitions);
+        if is_crd_table {
+            let items = self.crds_to_table_items();
+            if let ActiveView::Table(ref mut table) = self.active_view {
+                table.set_items(items, &self.filter_buffer);
+                table.is_loading = false;
+            }
+            return;
+        }
+
         if let ActiveView::Table(table) = &mut self.active_view {
             if table.kind == ResourceKind::Workloads {
                 let ctx = self.active_context.clone();
@@ -1456,7 +1986,13 @@ impl App {
 
                 self.rebuild_workloads_table();
 
-                let constituent_kinds = ["deployments", "statefulsets", "daemonsets", "pods", "cronjobs"];
+                let constituent_kinds = [
+                    "deployments",
+                    "statefulsets",
+                    "daemonsets",
+                    "pods",
+                    "cronjobs",
+                ];
                 for kind in &constituent_kinds {
                     let ch = format!("watch:{}:{}:{}", ctx, ns, kind);
                     if !self.watch_manager.has_channel(&ch) {
@@ -1469,7 +2005,10 @@ impl App {
                         let paths = self.kubeconfig_paths.clone();
                         self.active_watch_channels.insert(ch.clone());
                         self.active_watch_pool.push(ch.clone());
-                        let _ = self.watch_manager.start(sink, ctx.clone(), ns.clone(), kind.to_string(), ch, paths).await;
+                        let _ = self
+                            .watch_manager
+                            .start(sink, ctx.clone(), ns.clone(), kind.to_string(), ch, paths)
+                            .await;
                     } else if let Some(pos) = self.active_watch_pool.iter().position(|c| c == &ch) {
                         let c = self.active_watch_pool.remove(pos);
                         self.active_watch_pool.push(c);
@@ -1488,7 +2027,10 @@ impl App {
                 self.current_watch_channel = Some(channel.clone());
 
                 // 1. Instant Cache Render: If we already have items in memory, render immediately!
-                if let Some(cached) = self.resource_cache.get(&(ctx.clone(), ns.clone(), kind.clone())) {
+                if let Some(cached) =
+                    self.resource_cache
+                        .get(&(ctx.clone(), ns.clone(), kind.clone()))
+                {
                     table.set_items(cached.clone(), &self.filter_buffer);
                     table.is_loading = false;
                 } else {
@@ -1512,7 +2054,10 @@ impl App {
                     let paths = self.kubeconfig_paths.clone();
                     self.active_watch_channels.insert(channel.clone());
                     self.active_watch_pool.push(channel.clone());
-                    let _ = self.watch_manager.start(sink, ctx, ns, kind.clone(), channel, paths).await;
+                    let _ = self
+                        .watch_manager
+                        .start(sink, ctx, ns, kind.clone(), channel, paths)
+                        .await;
                 } else {
                     // Move to most-recently-used in pool
                     if let Some(pos) = self.active_watch_pool.iter().position(|c| c == &channel) {
@@ -1547,8 +2092,14 @@ impl App {
                 let cached = self
                     .resource_cache
                     .get(&(ctx.clone(), ns.clone(), res_key.clone()))
-                    .or_else(|| self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.kind.clone())))
-                    .or_else(|| self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.plural.clone())));
+                    .or_else(|| {
+                        self.resource_cache
+                            .get(&(ctx.clone(), ns.clone(), crd.kind.clone()))
+                    })
+                    .or_else(|| {
+                        self.resource_cache
+                            .get(&(ctx.clone(), ns.clone(), crd.plural.clone()))
+                    });
                 if let Some(cached) = cached {
                     table.set_items(cached.clone(), &self.filter_buffer);
                     table.is_loading = false;
@@ -1580,7 +2131,10 @@ impl App {
                         plural: crd.plural.clone(),
                         namespaced: crd.namespaced,
                     };
-                    let _ = self.watch_manager.start_custom(sink, ctx, ns, target, channel, paths).await;
+                    let _ = self
+                        .watch_manager
+                        .start_custom(sink, ctx, ns, target, channel, paths)
+                        .await;
                 } else {
                     // Move to most-recently-used in pool
                     if let Some(pos) = self.active_watch_pool.iter().position(|c| c == &channel) {
@@ -1600,7 +2154,10 @@ impl App {
         // Global Ctrl+C handler -> Immediately kill/exit TUI cleanly,
         // unless in Assistant view where Ctrl+C is used to copy selection or assistant reply.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if !matches!(self.active_view, ActiveView::Assistant) || self.modal.is_some() || self.show_help {
+            if !matches!(self.active_view, ActiveView::Assistant)
+                || self.modal.is_some()
+                || self.show_help
+            {
                 self.is_running = false;
                 return;
             }
@@ -1615,7 +2172,10 @@ impl App {
 
         // 1. Help Modal Open
         if self.show_help {
-            if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') || key.code == KeyCode::Char('?') {
+            if key.code == KeyCode::Esc
+                || key.code == KeyCode::Char('q')
+                || key.code == KeyCode::Char('?')
+            {
                 self.show_help = false;
             }
             return;
@@ -1625,24 +2185,45 @@ impl App {
         if let Some(modal) = self.modal.clone() {
             match modal {
                 Modal::FeatureBanner { .. } => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        || key.modifiers.contains(KeyModifiers::ALT)
+                    {
                         return;
                     }
                     match key.code {
-                        KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                        KeyCode::Esc
+                        | KeyCode::Enter
+                        | KeyCode::Char(' ')
+                        | KeyCode::Char('q')
+                        | KeyCode::Char('Q') => {
                             self.modal = None;
                         }
                         KeyCode::Char('t') | KeyCode::Char('T') => {
-                            self.tui_config.show_feature_banner = !self.tui_config.show_feature_banner;
+                            self.tui_config.show_feature_banner =
+                                !self.tui_config.show_feature_banner;
                             let save_result = self.tui_config.save();
                             let is_enabled = self.tui_config.show_feature_banner;
-                            self.modal = Some(Modal::FeatureBanner { show_on_startup: is_enabled });
+                            self.modal = Some(Modal::FeatureBanner {
+                                show_on_startup: is_enabled,
+                                update_available: self.tui_config.update_available.clone(),
+                            });
                             if let Err(err) = save_result {
-                                self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                                self.set_toast(
+                                    format!(
+                                        "Settings applied for this session but not saved: {err}"
+                                    ),
+                                    Theme::status_error(),
+                                );
                             } else if is_enabled {
-                                self.set_toast("Startup feature banner: Enabled".to_string(), Theme::status_ok());
+                                self.set_toast(
+                                    "Startup feature banner: Enabled".to_string(),
+                                    Theme::status_ok(),
+                                );
                             } else {
-                                self.set_toast("Startup feature banner: Disabled".to_string(), Theme::status_warn());
+                                self.set_toast(
+                                    "Startup feature banner: Disabled".to_string(),
+                                    Theme::status_warn(),
+                                );
                             }
                         }
                         KeyCode::Char(':') => {
@@ -1673,7 +2254,8 @@ impl App {
                         }
                         KeyCode::Char('5') => {
                             self.modal = None;
-                            self.switch_view_to_kind(ResourceKind::ArgoApplications).await;
+                            self.switch_view_to_kind(ResourceKind::ArgoApplications)
+                                .await;
                         }
                         KeyCode::Char('6') => {
                             self.modal = None;
@@ -1688,27 +2270,53 @@ impl App {
                             self.switch_view_to_kind(ResourceKind::TuiConfig).await;
                         }
                         KeyCode::Char('9') => {
-                            self.set_toast("Already viewing feature banner (:banner)".to_string(), Theme::status_ok());
+                            self.set_toast(
+                                "Already viewing feature banner (:banner)".to_string(),
+                                Theme::status_ok(),
+                            );
                         }
                         KeyCode::Char('0') => {
                             self.modal = None;
                             self.switch_view_to_kind(ResourceKind::Nodes).await;
                         }
+                        KeyCode::Char('b') | KeyCode::Char('B') => {
+                            self.modal = None;
+                            self.switch_view_to_kind(ResourceKind::BgpPeers).await;
+                        }
+                        KeyCode::Char('i') | KeyCode::Char('I') => {
+                            self.modal = None;
+                            self.open_add_cluster_modal();
+                        }
+                        KeyCode::Char('u') | KeyCode::Char('U') => {
+                            if let Some(ref ver) = self.tui_config.update_available {
+                                self.set_toast(
+                                    format!(
+                                        "▲ Update available: {} — run 'srelens-tui update' in your terminal to install",
+                                        ver
+                                    ),
+                                    Theme::status_warn(),
+                                );
+                            } else {
+                                self.set_toast(
+                                    "Checking for updates...".to_string(),
+                                    Theme::status_ok(),
+                                );
+                                self.spawn_update_check();
+                            }
+                        }
                         _ => {}
                     }
                 }
-                Modal::Confirm { action_name, .. } => {
-                    match key.code {
-                        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            self.modal = None;
-                            self.execute_modal_confirm(action_name).await;
-                        }
-                        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                            self.modal = None;
-                        }
-                        _ => {}
+                Modal::Confirm { action_name, .. } => match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        self.modal = None;
+                        self.execute_modal_confirm(action_name).await;
                     }
-                }
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        self.modal = None;
+                    }
+                    _ => {}
+                },
                 Modal::InputConfirm {
                     title,
                     message,
@@ -1716,64 +2324,75 @@ impl App {
                     required_input,
                     mut current_input,
                     is_destructive,
-                } => {
-                    match key.code {
-                        KeyCode::Enter => {
-                            if current_input.trim().eq_ignore_ascii_case(&required_input) {
-                                self.modal = None;
-                                self.execute_modal_confirm(action_name).await;
-                            }
-                        }
-                        KeyCode::Esc => {
+                } => match key.code {
+                    KeyCode::Enter => {
+                        if current_input.trim().eq_ignore_ascii_case(&required_input) {
                             self.modal = None;
+                            self.execute_modal_confirm(action_name).await;
                         }
-                        KeyCode::Backspace => {
-                            current_input.pop();
-                            self.modal = Some(Modal::InputConfirm {
-                                title,
-                                message,
-                                action_name,
-                                required_input,
-                                current_input,
-                                is_destructive,
-                            });
-                        }
-                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
-                            current_input.push(c);
-                            self.modal = Some(Modal::InputConfirm {
-                                title,
-                                message,
-                                action_name,
-                                required_input,
-                                current_input,
-                                is_destructive,
-                            });
-                        }
-                        _ => {}
                     }
-                }
-                Modal::Scale { workload_name, mut input, current_replicas } => {
-                    match key.code {
-                        KeyCode::Char(c) if c.is_ascii_digit() => {
-                            input.push(c);
-                            self.modal = Some(Modal::Scale { workload_name, input, current_replicas });
-                        }
-                        KeyCode::Backspace => {
-                            input.pop();
-                            self.modal = Some(Modal::Scale { workload_name, input, current_replicas });
-                        }
-                        KeyCode::Enter => {
-                            self.modal = None;
-                            if let Ok(count) = input.parse::<i32>() {
-                                self.execute_scale_workload(workload_name, count).await;
-                            }
-                        }
-                        KeyCode::Esc => {
-                            self.modal = None;
-                        }
-                        _ => {}
+                    KeyCode::Esc => {
+                        self.modal = None;
                     }
-                }
+                    KeyCode::Backspace => {
+                        current_input.pop();
+                        self.modal = Some(Modal::InputConfirm {
+                            title,
+                            message,
+                            action_name,
+                            required_input,
+                            current_input,
+                            is_destructive,
+                        });
+                    }
+                    KeyCode::Char(c)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        current_input.push(c);
+                        self.modal = Some(Modal::InputConfirm {
+                            title,
+                            message,
+                            action_name,
+                            required_input,
+                            current_input,
+                            is_destructive,
+                        });
+                    }
+                    _ => {}
+                },
+                Modal::Scale {
+                    workload_name,
+                    mut input,
+                    current_replicas,
+                } => match key.code {
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        input.push(c);
+                        self.modal = Some(Modal::Scale {
+                            workload_name,
+                            input,
+                            current_replicas,
+                        });
+                    }
+                    KeyCode::Backspace => {
+                        input.pop();
+                        self.modal = Some(Modal::Scale {
+                            workload_name,
+                            input,
+                            current_replicas,
+                        });
+                    }
+                    KeyCode::Enter => {
+                        self.modal = None;
+                        if let Ok(count) = input.parse::<i32>() {
+                            self.execute_scale_workload(workload_name, count).await;
+                        }
+                    }
+                    KeyCode::Esc => {
+                        self.modal = None;
+                    }
+                    _ => {}
+                },
                 Modal::NodeSsh {
                     node_name,
                     mut destination_input,
@@ -1797,7 +2416,11 @@ impl App {
                                 pos -= 1;
                             }
                             cursor_pos = pos;
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
                         KeyCode::Char('b') | KeyCode::Char('B')
                             if key.modifiers.contains(KeyModifiers::ALT) =>
@@ -1811,7 +2434,11 @@ impl App {
                                 pos -= 1;
                             }
                             cursor_pos = pos;
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
 
                         // 2. Skip word right: Option+Right, Ctrl+Right, or Alt+f / Alt+F
@@ -1829,7 +2456,11 @@ impl App {
                                 pos += 1;
                             }
                             cursor_pos = pos;
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
                         KeyCode::Char('f') | KeyCode::Char('F')
                             if key.modifiers.contains(KeyModifiers::ALT) =>
@@ -1844,7 +2475,11 @@ impl App {
                                 pos += 1;
                             }
                             cursor_pos = pos;
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
 
                         // 3. Start of Text: Ctrl+A, Cmd+A, Cmd+Left, Home
@@ -1853,15 +2488,27 @@ impl App {
                                 || key.modifiers.contains(KeyModifiers::SUPER) =>
                         {
                             cursor_pos = 0;
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
                         KeyCode::Left if key.modifiers.contains(KeyModifiers::SUPER) => {
                             cursor_pos = 0;
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
                         KeyCode::Home => {
                             cursor_pos = 0;
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
 
                         // 4. End of Text: Ctrl+E, Cmd+E, Cmd+Right, End
@@ -1870,28 +2517,48 @@ impl App {
                                 || key.modifiers.contains(KeyModifiers::SUPER) =>
                         {
                             cursor_pos = destination_input.chars().count();
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
                         KeyCode::Right if key.modifiers.contains(KeyModifiers::SUPER) => {
                             cursor_pos = destination_input.chars().count();
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
                         KeyCode::End => {
                             cursor_pos = destination_input.chars().count();
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
 
                         // 5. Single character Left / Right
                         KeyCode::Left => {
                             cursor_pos = cursor_pos.saturating_sub(1);
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
                         KeyCode::Right => {
                             let len = destination_input.chars().count();
                             if cursor_pos < len {
                                 cursor_pos += 1;
                             }
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
 
                         // 6. Delete word backwards (Ctrl+W, Option+Backspace, etc.)
@@ -1911,7 +2578,11 @@ impl App {
                                 destination_input = new_chars.into_iter().collect();
                                 cursor_pos = i;
                             }
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
 
                         // 7. Backspace
@@ -1923,7 +2594,11 @@ impl App {
                                 destination_input = chars.into_iter().collect();
                                 cursor_pos = pos - 1;
                             }
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
 
                         // 8. Delete
@@ -1934,7 +2609,11 @@ impl App {
                                 chars.remove(pos);
                                 destination_input = chars.into_iter().collect();
                             }
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
 
                         // 9. Typed characters
@@ -1947,7 +2626,11 @@ impl App {
                             chars.insert(pos, c);
                             destination_input = chars.into_iter().collect();
                             cursor_pos = pos + 1;
-                            self.modal = Some(Modal::NodeSsh { node_name, destination_input, cursor_pos });
+                            self.modal = Some(Modal::NodeSsh {
+                                node_name,
+                                destination_input,
+                                cursor_pos,
+                            });
                         }
 
                         // 10. Submit
@@ -1968,87 +2651,146 @@ impl App {
                         _ => {}
                     }
                 }
-                Modal::PortForward { pod_name, namespace, container_port, mut local_port_input, kind } => {
-                    match key.code {
-                        KeyCode::Char(c) if c.is_ascii_digit() => {
-                            local_port_input.push(c);
-                            self.modal = Some(Modal::PortForward { pod_name, namespace, container_port, local_port_input, kind });
-                        }
-                        KeyCode::Backspace => {
-                            local_port_input.pop();
-                            self.modal = Some(Modal::PortForward { pod_name, namespace, container_port, local_port_input, kind });
-                        }
-                        KeyCode::Enter => {
-                            self.modal = None;
-                            if let Ok(local_port) = local_port_input.parse::<u16>() {
-                                self.execute_start_port_forward(
-                                    pod_name,
-                                    kind,
-                                    namespace,
-                                    local_port,
-                                    container_port,
-                                ).await;
-                            }
-                        }
-                        KeyCode::Esc => {
-                            self.modal = None;
-                        }
-                        _ => {}
+                Modal::PortForward {
+                    pod_name,
+                    namespace,
+                    container_port,
+                    mut local_port_input,
+                    kind,
+                } => match key.code {
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        local_port_input.push(c);
+                        self.modal = Some(Modal::PortForward {
+                            pod_name,
+                            namespace,
+                            container_port,
+                            local_port_input,
+                            kind,
+                        });
                     }
-                }
-                Modal::ContainerPicker { containers, mut selected_idx, action, pod_name, namespace } => {
-                    match key.code {
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            if selected_idx > 0 {
-                                selected_idx -= 1;
-                            } else {
-                                selected_idx = containers.len().saturating_sub(1);
-                            }
-                            self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
+                    KeyCode::Backspace => {
+                        local_port_input.pop();
+                        self.modal = Some(Modal::PortForward {
+                            pod_name,
+                            namespace,
+                            container_port,
+                            local_port_input,
+                            kind,
+                        });
+                    }
+                    KeyCode::Enter => {
+                        self.modal = None;
+                        if let Ok(local_port) = local_port_input.parse::<u16>() {
+                            self.execute_start_port_forward(
+                                pod_name,
+                                kind,
+                                namespace,
+                                local_port,
+                                container_port,
+                            )
+                            .await;
                         }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if selected_idx + 1 < containers.len() {
-                                selected_idx += 1;
-                            } else {
-                                selected_idx = 0;
-                            }
-                            self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
-                        }
-                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    }
+                    KeyCode::Esc => {
+                        self.modal = None;
+                    }
+                    _ => {}
+                },
+                Modal::ContainerPicker {
+                    containers,
+                    mut selected_idx,
+                    action,
+                    pod_name,
+                    namespace,
+                } => match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if selected_idx > 0 {
+                            selected_idx -= 1;
+                        } else {
                             selected_idx = containers.len().saturating_sub(1);
-                            self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
                         }
-                        KeyCode::End | KeyCode::Char('G') => {
-                            selected_idx = containers.len().saturating_sub(1);
-                            self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
-                        }
-                        KeyCode::Home | KeyCode::Char('g') => {
+                        self.modal = Some(Modal::ContainerPicker {
+                            containers,
+                            selected_idx,
+                            action,
+                            pod_name,
+                            namespace,
+                        });
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if selected_idx + 1 < containers.len() {
+                            selected_idx += 1;
+                        } else {
                             selected_idx = 0;
-                            self.modal = Some(Modal::ContainerPicker { containers, selected_idx, action, pod_name, namespace });
                         }
-                        KeyCode::Enter => {
-                            let chosen_container = containers.get(selected_idx).cloned();
-                            self.modal = None;
-                            match action {
-                                ContainerAction::Logs => {
-                                    self.open_logs_view(pod_name, namespace, chosen_container).await;
-                                }
-                                ContainerAction::Shell => {
-                                    self.requires_terminal_suspend = Some(SuspendAction::PodShell {
-                                        pod: pod_name,
-                                        namespace,
-                                        container: chosen_container,
-                                    });
-                                }
+                        self.modal = Some(Modal::ContainerPicker {
+                            containers,
+                            selected_idx,
+                            action,
+                            pod_name,
+                            namespace,
+                        });
+                    }
+                    KeyCode::Char('g') | KeyCode::Char('G')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        selected_idx = containers.len().saturating_sub(1);
+                        self.modal = Some(Modal::ContainerPicker {
+                            containers,
+                            selected_idx,
+                            action,
+                            pod_name,
+                            namespace,
+                        });
+                    }
+                    KeyCode::End | KeyCode::Char('G') => {
+                        selected_idx = containers.len().saturating_sub(1);
+                        self.modal = Some(Modal::ContainerPicker {
+                            containers,
+                            selected_idx,
+                            action,
+                            pod_name,
+                            namespace,
+                        });
+                    }
+                    KeyCode::Home | KeyCode::Char('g') => {
+                        selected_idx = 0;
+                        self.modal = Some(Modal::ContainerPicker {
+                            containers,
+                            selected_idx,
+                            action,
+                            pod_name,
+                            namespace,
+                        });
+                    }
+                    KeyCode::Enter => {
+                        let chosen_container = containers.get(selected_idx).cloned();
+                        self.modal = None;
+                        match action {
+                            ContainerAction::Logs => {
+                                self.open_logs_view(pod_name, namespace, chosen_container)
+                                    .await;
+                            }
+                            ContainerAction::Shell => {
+                                self.requires_terminal_suspend = Some(SuspendAction::PodShell {
+                                    pod: pod_name,
+                                    namespace,
+                                    container: chosen_container,
+                                });
                             }
                         }
-                        KeyCode::Esc => {
-                            self.modal = None;
-                        }
-                        _ => {}
                     }
-                }
-                Modal::ContextPicker { contexts, mut selected_idx, mut filter, current_context } => {
+                    KeyCode::Esc => {
+                        self.modal = None;
+                    }
+                    _ => {}
+                },
+                Modal::ContextPicker {
+                    contexts,
+                    mut selected_idx,
+                    mut filter,
+                    current_context,
+                } => {
                     let lower_filter = filter.to_lowercase();
                     let filtered_indices: Vec<usize> = contexts
                         .iter()
@@ -2059,7 +2801,11 @@ impl App {
                             } else {
                                 c.name.to_lowercase().contains(&lower_filter)
                                     || c.cluster.to_lowercase().contains(&lower_filter)
-                                    || c.provider.as_deref().unwrap_or("").to_lowercase().contains(&lower_filter)
+                                    || c.provider
+                                        .as_deref()
+                                        .unwrap_or("")
+                                        .to_lowercase()
+                                        .contains(&lower_filter)
                                     || c.source_file.to_lowercase().contains(&lower_filter)
                             }
                         })
@@ -2074,7 +2820,12 @@ impl App {
                             } else {
                                 selected_idx = filtered_count.saturating_sub(1);
                             }
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                            self.modal = Some(Modal::ContextPicker {
+                                contexts,
+                                selected_idx,
+                                filter,
+                                current_context,
+                            });
                         }
                         KeyCode::Down => {
                             if selected_idx + 1 < filtered_count {
@@ -2082,7 +2833,12 @@ impl App {
                             } else {
                                 selected_idx = 0;
                             }
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                            self.modal = Some(Modal::ContextPicker {
+                                contexts,
+                                selected_idx,
+                                filter,
+                                current_context,
+                            });
                         }
                         KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if selected_idx > 0 {
@@ -2090,7 +2846,12 @@ impl App {
                             } else {
                                 selected_idx = filtered_count.saturating_sub(1);
                             }
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                            self.modal = Some(Modal::ContextPicker {
+                                contexts,
+                                selected_idx,
+                                filter,
+                                current_context,
+                            });
                         }
                         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if selected_idx + 1 < filtered_count {
@@ -2098,44 +2859,105 @@ impl App {
                             } else {
                                 selected_idx = 0;
                             }
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                            self.modal = Some(Modal::ContextPicker {
+                                contexts,
+                                selected_idx,
+                                filter,
+                                current_context,
+                            });
                         }
-                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('g') | KeyCode::Char('G')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
                             selected_idx = filtered_count.saturating_sub(1);
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                            self.modal = Some(Modal::ContextPicker {
+                                contexts,
+                                selected_idx,
+                                filter,
+                                current_context,
+                            });
                         }
                         KeyCode::End => {
                             selected_idx = filtered_count.saturating_sub(1);
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                            self.modal = Some(Modal::ContextPicker {
+                                contexts,
+                                selected_idx,
+                                filter,
+                                current_context,
+                            });
                         }
                         KeyCode::Home => {
                             selected_idx = 0;
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                            self.modal = Some(Modal::ContextPicker {
+                                contexts,
+                                selected_idx,
+                                filter,
+                                current_context,
+                            });
                         }
                         KeyCode::PageDown => {
                             selected_idx = (selected_idx + 5).min(filtered_count.saturating_sub(1));
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                            self.modal = Some(Modal::ContextPicker {
+                                contexts,
+                                selected_idx,
+                                filter,
+                                current_context,
+                            });
                         }
                         KeyCode::PageUp => {
                             selected_idx = selected_idx.saturating_sub(5);
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                            self.modal = Some(Modal::ContextPicker {
+                                contexts,
+                                selected_idx,
+                                filter,
+                                current_context,
+                            });
                         }
                         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             selected_idx = (selected_idx + 5).min(filtered_count.saturating_sub(1));
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                            self.modal = Some(Modal::ContextPicker {
+                                contexts,
+                                selected_idx,
+                                filter,
+                                current_context,
+                            });
                         }
-                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                        KeyCode::Char('a')
+                        | KeyCode::Char('A')
+                        | KeyCode::Char('i')
+                        | KeyCode::Char('I')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            self.open_add_cluster_modal();
+                        }
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
                             filter.push(c);
                             selected_idx = 0;
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                            self.modal = Some(Modal::ContextPicker {
+                                contexts,
+                                selected_idx,
+                                filter,
+                                current_context,
+                            });
                         }
                         KeyCode::Backspace => {
                             filter.pop();
                             selected_idx = 0;
-                            self.modal = Some(Modal::ContextPicker { contexts, selected_idx, filter, current_context });
+                            self.modal = Some(Modal::ContextPicker {
+                                contexts,
+                                selected_idx,
+                                filter,
+                                current_context,
+                            });
                         }
                         KeyCode::Enter => {
-                            let target_ctx = filtered_indices.get(selected_idx).and_then(|&orig_idx| contexts.get(orig_idx)).map(|c| c.name.clone());
+                            let target_ctx = filtered_indices
+                                .get(selected_idx)
+                                .and_then(|&orig_idx| contexts.get(orig_idx))
+                                .map(|c| c.name.clone());
                             self.modal = None;
                             if let Some(ctx) = target_ctx {
                                 self.switch_context(ctx).await;
@@ -2147,7 +2969,170 @@ impl App {
                         _ => {}
                     }
                 }
-                Modal::NamespacePicker { namespaces, mut selected_idx, mut filter, current_namespace } => {
+                Modal::AddCluster {
+                    mut input,
+                    mut cursor_pos,
+                    mut error_message,
+                    mut preview_contexts,
+                } => match key.code {
+                    KeyCode::Esc => {
+                        self.modal = None;
+                    }
+                    KeyCode::Enter => match self.import_kubeconfig(&input).await {
+                        Ok(ctx_name) => {
+                            self.modal = None;
+                            self.switch_context_forced(ctx_name.clone()).await;
+                            self.set_toast(
+                                format!("✓ Imported and switched to context '{}'", ctx_name),
+                                Theme::status_ok(),
+                            );
+                        }
+                        Err(err) => {
+                            error_message = Some(err);
+                            self.modal = Some(Modal::AddCluster {
+                                input,
+                                cursor_pos,
+                                error_message,
+                                preview_contexts,
+                            });
+                        }
+                    },
+                    KeyCode::Char('v') | KeyCode::Char('V')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if let Some(clip) = get_clipboard_text() {
+                            match Self::apply_add_cluster_paste(
+                                &mut input,
+                                &mut cursor_pos,
+                                &clip,
+                                "Clipboard content exceeds 1 MB limit",
+                            ) {
+                                Ok(()) => {
+                                    let (preview, err) = Self::parse_add_cluster_preview(&input);
+                                    preview_contexts = preview;
+                                    error_message = err;
+                                }
+                                Err(msg) => {
+                                    error_message = Some(msg);
+                                }
+                            }
+                            self.modal = Some(Modal::AddCluster {
+                                input,
+                                cursor_pos,
+                                error_message,
+                                preview_contexts,
+                            });
+                        }
+                    }
+                    _ if is_word_delete_key(&key) => {
+                        delete_prev_word(&mut input);
+                        cursor_pos = input.chars().count();
+                        let (preview, err) = Self::parse_add_cluster_preview(&input);
+                        preview_contexts = preview;
+                        error_message = err;
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::Char('u') | KeyCode::Char('U')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        input.clear();
+                        cursor_pos = 0;
+                        preview_contexts.clear();
+                        error_message = None;
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::Backspace => {
+                        let mut chars: Vec<char> = input.chars().collect();
+                        if cursor_pos > 0 && !chars.is_empty() {
+                            chars.remove(cursor_pos - 1);
+                            cursor_pos -= 1;
+                            input = chars.into_iter().collect();
+                            let (preview, err) = Self::parse_add_cluster_preview(&input);
+                            preview_contexts = preview;
+                            error_message = err;
+                        }
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::Left => {
+                        cursor_pos = cursor_pos.saturating_sub(1);
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::Right => {
+                        cursor_pos = (cursor_pos + 1).min(input.chars().count());
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::Home => {
+                        cursor_pos = 0;
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::End => {
+                        cursor_pos = input.chars().count();
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    KeyCode::Char(c)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        if input.len() < 1024 * 1024 {
+                            let mut chars: Vec<char> = input.chars().collect();
+                            let pos = cursor_pos.min(chars.len());
+                            chars.insert(pos, c);
+                            cursor_pos += 1;
+                            input = chars.into_iter().collect();
+                            let (preview, err) = Self::parse_add_cluster_preview(&input);
+                            preview_contexts = preview;
+                            error_message = err;
+                        }
+                        self.modal = Some(Modal::AddCluster {
+                            input,
+                            cursor_pos,
+                            error_message,
+                            preview_contexts,
+                        });
+                    }
+                    _ => {}
+                },
+                Modal::NamespacePicker {
+                    namespaces,
+                    mut selected_idx,
+                    mut filter,
+                    current_namespace,
+                } => {
                     let all_filtered: Vec<String> = namespaces
                         .iter()
                         .filter(|n| n.contains(filter.as_str()))
@@ -2162,7 +3147,12 @@ impl App {
                             } else {
                                 selected_idx = filtered_count.saturating_sub(1);
                             }
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx,
+                                filter,
+                                current_namespace,
+                            });
                         }
                         KeyCode::Down => {
                             if selected_idx + 1 < filtered_count {
@@ -2170,7 +3160,12 @@ impl App {
                             } else {
                                 selected_idx = 0;
                             }
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx,
+                                filter,
+                                current_namespace,
+                            });
                         }
                         KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if selected_idx > 0 {
@@ -2178,7 +3173,12 @@ impl App {
                             } else {
                                 selected_idx = filtered_count.saturating_sub(1);
                             }
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx,
+                                filter,
+                                current_namespace,
+                            });
                         }
                         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if selected_idx + 1 < filtered_count {
@@ -2186,31 +3186,70 @@ impl App {
                             } else {
                                 selected_idx = 0;
                             }
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx,
+                                filter,
+                                current_namespace,
+                            });
                         }
-                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('g') | KeyCode::Char('G')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
                             selected_idx = filtered_count.saturating_sub(1);
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx,
+                                filter,
+                                current_namespace,
+                            });
                         }
                         KeyCode::End => {
                             selected_idx = filtered_count.saturating_sub(1);
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx,
+                                filter,
+                                current_namespace,
+                            });
                         }
                         KeyCode::Home => {
                             selected_idx = 0;
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx,
+                                filter,
+                                current_namespace,
+                            });
                         }
                         KeyCode::PageDown => {
-                            selected_idx = (selected_idx + 10).min(filtered_count.saturating_sub(1));
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                            selected_idx =
+                                (selected_idx + 10).min(filtered_count.saturating_sub(1));
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx,
+                                filter,
+                                current_namespace,
+                            });
                         }
                         KeyCode::PageUp => {
                             selected_idx = selected_idx.saturating_sub(10);
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx,
+                                filter,
+                                current_namespace,
+                            });
                         }
                         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            selected_idx = (selected_idx + 10).min(filtered_count.saturating_sub(1));
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx, filter, current_namespace });
+                            selected_idx =
+                                (selected_idx + 10).min(filtered_count.saturating_sub(1));
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx,
+                                filter,
+                                current_namespace,
+                            });
                         }
                         KeyCode::Char('0') if filter.is_empty() => {
                             self.modal = None;
@@ -2218,19 +3257,44 @@ impl App {
                         }
                         _ if is_word_delete_key(&key) => {
                             delete_prev_word(&mut filter);
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx: 0,
+                                filter,
+                                current_namespace,
+                            });
                         }
-                        KeyCode::Char('u') | KeyCode::Char('U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('u') | KeyCode::Char('U')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
                             filter.clear();
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx: 0,
+                                filter,
+                                current_namespace,
+                            });
                         }
                         KeyCode::Backspace => {
                             filter.pop();
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx: 0,
+                                filter,
+                                current_namespace,
+                            });
                         }
-                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
                             filter.push(c);
-                            self.modal = Some(Modal::NamespacePicker { namespaces, selected_idx: 0, filter, current_namespace });
+                            self.modal = Some(Modal::NamespacePicker {
+                                namespaces,
+                                selected_idx: 0,
+                                filter,
+                                current_namespace,
+                            });
                         }
                         KeyCode::Enter => {
                             let target_ns = all_filtered.get(selected_idx).cloned();
@@ -2328,7 +3392,9 @@ impl App {
                                 filter,
                             });
                         }
-                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('g') | KeyCode::Char('G')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
                             selected_idx = filtered_count.saturating_sub(1);
                             self.modal = Some(Modal::ActionPalette {
                                 resource_kind,
@@ -2406,7 +3472,10 @@ impl App {
                                 filter,
                             });
                         }
-                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
                             filter.push(c);
                             selected_idx = 0;
                             self.modal = Some(Modal::ActionPalette {
@@ -2435,104 +3504,142 @@ impl App {
                         _ => {}
                     }
                 }
-                Modal::MetricsTimeline(mut state) => {
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            self.modal = None;
-                        }
-                        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
-                            state.cycle_time_range();
-                            self.modal = Some(Modal::MetricsTimeline(state));
-                        }
-                        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
-                            state.cycle_time_range_prev();
-                            self.modal = Some(Modal::MetricsTimeline(state));
-                        }
-                        KeyCode::Char('1') => {
-                            state.range = crate::views::metrics_panel_view::MetricsTimeRange::FiveMin;
-                            self.modal = Some(Modal::MetricsTimeline(state));
-                        }
-                        KeyCode::Char('2') => {
-                            state.range = crate::views::metrics_panel_view::MetricsTimeRange::TenMin;
-                            self.modal = Some(Modal::MetricsTimeline(state));
-                        }
-                        KeyCode::Char('3') => {
-                            state.range = crate::views::metrics_panel_view::MetricsTimeRange::ThirtyMin;
-                            self.modal = Some(Modal::MetricsTimeline(state));
-                        }
-                        KeyCode::Char('4') => {
-                            state.range = crate::views::metrics_panel_view::MetricsTimeRange::OneHour;
-                            self.modal = Some(Modal::MetricsTimeline(state));
-                        }
-                        KeyCode::Char('r') => {
-                            if state.target_kind == "Node" {
-                                self.refresh_node_metrics();
-                            } else {
-                                self.refresh_pod_metrics();
-                            }
-                            self.modal = Some(Modal::MetricsTimeline(state));
-                            self.set_toast("Refreshing metrics...".to_string(), Theme::status_ok());
-                        }
-                        _ => {
-                            self.modal = Some(Modal::MetricsTimeline(state));
-                        }
+                Modal::MetricsTimeline(mut state) => match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        self.modal = None;
                     }
-                }
-                Modal::ReasonRail { tallies, mut selected_idx, active_filter } => {
-                    match key.code {
-                        KeyCode::Esc => {
-                            self.modal = None;
+                    KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                        state.cycle_time_range();
+                        self.modal = Some(Modal::MetricsTimeline(state));
+                    }
+                    KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                        state.cycle_time_range_prev();
+                        self.modal = Some(Modal::MetricsTimeline(state));
+                    }
+                    KeyCode::Char('1') => {
+                        state.range = crate::views::metrics_panel_view::MetricsTimeRange::FiveMin;
+                        self.modal = Some(Modal::MetricsTimeline(state));
+                    }
+                    KeyCode::Char('2') => {
+                        state.range = crate::views::metrics_panel_view::MetricsTimeRange::TenMin;
+                        self.modal = Some(Modal::MetricsTimeline(state));
+                    }
+                    KeyCode::Char('3') => {
+                        state.range = crate::views::metrics_panel_view::MetricsTimeRange::ThirtyMin;
+                        self.modal = Some(Modal::MetricsTimeline(state));
+                    }
+                    KeyCode::Char('4') => {
+                        state.range = crate::views::metrics_panel_view::MetricsTimeRange::OneHour;
+                        self.modal = Some(Modal::MetricsTimeline(state));
+                    }
+                    KeyCode::Char('r') => {
+                        if state.target_kind == "Node" {
+                            self.refresh_node_metrics();
+                        } else {
+                            self.refresh_pod_metrics();
                         }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            if selected_idx > 0 {
-                                selected_idx -= 1;
-                            }
-                            self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
+                        self.modal = Some(Modal::MetricsTimeline(state));
+                        self.set_toast("Refreshing metrics...".to_string(), Theme::status_ok());
+                    }
+                    _ => {
+                        self.modal = Some(Modal::MetricsTimeline(state));
+                    }
+                },
+                Modal::ReasonRail {
+                    tallies,
+                    mut selected_idx,
+                    active_filter,
+                } => match key.code {
+                    KeyCode::Esc => {
+                        self.modal = None;
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        if selected_idx > 0 {
+                            selected_idx -= 1;
                         }
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            if !tallies.is_empty() && selected_idx + 1 < tallies.len() {
-                                selected_idx += 1;
-                            }
-                            self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
+                        self.modal = Some(Modal::ReasonRail {
+                            tallies,
+                            selected_idx,
+                            active_filter,
+                        });
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        if !tallies.is_empty() && selected_idx + 1 < tallies.len() {
+                            selected_idx += 1;
                         }
-                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if !tallies.is_empty() {
-                                selected_idx = tallies.len().saturating_sub(1);
-                            }
-                            self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
+                        self.modal = Some(Modal::ReasonRail {
+                            tallies,
+                            selected_idx,
+                            active_filter,
+                        });
+                    }
+                    KeyCode::Char('g') | KeyCode::Char('G')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if !tallies.is_empty() {
+                            selected_idx = tallies.len().saturating_sub(1);
                         }
-                        KeyCode::End => {
-                            if !tallies.is_empty() {
-                                selected_idx = tallies.len().saturating_sub(1);
-                            }
-                            self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
+                        self.modal = Some(Modal::ReasonRail {
+                            tallies,
+                            selected_idx,
+                            active_filter,
+                        });
+                    }
+                    KeyCode::End => {
+                        if !tallies.is_empty() {
+                            selected_idx = tallies.len().saturating_sub(1);
                         }
-                        KeyCode::Home => {
-                            selected_idx = 0;
-                            self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
-                        }
-                        KeyCode::Enter => {
-                            if let Some(tally) = tallies.get(selected_idx) {
-                                if let ActiveView::Table(table) = &mut self.active_view {
-                                    table.set_reason_filter(Some(tally.reason.clone()), &self.filter_buffer);
-                                    self.set_toast(format!("Filtered events by reason: {}", tally.reason), Theme::status_ok());
-                                }
-                            }
-                            self.modal = None;
-                        }
-                        KeyCode::Char('c') | KeyCode::Backspace => {
+                        self.modal = Some(Modal::ReasonRail {
+                            tallies,
+                            selected_idx,
+                            active_filter,
+                        });
+                    }
+                    KeyCode::Home => {
+                        selected_idx = 0;
+                        self.modal = Some(Modal::ReasonRail {
+                            tallies,
+                            selected_idx,
+                            active_filter,
+                        });
+                    }
+                    KeyCode::Enter => {
+                        if let Some(tally) = tallies.get(selected_idx) {
                             if let ActiveView::Table(table) = &mut self.active_view {
-                                table.set_reason_filter(None, &self.filter_buffer);
-                                self.set_toast("Cleared event reason filter".to_string(), Theme::status_ok());
+                                table.set_reason_filter(
+                                    Some(tally.reason.clone()),
+                                    &self.filter_buffer,
+                                );
+                                self.set_toast(
+                                    format!("Filtered events by reason: {}", tally.reason),
+                                    Theme::status_ok(),
+                                );
                             }
-                            self.modal = None;
                         }
-                        _ => {
-                            self.modal = Some(Modal::ReasonRail { tallies, selected_idx, active_filter });
-                        }
+                        self.modal = None;
                     }
-                }
-                Modal::ThemePicker { mut selected_idx, initial_theme_idx } => {
+                    KeyCode::Char('c') | KeyCode::Backspace => {
+                        if let ActiveView::Table(table) = &mut self.active_view {
+                            table.set_reason_filter(None, &self.filter_buffer);
+                            self.set_toast(
+                                "Cleared event reason filter".to_string(),
+                                Theme::status_ok(),
+                            );
+                        }
+                        self.modal = None;
+                    }
+                    _ => {
+                        self.modal = Some(Modal::ReasonRail {
+                            tallies,
+                            selected_idx,
+                            active_filter,
+                        });
+                    }
+                },
+                Modal::ThemePicker {
+                    mut selected_idx,
+                    initial_theme_idx,
+                } => {
                     let total = Theme::all_themes().len();
                     match key.code {
                         KeyCode::Esc => {
@@ -2546,7 +3653,10 @@ impl App {
                                 selected_idx = total.saturating_sub(1);
                             }
                             Theme::set_theme_by_index(selected_idx);
-                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                            self.modal = Some(Modal::ThemePicker {
+                                selected_idx,
+                                initial_theme_idx,
+                            });
                         }
                         KeyCode::Char('j') | KeyCode::Down => {
                             if selected_idx + 1 < total {
@@ -2555,33 +3665,53 @@ impl App {
                                 selected_idx = 0;
                             }
                             Theme::set_theme_by_index(selected_idx);
-                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                            self.modal = Some(Modal::ThemePicker {
+                                selected_idx,
+                                initial_theme_idx,
+                            });
                         }
-                        KeyCode::Char('g') | KeyCode::Char('G') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('g') | KeyCode::Char('G')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
                             selected_idx = total.saturating_sub(1);
                             Theme::set_theme_by_index(selected_idx);
-                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                            self.modal = Some(Modal::ThemePicker {
+                                selected_idx,
+                                initial_theme_idx,
+                            });
                         }
                         KeyCode::End => {
                             selected_idx = total.saturating_sub(1);
                             Theme::set_theme_by_index(selected_idx);
-                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                            self.modal = Some(Modal::ThemePicker {
+                                selected_idx,
+                                initial_theme_idx,
+                            });
                         }
                         KeyCode::Home => {
                             selected_idx = 0;
                             Theme::set_theme_by_index(selected_idx);
-                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                            self.modal = Some(Modal::ThemePicker {
+                                selected_idx,
+                                initial_theme_idx,
+                            });
                         }
                         KeyCode::Enter => {
                             Theme::set_theme_by_index(selected_idx);
                             let palette = Theme::active_palette();
                             self.ai_settings.theme = Some(palette.name.to_string());
                             let _ = self.ai_settings.save();
-                            self.set_toast(format!("Theme set to {}", palette.display_name), Theme::status_ok());
+                            self.set_toast(
+                                format!("Theme set to {}", palette.display_name),
+                                Theme::status_ok(),
+                            );
                             self.modal = None;
                         }
                         _ => {
-                            self.modal = Some(Modal::ThemePicker { selected_idx, initial_theme_idx });
+                            self.modal = Some(Modal::ThemePicker {
+                                selected_idx,
+                                initial_theme_idx,
+                            });
                         }
                     }
                 }
@@ -2604,9 +3734,11 @@ impl App {
                     if !trimmed.is_empty()
                         && (trimmed == "save-ai"
                             || trimmed == "export-ai"
-                            || (trimmed == "save" && matches!(self.active_view, ActiveView::Assistant))
+                            || (trimmed == "save"
+                                && matches!(self.active_view, ActiveView::Assistant))
                             || trimmed == "clear-ai"
-                            || (trimmed == "clear" && matches!(self.active_view, ActiveView::Assistant))
+                            || (trimmed == "clear"
+                                && matches!(self.active_view, ActiveView::Assistant))
                             || trimmed == "tree"
                             || trimmed == "lineage"
                             || trimmed == "related"
@@ -2625,8 +3757,11 @@ impl App {
                         return;
                     }
 
-                    let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
-                    let target = if !suggestions.is_empty() && self.command_suggestion_idx < suggestions.len() {
+                    let suggestions =
+                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let target = if !suggestions.is_empty()
+                        && self.command_suggestion_idx < suggestions.len()
+                    {
                         Some(suggestions[self.command_suggestion_idx].0.target.clone())
                     } else {
                         None
@@ -2637,12 +3772,18 @@ impl App {
                     self.command_suggestion_idx = 0;
                     if let Some(target) = target {
                         self.execute_command_target(target).await;
-                    } else if !fallback_cmd.trim().trim_start_matches(':').trim().is_empty() {
+                    } else if !fallback_cmd
+                        .trim()
+                        .trim_start_matches(':')
+                        .trim()
+                        .is_empty()
+                    {
                         self.execute_colon_command(&fallback_cmd).await;
                     }
                 }
                 KeyCode::Tab => {
-                    let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let suggestions =
+                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
                     if !suggestions.is_empty() {
                         let idx = self.command_suggestion_idx % suggestions.len();
                         self.command_buffer = suggestions[idx].0.name.clone();
@@ -2650,28 +3791,38 @@ impl App {
                         // Names and aliases can collide, so follow the selected
                         // target (including its CRD group), not the old index.
                         let target = &suggestions[idx].0.target;
-                        self.command_suggestion_idx = command_suggestions_with_crds(&self.command_buffer, &self.crds)
-                            .iter()
-                            .position(|(command, _)| &command.target == target)
-                            .unwrap_or(0);
+                        self.command_suggestion_idx =
+                            command_suggestions_with_crds(&self.command_buffer, &self.crds)
+                                .iter()
+                                .position(|(command, _)| &command.target == target)
+                                .unwrap_or(0);
                     }
                 }
                 KeyCode::BackTab => {
-                    let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                    let suggestions =
+                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
                     if !suggestions.is_empty() {
                         let len = suggestions.len();
                         let idx = (self.command_suggestion_idx + len - 1) % len;
                         self.command_suggestion_idx = idx;
                     }
                 }
-                KeyCode::Down | KeyCode::Char('n') | KeyCode::Char('N') if key.code == KeyCode::Down || key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                KeyCode::Down | KeyCode::Char('n') | KeyCode::Char('N')
+                    if key.code == KeyCode::Down
+                        || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    let suggestions =
+                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
                     if !suggestions.is_empty() {
-                        self.command_suggestion_idx = (self.command_suggestion_idx + 1) % suggestions.len();
+                        self.command_suggestion_idx =
+                            (self.command_suggestion_idx + 1) % suggestions.len();
                     }
                 }
-                KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P') if key.code == KeyCode::Up || key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let suggestions = command_suggestions_with_crds(&self.command_buffer, &self.crds);
+                KeyCode::Up | KeyCode::Char('p') | KeyCode::Char('P')
+                    if key.code == KeyCode::Up || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    let suggestions =
+                        command_suggestions_with_crds(&self.command_buffer, &self.crds);
                     if !suggestions.is_empty() {
                         let len = suggestions.len();
                         self.command_suggestion_idx = (self.command_suggestion_idx + len - 1) % len;
@@ -2685,7 +3836,9 @@ impl App {
                         self.command_suggestion_idx = 0;
                     }
                 }
-                KeyCode::Char('u') | KeyCode::Char('U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('u') | KeyCode::Char('U')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
                     self.command_buffer.clear();
                     self.command_suggestion_idx = 0;
                 }
@@ -2696,14 +3849,19 @@ impl App {
                         self.input_mode = InputMode::Normal;
                     }
                 }
-                KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('v') | KeyCode::Char('V')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
                     if let Some(clip) = get_clipboard_text() {
                         let cleaned = clip.replace("\r\n", " ").replace('\n', " ");
                         self.command_buffer.push_str(&cleaned);
                         self.command_suggestion_idx = 0;
                     }
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
                     self.command_buffer.push(c);
                     self.command_suggestion_idx = 0;
                 }
@@ -2728,14 +3886,20 @@ impl App {
                     };
 
                     if only_one {
-                        self.handle_view_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+                        self.handle_view_key_event(KeyEvent::new(
+                            KeyCode::Enter,
+                            KeyModifiers::NONE,
+                        ))
+                        .await;
                     }
                 }
                 _ if is_word_delete_key(&key) => {
                     delete_prev_word(&mut self.filter_buffer);
                     self.apply_current_filter();
                 }
-                KeyCode::Char('u') | KeyCode::Char('U') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('u') | KeyCode::Char('U')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
                     self.filter_buffer.clear();
                     self.apply_current_filter();
                 }
@@ -2743,14 +3907,19 @@ impl App {
                     self.filter_buffer.pop();
                     self.apply_current_filter();
                 }
-                KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('v') | KeyCode::Char('V')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
                     if let Some(clip) = get_clipboard_text() {
                         let cleaned = clip.replace("\r\n", "").replace('\n', "");
                         self.filter_buffer.push_str(&cleaned);
                         self.apply_current_filter();
                     }
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
                     self.filter_buffer.push(c);
                     self.apply_current_filter();
                 }
@@ -2785,7 +3954,10 @@ impl App {
         // 6. Normal Mode - k9s Global & View Keybindings
         match key.code {
             // Enter Command Mode
-            KeyCode::Char(':') if !matches!(self.active_view, ActiveView::Assistant) || self.assistant_state.input.is_empty() => {
+            KeyCode::Char(':')
+                if !matches!(self.active_view, ActiveView::Assistant)
+                    || self.assistant_state.input.is_empty() =>
+            {
                 self.input_mode = InputMode::Command;
                 self.command_buffer.clear();
             }
@@ -2798,14 +3970,27 @@ impl App {
                     ActiveView::Logs(logs) => self.filter_buffer = logs.search_query.clone(),
                     ActiveView::Top(top) => self.filter_buffer = top.filter.clone(),
                     ActiveView::Helm(helm) => self.filter_buffer = helm.filter_query.clone(),
-                    ActiveView::HelmDetail(detail) => self.filter_buffer = detail.search_query.clone(),
+                    ActiveView::HelmDetail(detail) => {
+                        self.filter_buffer = detail.search_query.clone()
+                    }
                     ActiveView::Argo(argo) => self.filter_buffer = argo.filter_query.clone(),
-                    ActiveView::ArgoDetail(detail) => self.filter_buffer = detail.search_query.clone(),
+                    ActiveView::ArgoDetail(detail) => {
+                        self.filter_buffer = detail.search_query.clone()
+                    }
+                    ActiveView::Bgp(bgp) => self.filter_buffer = bgp.search_query.clone(),
                     _ => {}
                 }
             }
             // Next search match in text views (Describe, YAML, Logs, HelmDetail)
-            KeyCode::Char('n') if matches!(self.active_view, ActiveView::Describe(_) | ActiveView::Yaml(_) | ActiveView::Logs(_) | ActiveView::HelmDetail(_)) => {
+            KeyCode::Char('n')
+                if matches!(
+                    self.active_view,
+                    ActiveView::Describe(_)
+                        | ActiveView::Yaml(_)
+                        | ActiveView::Logs(_)
+                        | ActiveView::HelmDetail(_)
+                ) =>
+            {
                 match &mut self.active_view {
                     ActiveView::Describe(desc) => desc.next_match(),
                     ActiveView::Yaml(yaml) => yaml.next_match(),
@@ -2815,7 +4000,15 @@ impl App {
                 }
             }
             // Previous search match in text views (Describe, YAML, Logs, HelmDetail)
-            KeyCode::Char('N') if matches!(self.active_view, ActiveView::Describe(_) | ActiveView::Yaml(_) | ActiveView::Logs(_) | ActiveView::HelmDetail(_)) => {
+            KeyCode::Char('N')
+                if matches!(
+                    self.active_view,
+                    ActiveView::Describe(_)
+                        | ActiveView::Yaml(_)
+                        | ActiveView::Logs(_)
+                        | ActiveView::HelmDetail(_)
+                ) =>
+            {
                 match &mut self.active_view {
                     ActiveView::Describe(desc) => desc.prev_match(),
                     ActiveView::Yaml(yaml) => yaml.prev_match(),
@@ -2825,7 +4018,10 @@ impl App {
                 }
             }
             // Open Help Modal
-            KeyCode::Char('?') if !matches!(self.active_view, ActiveView::Assistant) || self.assistant_state.input.is_empty() => {
+            KeyCode::Char('?')
+                if !matches!(self.active_view, ActiveView::Assistant)
+                    || self.assistant_state.input.is_empty() =>
+            {
                 self.show_help = true;
             }
             // Toggle All Namespaces vs Active Namespace (or Summarise in Overview)
@@ -2898,7 +4094,8 @@ impl App {
                     }
                 }
                 let has_table_filter = if let ActiveView::Table(t) = &self.active_view {
-                    t.filtered_indices.len() != t.raw_items.len() || t.active_reason_filter.is_some()
+                    t.filtered_indices.len() != t.raw_items.len()
+                        || t.active_reason_filter.is_some()
                 } else {
                     false
                 };
@@ -2942,6 +4139,10 @@ impl App {
                     gpu.toggle_pane();
                     return;
                 }
+                if let ActiveView::Bgp(ref mut bgp) = self.active_view {
+                    bgp.next_tab();
+                    return;
+                }
                 if let ActiveView::Topology(ref mut topo) = self.active_view {
                     topo.select_next_lane();
                     return;
@@ -2979,7 +4180,11 @@ impl App {
                 let kind_str = if table.kind == ResourceKind::Workloads && !row_kind.is_empty() {
                     row_kind.clone()
                 } else {
-                    table.kind.k8s_kind().map(String::from).unwrap_or_else(|| table.kind.to_string())
+                    table
+                        .kind
+                        .k8s_kind()
+                        .map(String::from)
+                        .unwrap_or_else(|| table.kind.to_string())
                 };
                 let table_kind = table.kind.clone();
 
@@ -2999,11 +4204,16 @@ impl App {
                             return;
                         }
                         KeyCode::Enter => {
-                            let reason_opt = tallies.get(table.selected_reason_idx).map(|t| t.reason.clone());
+                            let reason_opt = tallies
+                                .get(table.selected_reason_idx)
+                                .map(|t| t.reason.clone());
                             if let Some(r) = reason_opt {
                                 table.set_reason_filter(Some(r.clone()), &self.filter_buffer);
                                 table.reason_rail_focused = false;
-                                self.set_toast(format!("Filtered events by reason: {}", r), Theme::status_ok());
+                                self.set_toast(
+                                    format!("Filtered events by reason: {}", r),
+                                    Theme::status_ok(),
+                                );
                             } else {
                                 table.reason_rail_focused = false;
                             }
@@ -3012,7 +4222,10 @@ impl App {
                         KeyCode::Char('c') | KeyCode::Backspace => {
                             table.set_reason_filter(None, &self.filter_buffer);
                             table.reason_rail_focused = false;
-                            self.set_toast("Cleared event reason filter".to_string(), Theme::status_ok());
+                            self.set_toast(
+                                "Cleared event reason filter".to_string(),
+                                Theme::status_ok(),
+                            );
                             return;
                         }
                         _ => {}
@@ -3049,13 +4262,72 @@ impl App {
                         table.page_down(10);
                     }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        // Ctrl+d -> Delete resource confirmation
-                        if let Some(name) = sel_name {
-                            let ns = sel_ns.clone().unwrap_or_else(|| self.active_namespace.clone());
-                            let query_ns = if ns.is_empty() { "default".to_string() } else { ns };
+                        // Ctrl+d -> Delete resource confirmation (single or bulk marked)
+                        if !table.marked_indices.is_empty() {
+                            let mut targets: Vec<(String, String, String)> = Vec::new();
+                            let mut sorted_indices: Vec<usize> =
+                                table.marked_indices.iter().copied().collect();
+                            sorted_indices.sort_unstable();
+                            for idx in sorted_indices {
+                                if let Some(item) = table.raw_items.get(idx) {
+                                    let item_name = crate::views::resource_table::extract_field_str(
+                                        item, "name",
+                                    );
+                                    let mut item_ns =
+                                        crate::views::resource_table::extract_field_str(
+                                            item,
+                                            "namespace",
+                                        );
+                                    if item_ns.is_empty() {
+                                        item_ns = if self.active_namespace.is_empty() {
+                                            "default".to_string()
+                                        } else {
+                                            self.active_namespace.clone()
+                                        };
+                                    }
+                                    let item_kind = item
+                                        .get("kind")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(&kind_str)
+                                        .to_string();
+                                    if !item_name.is_empty() {
+                                        targets.push((item_kind, item_ns, item_name));
+                                    }
+                                }
+                            }
+                            if !targets.is_empty() {
+                                let count = targets.len();
+                                let title = format!("Delete {} Marked Resources", count);
+                                let message = format!(
+                                    "Are you sure you want to delete {} marked resources?",
+                                    count
+                                );
+                                let action_name = format!(
+                                    "bulk_delete:{}",
+                                    serde_json::to_string(&targets).unwrap_or_default()
+                                );
+                                self.modal = Some(Modal::Confirm {
+                                    title,
+                                    message,
+                                    action_name,
+                                    is_destructive: true,
+                                });
+                            }
+                        } else if let Some(name) = sel_name {
+                            let ns = sel_ns
+                                .clone()
+                                .unwrap_or_else(|| self.active_namespace.clone());
+                            let query_ns = if ns.is_empty() {
+                                "default".to_string()
+                            } else {
+                                ns
+                            };
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Delete {} [{}]", kind_str, name),
-                                message: format!("Are you sure you want to delete {} '{}' in namespace '{}'?", kind_str, name, query_ns),
+                                message: format!(
+                                    "Are you sure you want to delete {} '{}' in namespace '{}'?",
+                                    kind_str, name, query_ns
+                                ),
                                 action_name: format!("delete:{}:{}:{}", kind_str, query_ns, name),
                                 is_destructive: true,
                             });
@@ -3067,7 +4339,10 @@ impl App {
                             self.connection_attempt_start = Instant::now();
                             self.cluster_unreachable = false;
                             table.is_loading = true;
-                            self.set_toast("Retrying cluster connection...".to_string(), Theme::status_ok());
+                            self.set_toast(
+                                "Retrying cluster connection...".to_string(),
+                                Theme::status_ok(),
+                            );
                             self.refresh_cluster_info();
                             self.refresh_cluster_overview();
                             self.refresh_crds();
@@ -3078,8 +4353,14 @@ impl App {
                         // Rollout restart (r or Ctrl+r)
                         let is_restartable = matches!(
                             table_kind,
-                            ResourceKind::Deployments | ResourceKind::StatefulSets | ResourceKind::DaemonSets
-                        ) || (table_kind == ResourceKind::Workloads && matches!(row_kind.as_str(), "Deployment" | "StatefulSet" | "DaemonSet"));
+                            ResourceKind::Deployments
+                                | ResourceKind::StatefulSets
+                                | ResourceKind::DaemonSets
+                        ) || (table_kind == ResourceKind::Workloads
+                            && matches!(
+                                row_kind.as_str(),
+                                "Deployment" | "StatefulSet" | "DaemonSet"
+                            ));
 
                         if !is_restartable {
                             if table_kind == ResourceKind::Workloads {
@@ -3090,8 +4371,14 @@ impl App {
                             return;
                         }
                         if let Some(name) = sel_name {
-                            let ns = sel_ns.clone().unwrap_or_else(|| self.active_namespace.clone());
-                            let query_ns = if ns.is_empty() { "default".to_string() } else { ns };
+                            let ns = sel_ns
+                                .clone()
+                                .unwrap_or_else(|| self.active_namespace.clone());
+                            let query_ns = if ns.is_empty() {
+                                "default".to_string()
+                            } else {
+                                ns
+                            };
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Restart Workload [{}]", name),
                                 message: format!("Trigger zero-downtime rollout restart for {} '{}' in namespace '{}'?", kind_str, name, query_ns),
@@ -3105,13 +4392,18 @@ impl App {
                         let is_scalable = matches!(
                             table_kind,
                             ResourceKind::Deployments | ResourceKind::StatefulSets
-                        ) || (table_kind == ResourceKind::Workloads && matches!(row_kind.as_str(), "Deployment" | "StatefulSet"));
+                        ) || (table_kind == ResourceKind::Workloads
+                            && matches!(row_kind.as_str(), "Deployment" | "StatefulSet"));
 
                         if !is_scalable {
                             if table_kind == ResourceKind::Workloads {
                                 self.set_toast(format!("Scale is only available for Deployments and StatefulSets (selected is {})", row_kind), Theme::status_warn());
                             } else {
-                                self.set_toast("Scale is only available for Deployments and StatefulSets".to_string(), Theme::status_warn());
+                                self.set_toast(
+                                    "Scale is only available for Deployments and StatefulSets"
+                                        .to_string(),
+                                    Theme::status_warn(),
+                                );
                             }
                             return;
                         }
@@ -3131,20 +4423,41 @@ impl App {
 
                         if !is_pf_allowed {
                             if table_kind == ResourceKind::Workloads {
-                                self.set_toast(format!("Port forward is only available for Pods (selected is {})", row_kind), Theme::status_warn());
+                                self.set_toast(
+                                    format!(
+                                        "Port forward is only available for Pods (selected is {})",
+                                        row_kind
+                                    ),
+                                    Theme::status_warn(),
+                                );
                             } else {
-                                self.set_toast("Port forward is only available for Pods and Services".to_string(), Theme::status_warn());
+                                self.set_toast(
+                                    "Port forward is only available for Pods and Services"
+                                        .to_string(),
+                                    Theme::status_warn(),
+                                );
                             }
                             return;
                         }
 
-                        let target_kind = if table_kind == ResourceKind::Services { "Service" } else { "Pod" }.to_string();
-                        let ns = sel_ns.clone().unwrap_or_else(|| self.active_namespace.clone());
+                        let target_kind = if table_kind == ResourceKind::Services {
+                            "Service"
+                        } else {
+                            "Pod"
+                        }
+                        .to_string();
+                        let ns = sel_ns
+                            .clone()
+                            .unwrap_or_else(|| self.active_namespace.clone());
 
                         if key.code == KeyCode::Char('F') {
                             let has_active = if let Some(target_name) = &sel_name {
-                                table.active_port_forwards.contains_key(&(ns.clone(), target_name.clone()))
-                                    || table.active_port_forwards.contains_key(&(String::new(), target_name.clone()))
+                                table
+                                    .active_port_forwards
+                                    .contains_key(&(ns.clone(), target_name.clone()))
+                                    || table
+                                        .active_port_forwards
+                                        .contains_key(&(String::new(), target_name.clone()))
                             } else {
                                 false
                             };
@@ -3167,9 +4480,12 @@ impl App {
                             });
 
                             if detected_port.is_none() {
-                                if let Ok(client) = self.client_cache.get(&self.active_context).await {
+                                if let Ok(client) =
+                                    self.client_cache.get(&self.active_context).await
+                                {
                                     if target_kind == "Service" {
-                                        let api: kube::Api<k8s_openapi::api::core::v1::Service> = kube::Api::namespaced(client, &ns);
+                                        let api: kube::Api<k8s_openapi::api::core::v1::Service> =
+                                            kube::Api::namespaced(client, &ns);
                                         if let Ok(svc) = api.get(&target_name).await {
                                             if let Some(spec) = svc.spec {
                                                 if let Some(ports) = spec.ports {
@@ -3180,13 +4496,15 @@ impl App {
                                             }
                                         }
                                     } else {
-                                        let api: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(client, &ns);
+                                        let api: kube::Api<k8s_openapi::api::core::v1::Pod> =
+                                            kube::Api::namespaced(client, &ns);
                                         if let Ok(pod) = api.get(&target_name).await {
                                             if let Some(spec) = pod.spec {
                                                 for container in spec.containers {
                                                     if let Some(ports) = container.ports {
                                                         if let Some(p) = ports.first() {
-                                                            detected_port = Some(p.container_port as u16);
+                                                            detected_port =
+                                                                Some(p.container_port as u16);
                                                             break;
                                                         }
                                                     }
@@ -3211,9 +4529,15 @@ impl App {
                         let active = table.toggle_warning_triage(&self.filter_buffer);
                         let count = table.filtered_indices.len();
                         if active {
-                            self.set_toast(format!("Warning Triage: ON ({} warnings)", count), Theme::status_warn());
+                            self.set_toast(
+                                format!("Warning Triage: ON ({} warnings)", count),
+                                Theme::status_warn(),
+                            );
                         } else {
-                            self.set_toast(format!("Warning Triage: OFF (all {} events)", count), Theme::status_ok());
+                            self.set_toast(
+                                format!("Warning Triage: OFF (all {} events)", count),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     KeyCode::Char('R') if table_kind == ResourceKind::Events => {
@@ -3221,7 +4545,8 @@ impl App {
                         if width >= 110 {
                             table.toggle_reason_rail_focus();
                         } else {
-                            let tallies = crate::views::reason_rail::tally_event_reasons(&table.raw_items);
+                            let tallies =
+                                crate::views::reason_rail::tally_event_reasons(&table.raw_items);
                             self.modal = Some(Modal::ReasonRail {
                                 tallies,
                                 selected_idx: table.selected_reason_idx,
@@ -3229,26 +4554,58 @@ impl App {
                             });
                         }
                     }
-                    KeyCode::Char('m') if table_kind == ResourceKind::Pods || table_kind == ResourceKind::Nodes || table_kind == ResourceKind::Workloads => {
+                    KeyCode::Char('m')
+                        if table_kind == ResourceKind::Pods
+                            || table_kind == ResourceKind::Nodes
+                            || table_kind == ResourceKind::Workloads =>
+                    {
                         if table_kind == ResourceKind::Workloads && row_kind != "Pod" {
-                            self.set_toast(format!("Metrics timeline is only available for Pods (selected is {})", row_kind), Theme::status_warn());
+                            self.set_toast(
+                                format!(
+                                    "Metrics timeline is only available for Pods (selected is {})",
+                                    row_kind
+                                ),
+                                Theme::status_warn(),
+                            );
                             return;
                         }
                         if let Some(name) = sel_name {
-                            let target_kind = if table_kind == ResourceKind::Nodes { "Node".to_string() } else { "Pod".to_string() };
+                            let target_kind = if table_kind == ResourceKind::Nodes {
+                                "Node".to_string()
+                            } else {
+                                "Pod".to_string()
+                            };
                             let ns = if table_kind == ResourceKind::Nodes {
                                 None
                             } else {
-                                sel_ns.or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) })
+                                sel_ns.or_else(|| {
+                                    if self.active_namespace.is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.active_namespace.clone())
+                                    }
+                                })
                             };
                             let samples = if target_kind == "Node" {
                                 self.refresh_node_metrics();
-                                self.node_metrics_history.get(&name).map(|h| h.iter().cloned().collect()).unwrap_or_default()
+                                self.node_metrics_history
+                                    .get(&name)
+                                    .map(|h| h.iter().cloned().collect())
+                                    .unwrap_or_default()
                             } else {
                                 self.refresh_pod_metrics();
-                                self.pod_metrics_history.get(&name).map(|h| h.iter().cloned().collect()).unwrap_or_default()
+                                self.pod_metrics_history
+                                    .get(&name)
+                                    .map(|h| h.iter().cloned().collect())
+                                    .unwrap_or_default()
                             };
-                            let panel_state = crate::views::metrics_panel_view::MetricsPanelState::new(target_kind, name, ns, samples);
+                            let panel_state =
+                                crate::views::metrics_panel_view::MetricsPanelState::new(
+                                    target_kind,
+                                    name,
+                                    ns,
+                                    samples,
+                                );
                             self.modal = Some(Modal::MetricsTimeline(panel_state));
                         }
                     }
@@ -3259,13 +4616,20 @@ impl App {
                             let mut common_ns: Option<String> = None;
                             for &idx in &table.marked_indices {
                                 if let Some(item) = table.raw_items.get(idx) {
-                                    let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                                    let is_pod = table_kind == ResourceKind::Pods || kind.eq_ignore_ascii_case("Pod");
+                                    let kind =
+                                        item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                    let is_pod = table_kind == ResourceKind::Pods
+                                        || kind.eq_ignore_ascii_case("Pod");
                                     if is_pod {
-                                        if let Some(pname) = item.get("name").and_then(|v| v.as_str()) {
+                                        if let Some(pname) =
+                                            item.get("name").and_then(|v| v.as_str())
+                                        {
                                             marked_pods.push(pname.to_string());
                                             if common_ns.is_none() {
-                                                common_ns = item.get("namespace").and_then(|v| v.as_str()).map(String::from);
+                                                common_ns = item
+                                                    .get("namespace")
+                                                    .and_then(|v| v.as_str())
+                                                    .map(String::from);
                                             }
                                         }
                                     }
@@ -3273,7 +4637,8 @@ impl App {
                             }
                             if marked_pods.len() > 1 {
                                 let label = format!("{} pods", marked_pods.len());
-                                self.open_multi_pod_logs_view(label, common_ns, marked_pods).await;
+                                self.open_multi_pod_logs_view(label, common_ns, marked_pods)
+                                    .await;
                                 return;
                             }
                         }
@@ -3281,13 +4646,27 @@ impl App {
                         // 2. Workload multi-pod logs (Deployment, StatefulSet, DaemonSet, Job)
                         let is_workload = matches!(
                             table_kind,
-                            ResourceKind::Deployments | ResourceKind::StatefulSets | ResourceKind::DaemonSets | ResourceKind::Jobs
-                        ) || (table_kind == ResourceKind::Workloads && matches!(row_kind.as_str(), "Deployment" | "StatefulSet" | "DaemonSet" | "Job"));
+                            ResourceKind::Deployments
+                                | ResourceKind::StatefulSets
+                                | ResourceKind::DaemonSets
+                                | ResourceKind::Jobs
+                        ) || (table_kind == ResourceKind::Workloads
+                            && matches!(
+                                row_kind.as_str(),
+                                "Deployment" | "StatefulSet" | "DaemonSet" | "Job"
+                            ));
 
                         if is_workload {
                             if let Some(wname) = sel_name {
-                                let ns = sel_ns.clone()
-                                    .or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) })
+                                let ns = sel_ns
+                                    .clone()
+                                    .or_else(|| {
+                                        if self.active_namespace.is_empty() {
+                                            None
+                                        } else {
+                                            Some(self.active_namespace.clone())
+                                        }
+                                    })
                                     .unwrap_or_else(|| "default".to_string());
                                 let target_kind = if table_kind == ResourceKind::Workloads {
                                     row_kind.clone()
@@ -3299,7 +4678,13 @@ impl App {
                                     self.open_multi_pod_logs_view(wname, Some(ns), pods).await;
                                     return;
                                 } else {
-                                    self.set_toast(format!("No running pods found for {}/{}", target_kind, wname), Theme::status_warn());
+                                    self.set_toast(
+                                        format!(
+                                            "No running pods found for {}/{}",
+                                            target_kind, wname
+                                        ),
+                                        Theme::status_warn(),
+                                    );
                                     return;
                                 }
                             }
@@ -3310,9 +4695,24 @@ impl App {
                             if let Some(item) = table.selected_item() {
                                 let (obj_kind, obj_name) = parse_involved_object(item);
                                 if obj_kind.eq_ignore_ascii_case("Pod") {
-                                    (Some(obj_name), sel_ns.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) }))
+                                    (
+                                        Some(obj_name),
+                                        sel_ns.clone().or_else(|| {
+                                            if self.active_namespace.is_empty() {
+                                                None
+                                            } else {
+                                                Some(self.active_namespace.clone())
+                                            }
+                                        }),
+                                    )
                                 } else {
-                                    self.set_toast(format!("Logs only available for Pods (event target is {})", obj_kind), Theme::status_warn());
+                                    self.set_toast(
+                                        format!(
+                                            "Logs only available for Pods (event target is {})",
+                                            obj_kind
+                                        ),
+                                        Theme::status_warn(),
+                                    );
                                     (None, None)
                                 }
                             } else {
@@ -3320,15 +4720,36 @@ impl App {
                             }
                         } else if table_kind == ResourceKind::Workloads {
                             if row_kind == "Pod" {
-                                (sel_name.clone(), sel_ns.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) }))
+                                (
+                                    sel_name.clone(),
+                                    sel_ns.clone().or_else(|| {
+                                        if self.active_namespace.is_empty() {
+                                            None
+                                        } else {
+                                            Some(self.active_namespace.clone())
+                                        }
+                                    }),
+                                )
                             } else {
                                 self.set_toast(format!("Logs only available for Pods or Workloads (selected is {})", row_kind), Theme::status_warn());
                                 (None, None)
                             }
                         } else if table_kind == ResourceKind::Pods {
-                            (sel_name.clone(), sel_ns.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) }))
+                            (
+                                sel_name.clone(),
+                                sel_ns.clone().or_else(|| {
+                                    if self.active_namespace.is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.active_namespace.clone())
+                                    }
+                                }),
+                            )
                         } else {
-                            self.set_toast("Logs are only available for Pods and Workloads".to_string(), Theme::status_warn());
+                            self.set_toast(
+                                "Logs are only available for Pods and Workloads".to_string(),
+                                Theme::status_warn(),
+                            );
                             (None, None)
                         };
 
@@ -3340,26 +4761,43 @@ impl App {
                         // Shell / Exec
                         if table_kind == ResourceKind::Nodes {
                             if let Some(node_name) = sel_name {
-                                self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: node_name });
+                                self.requires_terminal_suspend =
+                                    Some(SuspendAction::NodeShell { node: node_name });
                             }
                         } else if table_kind == ResourceKind::Workloads && row_kind != "Pod" {
-                            self.set_toast(format!("Shell only available for Pods (selected is {})", row_kind), Theme::status_warn());
-                        } else if table_kind == ResourceKind::Pods || (table_kind == ResourceKind::Workloads && row_kind == "Pod") {
+                            self.set_toast(
+                                format!("Shell only available for Pods (selected is {})", row_kind),
+                                Theme::status_warn(),
+                            );
+                        } else if table_kind == ResourceKind::Pods
+                            || (table_kind == ResourceKind::Workloads && row_kind == "Pod")
+                        {
                             if let Some(pod_name) = sel_name {
-                                let target_ns = sel_ns.or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                                let target_ns = sel_ns.or_else(|| {
+                                    if self.active_namespace.is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.active_namespace.clone())
+                                    }
+                                });
                                 self.prompt_pod_shell(pod_name, target_ns).await;
                             }
                         } else {
-                            self.set_toast("Shell only available for Pods and Nodes".to_string(), Theme::status_warn());
+                            self.set_toast(
+                                "Shell only available for Pods and Nodes".to_string(),
+                                Theme::status_warn(),
+                            );
                         }
                     }
                     KeyCode::Char('S') | KeyCode::Char('h') => {
                         if table_kind == ResourceKind::Nodes {
                             if let Some(node_name) = sel_name {
-                                let destination = table.selected_item()
+                                let destination = table
+                                    .selected_item()
                                     .and_then(|item| {
-                                        item.get("internalIp").and_then(|v| v.as_str())
-                                            .or_else(|| item.get("externalIp").and_then(|v| v.as_str()))
+                                        item.get("internalIp").and_then(|v| v.as_str()).or_else(
+                                            || item.get("externalIp").and_then(|v| v.as_str()),
+                                        )
                                     })
                                     .unwrap_or(&node_name)
                                     .to_string();
@@ -3372,7 +4810,10 @@ impl App {
                             }
                         }
                     }
-                    KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                    KeyCode::Char('c')
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && !key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
                         if table_kind == ResourceKind::Events {
                             if let Some(item) = table.selected_item() {
                                 let summary = format_event_summary(item);
@@ -3380,15 +4821,25 @@ impl App {
                                 tokio::spawn(async move {
                                     let _ = copy_to_clipboard(&sum_clone);
                                 });
-                                self.set_toast("✓ Copied event message to clipboard".to_string(), Theme::status_ok());
+                                self.set_toast(
+                                    "✓ Copied event message to clipboard".to_string(),
+                                    Theme::status_ok(),
+                                );
                             }
                         } else {
                             let names_to_copy: Vec<String> = if !table.marked_indices.is_empty() {
-                                table.marked_indices.iter().filter_map(|&idx| {
-                                    table.raw_items.get(idx).and_then(|item| {
-                                        item.get("name").or_else(|| item.pointer("/metadata/name")).and_then(|v| v.as_str()).map(String::from)
+                                table
+                                    .marked_indices
+                                    .iter()
+                                    .filter_map(|&idx| {
+                                        table.raw_items.get(idx).and_then(|item| {
+                                            item.get("name")
+                                                .or_else(|| item.pointer("/metadata/name"))
+                                                .and_then(|v| v.as_str())
+                                                .map(String::from)
+                                        })
                                     })
-                                }).collect()
+                                    .collect()
                             } else if let Some(name) = sel_name.clone() {
                                 vec![name]
                             } else {
@@ -3403,20 +4854,32 @@ impl App {
                                     let _ = copy_to_clipboard(&text);
                                 });
                                 if count == 1 {
-                                    self.set_toast(format!("✓ Copied '{}' to clipboard", first_name), Theme::status_ok());
+                                    self.set_toast(
+                                        format!("✓ Copied '{}' to clipboard", first_name),
+                                        Theme::status_ok(),
+                                    );
                                 } else {
-                                    self.set_toast(format!("✓ Copied {} resource names to clipboard", count), Theme::status_ok());
+                                    self.set_toast(
+                                        format!("✓ Copied {} resource names to clipboard", count),
+                                        Theme::status_ok(),
+                                    );
                                 }
                             }
                         }
                     }
-                    KeyCode::Char('C') if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::NONE) => {
+                    KeyCode::Char('C')
+                        if key.modifiers.contains(KeyModifiers::SHIFT)
+                            || key.modifiers.contains(KeyModifiers::NONE) =>
+                    {
                         if let Some(item) = table.selected_item() {
                             let yaml_str = serde_yaml::to_string(item).unwrap_or_default();
                             tokio::spawn(async move {
                                 let _ = copy_to_clipboard(&yaml_str);
                             });
-                            self.set_toast("✓ Copied resource YAML to clipboard".to_string(), Theme::status_ok());
+                            self.set_toast(
+                                "✓ Copied resource YAML to clipboard".to_string(),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -3435,7 +4898,10 @@ impl App {
                                     tokio::spawn(async move {
                                         let _ = copy_to_clipboard(&url_clone);
                                     });
-                                    self.set_toast(format!("✓ Copied deep link: {}", url), Theme::status_ok());
+                                    self.set_toast(
+                                        format!("✓ Copied deep link: {}", url),
+                                        Theme::status_ok(),
+                                    );
                                 }
                             }
                         } else if let Some(name) = sel_name.clone() {
@@ -3450,7 +4916,10 @@ impl App {
                             tokio::spawn(async move {
                                 let _ = copy_to_clipboard(&url_clone);
                             });
-                            self.set_toast(format!("✓ Copied deep link: {}", url), Theme::status_ok());
+                            self.set_toast(
+                                format!("✓ Copied deep link: {}", url),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     KeyCode::Char('y') | KeyCode::Char('v') => {
@@ -3459,11 +4928,13 @@ impl App {
                             if let Some(item) = table.selected_item() {
                                 let (obj_kind, obj_name) = parse_involved_object(item);
                                 if !obj_name.is_empty() {
-                                    self.open_yaml_view(obj_name, obj_kind, sel_ns.clone()).await;
+                                    self.open_yaml_view(obj_name, obj_kind, sel_ns.clone())
+                                        .await;
                                 }
                             }
                         } else if let Some(name) = sel_name.clone() {
-                            self.open_yaml_view(name, kind_str.clone(), sel_ns.clone()).await;
+                            self.open_yaml_view(name, kind_str.clone(), sel_ns.clone())
+                                .await;
                         }
                     }
                     KeyCode::Char('d') => {
@@ -3472,17 +4943,20 @@ impl App {
                             if let Some(item) = table.selected_item() {
                                 let (obj_kind, obj_name) = parse_involved_object(item);
                                 if !obj_name.is_empty() {
-                                    self.open_describe_view(obj_name, obj_kind, sel_ns.clone()).await;
+                                    self.open_describe_view(obj_name, obj_kind, sel_ns.clone())
+                                        .await;
                                 }
                             }
                         } else if let Some(name) = sel_name.clone() {
-                            self.open_describe_view(name, kind_str.clone(), sel_ns.clone()).await;
+                            self.open_describe_view(name, kind_str.clone(), sel_ns.clone())
+                                .await;
                         }
                     }
                     KeyCode::Char('e') => {
                         // Edit YAML in $EDITOR
                         if let Some(name) = sel_name.clone() {
-                            self.open_yaml_view(name, kind_str.clone(), sel_ns.clone()).await;
+                            self.open_yaml_view(name, kind_str.clone(), sel_ns.clone())
+                                .await;
                             self.requires_terminal_suspend = Some(SuspendAction::EditYaml);
                         }
                     }
@@ -3521,16 +4995,36 @@ impl App {
                             }
                         } else if table_kind == ResourceKind::CustomResourceDefinitions {
                             if let Some(crd_name) = sel_name {
-                                if let Some(crd) = self.crds.iter().find(|c| c.crd_name == crd_name || c.kind.eq_ignore_ascii_case(&crd_name) || c.plural.eq_ignore_ascii_case(&crd_name)).cloned() {
+                                if let Some(crd) = self
+                                    .crds
+                                    .iter()
+                                    .find(|c| {
+                                        c.crd_name == crd_name
+                                            || c.kind.eq_ignore_ascii_case(&crd_name)
+                                            || c.plural.eq_ignore_ascii_case(&crd_name)
+                                    })
+                                    .cloned()
+                                {
                                     self.switch_view_to_crd(crd).await;
                                 }
                             }
                         } else if table_kind == ResourceKind::Pods {
                             if let Some(pod_name) = sel_name {
-                                let target_ns = sel_ns.or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                                let target_ns = sel_ns.or_else(|| {
+                                    if self.active_namespace.is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.active_namespace.clone())
+                                    }
+                                });
                                 self.prompt_pod_logs(pod_name, target_ns).await;
                             }
-                        } else if matches!(table_kind, ResourceKind::Deployments | ResourceKind::DaemonSets | ResourceKind::StatefulSets) {
+                        } else if matches!(
+                            table_kind,
+                            ResourceKind::Deployments
+                                | ResourceKind::DaemonSets
+                                | ResourceKind::StatefulSets
+                        ) {
                             if let Some(name) = sel_name {
                                 self.switch_view_to_kind(ResourceKind::Pods).await;
                                 if let ActiveView::Table(t) = &mut self.active_view {
@@ -3548,22 +5042,39 @@ impl App {
                                             t.apply_filter(&obj_name);
                                         }
                                         self.filter_buffer = obj_name.clone();
-                                        self.set_toast(format!("Jumped to Pod '{}'", obj_name), Theme::status_ok());
-                                    } else if let Some(target_cmd) = crate::commands::resolve_command_with_crds(&obj_kind, &self.crds) {
+                                        self.set_toast(
+                                            format!("Jumped to Pod '{}'", obj_name),
+                                            Theme::status_ok(),
+                                        );
+                                    } else if let Some(target_cmd) =
+                                        crate::commands::resolve_command_with_crds(
+                                            &obj_kind, &self.crds,
+                                        )
+                                    {
                                         self.execute_view_target(target_cmd).await;
                                         if let ActiveView::Table(t) = &mut self.active_view {
                                             t.apply_filter(&obj_name);
                                         }
                                         self.filter_buffer = obj_name.clone();
-                                        self.set_toast(format!("Jumped to {} '{}'", obj_kind, obj_name), Theme::status_ok());
+                                        self.set_toast(
+                                            format!("Jumped to {} '{}'", obj_kind, obj_name),
+                                            Theme::status_ok(),
+                                        );
                                     } else {
-                                        self.open_describe_view(obj_name, obj_kind, sel_ns.clone()).await;
+                                        self.open_describe_view(obj_name, obj_kind, sel_ns.clone())
+                                            .await;
                                     }
                                 }
                             }
                         } else if table_kind == ResourceKind::Workloads {
                             if let Some(name) = sel_name {
-                                let target_ns = sel_ns.or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                                let target_ns = sel_ns.or_else(|| {
+                                    if self.active_namespace.is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.active_namespace.clone())
+                                    }
+                                });
                                 match row_kind.as_str() {
                                     "Pod" => {
                                         self.prompt_pod_logs(name, target_ns).await;
@@ -3576,10 +5087,16 @@ impl App {
                                         self.filter_buffer = name;
                                     }
                                     "CronJob" => {
-                                        self.open_describe_view(name, "CronJob".to_string(), target_ns).await;
+                                        self.open_describe_view(
+                                            name,
+                                            "CronJob".to_string(),
+                                            target_ns,
+                                        )
+                                        .await;
                                     }
                                     _ => {
-                                        self.open_describe_view(name, row_kind.clone(), target_ns).await;
+                                        self.open_describe_view(name, row_kind.clone(), target_ns)
+                                            .await;
                                     }
                                 }
                             }
@@ -3596,155 +5113,186 @@ impl App {
                     _ => {}
                 }
             }
-            ActiveView::Yaml(yaml) => {
-                match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => yaml.scroll_down(1),
-                    KeyCode::Char('k') | KeyCode::Up => yaml.scroll_up(1),
-                    KeyCode::Char('g') | KeyCode::Home => yaml.scroll_top(),
-                    KeyCode::Char('G') | KeyCode::End => yaml.scroll_bottom(),
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => yaml.scroll_up(10),
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => yaml.scroll_down(10),
-                    KeyCode::Char('e') => {
-                        self.requires_terminal_suspend = Some(SuspendAction::EditYaml);
-                    }
-                    KeyCode::Char('c') | KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if let Some(selected) = yaml.selected_text() {
-                            tokio::spawn(async move {
-                                let _ = copy_to_clipboard(&selected);
-                            });
-                            self.set_toast("✓ Copied selection to clipboard".to_string(), Theme::status_ok());
-                        } else {
-                            let content = yaml.yaml_content.clone();
-                            tokio::spawn(async move {
-                                let _ = copy_to_clipboard(&content);
-                            });
-                            self.set_toast("✓ Copied YAML to clipboard".to_string(), Theme::status_ok());
-                        }
-                    }
-                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let link = crate::deep_link::DeepLink::Resource {
-                            context: self.active_context.clone(),
-                            namespace: yaml.namespace.clone(),
-                            kind: yaml.resource_kind.clone(),
-                            name: yaml.resource_name.clone(),
-                        };
-                        let url = link.to_url();
-                        let url_clone = url.clone();
-                        tokio::spawn(async move {
-                            let _ = copy_to_clipboard(&url_clone);
-                        });
-                        self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
-                    }
-                    _ => {}
+            ActiveView::Yaml(yaml) => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => yaml.scroll_down(1),
+                KeyCode::Char('k') | KeyCode::Up => yaml.scroll_up(1),
+                KeyCode::Char('g') | KeyCode::Home => yaml.scroll_top(),
+                KeyCode::Char('G') | KeyCode::End => yaml.scroll_bottom(),
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    yaml.scroll_up(10)
                 }
-            }
-            ActiveView::Describe(desc) => {
-                match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => desc.scroll_down(1),
-                    KeyCode::Char('k') | KeyCode::Up => desc.scroll_up(1),
-                    KeyCode::Char('g') | KeyCode::Home => desc.scroll_top(),
-                    KeyCode::Char('G') | KeyCode::End => desc.scroll_bottom(),
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => desc.scroll_up(10),
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => desc.scroll_down(10),
-                    KeyCode::Char('c') | KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let content = desc.content.clone();
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    yaml.scroll_down(10)
+                }
+                KeyCode::Char('e') => {
+                    self.requires_terminal_suspend = Some(SuspendAction::EditYaml);
+                }
+                KeyCode::Char('c') | KeyCode::Char('y')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    if let Some(selected) = yaml.selected_text() {
+                        tokio::spawn(async move {
+                            let _ = copy_to_clipboard(&selected);
+                        });
+                        self.set_toast(
+                            "✓ Copied selection to clipboard".to_string(),
+                            Theme::status_ok(),
+                        );
+                    } else {
+                        let content = yaml.yaml_content.clone();
                         tokio::spawn(async move {
                             let _ = copy_to_clipboard(&content);
                         });
-                        self.set_toast("Copied describe output to clipboard".to_string(), Theme::status_ok());
+                        self.set_toast(
+                            "✓ Copied YAML to clipboard".to_string(),
+                            Theme::status_ok(),
+                        );
                     }
-                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let link = crate::deep_link::DeepLink::Resource {
-                            context: self.active_context.clone(),
-                            namespace: desc.namespace.clone(),
-                            kind: desc.resource_kind.clone(),
-                            name: desc.resource_name.clone(),
-                        };
-                        let url = link.to_url();
-                        let url_clone = url.clone();
-                        tokio::spawn(async move {
-                            let _ = copy_to_clipboard(&url_clone);
-                        });
-                        self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
-                    }
-                    _ => {}
                 }
-            }
-            ActiveView::Logs(logs) => {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        if !logs.search_query.is_empty() {
-                            logs.clear_search();
-                            self.filter_buffer.clear();
+                KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let link = crate::deep_link::DeepLink::Resource {
+                        context: self.active_context.clone(),
+                        namespace: yaml.namespace.clone(),
+                        kind: yaml.resource_kind.clone(),
+                        name: yaml.resource_name.clone(),
+                    };
+                    let url = link.to_url();
+                    let url_clone = url.clone();
+                    tokio::spawn(async move {
+                        let _ = copy_to_clipboard(&url_clone);
+                    });
+                    self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                }
+                _ => {}
+            },
+            ActiveView::Describe(desc) => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => desc.scroll_down(1),
+                KeyCode::Char('k') | KeyCode::Up => desc.scroll_up(1),
+                KeyCode::Char('g') | KeyCode::Home => desc.scroll_top(),
+                KeyCode::Char('G') | KeyCode::End => desc.scroll_bottom(),
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    desc.scroll_up(10)
+                }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    desc.scroll_down(10)
+                }
+                KeyCode::Char('c') | KeyCode::Char('y')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    let content = desc.content.clone();
+                    tokio::spawn(async move {
+                        let _ = copy_to_clipboard(&content);
+                    });
+                    self.set_toast(
+                        "Copied describe output to clipboard".to_string(),
+                        Theme::status_ok(),
+                    );
+                }
+                KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let link = crate::deep_link::DeepLink::Resource {
+                        context: self.active_context.clone(),
+                        namespace: desc.namespace.clone(),
+                        kind: desc.resource_kind.clone(),
+                        name: desc.resource_name.clone(),
+                    };
+                    let url = link.to_url();
+                    let url_clone = url.clone();
+                    tokio::spawn(async move {
+                        let _ = copy_to_clipboard(&url_clone);
+                    });
+                    self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                }
+                _ => {}
+            },
+            ActiveView::Logs(logs) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    if !logs.search_query.is_empty() {
+                        logs.clear_search();
+                        self.filter_buffer.clear();
+                    } else {
+                        self.stop_active_log_stream();
+                        if let Some(prev) = self.nav_stack.pop() {
+                            self.active_view = prev;
                         } else {
-                            self.stop_active_log_stream();
-                            if let Some(prev) = self.nav_stack.pop() {
-                                self.active_view = prev;
-                            } else {
-                                self.switch_view_to_kind(ResourceKind::Pods).await;
-                            }
-                            self.restart_active_watch().await;
+                            self.switch_view_to_kind(ResourceKind::Pods).await;
                         }
+                        self.restart_active_watch().await;
                     }
-                    KeyCode::Char('j') | KeyCode::Down => logs.scroll_down(1),
-                    KeyCode::Char('k') | KeyCode::Up => logs.scroll_up(1),
-                    KeyCode::Char('g') | KeyCode::Home => logs.scroll_top(),
-                    KeyCode::Char('G') | KeyCode::End => logs.scroll_to_bottom(),
-                    KeyCode::Char('h') | KeyCode::Left => logs.scroll_left(8),
-                    KeyCode::Char('l') | KeyCode::Right => logs.scroll_right(8),
-                    KeyCode::Char('0') => logs.horizontal_scroll = 0,
-                    KeyCode::PageUp => logs.scroll_up(10),
-                    KeyCode::PageDown => logs.scroll_down(10),
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => logs.scroll_up(10),
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => logs.scroll_down(10),
-                    KeyCode::Char('f') => logs.toggle_follow(),
-                    KeyCode::Char('t') => logs.toggle_timestamps(),
-                    KeyCode::Char('p') => logs.toggle_previous(),
-                    KeyCode::Char('w') => logs.toggle_wrap(),
-                    KeyCode::Char('s') => {
-                        match logs.save_to_file() {
-                            Ok(path) => self.set_toast(format!("Logs saved to {}", path), Theme::status_ok()),
-                            Err(e) => self.set_toast(format!("Failed to save logs: {}", e), Theme::status_error()),
-                        }
-                    }
-                    KeyCode::Char('c') | KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let text = logs.lines.join("\n");
-                        let count = logs.lines.len();
-                        tokio::spawn(async move {
-                            let _ = copy_to_clipboard(&text);
-                        });
-                        self.set_toast(format!("Copied {} log lines to clipboard", count), Theme::status_ok());
-                    }
-                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let link = crate::deep_link::DeepLink::Resource {
-                            context: self.active_context.clone(),
-                            namespace: Some(logs.namespace.clone()),
-                            kind: "Pod".to_string(),
-                            name: logs.pod_name.clone(),
-                        };
-                        let url = link.to_url();
-                        let url_clone = url.clone();
-                        tokio::spawn(async move {
-                            let _ = copy_to_clipboard(&url_clone);
-                        });
-                        self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
-                    }
-                    _ => {}
                 }
-            }
+                KeyCode::Char('j') | KeyCode::Down => logs.scroll_down(1),
+                KeyCode::Char('k') | KeyCode::Up => logs.scroll_up(1),
+                KeyCode::Char('g') | KeyCode::Home => logs.scroll_top(),
+                KeyCode::Char('G') | KeyCode::End => logs.scroll_to_bottom(),
+                KeyCode::Char('h') | KeyCode::Left => logs.scroll_left(8),
+                KeyCode::Char('l') | KeyCode::Right => logs.scroll_right(8),
+                KeyCode::Char('0') => logs.horizontal_scroll = 0,
+                KeyCode::PageUp => logs.scroll_up(10),
+                KeyCode::PageDown => logs.scroll_down(10),
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    logs.scroll_up(10)
+                }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    logs.scroll_down(10)
+                }
+                KeyCode::Char('f') => logs.toggle_follow(),
+                KeyCode::Char('t') => logs.toggle_timestamps(),
+                KeyCode::Char('p') => logs.toggle_previous(),
+                KeyCode::Char('w') => logs.toggle_wrap(),
+                KeyCode::Char('s') => match logs.save_to_file() {
+                    Ok(path) => {
+                        self.set_toast(format!("Logs saved to {}", path), Theme::status_ok())
+                    }
+                    Err(e) => {
+                        self.set_toast(format!("Failed to save logs: {}", e), Theme::status_error())
+                    }
+                },
+                KeyCode::Char('c') | KeyCode::Char('y')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    let text = logs.lines.join("\n");
+                    let count = logs.lines.len();
+                    tokio::spawn(async move {
+                        let _ = copy_to_clipboard(&text);
+                    });
+                    self.set_toast(
+                        format!("Copied {} log lines to clipboard", count),
+                        Theme::status_ok(),
+                    );
+                }
+                KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let link = crate::deep_link::DeepLink::Resource {
+                        context: self.active_context.clone(),
+                        namespace: Some(logs.namespace.clone()),
+                        kind: "Pod".to_string(),
+                        name: logs.pod_name.clone(),
+                    };
+                    let url = link.to_url();
+                    let url_clone = url.clone();
+                    tokio::spawn(async move {
+                        let _ = copy_to_clipboard(&url_clone);
+                    });
+                    self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                }
+                _ => {}
+            },
             ActiveView::PortForwards(pf) => {
                 let sel_entry = pf.selected_forward().cloned();
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => pf.select_next(),
                     KeyCode::Char('k') | KeyCode::Up => pf.select_prev(),
-                    KeyCode::Char('c') | KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char('c') | KeyCode::Char('y')
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
                         if let Some(entry) = sel_entry {
                             let url = format!("http://127.0.0.1:{}", entry.local_port);
                             let url_clone = url.clone();
                             tokio::spawn(async move {
                                 let _ = copy_to_clipboard(&url_clone);
                             });
-                            self.set_toast(format!("Copied forward URL: {}", url), Theme::status_ok());
+                            self.set_toast(
+                                format!("Copied forward URL: {}", url),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -3760,15 +5308,24 @@ impl App {
                             tokio::spawn(async move {
                                 let _ = copy_to_clipboard(&url_clone);
                             });
-                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                            self.set_toast(
+                                format!("Copied deep link: {}", url),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     KeyCode::Char('d') => {
                         if let Some(entry) = sel_entry {
                             let id = entry.id.clone();
                             self.modal = Some(Modal::Confirm {
-                                title: format!("Stop Port Forward [127.0.0.1:{}]", entry.local_port),
-                                message: format!("Stop port-forward to {}/{}?", entry.target_type, entry.target_name),
+                                title: format!(
+                                    "Stop Port Forward [127.0.0.1:{}]",
+                                    entry.local_port
+                                ),
+                                message: format!(
+                                    "Stop port-forward to {}/{}?",
+                                    entry.target_type, entry.target_name
+                                ),
                                 action_name: format!("stop-pf:{}", id),
                                 is_destructive: false,
                             });
@@ -3800,7 +5357,10 @@ impl App {
                             tokio::spawn(async move {
                                 let _ = copy_to_clipboard(&url_clone);
                             });
-                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                            self.set_toast(
+                                format!("Copied deep link: {}", url),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -3816,12 +5376,19 @@ impl App {
                             tokio::spawn(async move {
                                 let _ = copy_to_clipboard(&url_clone);
                             });
-                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                            self.set_toast(
+                                format!("Copied deep link: {}", url),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     KeyCode::Char('v') => {
                         if let Some(rel) = sel_rel {
-                            self.open_helm_detail(rel.name, rel.namespace, HelmDetailTab::ValuesDiff);
+                            self.open_helm_detail(
+                                rel.name,
+                                rel.namespace,
+                                HelmDetailTab::ValuesDiff,
+                            );
                         }
                     }
                     KeyCode::Char('y') => {
@@ -3831,38 +5398,64 @@ impl App {
                     }
                     KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Some(rel) = sel_rel {
-                            self.open_helm_detail(rel.name, rel.namespace, HelmDetailTab::Revisions);
+                            self.open_helm_detail(
+                                rel.name,
+                                rel.namespace,
+                                HelmDetailTab::Revisions,
+                            );
                         }
                     }
                     KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Some(rel) = sel_rel {
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Uninstall Helm Release [{}]", rel.name),
-                                message: format!("Uninstall release '{}' from namespace '{}'?", rel.name, rel.namespace),
-                                action_name: format!("helm-uninstall:{}:{}", rel.name, rel.namespace),
+                                message: format!(
+                                    "Uninstall release '{}' from namespace '{}'?",
+                                    rel.name, rel.namespace
+                                ),
+                                action_name: format!(
+                                    "helm-uninstall:{}:{}",
+                                    rel.name, rel.namespace
+                                ),
                                 is_destructive: true,
                             });
                         }
                     }
                     KeyCode::Char('R') => {
                         if self.helm_refreshing {
-                            self.set_toast("Helm releases refresh already in progress...".to_string(), Theme::status_warn());
+                            self.set_toast(
+                                "Helm releases refresh already in progress...".to_string(),
+                                Theme::status_warn(),
+                            );
                         } else {
                             self.refresh_helm_releases();
-                            self.set_toast("Refreshing Helm releases...".to_string(), Theme::status_ok());
+                            self.set_toast(
+                                "Refreshing Helm releases...".to_string(),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if self.helm_refreshing {
-                            self.set_toast("Helm releases refresh already in progress...".to_string(), Theme::status_warn());
+                            self.set_toast(
+                                "Helm releases refresh already in progress...".to_string(),
+                                Theme::status_warn(),
+                            );
                         } else {
                             self.refresh_helm_releases();
-                            self.set_toast("Refreshing Helm releases...".to_string(), Theme::status_ok());
+                            self.set_toast(
+                                "Refreshing Helm releases...".to_string(),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     KeyCode::Char('r') => {
                         if helm.error.is_some() || self.helm_refreshing {
-                            self.set_toast("Refresh Helm releases successfully before rollback (R to retry)".to_string(), Theme::status_warn());
+                            self.set_toast(
+                                "Refresh Helm releases successfully before rollback (R to retry)"
+                                    .to_string(),
+                                Theme::status_warn(),
+                            );
                             return;
                         }
                         if let Some(rel) = sel_rel {
@@ -3870,12 +5463,24 @@ impl App {
                                 let target_rev = rel.revision - 1;
                                 self.modal = Some(Modal::Confirm {
                                     title: format!("Rollback Helm Release [{}]", rel.name),
-                                    message: format!("Rollback '{}' in namespace '{}' to previous revision {}?", rel.name, rel.namespace, target_rev),
-                                    action_name: format!("helm-rollback:{}:{}:{}", rel.name, rel.namespace, target_rev),
+                                    message: format!(
+                                        "Rollback '{}' in namespace '{}' to previous revision {}?",
+                                        rel.name, rel.namespace, target_rev
+                                    ),
+                                    action_name: format!(
+                                        "helm-rollback:{}:{}:{}",
+                                        rel.name, rel.namespace, target_rev
+                                    ),
                                     is_destructive: true,
                                 });
                             } else {
-                                self.set_toast(format!("Release '{}' is at revision 1 (no previous revision)", rel.name), Theme::status_warn());
+                                self.set_toast(
+                                    format!(
+                                        "Release '{}' is at revision 1 (no previous revision)",
+                                        rel.name
+                                    ),
+                                    Theme::status_warn(),
+                                );
                             }
                         }
                     }
@@ -3885,7 +5490,10 @@ impl App {
             ActiveView::Argo(argo) => {
                 let sel_app = argo.selected_application().cloned();
                 let hub_ctx = argo.hub_context_name.clone();
-                let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+                let query_ctx = hub_ctx
+                    .as_deref()
+                    .unwrap_or(&self.active_context)
+                    .to_string();
 
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => argo.select_next(),
@@ -3897,56 +5505,83 @@ impl App {
                     }
                     KeyCode::Char('x') => {
                         if let Some(app) = sel_app {
-                            self.open_action_palette("Application".to_string(), app.name.clone(), Some(app.namespace.clone()));
+                            self.open_action_palette(
+                                "Application".to_string(),
+                                app.name.clone(),
+                                Some(app.namespace.clone()),
+                            );
                         }
                     }
                     KeyCode::Char('s') => {
-                        if let Some(app) = sel_app {
-                            let payload = serde_json::json!({
-                                "ctx": query_ctx,
-                                "ns": app.namespace,
-                                "name": app.name,
-                                "prune": false,
-                                "dry_run": false,
-                            });
+                        if let Some(ref app) = sel_app {
+                            let hub_info = if query_ctx != self.active_context {
+                                format!(" on hub cluster '{}'", query_ctx)
+                            } else {
+                                String::new()
+                            };
+                            let payload = argo_confirm_payload(
+                                &query_ctx,
+                                app,
+                                serde_json::json!({"prune": false, "dry_run": false}),
+                            );
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Sync ArgoCD Application [{}]", app.name),
-                                message: format!("Trigger sync for '{}/{}'? (Prune: false)", app.namespace, app.name),
+                                message: format!(
+                                    "Trigger sync for '{}/{}'{hub_info}? (Prune: false)",
+                                    app.namespace, app.name
+                                ),
                                 action_name: format!("argo_sync:{}", payload),
                                 is_destructive: false,
                             });
                         }
                     }
                     KeyCode::Char('S') => {
-                        if let Some(app) = sel_app {
-                            let payload = serde_json::json!({
-                                "ctx": query_ctx,
-                                "ns": app.namespace,
-                                "name": app.name,
-                                "prune": true,
-                                "dry_run": false,
-                            });
+                        if let Some(ref app) = sel_app {
+                            let hub_info = if query_ctx != self.active_context {
+                                format!(" on hub cluster '{}'", query_ctx)
+                            } else {
+                                String::new()
+                            };
+                            let payload = argo_confirm_payload(
+                                &query_ctx,
+                                app,
+                                serde_json::json!({"prune": true, "dry_run": false}),
+                            );
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Sync ArgoCD Application with Prune [{}]", app.name),
-                                message: format!("Trigger sync with PRUNE for '{}/{}'?", app.namespace, app.name),
+                                message: format!(
+                                    "Trigger sync with PRUNE for '{}/{}'{hub_info}?",
+                                    app.namespace, app.name
+                                ),
                                 action_name: format!("argo_sync:{}", payload),
                                 is_destructive: true,
                             });
                         }
                     }
                     KeyCode::Char('p') => {
-                        if let Some(app) = sel_app {
+                        if let Some(ref app) = sel_app {
+                            let hub_info = if query_ctx != self.active_context {
+                                format!(" on hub cluster '{}'", query_ctx)
+                            } else {
+                                String::new()
+                            };
                             let enable = !app.auto_sync_enabled;
-                            let label = if enable { "Enable Auto-Sync" } else { "Pause Auto-Sync (Incident Lever)" };
-                            let payload = serde_json::json!({
-                                "ctx": query_ctx,
-                                "ns": app.namespace,
-                                "name": app.name,
-                                "enable": enable,
-                            });
+                            let label = if enable {
+                                "Enable Auto-Sync"
+                            } else {
+                                "Pause Auto-Sync (Incident Lever)"
+                            };
+                            let payload = argo_confirm_payload(
+                                &query_ctx,
+                                app,
+                                serde_json::json!({"enable": enable}),
+                            );
                             self.modal = Some(Modal::Confirm {
                                 title: format!("{} [{}]", label, app.name),
-                                message: format!("{} for '{}/{}'?", label, app.namespace, app.name),
+                                message: format!(
+                                    "{} for '{}/{}'{hub_info}?",
+                                    label, app.namespace, app.name
+                                ),
                                 action_name: format!("argo_toggle_auto:{}", payload),
                                 is_destructive: !enable,
                             });
@@ -3954,7 +5589,10 @@ impl App {
                     }
                     KeyCode::Char('R') => {
                         if let Some(app) = sel_app {
-                            self.set_toast(format!("Triggering hard refresh for '{}'...", app.name), Theme::status_ok());
+                            self.set_toast(
+                                format!("Triggering hard refresh for '{}'...", app.name),
+                                Theme::status_ok(),
+                            );
                             self.trigger_argo_hard_refresh(&app.name, &app.namespace);
                         }
                     }
@@ -3962,11 +5600,20 @@ impl App {
                         if let Some(app) = sel_app {
                             if !app.repo_url.is_empty() {
                                 match open_browser_url(&app.repo_url) {
-                                    Ok(_) => self.set_toast(format!("Opened Git repo: {}", app.repo_url), Theme::status_ok()),
-                                    Err(err) => self.set_toast(format!("Could not open browser: {}", err), Theme::status_error()),
+                                    Ok(_) => self.set_toast(
+                                        format!("Opened Git repo: {}", app.repo_url),
+                                        Theme::status_ok(),
+                                    ),
+                                    Err(err) => self.set_toast(
+                                        format!("Could not open browser: {}", err),
+                                        Theme::status_error(),
+                                    ),
                                 }
                             } else {
-                                self.set_toast("Application has no repoURL configured".to_string(), Theme::status_warn());
+                                self.set_toast(
+                                    "Application has no repoURL configured".to_string(),
+                                    Theme::status_warn(),
+                                );
                             }
                         }
                     }
@@ -3983,13 +5630,18 @@ impl App {
                     }
                     KeyCode::Char('r') => {
                         self.refresh_argo_applications_ext(true);
-                        self.set_toast("Refreshing ArgoCD applications...".to_string(), Theme::status_ok());
+                        self.set_toast(
+                            "Refreshing ArgoCD applications...".to_string(),
+                            Theme::status_ok(),
+                        );
                     }
                     KeyCode::Char('c') => {
                         let mut cfg = TuiConfigViewState::new();
-                        cfg.available_contexts = self.contexts.iter().map(|c| c.name.clone()).collect();
+                        cfg.available_contexts =
+                            self.contexts.iter().map(|c| c.name.clone()).collect();
                         cfg.selected_field = 4;
-                        let old_view = std::mem::replace(&mut self.active_view, ActiveView::TuiConfig(cfg));
+                        let old_view =
+                            std::mem::replace(&mut self.active_view, ActiveView::TuiConfig(cfg));
                         self.nav_stack.push(old_view);
                     }
                     KeyCode::Char('y') => {
@@ -4005,7 +5657,10 @@ impl App {
                             tokio::spawn(async move {
                                 let _ = copy_to_clipboard(&url_clone);
                             });
-                            self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                            self.set_toast(
+                                format!("Copied deep link: {}", url),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     _ => {}
@@ -4027,45 +5682,54 @@ impl App {
                             tokio::spawn(async move {
                                 let _ = copy_to_clipboard(&info_clone);
                             });
-                            self.set_toast(format!("Copied tool info: {}", info), Theme::status_ok());
+                            self.set_toast(
+                                format!("Copied tool info: {}", info),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     _ => {}
                 }
             }
-            ActiveView::Overview(ov) => {
-                match key.code {
-                    KeyCode::Char('r') => {
-                        self.refresh_cluster_overview();
-                        self.set_toast("Refreshing cluster overview...".to_string(), Theme::status_ok());
-                    }
-                    KeyCode::Char('c') | KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let summary = ov.data.to_summary_text();
-                        tokio::spawn(async move {
-                            let _ = copy_to_clipboard(&summary);
-                        });
-                        self.set_toast("Copied cluster overview summary to clipboard".to_string(), Theme::status_ok());
-                    }
-                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        let link = crate::deep_link::DeepLink::Cluster {
-                            context: self.active_context.clone(),
-                        };
-                        let url = link.to_url();
-                        let url_clone = url.clone();
-                        tokio::spawn(async move {
-                            let _ = copy_to_clipboard(&url_clone);
-                        });
-                        self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
-                    }
-                    KeyCode::Char('s') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.summarise_cluster_health();
-                    }
-                    KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.summarise_cluster_health();
-                    }
-                    _ => {}
+            ActiveView::Overview(ov) => match key.code {
+                KeyCode::Char('r') => {
+                    self.refresh_cluster_overview();
+                    self.set_toast(
+                        "Refreshing cluster overview...".to_string(),
+                        Theme::status_ok(),
+                    );
                 }
-            }
+                KeyCode::Char('c') | KeyCode::Char('y')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    let summary = ov.data.to_summary_text();
+                    tokio::spawn(async move {
+                        let _ = copy_to_clipboard(&summary);
+                    });
+                    self.set_toast(
+                        "Copied cluster overview summary to clipboard".to_string(),
+                        Theme::status_ok(),
+                    );
+                }
+                KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let link = crate::deep_link::DeepLink::Cluster {
+                        context: self.active_context.clone(),
+                    };
+                    let url = link.to_url();
+                    let url_clone = url.clone();
+                    tokio::spawn(async move {
+                        let _ = copy_to_clipboard(&url_clone);
+                    });
+                    self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                }
+                KeyCode::Char('s') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.summarise_cluster_health();
+                }
+                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.summarise_cluster_health();
+                }
+                _ => {}
+            },
             ActiveView::Assistant => {
                 let ai = &mut self.assistant_state;
                 if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -4079,8 +5743,14 @@ impl App {
                     let prov_name = crate::ai_config::provider_display_name(prov);
                     let model = self.ai_settings.get_model(prov);
                     match ai.save_conversation_to_file(prov_name, &model, None) {
-                        Ok(path) => self.set_toast(format!("✓ Saved conversation to {}", path.display()), Theme::status_ok()),
-                        Err(err) => self.set_toast(format!("Failed to save conversation: {}", err), Theme::status_error()),
+                        Ok(path) => self.set_toast(
+                            format!("✓ Saved conversation to {}", path.display()),
+                            Theme::status_ok(),
+                        ),
+                        Err(err) => self.set_toast(
+                            format!("Failed to save conversation: {}", err),
+                            Theme::status_error(),
+                        ),
                     }
                     return;
                 }
@@ -4090,15 +5760,24 @@ impl App {
                     return;
                 }
                 if (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C'))
-                    && (key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::SUPER))
+                    && (key.modifiers.contains(KeyModifiers::CONTROL)
+                        || key.modifiers.contains(KeyModifiers::SUPER))
                 {
                     if let Some(selected) = ai.get_selected_text() {
                         let _ = copy_to_clipboard(&selected);
-                        self.set_toast("✓ Copied selection to clipboard".to_string(), Theme::status_ok());
+                        self.set_toast(
+                            "✓ Copied selection to clipboard".to_string(),
+                            Theme::status_ok(),
+                        );
                         return;
-                    } else if let Some(last_asst) = ai.messages.iter().rev().find(|m| m.role == "assistant") {
+                    } else if let Some(last_asst) =
+                        ai.messages.iter().rev().find(|m| m.role == "assistant")
+                    {
                         let _ = copy_to_clipboard(&last_asst.content);
-                        self.set_toast("✓ Copied assistant answer to clipboard".to_string(), Theme::status_ok());
+                        self.set_toast(
+                            "✓ Copied assistant answer to clipboard".to_string(),
+                            Theme::status_ok(),
+                        );
                         return;
                     } else {
                         self.set_toast("Nothing to copy".to_string(), Theme::status_warn());
@@ -4202,10 +5881,18 @@ impl App {
                     }
                     KeyCode::PageUp => ai.scroll_up(10),
                     KeyCode::PageDown => ai.scroll_down(10),
-                    KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_up(2),
-                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_down(2),
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_up(10),
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => ai.scroll_down(10),
+                    KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        ai.scroll_up(2)
+                    }
+                    KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        ai.scroll_down(2)
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        ai.scroll_up(10)
+                    }
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        ai.scroll_down(10)
+                    }
 
                     // Editing & Input
                     _ if is_word_delete_key(&key) => {
@@ -4257,7 +5944,10 @@ impl App {
                             let _ = self.ai_settings.save();
                             ai.input.clear();
                             ai.slash_suggestions.clear();
-                            ai.add_assistant_message("Caveman mode disabled. Returning to standard conversational mode.".to_string());
+                            ai.add_assistant_message(
+                                "Caveman mode disabled. Returning to standard conversational mode."
+                                    .to_string(),
+                            );
                             self.set_toast("Caveman mode disabled".to_string(), Theme::status_ok());
                             return;
                         }
@@ -4269,7 +5959,8 @@ impl App {
                             || trimmed_lower == "be brief"
                         {
                             ai.caveman_level = Some(crate::ai_skills::CavemanLevel::Full);
-                            self.ai_settings.set_caveman_level(Some(crate::ai_skills::CavemanLevel::Full));
+                            self.ai_settings
+                                .set_caveman_level(Some(crate::ai_skills::CavemanLevel::Full));
                             let _ = self.ai_settings.save();
                             ai.input.clear();
                             ai.slash_suggestions.clear();
@@ -4283,7 +5974,10 @@ impl App {
 
                         if raw_input.starts_with('/') {
                             let parts: Vec<&str> = raw_input.split_whitespace().collect();
-                            let cmd = parts.first().map(|s| s.trim_start_matches('/')).unwrap_or("");
+                            let cmd = parts
+                                .first()
+                                .map(|s| s.trim_start_matches('/'))
+                                .unwrap_or("");
                             let arg = if parts.len() > 1 {
                                 Some(parts[1..].join(" "))
                             } else {
@@ -4296,19 +5990,29 @@ impl App {
                                     ai.clear_conversation();
                                     ai.input.clear();
                                     ai.slash_suggestions.clear();
-                                    self.set_toast("✓ Conversation cleared".to_string(), Theme::status_ok());
+                                    self.set_toast(
+                                        "✓ Conversation cleared".to_string(),
+                                        Theme::status_ok(),
+                                    );
                                     return;
                                 }
                                 "save" | "export" => {
                                     let prov = self.ai_settings.default_provider;
                                     let prov_name = crate::ai_config::provider_display_name(prov);
                                     let model = self.ai_settings.get_model(prov);
-                                    let save_res = ai.save_conversation_to_file(prov_name, &model, None);
+                                    let save_res =
+                                        ai.save_conversation_to_file(prov_name, &model, None);
                                     ai.input.clear();
                                     ai.slash_suggestions.clear();
                                     match save_res {
-                                        Ok(path) => self.set_toast(format!("✓ Saved conversation to {}", path.display()), Theme::status_ok()),
-                                        Err(err) => self.set_toast(format!("Failed to save conversation: {}", err), Theme::status_error()),
+                                        Ok(path) => self.set_toast(
+                                            format!("✓ Saved conversation to {}", path.display()),
+                                            Theme::status_ok(),
+                                        ),
+                                        Err(err) => self.set_toast(
+                                            format!("Failed to save conversation: {}", err),
+                                            Theme::status_error(),
+                                        ),
                                     }
                                     return;
                                 }
@@ -4319,7 +6023,9 @@ impl App {
                                     return;
                                 }
                                 "caveman" | "cave" | "terse" => {
-                                    let action = crate::ai_skills::parse_caveman_command(arg.as_deref().unwrap_or(""));
+                                    let action = crate::ai_skills::parse_caveman_command(
+                                        arg.as_deref().unwrap_or(""),
+                                    );
                                     match action {
                                         crate::ai_skills::CavemanCommandAction::Status => {
                                             if let Some(lvl) = ai.caveman_level {
@@ -4330,13 +6036,19 @@ impl App {
                                                 ai.input.clear();
                                                 ai.slash_suggestions.clear();
                                             } else {
-                                                ai.caveman_level = Some(crate::ai_skills::CavemanLevel::Full);
-                                                self.ai_settings.set_caveman_level(Some(crate::ai_skills::CavemanLevel::Full));
+                                                ai.caveman_level =
+                                                    Some(crate::ai_skills::CavemanLevel::Full);
+                                                self.ai_settings.set_caveman_level(Some(
+                                                    crate::ai_skills::CavemanLevel::Full,
+                                                ));
                                                 let _ = self.ai_settings.save();
                                                 ai.add_assistant_message("🦖 Caveman mode activated (level: **full**). Output tokens cut ~75%. Responses terse, no fluff. Type `/caveman off` or `stop caveman` to disable.".to_string());
                                                 ai.input.clear();
                                                 ai.slash_suggestions.clear();
-                                                self.set_toast("🦖 Caveman mode: full".to_string(), Theme::status_ok());
+                                                self.set_toast(
+                                                    "🦖 Caveman mode: full".to_string(),
+                                                    Theme::status_ok(),
+                                                );
                                             }
                                             return;
                                         }
@@ -4347,10 +6059,16 @@ impl App {
                                             ai.add_assistant_message("Caveman mode disabled. Returning to standard conversational mode.".to_string());
                                             ai.input.clear();
                                             ai.slash_suggestions.clear();
-                                            self.set_toast("Caveman mode disabled".to_string(), Theme::status_ok());
+                                            self.set_toast(
+                                                "Caveman mode disabled".to_string(),
+                                                Theme::status_ok(),
+                                            );
                                             return;
                                         }
-                                        crate::ai_skills::CavemanCommandAction::SetLevel { level, remainder_query } => {
+                                        crate::ai_skills::CavemanCommandAction::SetLevel {
+                                            level,
+                                            remainder_query,
+                                        } => {
                                             ai.caveman_level = Some(level);
                                             self.ai_settings.set_caveman_level(Some(level));
                                             let _ = self.ai_settings.save();
@@ -4370,7 +6088,13 @@ impl App {
                                                     ));
                                                     ai.input.clear();
                                                     ai.slash_suggestions.clear();
-                                                    self.set_toast(format!("🦖 Caveman mode: {}", level.display_name()), Theme::status_ok());
+                                                    self.set_toast(
+                                                        format!(
+                                                            "🦖 Caveman mode: {}",
+                                                            level.display_name()
+                                                        ),
+                                                        Theme::status_ok(),
+                                                    );
                                                     return;
                                                 }
                                                 Some(q) => {
@@ -4394,7 +6118,9 @@ impl App {
                             ) {
                                 agent_query = expanded;
                                 ai.slash_suggestions.clear();
-                            } else if !ai.slash_suggestions.is_empty() && (!raw_input.contains(' ') || raw_input == "/") {
+                            } else if !ai.slash_suggestions.is_empty()
+                                && (!raw_input.contains(' ') || raw_input == "/")
+                            {
                                 ai.apply_selected_slash_suggestion();
                                 return;
                             }
@@ -4413,9 +6139,15 @@ impl App {
                             settings.finish_editing();
                             self.ai_settings = settings.settings.clone();
                             if let Err(e) = settings.save() {
-                                self.set_toast(format!("Failed to save settings: {}", e), Theme::status_error());
+                                self.set_toast(
+                                    format!("Failed to save settings: {}", e),
+                                    Theme::status_error(),
+                                );
                             } else {
-                                self.set_toast("✓ Setting updated and saved".to_string(), Theme::status_ok());
+                                self.set_toast(
+                                    "✓ Setting updated and saved".to_string(),
+                                    Theme::status_ok(),
+                                );
                             }
                         }
                         _ if is_word_delete_key(&key) => {
@@ -4424,13 +6156,18 @@ impl App {
                         KeyCode::Backspace => {
                             settings.edit_buffer.pop();
                         }
-                        KeyCode::Char('v') | KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('v') | KeyCode::Char('V')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
                             if let Some(clip) = get_clipboard_text() {
                                 let cleaned = clip.replace("\r\n", "").replace('\n', "");
                                 settings.edit_buffer.push_str(&cleaned);
                             }
                         }
-                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) => {
+                        KeyCode::Char(c)
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && !key.modifiers.contains(KeyModifiers::ALT) =>
+                        {
                             settings.edit_buffer.push(c);
                         }
                         _ => {}
@@ -4448,27 +6185,40 @@ impl App {
                         }
                         KeyCode::Char('j') | KeyCode::Down => settings.select_next_provider(),
                         KeyCode::Char('k') | KeyCode::Up => settings.select_prev_provider(),
-                        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => settings.select_next_field(),
-                        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => settings.select_prev_field(),
+                        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                            settings.select_next_field()
+                        }
+                        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                            settings.select_prev_field()
+                        }
                         KeyCode::Char(' ') => {
                             settings.set_active_provider();
                             self.ai_settings = settings.settings.clone();
                             let _ = settings.save();
-                            let prov_name = crate::ai_config::provider_display_name(settings.settings.default_provider);
-                            self.set_toast(format!("✓ Active provider set to {}", prov_name), Theme::status_ok());
+                            let prov_name = crate::ai_config::provider_display_name(
+                                settings.settings.default_provider,
+                            );
+                            self.set_toast(
+                                format!("✓ Active provider set to {}", prov_name),
+                                Theme::status_ok(),
+                            );
                         }
                         KeyCode::Char('e') | KeyCode::Enter => settings.start_editing(),
-                        KeyCode::Char('s') => {
-                            match settings.save() {
-                                Ok(path) => {
-                                    self.ai_settings = settings.settings.clone();
-                                    self.set_toast(format!("Saved AI settings to {}", path.display()), Theme::status_ok());
-                                }
-                                Err(err) => {
-                                    self.set_toast(format!("Failed to save settings: {}", err), Theme::status_error());
-                                }
+                        KeyCode::Char('s') => match settings.save() {
+                            Ok(path) => {
+                                self.ai_settings = settings.settings.clone();
+                                self.set_toast(
+                                    format!("Saved AI settings to {}", path.display()),
+                                    Theme::status_ok(),
+                                );
                             }
-                        }
+                            Err(err) => {
+                                self.set_toast(
+                                    format!("Failed to save settings: {}", err),
+                                    Theme::status_error(),
+                                );
+                            }
+                        },
                         _ => {}
                     }
                 }
@@ -4479,12 +6229,16 @@ impl App {
                         KeyCode::Esc => {
                             cfg_state.cancel_editing();
                         }
-                        KeyCode::Enter => {
-                            match cfg_state.finish_editing(&mut self.tui_config) {
-                                Ok(()) => self.set_toast("Saved ArgoCD Hub setting".to_string(), Theme::status_ok()),
-                                Err(err) => self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error()),
-                            }
-                        }
+                        KeyCode::Enter => match cfg_state.finish_editing(&mut self.tui_config) {
+                            Ok(()) => self.set_toast(
+                                "Saved ArgoCD Hub setting".to_string(),
+                                Theme::status_ok(),
+                            ),
+                            Err(err) => self.set_toast(
+                                format!("Settings applied for this session but not saved: {err}"),
+                                Theme::status_error(),
+                            ),
+                        },
                         KeyCode::Left => {
                             cfg_state.move_cursor_left();
                         }
@@ -4550,28 +6304,47 @@ impl App {
                             self.switch_view_to_kind(ResourceKind::Pods).await;
                         }
                     }
-                    KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => cfg_state.select_next_field(),
-                    KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => cfg_state.select_prev_field(),
+                    KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
+                        cfg_state.select_next_field()
+                    }
+                    KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => {
+                        cfg_state.select_prev_field()
+                    }
                     KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('-') => {
                         if let Err(err) = cfg_state.adjust_current(-1, &mut self.tui_config) {
-                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                            self.set_toast(
+                                format!("Settings applied for this session but not saved: {err}"),
+                                Theme::status_error(),
+                            );
                         }
                     }
-                    KeyCode::Char('l') | KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => {
+                    KeyCode::Char('l')
+                    | KeyCode::Right
+                    | KeyCode::Char('+')
+                    | KeyCode::Char('=') => {
                         if let Err(err) = cfg_state.adjust_current(1, &mut self.tui_config) {
-                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                            self.set_toast(
+                                format!("Settings applied for this session but not saved: {err}"),
+                                Theme::status_error(),
+                            );
                         }
                     }
                     KeyCode::Enter => {
                         if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
                             cfg_state.start_editing(&self.tui_config);
                         } else if let Err(err) = cfg_state.cycle_current(&mut self.tui_config) {
-                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                            self.set_toast(
+                                format!("Settings applied for this session but not saved: {err}"),
+                                Theme::status_error(),
+                            );
                         }
                     }
                     KeyCode::Char(' ') => {
                         if let Err(err) = cfg_state.cycle_current(&mut self.tui_config) {
-                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                            self.set_toast(
+                                format!("Settings applied for this session but not saved: {err}"),
+                                Theme::status_error(),
+                            );
                         }
                     }
                     KeyCode::Char('e') | KeyCode::Char('E') => {
@@ -4582,105 +6355,143 @@ impl App {
                     KeyCode::Char('c') | KeyCode::Char('C') => {
                         if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
                             match cfg_state.clear_current(&mut self.tui_config) {
-                                Ok(()) => self.set_toast("Cleared ArgoCD Hub setting".to_string(), Theme::status_ok()),
-                                Err(err) => self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error()),
+                                Ok(()) => self.set_toast(
+                                    "Cleared ArgoCD Hub setting".to_string(),
+                                    Theme::status_ok(),
+                                ),
+                                Err(err) => self.set_toast(
+                                    format!(
+                                        "Settings applied for this session but not saved: {err}"
+                                    ),
+                                    Theme::status_error(),
+                                ),
                             }
                         }
                     }
                     KeyCode::Char('[') | KeyCode::Char('{') => {
                         if let Err(err) = cfg_state.adjust_current(-5, &mut self.tui_config) {
-                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                            self.set_toast(
+                                format!("Settings applied for this session but not saved: {err}"),
+                                Theme::status_error(),
+                            );
                         }
                     }
                     KeyCode::Char(']') | KeyCode::Char('}') => {
                         if let Err(err) = cfg_state.adjust_current(5, &mut self.tui_config) {
-                            self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error());
+                            self.set_toast(
+                                format!("Settings applied for this session but not saved: {err}"),
+                                Theme::status_error(),
+                            );
                         }
                     }
                     KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('d') => {
                         match cfg_state.reset_defaults(&mut self.tui_config) {
-                            Ok(()) => self.set_toast("Reset TUI settings to defaults".to_string(), Theme::status_ok()),
-                            Err(err) => self.set_toast(format!("Settings applied for this session but not saved: {err}"), Theme::status_error()),
+                            Ok(()) => self.set_toast(
+                                "Reset TUI settings to defaults".to_string(),
+                                Theme::status_ok(),
+                            ),
+                            Err(err) => self.set_toast(
+                                format!("Settings applied for this session but not saved: {err}"),
+                                Theme::status_error(),
+                            ),
                         }
                     }
                     _ => {}
                 }
             }
-            ActiveView::Tree(tree) => {
-                    match key.code {
-                        KeyCode::Char('j') | KeyCode::Down => tree.select_next(),
-                        KeyCode::Char('k') | KeyCode::Up => tree.select_prev(),
-                        KeyCode::Char('g') | KeyCode::Home => tree.select_first(),
-                        KeyCode::Char('G') | KeyCode::End => tree.select_last(),
-                        KeyCode::Char('c') if !key.modifiers.contains(KeyModifiers::SHIFT) && !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if let Some(node) = tree.selected_node() {
-                                let name = node.name.clone();
-                                let n_clone = name.clone();
-                                tokio::spawn(async move {
-                                    let _ = copy_to_clipboard(&n_clone);
-                                });
-                                self.set_toast(format!("✓ Copied '{}' to clipboard", name), Theme::status_ok());
-                            }
-                        }
-                        KeyCode::Char('C') | KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                            let text = tree.tree_as_text();
-                            tokio::spawn(async move {
-                                let _ = copy_to_clipboard(&text);
-                            });
-                            self.set_toast("✓ Copied resource relationship tree to clipboard".to_string(), Theme::status_ok());
-                        }
-                        KeyCode::Enter => {
-                            if let Some(node) = tree.selected_node() {
-                                let name = node.name.clone();
-                                let kind = node.kind.clone();
-                                let ns = node.namespace.clone();
-                                self.open_describe_view(name, kind, ns).await;
-                            }
-                        }
-                        KeyCode::Char('d') => {
-                            if let Some(node) = tree.selected_node() {
-                                let name = node.name.clone();
-                                let kind = node.kind.clone();
-                                let ns = node.namespace.clone();
-                                self.open_describe_view(name, kind, ns).await;
-                            }
-                        }
-                        KeyCode::Char('y') => {
-                            if let Some(node) = tree.selected_node() {
-                                let name = node.name.clone();
-                                let kind = node.kind.clone();
-                                let ns = node.namespace.clone();
-                                self.open_yaml_view(name, kind, ns).await;
-                            }
-                        }
-                        KeyCode::Char('l') => {
-                            if let Some(node) = tree.selected_node() {
-                                let is_pod = node.kind.eq_ignore_ascii_case("Pod");
-                                let kind = node.kind.clone();
-                                let name = node.name.clone();
-                                let ns = node.namespace.clone();
-                                if is_pod {
-                                    self.prompt_pod_logs(name, ns).await;
-                                } else {
-                                    self.set_toast(format!("Logs only available for Pods (selected {})", kind), Theme::status_warn());
-                                }
-                            }
-                        }
-                        KeyCode::Char('x') => {
-                            if let Some(node) = tree.selected_node() {
-                                let name = node.name.clone();
-                                let kind = node.kind.clone();
-                                let ns = node.namespace.clone();
-                                self.open_action_palette(kind, name, ns);
-                            }
-                        }
-                        _ => {}
+            ActiveView::Tree(tree) => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => tree.select_next(),
+                KeyCode::Char('k') | KeyCode::Up => tree.select_prev(),
+                KeyCode::Char('g') | KeyCode::Home => tree.select_first(),
+                KeyCode::Char('G') | KeyCode::End => tree.select_last(),
+                KeyCode::Char('c')
+                    if !key.modifiers.contains(KeyModifiers::SHIFT)
+                        && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    if let Some(node) = tree.selected_node() {
+                        let name = node.name.clone();
+                        let n_clone = name.clone();
+                        tokio::spawn(async move {
+                            let _ = copy_to_clipboard(&n_clone);
+                        });
+                        self.set_toast(
+                            format!("✓ Copied '{}' to clipboard", name),
+                            Theme::status_ok(),
+                        );
                     }
                 }
+                KeyCode::Char('C') | KeyCode::Char('c')
+                    if key.modifiers.contains(KeyModifiers::SHIFT) =>
+                {
+                    let text = tree.tree_as_text();
+                    tokio::spawn(async move {
+                        let _ = copy_to_clipboard(&text);
+                    });
+                    self.set_toast(
+                        "✓ Copied resource relationship tree to clipboard".to_string(),
+                        Theme::status_ok(),
+                    );
+                }
+                KeyCode::Enter => {
+                    if let Some(node) = tree.selected_node() {
+                        let name = node.name.clone();
+                        let kind = node.kind.clone();
+                        let ns = node.namespace.clone();
+                        self.open_describe_view(name, kind, ns).await;
+                    }
+                }
+                KeyCode::Char('d') => {
+                    if let Some(node) = tree.selected_node() {
+                        let name = node.name.clone();
+                        let kind = node.kind.clone();
+                        let ns = node.namespace.clone();
+                        self.open_describe_view(name, kind, ns).await;
+                    }
+                }
+                KeyCode::Char('y') => {
+                    if let Some(node) = tree.selected_node() {
+                        let name = node.name.clone();
+                        let kind = node.kind.clone();
+                        let ns = node.namespace.clone();
+                        self.open_yaml_view(name, kind, ns).await;
+                    }
+                }
+                KeyCode::Char('l') => {
+                    if let Some(node) = tree.selected_node() {
+                        let is_pod = node.kind.eq_ignore_ascii_case("Pod");
+                        let kind = node.kind.clone();
+                        let name = node.name.clone();
+                        let ns = node.namespace.clone();
+                        if is_pod {
+                            self.prompt_pod_logs(name, ns).await;
+                        } else {
+                            self.set_toast(
+                                format!("Logs only available for Pods (selected {})", kind),
+                                Theme::status_warn(),
+                            );
+                        }
+                    }
+                }
+                KeyCode::Char('x') => {
+                    if let Some(node) = tree.selected_node() {
+                        let name = node.name.clone();
+                        let kind = node.kind.clone();
+                        let ns = node.namespace.clone();
+                        self.open_action_palette(kind, name, ns);
+                    }
+                }
+                _ => {}
+            },
             ActiveView::NodeInspector(inspector) => {
-                let sel_pod = inspector.selected_pod().map(|p| (p.name.clone(), p.namespace.clone()));
+                let sel_pod = inspector
+                    .selected_pod()
+                    .map(|p| (p.name.clone(), p.namespace.clone()));
                 let node_name = inspector.node_name.clone();
-                let is_unsched = inspector.details.as_ref().map(|d| d.unschedulable).unwrap_or(false);
+                let is_unsched = inspector
+                    .details
+                    .as_ref()
+                    .map(|d| d.unschedulable)
+                    .unwrap_or(false);
 
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
@@ -4694,8 +6505,29 @@ impl App {
                     KeyCode::Char('k') | KeyCode::Up => inspector.select_prev(),
                     KeyCode::Char('g') | KeyCode::Home => inspector.select_first(),
                     KeyCode::Char('G') | KeyCode::End => inspector.select_last(),
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => inspector.page_down(10),
-                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => inspector.page_up(10),
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some((p_name, p_ns)) = sel_pod {
+                            let query_ns = if p_ns.is_empty() {
+                                "default".to_string()
+                            } else {
+                                p_ns.clone()
+                            };
+                            self.modal = Some(Modal::Confirm {
+                                title: format!("Delete Pod [{}]", p_name),
+                                message: format!(
+                                    "Are you sure you want to delete Pod '{}' in namespace '{}'?",
+                                    p_name, query_ns
+                                ),
+                                action_name: format!("delete:Pod:{}:{}", query_ns, p_name),
+                                is_destructive: true,
+                            });
+                        } else {
+                            inspector.page_down(10);
+                        }
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        inspector.page_up(10)
+                    }
                     KeyCode::Char('r') => {
                         self.open_node_inspector(node_name);
                     }
@@ -4708,7 +6540,10 @@ impl App {
                                 t.apply_filter(&p_name);
                             }
                             self.filter_buffer = p_name.clone();
-                            self.set_toast(format!("Jumped to Pod '{}'", p_name), Theme::status_ok());
+                            self.set_toast(
+                                format!("Jumped to Pod '{}'", p_name),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     KeyCode::Char('l') => {
@@ -4720,26 +6555,32 @@ impl App {
                     KeyCode::Char('d') => {
                         // Describe highlighted pod (or node if no pods)
                         if let Some((p_name, p_ns)) = sel_pod {
-                            self.open_describe_view(p_name, "Pod".to_string(), Some(p_ns)).await;
+                            self.open_describe_view(p_name, "Pod".to_string(), Some(p_ns))
+                                .await;
                         } else {
-                            self.open_describe_view(node_name, "Node".to_string(), None).await;
+                            self.open_describe_view(node_name, "Node".to_string(), None)
+                                .await;
                         }
                     }
                     KeyCode::Char('D') => {
                         // Describe node
-                        self.open_describe_view(node_name, "Node".to_string(), None).await;
+                        self.open_describe_view(node_name, "Node".to_string(), None)
+                            .await;
                     }
                     KeyCode::Char('y') => {
                         // View YAML of highlighted pod (or node if no pods)
                         if let Some((p_name, p_ns)) = sel_pod {
-                            self.open_yaml_view(p_name, "Pod".to_string(), Some(p_ns)).await;
+                            self.open_yaml_view(p_name, "Pod".to_string(), Some(p_ns))
+                                .await;
                         } else {
-                            self.open_yaml_view(node_name, "Node".to_string(), None).await;
+                            self.open_yaml_view(node_name, "Node".to_string(), None)
+                                .await;
                         }
                     }
                     KeyCode::Char('Y') => {
                         // View YAML of node
-                        self.open_yaml_view(node_name, "Node".to_string(), None).await;
+                        self.open_yaml_view(node_name, "Node".to_string(), None)
+                            .await;
                     }
                     KeyCode::Char('x') => {
                         // Open Action Palette
@@ -4753,15 +6594,21 @@ impl App {
                         if let Some((p_name, p_ns)) = sel_pod {
                             self.prompt_pod_shell(p_name, Some(p_ns)).await;
                         } else {
-                            self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: node_name.clone() });
+                            self.requires_terminal_suspend = Some(SuspendAction::NodeShell {
+                                node: node_name.clone(),
+                            });
                         }
                     }
                     KeyCode::Char('S') => {
                         // Explicit node debug shell even if a pod is highlighted
-                        self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: node_name.clone() });
+                        self.requires_terminal_suspend = Some(SuspendAction::NodeShell {
+                            node: node_name.clone(),
+                        });
                     }
                     KeyCode::Char('h') | KeyCode::Char('H') => {
-                        let destination = inspector.details.as_ref()
+                        let destination = inspector
+                            .details
+                            .as_ref()
                             .and_then(|d| d.internal_ip.clone().or_else(|| d.external_ip.clone()))
                             .unwrap_or_else(|| node_name.clone());
                         let cursor_pos = destination.chars().count();
@@ -4799,431 +6646,638 @@ impl App {
                             is_destructive: target_unsched,
                         });
                     }
-                    _ => {}
-                }
-            }
-            ActiveView::Topology(topo) => {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        if let Some(prev) = self.nav_stack.pop() {
-                            self.active_view = prev;
-                        } else {
-                            self.switch_view_to_kind(ResourceKind::Workloads).await;
-                        }
-                    }
-                    KeyCode::Left | KeyCode::Char('h') => topo.select_prev_lane(),
-                    KeyCode::Right => topo.select_next_lane(),
-                    KeyCode::Up | KeyCode::Char('k') => topo.select_prev_node(),
-                    KeyCode::Down | KeyCode::Char('j') => topo.select_next_node(),
-                    KeyCode::Tab => topo.select_next_lane(),
-                    KeyCode::BackTab => topo.select_prev_lane(),
-                    KeyCode::Char('g') | KeyCode::Home => topo.select_first_node(),
-                    KeyCode::Char('G') | KeyCode::End => topo.select_last_node(),
-                    KeyCode::Char('r') => {
-                        self.reload_topology_view();
-                    }
-                    KeyCode::Enter => {
-                        if let Some(node) = topo.selected_node() {
-                            let name = node.name.clone();
-                            let kind = node.kind.clone();
-                            let ns = node.namespace.clone();
-                            let is_workload = matches!(
-                                kind.to_lowercase().as_str(),
-                                "deployment" | "statefulset" | "daemonset" | "job" | "cronjob"
-                            );
-                            if is_workload {
-                                self.nav_stack.push(ActiveView::Topology(topo.clone()));
-                                if !ns.is_empty() && ns != self.active_namespace {
-                                    self.switch_namespace(ns.clone()).await;
-                                }
-                                self.switch_view_to_kind(ResourceKind::Pods).await;
-                                if let ActiveView::Table(t) = &mut self.active_view {
-                                    t.apply_filter(&name);
-                                }
-                                self.filter_buffer = name.clone();
-                                self.set_toast(format!("Jumped to Pods for {}", name), Theme::status_ok());
-                            } else if !kind.eq_ignore_ascii_case("External") {
-                                self.open_describe_view(name, kind, if ns.is_empty() { None } else { Some(ns.clone()) }).await;
-                            }
-                        }
-                    }
-                    KeyCode::Char('d') => {
-                        if let Some(node) = topo.selected_node() {
-                            let name = node.name.clone();
-                            let kind = node.kind.clone();
-                            let ns = node.namespace.clone();
-                            if !kind.eq_ignore_ascii_case("External") {
-                                self.open_describe_view(name, kind, if ns.is_empty() { None } else { Some(ns) }).await;
-                            }
-                        }
-                    }
-                    KeyCode::Char('y') => {
-                        if let Some(node) = topo.selected_node() {
-                            let name = node.name.clone();
-                            let kind = node.kind.clone();
-                            let ns = node.namespace.clone();
-                            if !kind.eq_ignore_ascii_case("External") {
-                                self.open_yaml_view(name, kind, if ns.is_empty() { None } else { Some(ns) }).await;
-                            }
-                        }
-                    }
-                    KeyCode::Char('l') => {
-                        if let Some(node) = topo.selected_node() {
-                            let name = node.name.clone();
-                            let kind = node.kind.clone();
-                            let ns = node.namespace.clone();
-                            let is_workload = matches!(
-                                kind.to_lowercase().as_str(),
-                                "deployment" | "statefulset" | "daemonset" | "job" | "cronjob" | "pod"
-                            );
-                            if is_workload {
-                                self.prompt_pod_logs(name, if ns.is_empty() { None } else { Some(ns) }).await;
-                            } else {
-                                self.set_toast(format!("Logs only available for workloads/pods (selected {})", kind), Theme::status_warn());
-                            }
-                        }
+                    KeyCode::Char('b') | KeyCode::Char('B') => {
+                        self.switch_view_to_kind(ResourceKind::BgpPeers).await;
                     }
                     _ => {}
                 }
             }
-            ActiveView::GpuInfo(gpu) => {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        if let Some(prev) = self.nav_stack.pop() {
-                            self.active_view = prev;
-                        } else {
-                            self.switch_view_to_kind(ResourceKind::Nodes).await;
-                        }
+            ActiveView::Topology(topo) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    if let Some(prev) = self.nav_stack.pop() {
+                        self.active_view = prev;
+                    } else {
+                        self.switch_view_to_kind(ResourceKind::Workloads).await;
                     }
-                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
-                        gpu.toggle_pane();
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        match gpu.focused_pane {
-                            gpu_view::GpuPane::Nodes => gpu.select_prev_node(),
-                            gpu_view::GpuPane::Pods => gpu.select_prev_pod(),
-                        }
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        match gpu.focused_pane {
-                            gpu_view::GpuPane::Nodes => gpu.select_next_node(),
-                            gpu_view::GpuPane::Pods => gpu.select_next_pod(),
-                        }
-                    }
-                    KeyCode::Char('g') | KeyCode::Home => {
-                        match gpu.focused_pane {
-                            gpu_view::GpuPane::Nodes => gpu.select_first_node(),
-                            gpu_view::GpuPane::Pods => gpu.select_first_pod(),
-                        }
-                    }
-                    KeyCode::Char('G') | KeyCode::End => {
-                        match gpu.focused_pane {
-                            gpu_view::GpuPane::Nodes => gpu.select_last_node(),
-                            gpu_view::GpuPane::Pods => gpu.select_last_pod(),
-                        }
-                    }
-                    KeyCode::Char('r') => {
-                        self.reload_gpu_info_view();
-                    }
-                    KeyCode::Enter => {
-                        if gpu.focused_pane == gpu_view::GpuPane::Pods {
-                            if let Some(pod) = gpu.selected_pod() {
-                                let p_name = pod.name.clone();
-                                let p_ns = pod.namespace.clone();
-                                self.open_describe_view(p_name, "Pod".to_string(), Some(p_ns)).await;
+                }
+                KeyCode::Left | KeyCode::Char('h') => topo.select_prev_lane(),
+                KeyCode::Right => topo.select_next_lane(),
+                KeyCode::Up | KeyCode::Char('k') => topo.select_prev_node(),
+                KeyCode::Down | KeyCode::Char('j') => topo.select_next_node(),
+                KeyCode::Tab => topo.select_next_lane(),
+                KeyCode::BackTab => topo.select_prev_lane(),
+                KeyCode::Char('g') | KeyCode::Home => topo.select_first_node(),
+                KeyCode::Char('G') | KeyCode::End => topo.select_last_node(),
+                KeyCode::Char('r') => {
+                    self.reload_topology_view();
+                }
+                KeyCode::Enter => {
+                    if let Some(node) = topo.selected_node() {
+                        let name = node.name.clone();
+                        let kind = node.kind.clone();
+                        let ns = node.namespace.clone();
+                        let is_workload = matches!(
+                            kind.to_lowercase().as_str(),
+                            "deployment" | "statefulset" | "daemonset" | "job" | "cronjob"
+                        );
+                        if is_workload {
+                            self.nav_stack.push(ActiveView::Topology(topo.clone()));
+                            if !ns.is_empty() && ns != self.active_namespace {
+                                self.switch_namespace(ns.clone()).await;
                             }
-                        } else if let Some(node) = gpu.selected_node() {
-                            let n_name = node.name.clone();
-                            self.open_node_inspector(n_name);
+                            self.switch_view_to_kind(ResourceKind::Pods).await;
+                            if let ActiveView::Table(t) = &mut self.active_view {
+                                t.apply_filter(&name);
+                            }
+                            self.filter_buffer = name.clone();
+                            self.set_toast(
+                                format!("Jumped to Pods for {}", name),
+                                Theme::status_ok(),
+                            );
+                        } else if !kind.eq_ignore_ascii_case("External") {
+                            self.open_describe_view(
+                                name,
+                                kind,
+                                if ns.is_empty() {
+                                    None
+                                } else {
+                                    Some(ns.clone())
+                                },
+                            )
+                            .await;
                         }
                     }
-                    KeyCode::Char('l') => {
+                }
+                KeyCode::Char('d') => {
+                    if let Some(node) = topo.selected_node() {
+                        let name = node.name.clone();
+                        let kind = node.kind.clone();
+                        let ns = node.namespace.clone();
+                        if !kind.eq_ignore_ascii_case("External") {
+                            self.open_describe_view(
+                                name,
+                                kind,
+                                if ns.is_empty() { None } else { Some(ns) },
+                            )
+                            .await;
+                        }
+                    }
+                }
+                KeyCode::Char('y') => {
+                    if let Some(node) = topo.selected_node() {
+                        let name = node.name.clone();
+                        let kind = node.kind.clone();
+                        let ns = node.namespace.clone();
+                        if !kind.eq_ignore_ascii_case("External") {
+                            self.open_yaml_view(
+                                name,
+                                kind,
+                                if ns.is_empty() { None } else { Some(ns) },
+                            )
+                            .await;
+                        }
+                    }
+                }
+                KeyCode::Char('l') => {
+                    if let Some(node) = topo.selected_node() {
+                        let name = node.name.clone();
+                        let kind = node.kind.clone();
+                        let ns = node.namespace.clone();
+                        let is_workload = matches!(
+                            kind.to_lowercase().as_str(),
+                            "deployment" | "statefulset" | "daemonset" | "job" | "cronjob" | "pod"
+                        );
+                        if is_workload {
+                            self.prompt_pod_logs(name, if ns.is_empty() { None } else { Some(ns) })
+                                .await;
+                        } else {
+                            self.set_toast(
+                                format!(
+                                    "Logs only available for workloads/pods (selected {})",
+                                    kind
+                                ),
+                                Theme::status_warn(),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            },
+            ActiveView::GpuInfo(gpu) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    if let Some(prev) = self.nav_stack.pop() {
+                        self.active_view = prev;
+                    } else {
+                        self.switch_view_to_kind(ResourceKind::Nodes).await;
+                    }
+                }
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
+                    gpu.toggle_pane();
+                }
+                KeyCode::Up | KeyCode::Char('k') => match gpu.focused_pane {
+                    gpu_view::GpuPane::Nodes => gpu.select_prev_node(),
+                    gpu_view::GpuPane::Pods => gpu.select_prev_pod(),
+                },
+                KeyCode::Down | KeyCode::Char('j') => match gpu.focused_pane {
+                    gpu_view::GpuPane::Nodes => gpu.select_next_node(),
+                    gpu_view::GpuPane::Pods => gpu.select_next_pod(),
+                },
+                KeyCode::Char('g') | KeyCode::Home => match gpu.focused_pane {
+                    gpu_view::GpuPane::Nodes => gpu.select_first_node(),
+                    gpu_view::GpuPane::Pods => gpu.select_first_pod(),
+                },
+                KeyCode::Char('G') | KeyCode::End => match gpu.focused_pane {
+                    gpu_view::GpuPane::Nodes => gpu.select_last_node(),
+                    gpu_view::GpuPane::Pods => gpu.select_last_pod(),
+                },
+                KeyCode::Char('r') => {
+                    self.reload_gpu_info_view();
+                }
+                KeyCode::Enter => {
+                    if gpu.focused_pane == gpu_view::GpuPane::Pods {
                         if let Some(pod) = gpu.selected_pod() {
                             let p_name = pod.name.clone();
                             let p_ns = pod.namespace.clone();
-                            self.prompt_pod_logs(p_name, Some(p_ns)).await;
-                        } else {
-                            self.set_toast("Select a pod to stream logs".to_string(), Theme::status_warn());
+                            self.open_describe_view(p_name, "Pod".to_string(), Some(p_ns))
+                                .await;
                         }
+                    } else if let Some(node) = gpu.selected_node() {
+                        let n_name = node.name.clone();
+                        self.open_node_inspector(n_name);
                     }
-                    KeyCode::Char('d') => {
-                        if gpu.focused_pane == gpu_view::GpuPane::Pods {
-                            if let Some(pod) = gpu.selected_pod() {
-                                let p_name = pod.name.clone();
-                                let p_ns = pod.namespace.clone();
-                                self.open_describe_view(p_name, "Pod".to_string(), Some(p_ns)).await;
-                            }
-                        } else if let Some(node) = gpu.selected_node() {
-                            let n_name = node.name.clone();
-                            self.open_describe_view(n_name, "Node".to_string(), None).await;
-                        }
-                    }
-                    KeyCode::Char('y') => {
-                        if gpu.focused_pane == gpu_view::GpuPane::Pods {
-                            if let Some(pod) = gpu.selected_pod() {
-                                let p_name = pod.name.clone();
-                                let p_ns = pod.namespace.clone();
-                                self.open_yaml_view(p_name, "Pod".to_string(), Some(p_ns)).await;
-                            }
-                        } else if let Some(node) = gpu.selected_node() {
-                            let n_name = node.name.clone();
-                            self.open_yaml_view(n_name, "Node".to_string(), None).await;
-                        }
-                    }
-                    _ => {}
                 }
-            }
-            ActiveView::Top(top) => {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        if let Some(prev) = self.nav_stack.pop() {
-                            self.active_view = prev;
-                        } else {
-                            self.switch_view_to_kind(ResourceKind::Pods).await;
+                KeyCode::Char('l') => {
+                    if let Some(pod) = gpu.selected_pod() {
+                        let p_name = pod.name.clone();
+                        let p_ns = pod.namespace.clone();
+                        self.prompt_pod_logs(p_name, Some(p_ns)).await;
+                    } else {
+                        self.set_toast(
+                            "Select a pod to stream logs".to_string(),
+                            Theme::status_warn(),
+                        );
+                    }
+                }
+                KeyCode::Char('d') => {
+                    if gpu.focused_pane == gpu_view::GpuPane::Pods {
+                        if let Some(pod) = gpu.selected_pod() {
+                            let p_name = pod.name.clone();
+                            let p_ns = pod.namespace.clone();
+                            self.open_describe_view(p_name, "Pod".to_string(), Some(p_ns))
+                                .await;
+                        }
+                    } else if let Some(node) = gpu.selected_node() {
+                        let n_name = node.name.clone();
+                        self.open_describe_view(n_name, "Node".to_string(), None)
+                            .await;
+                    }
+                }
+                KeyCode::Char('y') => {
+                    if gpu.focused_pane == gpu_view::GpuPane::Pods {
+                        if let Some(pod) = gpu.selected_pod() {
+                            let p_name = pod.name.clone();
+                            let p_ns = pod.namespace.clone();
+                            self.open_yaml_view(p_name, "Pod".to_string(), Some(p_ns))
+                                .await;
+                        }
+                    } else if let Some(node) = gpu.selected_node() {
+                        let n_name = node.name.clone();
+                        self.open_yaml_view(n_name, "Node".to_string(), None).await;
+                    }
+                }
+                _ => {}
+            },
+            ActiveView::Bgp(bgp) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    if let Some(prev) = self.nav_stack.pop() {
+                        self.active_view = prev;
+                    } else {
+                        self.switch_view_to_kind(ResourceKind::Nodes).await;
+                    }
+                }
+                KeyCode::Tab | KeyCode::Right => {
+                    bgp.next_tab();
+                }
+                KeyCode::BackTab | KeyCode::Left => {
+                    bgp.prev_tab();
+                }
+                KeyCode::Char('1') => {
+                    bgp.active_tab = bgp_view::BgpTab::Peers;
+                }
+                KeyCode::Char('2') => {
+                    bgp.active_tab = bgp_view::BgpTab::Services;
+                }
+                KeyCode::Char('3') => {
+                    bgp.active_tab = bgp_view::BgpTab::IpPools;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    bgp.select_prev();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    bgp.select_next();
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    bgp.select_first();
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    bgp.select_last();
+                }
+                KeyCode::Char('r') => {
+                    self.reload_bgp_view();
+                }
+                KeyCode::Enter => match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => {
+                        if let Some(peer) = bgp.selected_peer() {
+                            let n_name = peer.node_name.clone();
+                            self.open_node_inspector(n_name);
                         }
                     }
-                    KeyCode::Tab | KeyCode::BackTab => {
-                        top.toggle_tab();
+                    bgp_view::BgpTab::Services => {
+                        if let Some(svc) = bgp.selected_service() {
+                            let s_name = svc.service_name.clone();
+                            let s_ns = svc.namespace.clone();
+                            self.open_describe_view(s_name, "Service".to_string(), Some(s_ns))
+                                .await;
+                        }
                     }
-                    KeyCode::Char('1') => {
-                        top.set_tab(top_view::TopTab::Pods);
-                    }
-                    KeyCode::Char('2') => {
-                        top.set_tab(top_view::TopTab::Nodes);
-                    }
-                    KeyCode::Char('c') => {
-                        top.set_sort_by(top_view::TopSortBy::Cpu);
-                    }
-                    KeyCode::Char('m') => {
-                        top.set_sort_by(top_view::TopSortBy::Memory);
-                    }
-                    KeyCode::Char('S') => {
-                        top.toggle_sort_direction();
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        top.select_prev();
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        top.select_next();
-                    }
-                    KeyCode::PageUp => {
-                        top.scroll_page_up(10);
-                    }
-                    KeyCode::PageDown => {
-                        top.scroll_page_down(10);
-                    }
-                    KeyCode::Char('g') | KeyCode::Home => {
-                        top.select_first();
-                    }
-                    KeyCode::Char('G') | KeyCode::End => {
-                        top.select_last();
-                    }
-                    KeyCode::Char('/') => {
-                        self.input_mode = InputMode::Filter;
-                        self.filter_buffer = top.filter.clone();
-                    }
-                    KeyCode::Char('r') => {
-                        self.refresh_pod_metrics();
-                        self.refresh_node_metrics();
-                        self.refresh_top_view_data();
-                        self.set_toast("Refreshed metrics".to_string(), Theme::status_ok());
-                    }
-                    KeyCode::Enter | KeyCode::Char('d') => {
-                        match top.active_tab {
-                            top_view::TopTab::Pods => {
-                                if let Some(pod) = top.selected_pod() {
-                                    let p_name = pod.name.clone();
-                                    let p_ns = pod.namespace.clone();
-                                    self.open_describe_view(p_name, "Pod".to_string(), Some(p_ns)).await;
+                    bgp_view::BgpTab::IpPools => {
+                        if let Some(pool) = bgp.selected_pool() {
+                            let p_name = pool.name.clone();
+                            let p_ns = pool.namespace.clone();
+                            let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                    "IPAddressPool".to_string()
                                 }
-                            }
-                            top_view::TopTab::Nodes => {
-                                if let Some(node) = top.selected_node() {
-                                    let n_name = node.name.clone();
-                                    self.open_describe_view(n_name, "Node".to_string(), None).await;
+                                Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                    "IPPool".to_string()
                                 }
-                            }
+                                _ => "CiliumLoadBalancerIPPool".to_string(),
+                            };
+                            self.open_describe_view(p_name, p_kind, p_ns).await;
                         }
                     }
-                    KeyCode::Char('l') => {
-                        if top.active_tab == top_view::TopTab::Pods {
-                            if let Some(pod) = top.selected_pod() {
-                                let p_name = pod.name.clone();
-                                let p_ns = pod.namespace.clone();
-                                self.prompt_pod_logs(p_name, Some(p_ns)).await;
-                            }
-                        } else {
-                            self.set_toast("Logs only available for Pods".to_string(), Theme::status_warn());
-                        }
-                    }
-                    KeyCode::Char('f') | KeyCode::Char('F') => {
-                        if top.active_tab == top_view::TopTab::Pods {
-                            if let Some(pod) = top.selected_pod() {
-                                let p_name = pod.name.clone();
-                                let p_ns = pod.namespace.clone();
+                },
+                KeyCode::Char('d') => match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => {
+                        if let Some(peer) = bgp.selected_peer() {
+                            let (target_name, target_kind, target_ns, target_api_version) =
+                                bgp_view::peer_drilldown_target(
+                                    peer,
+                                    bgp.summary.as_ref().map(|s| &s.engine),
+                                );
 
-                                if key.code == KeyCode::Char('F') && !self.active_forwards_for("Pod", &p_ns, &p_name).is_empty() {
-                                    self.close_selected_port_forward().await;
-                                    return;
+                            self.open_describe_view_in_group(
+                                target_name,
+                                target_kind,
+                                target_ns,
+                                target_api_version,
+                            )
+                            .await;
+                        }
+                    }
+                    bgp_view::BgpTab::Services => {
+                        if let Some(svc) = bgp.selected_service() {
+                            let s_name = svc.service_name.clone();
+                            let s_ns = svc.namespace.clone();
+                            self.open_describe_view(s_name, "Service".to_string(), Some(s_ns))
+                                .await;
+                        }
+                    }
+                    bgp_view::BgpTab::IpPools => {
+                        if let Some(pool) = bgp.selected_pool() {
+                            let p_name = pool.name.clone();
+                            let p_ns = pool.namespace.clone();
+                            let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                    "IPAddressPool".to_string()
                                 }
+                                Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                    "IPPool".to_string()
+                                }
+                                _ => "CiliumLoadBalancerIPPool".to_string(),
+                            };
+                            self.open_describe_view(p_name, p_kind, p_ns).await;
+                        }
+                    }
+                },
+                KeyCode::Char('y') => match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => {
+                        if let Some(peer) = bgp.selected_peer() {
+                            let (target_name, target_kind, target_ns, target_api_version) =
+                                bgp_view::peer_drilldown_target(
+                                    peer,
+                                    bgp.summary.as_ref().map(|s| &s.engine),
+                                );
 
-                                let mut detected_port = None;
-                                if let Ok(client) = self.client_cache.get(&self.active_context).await {
-                                    let api: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(client, &p_ns);
-                                    if let Ok(p) = api.get(&p_name).await {
-                                        if let Some(spec) = p.spec {
-                                            for container in spec.containers {
-                                                if let Some(ports) = container.ports {
-                                                    if let Some(port) = ports.first() {
-                                                        detected_port = Some(port.container_port as u16);
-                                                        break;
-                                                    }
+                            self.open_yaml_view_in_group(
+                                target_name,
+                                target_kind,
+                                target_ns,
+                                target_api_version,
+                            )
+                            .await;
+                        }
+                    }
+                    bgp_view::BgpTab::Services => {
+                        if let Some(svc) = bgp.selected_service() {
+                            let s_name = svc.service_name.clone();
+                            let s_ns = svc.namespace.clone();
+                            self.open_yaml_view(s_name, "Service".to_string(), Some(s_ns))
+                                .await;
+                        }
+                    }
+                    bgp_view::BgpTab::IpPools => {
+                        if let Some(pool) = bgp.selected_pool() {
+                            let p_name = pool.name.clone();
+                            let p_ns = pool.namespace.clone();
+                            let p_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
+                                Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
+                                    "IPAddressPool".to_string()
+                                }
+                                Some(srelens_kube::bgp::BgpEngineType::Calico) => {
+                                    "IPPool".to_string()
+                                }
+                                _ => "CiliumLoadBalancerIPPool".to_string(),
+                            };
+                            self.open_yaml_view(p_name, p_kind, p_ns).await;
+                        }
+                    }
+                },
+                _ => {}
+            },
+            ActiveView::Top(top) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    if let Some(prev) = self.nav_stack.pop() {
+                        self.active_view = prev;
+                    } else {
+                        self.switch_view_to_kind(ResourceKind::Pods).await;
+                    }
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    top.toggle_tab();
+                }
+                KeyCode::Char('1') => {
+                    top.set_tab(top_view::TopTab::Pods);
+                }
+                KeyCode::Char('2') => {
+                    top.set_tab(top_view::TopTab::Nodes);
+                }
+                KeyCode::Char('c') => {
+                    top.set_sort_by(top_view::TopSortBy::Cpu);
+                }
+                KeyCode::Char('m') => {
+                    top.set_sort_by(top_view::TopSortBy::Memory);
+                }
+                KeyCode::Char('S') => {
+                    top.toggle_sort_direction();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    top.select_prev();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    top.select_next();
+                }
+                KeyCode::PageUp => {
+                    top.scroll_page_up(10);
+                }
+                KeyCode::PageDown => {
+                    top.scroll_page_down(10);
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    top.select_first();
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    top.select_last();
+                }
+                KeyCode::Char('/') => {
+                    self.input_mode = InputMode::Filter;
+                    self.filter_buffer = top.filter.clone();
+                }
+                KeyCode::Char('r') => {
+                    self.refresh_pod_metrics();
+                    self.refresh_node_metrics();
+                    self.refresh_top_view_data();
+                    self.set_toast("Refreshed metrics".to_string(), Theme::status_ok());
+                }
+                KeyCode::Enter | KeyCode::Char('d') => match top.active_tab {
+                    top_view::TopTab::Pods => {
+                        if let Some(pod) = top.selected_pod() {
+                            let p_name = pod.name.clone();
+                            let p_ns = pod.namespace.clone();
+                            self.open_describe_view(p_name, "Pod".to_string(), Some(p_ns))
+                                .await;
+                        }
+                    }
+                    top_view::TopTab::Nodes => {
+                        if let Some(node) = top.selected_node() {
+                            let n_name = node.name.clone();
+                            self.open_describe_view(n_name, "Node".to_string(), None)
+                                .await;
+                        }
+                    }
+                },
+                KeyCode::Char('l') => {
+                    if top.active_tab == top_view::TopTab::Pods {
+                        if let Some(pod) = top.selected_pod() {
+                            let p_name = pod.name.clone();
+                            let p_ns = pod.namespace.clone();
+                            self.prompt_pod_logs(p_name, Some(p_ns)).await;
+                        }
+                    } else {
+                        self.set_toast(
+                            "Logs only available for Pods".to_string(),
+                            Theme::status_warn(),
+                        );
+                    }
+                }
+                KeyCode::Char('f') | KeyCode::Char('F') => {
+                    if top.active_tab == top_view::TopTab::Pods {
+                        if let Some(pod) = top.selected_pod() {
+                            let p_name = pod.name.clone();
+                            let p_ns = pod.namespace.clone();
+
+                            if key.code == KeyCode::Char('F')
+                                && !self.active_forwards_for("Pod", &p_ns, &p_name).is_empty()
+                            {
+                                self.close_selected_port_forward().await;
+                                return;
+                            }
+
+                            let mut detected_port = None;
+                            if let Ok(client) = self.client_cache.get(&self.active_context).await {
+                                let api: kube::Api<k8s_openapi::api::core::v1::Pod> =
+                                    kube::Api::namespaced(client, &p_ns);
+                                if let Ok(p) = api.get(&p_name).await {
+                                    if let Some(spec) = p.spec {
+                                        for container in spec.containers {
+                                            if let Some(ports) = container.ports {
+                                                if let Some(port) = ports.first() {
+                                                    detected_port =
+                                                        Some(port.container_port as u16);
+                                                    break;
                                                 }
                                             }
                                         }
                                     }
                                 }
-                                let target_port = detected_port.unwrap_or(8080);
-                                self.modal = Some(Modal::PortForward {
-                                    pod_name: p_name,
-                                    namespace: p_ns,
-                                    container_port: target_port,
-                                    local_port_input: target_port.to_string(),
-                                    kind: "Pod".to_string(),
-                                });
                             }
-                        } else {
-                            self.set_toast("Port forward only available for Pods".to_string(), Theme::status_warn());
+                            let target_port = detected_port.unwrap_or(8080);
+                            self.modal = Some(Modal::PortForward {
+                                pod_name: p_name,
+                                namespace: p_ns,
+                                container_port: target_port,
+                                local_port_input: target_port.to_string(),
+                                kind: "Pod".to_string(),
+                            });
                         }
+                    } else {
+                        self.set_toast(
+                            "Port forward only available for Pods".to_string(),
+                            Theme::status_warn(),
+                        );
                     }
-                    KeyCode::Char('y') => {
-                        match top.active_tab {
-                            top_view::TopTab::Pods => {
-                                if let Some(pod) = top.selected_pod() {
-                                    let p_name = pod.name.clone();
-                                    let p_ns = pod.namespace.clone();
-                                    self.open_yaml_view(p_name, "Pod".to_string(), Some(p_ns)).await;
-                                }
-                            }
-                            top_view::TopTab::Nodes => {
-                                if let Some(node) = top.selected_node() {
-                                    let n_name = node.name.clone();
-                                    self.open_yaml_view(n_name, "Node".to_string(), None).await;
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
                 }
-            }
-            ActiveView::HelmDetail(detail) => {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        if let Some(prev) = self.nav_stack.pop() {
-                            self.active_view = prev;
-                        } else {
-                            self.switch_view_to_kind(ResourceKind::HelmReleases).await;
+                KeyCode::Char('y') => match top.active_tab {
+                    top_view::TopTab::Pods => {
+                        if let Some(pod) = top.selected_pod() {
+                            let p_name = pod.name.clone();
+                            let p_ns = pod.namespace.clone();
+                            self.open_yaml_view(p_name, "Pod".to_string(), Some(p_ns))
+                                .await;
                         }
                     }
-                    KeyCode::Tab => detail.next_tab(),
-                    KeyCode::BackTab => detail.prev_tab(),
-                    KeyCode::Right | KeyCode::Char('l') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        detail.next_tab();
-                    }
-                    KeyCode::Left | KeyCode::Char('h') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        detail.prev_tab();
-                    }
-                    KeyCode::Char('1') => detail.set_tab(HelmDetailTab::Overview),
-                    KeyCode::Char('2') => detail.set_tab(HelmDetailTab::ValuesDiff),
-                    KeyCode::Char('3') => detail.set_tab(HelmDetailTab::Revisions),
-                    KeyCode::Char('4') => detail.set_tab(HelmDetailTab::Manifest),
-                    KeyCode::Char('5') => detail.set_tab(HelmDetailTab::Notes),
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if detail.active_tab == HelmDetailTab::Revisions {
-                            detail.select_prev_revision();
-                        } else {
-                            detail.scroll_up(1);
+                    top_view::TopTab::Nodes => {
+                        if let Some(node) = top.selected_node() {
+                            let n_name = node.name.clone();
+                            self.open_yaml_view(n_name, "Node".to_string(), None).await;
                         }
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if detail.active_tab == HelmDetailTab::Revisions {
-                            detail.select_next_revision();
-                        } else {
-                            detail.scroll_down(1);
-                        }
+                },
+                _ => {}
+            },
+            ActiveView::HelmDetail(detail) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    if let Some(prev) = self.nav_stack.pop() {
+                        self.active_view = prev;
+                    } else {
+                        self.switch_view_to_kind(ResourceKind::HelmReleases).await;
                     }
-                    KeyCode::PageUp => detail.scroll_up(15),
-                    KeyCode::PageDown => detail.scroll_down(15),
-                    KeyCode::Char('g') => detail.scroll_to_top(),
-                    KeyCode::Char('G') => detail.scroll_to_bottom(),
-                    KeyCode::Char('m') => {
-                        if detail.active_tab == HelmDetailTab::ValuesDiff {
-                            detail.toggle_diff_mode();
-                        }
+                }
+                KeyCode::Tab => detail.next_tab(),
+                KeyCode::BackTab => detail.prev_tab(),
+                KeyCode::Right | KeyCode::Char('l')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    detail.next_tab();
+                }
+                KeyCode::Left | KeyCode::Char('h')
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    detail.prev_tab();
+                }
+                KeyCode::Char('1') => detail.set_tab(HelmDetailTab::Overview),
+                KeyCode::Char('2') => detail.set_tab(HelmDetailTab::ValuesDiff),
+                KeyCode::Char('3') => detail.set_tab(HelmDetailTab::Revisions),
+                KeyCode::Char('4') => detail.set_tab(HelmDetailTab::Manifest),
+                KeyCode::Char('5') => detail.set_tab(HelmDetailTab::Notes),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if detail.active_tab == HelmDetailTab::Revisions {
+                        detail.select_prev_revision();
+                    } else {
+                        detail.scroll_up(1);
                     }
-                    KeyCode::Char('r') => {
-                        let rev_opt = if detail.active_tab == HelmDetailTab::Revisions {
-                            detail.selected_revision().map(|r| r.revision)
-                        } else if let Some(d) = &detail.detail {
-                            if d.revision > 1 {
-                                Some(d.revision - 1)
-                            } else {
-                                None
-                            }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if detail.active_tab == HelmDetailTab::Revisions {
+                        detail.select_next_revision();
+                    } else {
+                        detail.scroll_down(1);
+                    }
+                }
+                KeyCode::PageUp => detail.scroll_up(15),
+                KeyCode::PageDown => detail.scroll_down(15),
+                KeyCode::Char('g') => detail.scroll_to_top(),
+                KeyCode::Char('G') => detail.scroll_to_bottom(),
+                KeyCode::Char('m') => {
+                    if detail.active_tab == HelmDetailTab::ValuesDiff {
+                        detail.toggle_diff_mode();
+                    }
+                }
+                KeyCode::Char('r') => {
+                    let rev_opt = if detail.active_tab == HelmDetailTab::Revisions {
+                        detail.selected_revision().map(|r| r.revision)
+                    } else if let Some(d) = &detail.detail {
+                        if d.revision > 1 {
+                            Some(d.revision - 1)
                         } else {
                             None
-                        };
-                        if let Some(rev) = rev_opt {
-                            self.modal = Some(Modal::Confirm {
-                                title: format!("Rollback Helm Release [{}]", detail.release_name),
-                                message: format!(
-                                    "Rollback '{}' in namespace '{}' to revision {}?",
-                                    detail.release_name, detail.namespace, rev
-                                ),
-                                action_name: format!(
-                                    "helm-rollback:{}:{}:{}",
-                                    detail.release_name, detail.namespace, rev
-                                ),
-                                is_destructive: true,
-                            });
-                        } else {
-                            self.set_toast("No previous revision available to rollback to".to_string(), Theme::status_warn());
                         }
-                    }
-                    KeyCode::Char('c') => {
-                        let link = crate::deep_link::DeepLink::Resource {
-                            context: self.active_context.clone(),
-                            namespace: Some(detail.namespace.clone()),
-                            kind: "HelmRelease".to_string(),
-                            name: detail.release_name.clone(),
-                        };
-                        let url = link.to_url();
-                        let url_clone = url.clone();
-                        tokio::spawn(async move {
-                            let _ = copy_to_clipboard(&url_clone);
+                    } else {
+                        None
+                    };
+                    if let Some(rev) = rev_opt {
+                        self.modal = Some(Modal::Confirm {
+                            title: format!("Rollback Helm Release [{}]", detail.release_name),
+                            message: format!(
+                                "Rollback '{}' in namespace '{}' to revision {}?",
+                                detail.release_name, detail.namespace, rev
+                            ),
+                            action_name: format!(
+                                "helm-rollback:{}:{}:{}",
+                                detail.release_name, detail.namespace, rev
+                            ),
+                            is_destructive: true,
                         });
-                        self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                    } else {
+                        self.set_toast(
+                            "No previous revision available to rollback to".to_string(),
+                            Theme::status_warn(),
+                        );
                     }
-                    KeyCode::Char('y') => {
-                        let text_to_copy: Option<String> = match detail.active_tab {
-                            HelmDetailTab::Manifest => detail.detail.as_ref().map(|d| d.manifest.clone()),
-                            HelmDetailTab::ValuesDiff => detail.detail.as_ref().map(|d| d.values_yaml.clone()),
-                            HelmDetailTab::Notes => detail.detail.as_ref().map(|d| d.notes.clone()),
-                            _ => None,
-                        };
-                        if let Some(txt) = text_to_copy {
-                            tokio::spawn(async move {
-                                let _ = copy_to_clipboard(&txt);
-                            });
-                            self.set_toast("Copied tab content to clipboard".to_string(), Theme::status_ok());
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                KeyCode::Char('c') => {
+                    let link = crate::deep_link::DeepLink::Resource {
+                        context: self.active_context.clone(),
+                        namespace: Some(detail.namespace.clone()),
+                        kind: "HelmRelease".to_string(),
+                        name: detail.release_name.clone(),
+                    };
+                    let url = link.to_url();
+                    let url_clone = url.clone();
+                    tokio::spawn(async move {
+                        let _ = copy_to_clipboard(&url_clone);
+                    });
+                    self.set_toast(format!("Copied deep link: {}", url), Theme::status_ok());
+                }
+                KeyCode::Char('y') => {
+                    let text_to_copy: Option<String> = match detail.active_tab {
+                        HelmDetailTab::Manifest => {
+                            detail.detail.as_ref().map(|d| d.manifest.clone())
+                        }
+                        HelmDetailTab::ValuesDiff => {
+                            detail.detail.as_ref().map(|d| d.values_yaml.clone())
+                        }
+                        HelmDetailTab::Notes => detail.detail.as_ref().map(|d| d.notes.clone()),
+                        _ => None,
+                    };
+                    if let Some(txt) = text_to_copy {
+                        tokio::spawn(async move {
+                            let _ = copy_to_clipboard(&txt);
+                        });
+                        self.set_toast(
+                            "Copied tab content to clipboard".to_string(),
+                            Theme::status_ok(),
+                        );
+                    }
+                }
+                _ => {}
+            },
             ActiveView::ArgoDetail(detail) => {
                 let hub_ctx = detail.hub_context.clone();
-                let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+                let query_ctx = hub_ctx
+                    .as_deref()
+                    .unwrap_or(&self.active_context)
+                    .to_string();
                 let app_opt = detail.application.clone();
 
                 match key.code {
@@ -5231,35 +7285,50 @@ impl App {
                         if let Some(prev) = self.nav_stack.pop() {
                             self.active_view = prev;
                         } else {
-                            self.switch_view_to_kind(ResourceKind::ArgoApplications).await;
+                            self.switch_view_to_kind(ResourceKind::ArgoApplications)
+                                .await;
                         }
                     }
                     KeyCode::Tab => detail.next_tab(),
                     KeyCode::BackTab => detail.prev_tab(),
-                    KeyCode::Right | KeyCode::Char('l') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Right | KeyCode::Char('l')
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
                         detail.next_tab();
                     }
-                    KeyCode::Left | KeyCode::Char('h') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Left | KeyCode::Char('h')
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
                         detail.prev_tab();
                     }
                     KeyCode::Char('1') => detail.set_tab(argo_detail_view::ArgoDetailTab::Overview),
-                    KeyCode::Char('2') => detail.set_tab(argo_detail_view::ArgoDetailTab::ManagedResources),
+                    KeyCode::Char('2') => {
+                        detail.set_tab(argo_detail_view::ArgoDetailTab::ManagedResources)
+                    }
                     KeyCode::Char('3') => detail.set_tab(argo_detail_view::ArgoDetailTab::Drift),
-                    KeyCode::Char('4') => detail.set_tab(argo_detail_view::ArgoDetailTab::RevisionHistory),
+                    KeyCode::Char('4') => {
+                        detail.set_tab(argo_detail_view::ArgoDetailTab::RevisionHistory)
+                    }
                     KeyCode::Up | KeyCode::Char('k') => detail.select_prev(),
                     KeyCode::Down | KeyCode::Char('j') => detail.select_next(),
                     KeyCode::Char('s') => {
                         if let Some(ref app) = app_opt {
-                            let payload = serde_json::json!({
-                                "ctx": query_ctx,
-                                "ns": app.namespace,
-                                "name": app.name,
-                                "prune": false,
-                                "dry_run": false,
-                            });
+                            let hub_info = if query_ctx != self.active_context {
+                                format!(" on hub cluster '{}'", query_ctx)
+                            } else {
+                                String::new()
+                            };
+                            let payload = argo_confirm_payload(
+                                &query_ctx,
+                                app,
+                                serde_json::json!({"prune": false, "dry_run": false}),
+                            );
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Sync ArgoCD Application [{}]", app.name),
-                                message: format!("Trigger sync for '{}/{}'? (Prune: false)", app.namespace, app.name),
+                                message: format!(
+                                    "Trigger sync for '{}/{}'{hub_info}? (Prune: false)",
+                                    app.namespace, app.name
+                                ),
                                 action_name: format!("argo_sync:{}", payload),
                                 is_destructive: false,
                             });
@@ -5267,16 +7336,22 @@ impl App {
                     }
                     KeyCode::Char('S') => {
                         if let Some(ref app) = app_opt {
-                            let payload = serde_json::json!({
-                                "ctx": query_ctx,
-                                "ns": app.namespace,
-                                "name": app.name,
-                                "prune": true,
-                                "dry_run": false,
-                            });
+                            let hub_info = if query_ctx != self.active_context {
+                                format!(" on hub cluster '{}'", query_ctx)
+                            } else {
+                                String::new()
+                            };
+                            let payload = argo_confirm_payload(
+                                &query_ctx,
+                                app,
+                                serde_json::json!({"prune": true, "dry_run": false}),
+                            );
                             self.modal = Some(Modal::Confirm {
                                 title: format!("Sync ArgoCD Application with Prune [{}]", app.name),
-                                message: format!("Trigger sync with PRUNE for '{}/{}'?", app.namespace, app.name),
+                                message: format!(
+                                    "Trigger sync with PRUNE for '{}/{}'{hub_info}?",
+                                    app.namespace, app.name
+                                ),
                                 action_name: format!("argo_sync:{}", payload),
                                 is_destructive: true,
                             });
@@ -5284,17 +7359,28 @@ impl App {
                     }
                     KeyCode::Char('p') => {
                         if let Some(ref app) = app_opt {
+                            let hub_info = if query_ctx != self.active_context {
+                                format!(" on hub cluster '{}'", query_ctx)
+                            } else {
+                                String::new()
+                            };
                             let enable = !app.auto_sync_enabled;
-                            let label = if enable { "Enable Auto-Sync" } else { "Pause Auto-Sync (Incident Lever)" };
-                            let payload = serde_json::json!({
-                                "ctx": query_ctx,
-                                "ns": app.namespace,
-                                "name": app.name,
-                                "enable": enable,
-                            });
+                            let label = if enable {
+                                "Enable Auto-Sync"
+                            } else {
+                                "Pause Auto-Sync (Incident Lever)"
+                            };
+                            let payload = argo_confirm_payload(
+                                &query_ctx,
+                                app,
+                                serde_json::json!({"enable": enable}),
+                            );
                             self.modal = Some(Modal::Confirm {
                                 title: format!("{} [{}]", label, app.name),
-                                message: format!("{} for '{}/{}'?", label, app.namespace, app.name),
+                                message: format!(
+                                    "{} for '{}/{}'{hub_info}?",
+                                    label, app.namespace, app.name
+                                ),
                                 action_name: format!("argo_toggle_auto:{}", payload),
                                 is_destructive: !enable,
                             });
@@ -5302,7 +7388,10 @@ impl App {
                     }
                     KeyCode::Char('R') => {
                         if let Some(ref app) = app_opt {
-                            self.set_toast(format!("Triggering hard refresh for '{}'...", app.name), Theme::status_ok());
+                            self.set_toast(
+                                format!("Triggering hard refresh for '{}'...", app.name),
+                                Theme::status_ok(),
+                            );
                             self.trigger_argo_hard_refresh(&app.name, &app.namespace);
                         }
                     }
@@ -5310,11 +7399,20 @@ impl App {
                         if let Some(ref app) = app_opt {
                             if !app.repo_url.is_empty() {
                                 match open_browser_url(&app.repo_url) {
-                                    Ok(_) => self.set_toast(format!("Opened Git repo: {}", app.repo_url), Theme::status_ok()),
-                                    Err(err) => self.set_toast(format!("Could not open browser: {}", err), Theme::status_error()),
+                                    Ok(_) => self.set_toast(
+                                        format!("Opened Git repo: {}", app.repo_url),
+                                        Theme::status_ok(),
+                                    ),
+                                    Err(err) => self.set_toast(
+                                        format!("Could not open browser: {}", err),
+                                        Theme::status_error(),
+                                    ),
                                 }
                             } else {
-                                self.set_toast("Application has no repoURL configured".to_string(), Theme::status_warn());
+                                self.set_toast(
+                                    "Application has no repoURL configured".to_string(),
+                                    Theme::status_warn(),
+                                );
                             }
                         }
                     }
@@ -5322,7 +7420,10 @@ impl App {
                         let name = detail.app_name.clone();
                         let ns = detail.app_namespace.clone();
                         self.reload_argo_detail(&name, &ns);
-                        self.set_toast("Refreshing application details...".to_string(), Theme::status_ok());
+                        self.set_toast(
+                            "Refreshing application details...".to_string(),
+                            Theme::status_ok(),
+                        );
                     }
                     KeyCode::Char('c') => {
                         let link = crate::deep_link::DeepLink::Resource {
@@ -5342,7 +7443,11 @@ impl App {
                         if let Some(res) = detail.selected_resource() {
                             let name = res.name.clone();
                             let kind = res.kind.clone();
-                            let ns = if res.namespace.is_empty() { None } else { Some(res.namespace.clone()) };
+                            let ns = if res.namespace.is_empty() {
+                                None
+                            } else {
+                                Some(res.namespace.clone())
+                            };
                             self.open_describe_view(name, kind, ns).await;
                         }
                     }
@@ -5350,7 +7455,11 @@ impl App {
                         if let Some(res) = detail.selected_resource() {
                             let name = res.name.clone();
                             let kind = res.kind.clone();
-                            let ns = if res.namespace.is_empty() { None } else { Some(res.namespace.clone()) };
+                            let ns = if res.namespace.is_empty() {
+                                None
+                            } else {
+                                Some(res.namespace.clone())
+                            };
                             self.open_yaml_view(name, kind, ns).await;
                         }
                     }
@@ -5363,9 +7472,17 @@ impl App {
                             };
                             Some((res.kind.clone(), res.name.clone(), ns))
                         } else if let Some(ref app) = app_opt {
-                            Some(("Application".to_string(), app.name.clone(), Some(app.namespace.clone())))
+                            Some((
+                                "Application".to_string(),
+                                app.name.clone(),
+                                Some(app.namespace.clone()),
+                            ))
                         } else {
-                            Some(("Application".to_string(), detail.app_name.clone(), Some(detail.app_namespace.clone())))
+                            Some((
+                                "Application".to_string(),
+                                detail.app_name.clone(),
+                                Some(detail.app_namespace.clone()),
+                            ))
                         };
 
                         if let Some((kind, name, ns)) = action_target {
@@ -5412,7 +7529,8 @@ impl App {
                         kubeconfig_paths,
                         event_tx,
                         timeout_seconds,
-                    ).await;
+                    )
+                    .await;
                 });
             } else {
                 ai.add_assistant_message("cursor-agent CLI was not found on PATH. Install from https://docs.cursor.com/en/cli/overview or ensure ~/.local/bin is in your PATH.".to_string());
@@ -5438,7 +7556,8 @@ impl App {
                     active_ns,
                     event_tx,
                     timeout_seconds,
-                ).await;
+                )
+                .await;
             });
         } else {
             let env_var = crate::ai_config::env_var_for_provider(provider);
@@ -5453,14 +7572,20 @@ impl App {
 
     pub fn summarise_cluster_health(&mut self) {
         if self.assistant_state.is_busy {
-            self.set_toast("⚠️ Assistant is busy processing a query. Please wait.".to_string(), Theme::status_warn());
+            self.set_toast(
+                "⚠️ Assistant is busy processing a query. Please wait.".to_string(),
+                Theme::status_warn(),
+            );
             return;
         }
         let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
         self.nav_stack.push(old);
         let prompt = "Summarise the health of this cluster".to_string();
         self.submit_assistant_query(prompt.clone(), prompt);
-        self.set_toast("Generating AI cluster health summary...".to_string(), Theme::status_ok());
+        self.set_toast(
+            "Generating AI cluster health summary...".to_string(),
+            Theme::status_ok(),
+        );
     }
 
     pub async fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
@@ -5487,15 +7612,21 @@ impl App {
 
         // 1. Check if clicking on header context chips
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-            let clicked_ctx = self.context_chip_rects.borrow().iter().find_map(|(rect, name)| {
-                if mouse.column >= rect.x && mouse.column < rect.x + rect.width
-                    && mouse.row >= rect.y && mouse.row < rect.y + rect.height
-                {
-                    Some(name.clone())
-                } else {
-                    None
-                }
-            });
+            let clicked_ctx = self
+                .context_chip_rects
+                .borrow()
+                .iter()
+                .find_map(|(rect, name)| {
+                    if mouse.column >= rect.x
+                        && mouse.column < rect.x + rect.width
+                        && mouse.row >= rect.y
+                        && mouse.row < rect.y + rect.height
+                    {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                });
 
             if let Some(target) = clicked_ctx {
                 if target == ":ctx" {
@@ -5513,8 +7644,10 @@ impl App {
                 let clicked_range = {
                     if let Ok(lock) = panel.range_button_rects.lock() {
                         lock.iter().find_map(|(rect, r)| {
-                            if mouse.column >= rect.x && mouse.column < rect.x + rect.width
-                                && mouse.row >= rect.y && mouse.row < rect.y + rect.height
+                            if mouse.column >= rect.x
+                                && mouse.column < rect.x + rect.width
+                                && mouse.row >= rect.y
+                                && mouse.row < rect.y + rect.height
                             {
                                 Some(*r)
                             } else {
@@ -5534,15 +7667,22 @@ impl App {
 
         if let ActiveView::Assistant = &self.active_view {
             let vp = self.assistant_state.last_viewport_rect.get();
-            if mouse.column >= vp.x && mouse.column < vp.x + vp.width
-                && mouse.row >= vp.y && mouse.row < vp.y + vp.height
+            if mouse.column >= vp.x
+                && mouse.column < vp.x + vp.width
+                && mouse.row >= vp.y
+                && mouse.row < vp.y + vp.height
             {
                 let screen_row = mouse.row.saturating_sub(vp.y) as usize;
                 let screen_col = mouse.column.saturating_sub(vp.x + 1) as usize;
                 let line_idx = self.assistant_state.effective_scroll() + screen_row;
 
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                    if self.assistant_state.tool_chip_lines.borrow().contains(&line_idx) {
+                    if self
+                        .assistant_state
+                        .tool_chip_lines
+                        .borrow()
+                        .contains(&line_idx)
+                    {
                         self.assistant_state.toggle_tools_expansion();
                         return;
                     }
@@ -5567,8 +7707,10 @@ impl App {
 
         if let ActiveView::Yaml(yaml) = &mut self.active_view {
             let vp = yaml.last_viewport_rect.get();
-            if mouse.column >= vp.x && mouse.column < vp.x + vp.width
-                && mouse.row >= vp.y && mouse.row < vp.y + vp.height
+            if mouse.column >= vp.x
+                && mouse.column < vp.x + vp.width
+                && mouse.row >= vp.y
+                && mouse.row < vp.y + vp.height
             {
                 let screen_row = mouse.row.saturating_sub(vp.y) as usize;
                 let line_idx = yaml.scroll_offset + screen_row;
@@ -5585,7 +7727,10 @@ impl App {
                             tokio::spawn(async move {
                                 let _ = copy_to_clipboard(&selected);
                             });
-                            self.set_toast("✓ Copied selection to clipboard".to_string(), Theme::status_ok());
+                            self.set_toast(
+                                "✓ Copied selection to clipboard".to_string(),
+                                Theme::status_ok(),
+                            );
                         }
                     }
                     MouseEventKind::ScrollDown => {
@@ -5604,8 +7749,10 @@ impl App {
         // Table mouse row selection and scrolling
         if let ActiveView::Table(table) = &mut self.active_view {
             let vp = table.last_viewport_rect.get();
-            if mouse.column >= vp.x && mouse.column < vp.x + vp.width
-                && mouse.row >= vp.y && mouse.row < vp.y + vp.height
+            if mouse.column >= vp.x
+                && mouse.column < vp.x + vp.width
+                && mouse.row >= vp.y
+                && mouse.row < vp.y + vp.height
             {
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
@@ -5636,8 +7783,10 @@ impl App {
         // Node Inspector pods table mouse selection and scrolling
         if let ActiveView::NodeInspector(inspector) = &mut self.active_view {
             let vp = inspector.last_pods_table_rect.get();
-            if mouse.column >= vp.x && mouse.column < vp.x + vp.width
-                && mouse.row >= vp.y && mouse.row < vp.y + vp.height
+            if mouse.column >= vp.x
+                && mouse.column < vp.x + vp.width
+                && mouse.row >= vp.y
+                && mouse.row < vp.y + vp.height
             {
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
@@ -5718,8 +7867,10 @@ impl App {
         // GPU View mouse selection, hover & scrolling
         if let ActiveView::GpuInfo(gpu) = &mut self.active_view {
             let left_vp = gpu.last_left_pane_rect.get();
-            if mouse.column >= left_vp.x && mouse.column < left_vp.x + left_vp.width
-                && mouse.row >= left_vp.y && mouse.row < left_vp.y + left_vp.height
+            if mouse.column >= left_vp.x
+                && mouse.column < left_vp.x + left_vp.width
+                && mouse.row >= left_vp.y
+                && mouse.row < left_vp.y + left_vp.height
             {
                 let data_start_y = left_vp.y + 3;
                 if mouse.row >= data_start_y {
@@ -5741,8 +7892,10 @@ impl App {
             }
 
             let pods_vp = gpu.last_pods_pane_rect.get();
-            if mouse.column >= pods_vp.x && mouse.column < pods_vp.x + pods_vp.width
-                && mouse.row >= pods_vp.y && mouse.row < pods_vp.y + pods_vp.height
+            if mouse.column >= pods_vp.x
+                && mouse.column < pods_vp.x + pods_vp.width
+                && mouse.row >= pods_vp.y
+                && mouse.row < pods_vp.y + pods_vp.height
             {
                 let data_start_y = pods_vp.y + 2;
                 if mouse.row >= data_start_y {
@@ -5767,7 +7920,10 @@ impl App {
         // handler (tables, logs, describe, helm, overview, ...). The text is
         // captured from the rendered buffer, so whatever is visible is what
         // gets copied.
-        if !matches!(self.active_view, ActiveView::Assistant | ActiveView::Yaml(_)) {
+        if !matches!(
+            self.active_view,
+            ActiveView::Assistant | ActiveView::Yaml(_)
+        ) {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     self.screen_selection =
@@ -5848,6 +8004,10 @@ impl App {
             ActiveView::ArgoDetail(detail) => {
                 detail.search_query = filter;
             }
+            ActiveView::Bgp(bgp) => {
+                bgp.search_query = filter;
+                bgp.clamp_selection();
+            }
             _ => {}
         }
     }
@@ -5883,6 +8043,10 @@ impl App {
             }
             ActiveView::ArgoDetail(detail) => {
                 detail.search_query.clear();
+            }
+            ActiveView::Bgp(bgp) => {
+                bgp.search_query.clear();
+                bgp.clamp_selection();
             }
             _ => {}
         }
@@ -5925,7 +8089,11 @@ impl App {
                     let cleaned = text.replace("\r\n", "").replace('\n', "");
                     input.push_str(&cleaned);
                 }
-                Modal::NodeSsh { ref mut destination_input, ref mut cursor_pos, .. } => {
+                Modal::NodeSsh {
+                    ref mut destination_input,
+                    ref mut cursor_pos,
+                    ..
+                } => {
                     let cleaned = text.replace("\r\n", "").replace('\n', "");
                     let pos = (*cursor_pos).min(destination_input.chars().count());
                     let mut chars: Vec<char> = destination_input.chars().collect();
@@ -5936,9 +8104,34 @@ impl App {
                     *destination_input = chars.into_iter().collect();
                     *cursor_pos = pos + added_len;
                 }
-                Modal::PortForward { ref mut local_port_input, .. } => {
+                Modal::PortForward {
+                    ref mut local_port_input,
+                    ..
+                } => {
                     let cleaned = text.replace("\r\n", "").replace('\n', "");
                     local_port_input.push_str(&cleaned);
+                }
+                Modal::AddCluster {
+                    ref mut input,
+                    ref mut cursor_pos,
+                    ref mut error_message,
+                    ref mut preview_contexts,
+                } => {
+                    match Self::apply_add_cluster_paste(
+                        input,
+                        cursor_pos,
+                        &text,
+                        "Pasted content exceeds 1 MB limit",
+                    ) {
+                        Ok(()) => {
+                            let (preview, err) = Self::parse_add_cluster_preview(input);
+                            *preview_contexts = preview;
+                            *error_message = err;
+                        }
+                        Err(msg) => {
+                            *error_message = Some(msg);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -5947,17 +8140,31 @@ impl App {
 
     pub async fn execute_colon_command(&mut self, cmd: &str) {
         let trimmed = cmd.trim();
-        if trimmed == "save-ai" || trimmed == "export-ai" || (trimmed == "save" && matches!(self.active_view, ActiveView::Assistant)) {
+        if trimmed == "save-ai"
+            || trimmed == "export-ai"
+            || (trimmed == "save" && matches!(self.active_view, ActiveView::Assistant))
+        {
             let prov = self.ai_settings.default_provider;
             let prov_name = crate::ai_config::provider_display_name(prov);
             let model = self.ai_settings.get_model(prov);
-            match self.assistant_state.save_conversation_to_file(prov_name, &model, None) {
-                Ok(path) => self.set_toast(format!("✓ Saved conversation to {}", path.display()), Theme::status_ok()),
-                Err(err) => self.set_toast(format!("Failed to save conversation: {}", err), Theme::status_error()),
+            match self
+                .assistant_state
+                .save_conversation_to_file(prov_name, &model, None)
+            {
+                Ok(path) => self.set_toast(
+                    format!("✓ Saved conversation to {}", path.display()),
+                    Theme::status_ok(),
+                ),
+                Err(err) => self.set_toast(
+                    format!("Failed to save conversation: {}", err),
+                    Theme::status_error(),
+                ),
             }
             return;
         }
-        if trimmed == "clear-ai" || (trimmed == "clear" && matches!(self.active_view, ActiveView::Assistant)) {
+        if trimmed == "clear-ai"
+            || (trimmed == "clear" && matches!(self.active_view, ActiveView::Assistant))
+        {
             self.assistant_state.clear_conversation();
             self.set_toast("✓ Conversation cleared".to_string(), Theme::status_ok());
             return;
@@ -5967,24 +8174,42 @@ impl App {
             if let ActiveView::Table(ref table) = self.active_view {
                 if let Some(name) = table.selected_resource_name() {
                     let kind = table.kind.display_name().to_string();
-                    let ns = table.selected_namespace().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                    let ns = table.selected_namespace().or_else(|| {
+                        if self.active_namespace.is_empty() {
+                            None
+                        } else {
+                            Some(self.active_namespace.clone())
+                        }
+                    });
                     self.open_resource_tree(kind, name, ns);
                     return;
                 }
             }
-            self.set_toast("Select a resource in table to view its relationship tree".to_string(), Theme::status_warn());
+            self.set_toast(
+                "Select a resource in table to view its relationship tree".to_string(),
+                Theme::status_warn(),
+            );
             return;
         }
         if trimmed == "actions" || trimmed == "act" {
             if let ActiveView::Table(ref table) = self.active_view {
                 if let Some(name) = table.selected_resource_name() {
                     let kind = table.kind.display_name().to_string();
-                    let ns = table.selected_namespace().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                    let ns = table.selected_namespace().or_else(|| {
+                        if self.active_namespace.is_empty() {
+                            None
+                        } else {
+                            Some(self.active_namespace.clone())
+                        }
+                    });
                     self.open_action_palette(kind, name, ns);
                     return;
                 }
             }
-            self.set_toast("Select a resource in table to open its actions palette".to_string(), Theme::status_warn());
+            self.set_toast(
+                "Select a resource in table to open its actions palette".to_string(),
+                Theme::status_warn(),
+            );
             return;
         }
 
@@ -5996,22 +8221,39 @@ impl App {
                         let ns = if table.kind == ResourceKind::Nodes {
                             None
                         } else {
-                            table.selected_namespace().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) })
+                            table.selected_namespace().or_else(|| {
+                                if self.active_namespace.is_empty() {
+                                    None
+                                } else {
+                                    Some(self.active_namespace.clone())
+                                }
+                            })
                         };
                         let samples = if table.kind == ResourceKind::Nodes {
                             self.refresh_node_metrics();
-                            self.node_metrics_history.get(&name).map(|h| h.iter().cloned().collect()).unwrap_or_default()
+                            self.node_metrics_history
+                                .get(&name)
+                                .map(|h| h.iter().cloned().collect())
+                                .unwrap_or_default()
                         } else {
                             self.refresh_pod_metrics();
-                            self.pod_metrics_history.get(&name).map(|h| h.iter().cloned().collect()).unwrap_or_default()
+                            self.pod_metrics_history
+                                .get(&name)
+                                .map(|h| h.iter().cloned().collect())
+                                .unwrap_or_default()
                         };
-                        let panel_state = crate::views::metrics_panel_view::MetricsPanelState::new(kind_str, name, ns, samples);
+                        let panel_state = crate::views::metrics_panel_view::MetricsPanelState::new(
+                            kind_str, name, ns, samples,
+                        );
                         self.modal = Some(Modal::MetricsTimeline(panel_state));
                         return;
                     }
                 }
             }
-            self.set_toast("Select a Pod or Node to view its live metrics timeline".to_string(), Theme::status_warn());
+            self.set_toast(
+                "Select a Pod or Node to view its live metrics timeline".to_string(),
+                Theme::status_warn(),
+            );
             return;
         }
 
@@ -6027,7 +8269,10 @@ impl App {
                     return;
                 }
             }
-            self.set_toast(":reasons is only available when viewing Events (:events)".to_string(), Theme::status_warn());
+            self.set_toast(
+                ":reasons is only available when viewing Events (:events)".to_string(),
+                Theme::status_warn(),
+            );
             return;
         }
 
@@ -6062,13 +8307,18 @@ impl App {
                 }
             }
         } else {
-            self.set_toast(format!("Unknown command: '{}' (type :help or ?)", trimmed), Theme::status_warn());
+            self.set_toast(
+                format!("Unknown command: '{}' (type :help or ?)", trimmed),
+                Theme::status_warn(),
+            );
         }
     }
 
     pub fn open_context_picker(&mut self) {
-        let items: Vec<crate::ui::dialogs::ContextPickerItem> = self.contexts.iter().map(|c| {
-            crate::ui::dialogs::ContextPickerItem {
+        let items: Vec<crate::ui::dialogs::ContextPickerItem> = self
+            .contexts
+            .iter()
+            .map(|c| crate::ui::dialogs::ContextPickerItem {
                 name: c.name.clone(),
                 cluster: c.cluster.clone(),
                 server: c.server.clone(),
@@ -6076,14 +8326,276 @@ impl App {
                 is_local: c.is_local,
                 provider: c.provider.clone(),
                 source_file: c.source_file.clone(),
-            }
-        }).collect();
+            })
+            .collect();
         self.modal = Some(Modal::ContextPicker {
             contexts: items,
             current_context: self.active_context.clone(),
             selected_idx: 0,
             filter: String::new(),
         });
+    }
+
+    pub fn open_add_cluster_modal(&mut self) {
+        let clip = get_clipboard_text().unwrap_or_default();
+        let (input, preview_contexts, error_message) = if !clip.trim().is_empty() {
+            let (preview, err) = Self::parse_add_cluster_preview(&clip);
+            if err.is_none() && !preview.is_empty() {
+                (clip, preview, None)
+            } else {
+                (String::new(), vec![], None)
+            }
+        } else {
+            (String::new(), vec![], None)
+        };
+
+        let cursor_pos = input.chars().count();
+        self.modal = Some(Modal::AddCluster {
+            input,
+            cursor_pos,
+            error_message,
+            preview_contexts,
+        });
+    }
+
+    fn apply_add_cluster_paste(
+        input: &mut String,
+        cursor_pos: &mut usize,
+        raw_text: &str,
+        limit_error_message: &str,
+    ) -> Result<(), String> {
+        let cleaned = raw_text.replace("\r\n", "\n");
+        if input.len().saturating_add(cleaned.len()) > 1024 * 1024 {
+            return Err(limit_error_message.to_string());
+        }
+        let pos = (*cursor_pos).min(input.chars().count());
+        let added_len = cleaned.chars().count();
+        let byte_pos = input
+            .char_indices()
+            .nth(pos)
+            .map(|(b, _)| b)
+            .unwrap_or(input.len());
+        input.insert_str(byte_pos, &cleaned);
+        *cursor_pos = pos + added_len;
+        Ok(())
+    }
+
+    fn parse_add_cluster_preview(input: &str) -> (Vec<String>, Option<String>) {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return (vec![], None);
+        }
+
+        if trimmed.contains('\n')
+            || trimmed.starts_with("apiVersion:")
+            || trimmed.starts_with("clusters:")
+            || trimmed.starts_with("kind:")
+        {
+            match kube::config::Kubeconfig::from_yaml(trimmed) {
+                Ok(cfg) => {
+                    if cfg.contexts.is_empty() {
+                        (vec![], Some("Kubeconfig contains no contexts".to_string()))
+                    } else {
+                        (cfg.contexts.into_iter().map(|c| c.name).collect(), None)
+                    }
+                }
+                Err(e) => (vec![], Some(format!("Invalid YAML: {}", e))),
+            }
+        } else {
+            let resolved_path = if trimmed.starts_with("~/") || trimmed == "~" {
+                dirs::home_dir().map(|h| {
+                    if trimmed == "~" {
+                        h
+                    } else {
+                        h.join(&trimmed[2..])
+                    }
+                })
+            } else {
+                Some(PathBuf::from(trimmed))
+            };
+
+            if let Some(ref path) = resolved_path {
+                if path.is_file() {
+                    match std::fs::read_to_string(path) {
+                        Ok(content) => match kube::config::Kubeconfig::from_yaml(&content) {
+                            Ok(cfg) => {
+                                if cfg.contexts.is_empty() {
+                                    (vec![], Some("File contains no contexts".to_string()))
+                                } else {
+                                    (cfg.contexts.into_iter().map(|c| c.name).collect(), None)
+                                }
+                            }
+                            Err(e) => (vec![], Some(format!("Invalid kubeconfig file: {}", e))),
+                        },
+                        Err(e) => (vec![], Some(format!("Cannot read file: {}", e))),
+                    }
+                } else if trimmed.contains('/')
+                    || trimmed.starts_with('~')
+                    || trimmed.starts_with('.')
+                {
+                    (vec![], Some("File does not exist".to_string()))
+                } else {
+                    match kube::config::Kubeconfig::from_yaml(trimmed) {
+                        Ok(cfg) => {
+                            if cfg.contexts.is_empty() {
+                                (vec![], Some("Kubeconfig contains no contexts".to_string()))
+                            } else {
+                                (cfg.contexts.into_iter().map(|c| c.name).collect(), None)
+                            }
+                        }
+                        Err(e) => (vec![], Some(format!("Invalid kubeconfig: {}", e))),
+                    }
+                }
+            } else {
+                (vec![], None)
+            }
+        }
+    }
+
+    pub async fn import_kubeconfig(&mut self, input: &str) -> Result<String, String> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err("Input is empty".to_string());
+        }
+
+        let mut target_path: Option<PathBuf> = None;
+        let mut parsed_config: Option<kube::config::Kubeconfig> = None;
+
+        let config_dir = srelens_kube::connect::default_kubeconfig_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join(".kube").join("srelens-configs")))
+            .ok_or_else(|| "Could not determine config directory to save kubeconfig".to_string())?;
+
+        let resolved_path = if trimmed.starts_with("~/") || trimmed == "~" {
+            dirs::home_dir().map(|h| {
+                if trimmed == "~" {
+                    h
+                } else {
+                    h.join(&trimmed[2..])
+                }
+            })
+        } else {
+            Some(PathBuf::from(trimmed))
+        };
+
+        if let Some(ref path) = resolved_path {
+            if path.is_file() {
+                match std::fs::read_to_string(path) {
+                    Ok(content) => match kube::config::Kubeconfig::from_yaml(&content) {
+                        Ok(cfg) => {
+                            if cfg.contexts.is_empty() {
+                                return Err("Kubeconfig file contains no contexts".to_string());
+                            }
+                            let first_ctx = cfg
+                                .current_context
+                                .as_deref()
+                                .or_else(|| cfg.contexts.first().map(|c| c.name.as_str()))
+                                .unwrap_or("cluster");
+
+                            // Copy/persist into managed directory so it survives restarts
+                            let saved_file = srelens_kube::connect::write_private_kubeconfig_file(
+                                &config_dir,
+                                first_ctx,
+                                &content,
+                            )?;
+                            target_path = Some(saved_file);
+                            parsed_config = Some(cfg);
+                        }
+                        Err(e) => {
+                            return Err(format!("Invalid kubeconfig file: {}", e));
+                        }
+                    },
+                    Err(e) => {
+                        return Err(format!("Failed to read file: {}", e));
+                    }
+                }
+            }
+        }
+
+        if parsed_config.is_none() {
+            match kube::config::Kubeconfig::from_yaml(trimmed) {
+                Ok(cfg) => {
+                    if cfg.contexts.is_empty() {
+                        return Err("Kubeconfig contains no contexts".to_string());
+                    }
+
+                    let first_ctx = cfg
+                        .current_context
+                        .as_deref()
+                        .or_else(|| cfg.contexts.first().map(|c| c.name.as_str()))
+                        .unwrap_or("cluster");
+
+                    let saved_file = srelens_kube::connect::write_private_kubeconfig_file(
+                        &config_dir,
+                        first_ctx,
+                        trimmed,
+                    )?;
+                    target_path = Some(saved_file);
+                    parsed_config = Some(cfg);
+                }
+                Err(e) => {
+                    if trimmed.contains('/') || trimmed.starts_with('~') || trimmed.starts_with('.')
+                    {
+                        return Err(format!("File does not exist or invalid: {}", trimmed));
+                    }
+                    return Err(format!("Invalid kubeconfig YAML: {}", e));
+                }
+            }
+        }
+
+        let target_path =
+            target_path.ok_or_else(|| "Failed to resolve target kubeconfig path".to_string())?;
+        let parsed = parsed_config.ok_or_else(|| "Failed to parse kubeconfig".to_string())?;
+
+        if !self.kubeconfig_paths.contains(&target_path) {
+            self.kubeconfig_paths.push(target_path.clone());
+        }
+        self.client_cache
+            .ensure_paths(vec![target_path.clone()])
+            .await;
+
+        let resolved = srelens_kube::context_resolve::resolve_contexts(&self.kubeconfig_paths);
+        self.contexts = resolved
+            .iter()
+            .map(|rc| ContextDto {
+                name: rc.display_name.clone(),
+                stable_id: rc.stable_id().to_string(),
+                key: rc.key(),
+                cluster: rc.cluster.clone(),
+                server: rc.server.clone(),
+                namespace: rc.namespace.clone(),
+                is_current: rc.is_current,
+                is_local: false,
+                provider: None,
+                source_file: rc.source.to_string_lossy().into_owned(),
+                auth_kind: rc.auth_kind.clone(),
+            })
+            .collect();
+
+        let target_context_name = parsed
+            .current_context
+            .as_deref()
+            .or_else(|| parsed.contexts.first().map(|c| c.name.as_str()))
+            .unwrap_or("");
+
+        let target_dto = self
+            .contexts
+            .iter()
+            .find(|c| {
+                c.source_file == target_path.to_string_lossy()
+                    && (c.name == target_context_name || c.key.ends_with(target_context_name))
+            })
+            .or_else(|| {
+                self.contexts
+                    .iter()
+                    .find(|c| c.source_file == target_path.to_string_lossy())
+            })
+            .or_else(|| self.contexts.iter().find(|c| c.name == target_context_name));
+
+        if let Some(dto) = target_dto {
+            Ok(dto.name.clone())
+        } else {
+            Ok(target_context_name.to_string())
+        }
     }
 
     pub async fn execute_view_target(&mut self, target: CommandTarget) {
@@ -6093,8 +8605,15 @@ impl App {
             CommandTarget::Contexts => {
                 self.open_context_picker();
             }
+            CommandTarget::AddCluster => {
+                self.open_add_cluster_modal();
+            }
             CommandTarget::Namespaces => {
-                let initial_idx = self.namespaces.iter().position(|n| n == &self.active_namespace).unwrap_or(0);
+                let initial_idx = self
+                    .namespaces
+                    .iter()
+                    .position(|n| n == &self.active_namespace)
+                    .unwrap_or(0);
                 self.modal = Some(Modal::NamespacePicker {
                     namespaces: self.namespaces.clone(),
                     current_namespace: self.active_namespace.clone(),
@@ -6119,15 +8638,33 @@ impl App {
                 if let Some(p) = Theme::set_theme_by_name(&theme_name) {
                     self.ai_settings.theme = Some(p.name.to_string());
                     let _ = self.ai_settings.save();
-                    self.set_toast(format!("Theme switched to {}", p.display_name), Theme::status_ok());
+                    self.set_toast(
+                        format!("Theme switched to {}", p.display_name),
+                        Theme::status_ok(),
+                    );
                 } else {
-                    self.set_toast(format!("Unknown theme '{}'. Try :themes to pick.", theme_name), Theme::status_warn());
+                    self.set_toast(
+                        format!("Unknown theme '{}'. Try :themes to pick.", theme_name),
+                        Theme::status_warn(),
+                    );
                 }
             }
             CommandTarget::FeatureBanner => {
                 self.modal = Some(Modal::FeatureBanner {
                     show_on_startup: self.tui_config.show_feature_banner,
+                    update_available: self.tui_config.update_available.clone(),
                 });
+            }
+            CommandTarget::Update => {
+                if let Some(ref ver) = self.tui_config.update_available {
+                    self.set_toast(
+                        format!("▲ Update available: {} — run 'srelens-tui update' in your terminal to install", ver),
+                        Theme::status_warn(),
+                    );
+                } else {
+                    self.set_toast("Checking for updates...".to_string(), Theme::status_ok());
+                    self.spawn_update_check();
+                }
             }
             CommandTarget::OpenUrl(_) => {}
         }
@@ -6137,13 +8674,19 @@ impl App {
         match target {
             CommandTarget::OpenUrl(url) => {
                 if url.is_empty() {
-                    self.set_toast("Usage: :open <srelens://... or kind/name>".to_string(), Theme::status_warn());
+                    self.set_toast(
+                        "Usage: :open <srelens://... or kind/name>".to_string(),
+                        Theme::status_warn(),
+                    );
                     return;
                 }
                 match crate::deep_link::DeepLink::parse(&url) {
                     Ok(link) => {
                         if let Err(err) = self.navigate_deep_link(&link).await {
-                            self.set_toast(format!("Navigation error: {}", err), Theme::status_error());
+                            self.set_toast(
+                                format!("Navigation error: {}", err),
+                                Theme::status_error(),
+                            );
                         }
                     }
                     Err(err) => {
@@ -6155,16 +8698,26 @@ impl App {
         }
     }
 
-    pub async fn navigate_deep_link(&mut self, link: &crate::deep_link::DeepLink) -> Result<(), String> {
+    pub async fn navigate_deep_link(
+        &mut self,
+        link: &crate::deep_link::DeepLink,
+    ) -> Result<(), String> {
         match link {
             crate::deep_link::DeepLink::Cluster { context } => {
                 if context != &self.active_context {
                     self.switch_context(context.clone()).await;
                 }
-                self.set_toast(format!("Switched to cluster '{}'", context), Theme::status_ok());
+                self.set_toast(
+                    format!("Switched to cluster '{}'", context),
+                    Theme::status_ok(),
+                );
                 Ok(())
             }
-            crate::deep_link::DeepLink::View { context, namespace, target } => {
+            crate::deep_link::DeepLink::View {
+                context,
+                namespace,
+                target,
+            } => {
                 if let Some(ctx) = context {
                     if !ctx.is_empty() && ctx != &self.active_context {
                         self.switch_context(ctx.clone()).await;
@@ -6178,7 +8731,12 @@ impl App {
                 self.execute_view_target(target.clone()).await;
                 Ok(())
             }
-            crate::deep_link::DeepLink::Resource { context, namespace, kind, name } => {
+            crate::deep_link::DeepLink::Resource {
+                context,
+                namespace,
+                kind,
+                name,
+            } => {
                 if !context.is_empty() && context != &self.active_context {
                     self.switch_context(context.clone()).await;
                 }
@@ -6189,15 +8747,25 @@ impl App {
                 }
 
                 if kind.eq_ignore_ascii_case("helmrelease") || kind.eq_ignore_ascii_case("helm") {
-                    let ns = namespace.clone().unwrap_or_else(|| self.active_namespace.clone());
+                    let ns = namespace
+                        .clone()
+                        .unwrap_or_else(|| self.active_namespace.clone());
                     self.open_helm_detail(name.clone(), ns, HelmDetailTab::Overview);
-                    self.set_toast(format!("Navigated to Helm release '{}'", name), Theme::status_ok());
+                    self.set_toast(
+                        format!("Navigated to Helm release '{}'", name),
+                        Theme::status_ok(),
+                    );
                     return Ok(());
                 }
 
                 // Resolve kind
                 let target_cmd = crate::commands::resolve_command_with_crds(kind, &self.crds)
-                    .or_else(|| crate::commands::resolve_command_with_crds(format!(":{}", kind).as_str(), &self.crds));
+                    .or_else(|| {
+                        crate::commands::resolve_command_with_crds(
+                            format!(":{}", kind).as_str(),
+                            &self.crds,
+                        )
+                    });
 
                 if let Some(target) = target_cmd {
                     self.execute_view_target(target).await;
@@ -6209,7 +8777,11 @@ impl App {
                 if let ActiveView::Table(table) = &mut self.active_view {
                     if let Some(idx) = table.raw_items.iter().position(|item| {
                         item.get("name").and_then(|v| v.as_str()) == Some(name.as_str())
-                            || item.get("metadata").and_then(|m| m.get("name")).and_then(|v| v.as_str()) == Some(name.as_str())
+                            || item
+                                .get("metadata")
+                                .and_then(|m| m.get("name"))
+                                .and_then(|v| v.as_str())
+                                == Some(name.as_str())
                     }) {
                         table.selected_idx = idx;
                     } else {
@@ -6217,7 +8789,10 @@ impl App {
                     }
                 }
 
-                self.set_toast(format!("Navigated to {} '{}'", kind, name), Theme::status_ok());
+                self.set_toast(
+                    format!("Navigated to {} '{}'", kind, name),
+                    Theme::status_ok(),
+                );
                 Ok(())
             }
         }
@@ -6226,7 +8801,9 @@ impl App {
     pub async fn switch_view_to_crd(&mut self, mut crd: CrdMeta) {
         self.stop_active_log_stream();
         if crd.printer_columns.is_empty() {
-            if let Some(discovered) = self.crds.iter().find(|c| c.crd_name == crd.crd_name || (c.group == crd.group && c.kind == crd.kind)) {
+            if let Some(discovered) = self.crds.iter().find(|c| {
+                c.crd_name == crd.crd_name || (c.group == crd.group && c.kind == crd.kind)
+            }) {
                 crd.printer_columns = discovered.printer_columns.clone();
             }
         }
@@ -6241,8 +8818,14 @@ impl App {
         let cached = self
             .resource_cache
             .get(&(ctx.clone(), ns.clone(), crd.crd_name.clone()))
-            .or_else(|| self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.kind.clone())))
-            .or_else(|| self.resource_cache.get(&(ctx.clone(), ns.clone(), crd.plural.clone())));
+            .or_else(|| {
+                self.resource_cache
+                    .get(&(ctx.clone(), ns.clone(), crd.kind.clone()))
+            })
+            .or_else(|| {
+                self.resource_cache
+                    .get(&(ctx.clone(), ns.clone(), crd.plural.clone()))
+            });
         if let Some(cached) = cached {
             table.set_items(cached.clone(), &self.filter_buffer);
             table.is_loading = false;
@@ -6252,6 +8835,7 @@ impl App {
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Table(table));
         self.nav_stack.push(old_view);
         self.filter_buffer.clear();
+        self.fetch_crd_instances(crd.clone());
         self.restart_active_watch().await;
     }
 
@@ -6262,27 +8846,39 @@ impl App {
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
-            if let Ok(client) = cache.get(&ctx).await {
-                let api_version = if crd.group.is_empty() {
-                    crd.version.clone()
-                } else {
-                    format!("{}/{}", crd.group, crd.version)
-                };
-                let ar = kube::core::ApiResource {
-                    group: crd.group.clone(),
-                    version: crd.version.clone(),
-                    api_version,
-                    kind: crd.kind.clone(),
-                    plural: crd.plural.clone(),
-                };
+            let client = match cache.get(&ctx).await {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = event_tx.send(AppEvent::ActionResult {
+                        title: format!("crd_instances_failed:{}", crd.kind),
+                        result: Err(e.to_string()),
+                    });
+                    return;
+                }
+            };
 
-                let api: kube::Api<kube::core::DynamicObject> = if crd.namespaced && !ns.is_empty() {
+            let api_version = if crd.group.is_empty() {
+                crd.version.clone()
+            } else {
+                format!("{}/{}", crd.group, crd.version)
+            };
+            let ar = kube::core::ApiResource {
+                group: crd.group.clone(),
+                version: crd.version.clone(),
+                api_version,
+                kind: crd.kind.clone(),
+                plural: crd.plural.clone(),
+            };
+
+            let api: kube::Api<kube::core::DynamicObject> =
+                if crd.namespaced && !ns.is_empty() && ns != "all" {
                     kube::Api::namespaced_with(client, &ns, &ar)
                 } else {
                     kube::Api::all_with(client, &ar)
                 };
 
-                if let Ok(list) = api.list(&kube::api::ListParams::default()).await {
+            match api.list(&kube::api::ListParams::default()).await {
+                Ok(list) => {
                     let items: Vec<serde_json::Value> = list
                         .items
                         .into_iter()
@@ -6292,17 +8888,28 @@ impl App {
                                 if let Some(obj) = val.as_object_mut() {
                                     obj.insert("metadata".to_string(), meta_val.clone());
                                     if let Some(n) = &item.metadata.name {
-                                        obj.insert("name".to_string(), serde_json::Value::String(n.clone()));
+                                        obj.insert(
+                                            "name".to_string(),
+                                            serde_json::Value::String(n.clone()),
+                                        );
                                     }
                                     if let Some(ns_name) = &item.metadata.namespace {
-                                        obj.insert("namespace".to_string(), serde_json::Value::String(ns_name.clone()));
+                                        obj.insert(
+                                            "namespace".to_string(),
+                                            serde_json::Value::String(ns_name.clone()),
+                                        );
                                     }
                                     if let Some(ts) = &item.metadata.creation_timestamp {
                                         let age = srelens_kube::humanize_age(Some(ts));
-                                        obj.insert("age".to_string(), serde_json::Value::String(age));
+                                        obj.insert(
+                                            "age".to_string(),
+                                            serde_json::Value::String(age),
+                                        );
                                         obj.insert(
                                             "createdAt".to_string(),
-                                            serde_json::Value::String(srelens_kube::creation_timestamp_iso(Some(ts))),
+                                            serde_json::Value::String(
+                                                srelens_kube::creation_timestamp_iso(Some(ts)),
+                                            ),
                                         );
                                     }
                                 }
@@ -6314,6 +8921,12 @@ impl App {
                     let _ = event_tx.send(AppEvent::ActionResult {
                         title: format!("crd_instances:{}", crd.kind),
                         result: Ok(serde_json::to_string(&items).unwrap_or_default()),
+                    });
+                }
+                Err(e) => {
+                    let _ = event_tx.send(AppEvent::ActionResult {
+                        title: format!("crd_instances_failed:{}", crd.kind),
+                        result: Err(e.to_string()),
                     });
                 }
             }
@@ -6374,10 +8987,11 @@ impl App {
                         namespaces: ns_list.clone(),
                         prometheus: vec![],
                     };
-                    let res = match srelens_kube::topology::build_topology(cache, input, false).await {
-                        Ok(graph) => Ok(graph),
-                        Err(e) => Err(format!("Failed to build topology: {}", e)),
-                    };
+                    let res =
+                        match srelens_kube::topology::build_topology(cache, input, false).await {
+                            Ok(graph) => Ok(graph),
+                            Err(e) => Err(format!("Failed to build topology: {}", e)),
+                        };
                     let _ = event_tx.send(crate::event::AppEvent::TopologyResult {
                         context: ctx,
                         namespaces: ns_list,
@@ -6406,6 +9020,25 @@ impl App {
 
                 ActiveView::GpuInfo(gpu_state)
             }
+            ResourceKind::BgpPeers => {
+                let bgp_state = bgp_view::BgpViewState::new();
+                let ctx = self.active_context.clone();
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+
+                tokio::spawn(async move {
+                    let res = match cache.get(&ctx).await {
+                        Ok(client) => srelens_kube::bgp::fetch_bgp_summary(&client).await,
+                        Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
+                    };
+                    let _ = event_tx.send(crate::event::AppEvent::BgpResult {
+                        context: ctx,
+                        result: res,
+                    });
+                });
+
+                ActiveView::Bgp(bgp_state)
+            }
             ResourceKind::TopPods => {
                 self.refresh_pod_metrics();
                 self.refresh_node_metrics();
@@ -6424,10 +9057,17 @@ impl App {
             }
             _ => {
                 let mut table = ResourceTableState::new(kind.clone());
-                if let Some(watch_kind) = table.kind.watch_kind() {
+                if kind == ResourceKind::CustomResourceDefinitions {
+                    let items = self.crds_to_table_items();
+                    table.set_items(items, &self.filter_buffer);
+                    table.is_loading = false;
+                } else if let Some(watch_kind) = table.kind.watch_kind() {
                     let ctx = &self.active_context;
                     let ns = &self.active_namespace;
-                    if let Some(cached) = self.resource_cache.get(&(ctx.clone(), ns.clone(), watch_kind.to_string())) {
+                    if let Some(cached) =
+                        self.resource_cache
+                            .get(&(ctx.clone(), ns.clone(), watch_kind.to_string()))
+                    {
                         table.set_items(cached.clone(), &self.filter_buffer);
                         table.is_loading = false;
                     }
@@ -6446,8 +9086,13 @@ impl App {
     }
 
     pub async fn get_pod_containers(&self, pod_name: &str, namespace: Option<&str>) -> Vec<String> {
-        let target_ns = namespace
-            .or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.as_str()) });
+        let target_ns = namespace.or_else(|| {
+            if self.active_namespace.is_empty() {
+                None
+            } else {
+                Some(self.active_namespace.as_str())
+            }
+        });
         let query_ns = target_ns.unwrap_or("default");
 
         // 1. Check if full pod JSON is cached in resource_cache
@@ -6455,24 +9100,33 @@ impl App {
             if kind == "Pods" && (ns == query_ns || ns.is_empty()) {
                 for item in items {
                     let name_match = item.get("name").and_then(|v| v.as_str()) == Some(pod_name)
-                        || item.pointer("/metadata/name").and_then(|v| v.as_str()) == Some(pod_name);
+                        || item.pointer("/metadata/name").and_then(|v| v.as_str())
+                            == Some(pod_name);
                     if name_match {
                         let mut containers = Vec::new();
-                        if let Some(conts) = item.pointer("/spec/containers").and_then(|v| v.as_array()) {
+                        if let Some(conts) =
+                            item.pointer("/spec/containers").and_then(|v| v.as_array())
+                        {
                             for c in conts {
                                 if let Some(n) = c.get("name").and_then(|v| v.as_str()) {
                                     containers.push(n.to_string());
                                 }
                             }
                         }
-                        if let Some(inits) = item.pointer("/spec/initContainers").and_then(|v| v.as_array()) {
+                        if let Some(inits) = item
+                            .pointer("/spec/initContainers")
+                            .and_then(|v| v.as_array())
+                        {
                             for c in inits {
                                 if let Some(n) = c.get("name").and_then(|v| v.as_str()) {
                                     containers.push(n.to_string());
                                 }
                             }
                         }
-                        if let Some(ephems) = item.pointer("/spec/ephemeralContainers").and_then(|v| v.as_array()) {
+                        if let Some(ephems) = item
+                            .pointer("/spec/ephemeralContainers")
+                            .and_then(|v| v.as_array())
+                        {
                             for c in ephems {
                                 if let Some(n) = c.get("name").and_then(|v| v.as_str()) {
                                     containers.push(n.to_string());
@@ -6492,10 +9146,12 @@ impl App {
         let cache = self.client_cache.clone();
 
         if let Ok(client) = cache.get(&ctx).await {
-            let api: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(client, query_ns);
+            let api: kube::Api<k8s_openapi::api::core::v1::Pod> =
+                kube::Api::namespaced(client, query_ns);
             if let Ok(pod) = api.get(pod_name).await {
                 if let Some(spec) = pod.spec {
-                    let mut containers: Vec<String> = spec.containers.into_iter().map(|c| c.name).collect();
+                    let mut containers: Vec<String> =
+                        spec.containers.into_iter().map(|c| c.name).collect();
                     if let Some(inits) = spec.init_containers {
                         containers.extend(inits.into_iter().map(|c| c.name));
                     }
@@ -6510,7 +9166,9 @@ impl App {
     }
 
     pub async fn prompt_pod_logs(&mut self, pod_name: String, namespace: Option<String>) {
-        let containers = self.get_pod_containers(&pod_name, namespace.as_deref()).await;
+        let containers = self
+            .get_pod_containers(&pod_name, namespace.as_deref())
+            .await;
         if containers.len() > 1 {
             self.modal = Some(Modal::ContainerPicker {
                 pod_name,
@@ -6520,12 +9178,15 @@ impl App {
                 action: ContainerAction::Logs,
             });
         } else {
-            self.open_logs_view(pod_name, namespace, containers.into_iter().next()).await;
+            self.open_logs_view(pod_name, namespace, containers.into_iter().next())
+                .await;
         }
     }
 
     pub async fn prompt_pod_shell(&mut self, pod_name: String, namespace: Option<String>) {
-        let containers = self.get_pod_containers(&pod_name, namespace.as_deref()).await;
+        let containers = self
+            .get_pod_containers(&pod_name, namespace.as_deref())
+            .await;
         if containers.len() > 1 {
             self.modal = Some(Modal::ContainerPicker {
                 pod_name,
@@ -6549,14 +9210,25 @@ impl App {
         }
     }
 
-    pub async fn open_logs_view(&mut self, pod_name: String, namespace: Option<String>, container: Option<String>) {
+    pub async fn open_logs_view(
+        &mut self,
+        pod_name: String,
+        namespace: Option<String>,
+        container: Option<String>,
+    ) {
         self.stop_active_log_stream();
 
         let channel = format!("logs:{}:{}", pod_name, uuid::Uuid::new_v4());
         self.active_log_channel = Some(channel.clone());
 
         let target_ns = namespace
-            .or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) })
+            .or_else(|| {
+                if self.active_namespace.is_empty() {
+                    None
+                } else {
+                    Some(self.active_namespace.clone())
+                }
+            })
             .unwrap_or_else(|| "default".to_string());
 
         let mut logs_state = LogsViewState::new(
@@ -6565,7 +9237,12 @@ impl App {
             container.clone(),
             channel.clone(),
         );
-        logs_state.push_line(format!("Streaming logs for pod {}/{} (container: {})...", target_ns, pod_name, container.as_deref().unwrap_or("default")));
+        logs_state.push_line(format!(
+            "Streaming logs for pod {}/{} (container: {})...",
+            target_ns,
+            pod_name,
+            container.as_deref().unwrap_or("default")
+        ));
 
         let sink = TuiSink::arc(self.event_tx.clone());
         let ctx = self.active_context.clone();
@@ -6575,16 +9252,19 @@ impl App {
             label: container.clone().unwrap_or_default(),
         };
 
-        let _ = self.logs_manager.start(
-            sink,
-            ctx,
-            target_ns,
-            vec![target],
-            channel,
-            Some(logs_state.timestamps),
-            None,
-            Some(200),
-        ).await;
+        let _ = self
+            .logs_manager
+            .start(
+                sink,
+                ctx,
+                target_ns,
+                vec![target],
+                channel,
+                Some(logs_state.timestamps),
+                None,
+                Some(200),
+            )
+            .await;
 
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Logs(logs_state));
         self.nav_stack.push(old_view);
@@ -6602,7 +9282,13 @@ impl App {
         self.active_log_channel = Some(channel.clone());
 
         let target_ns = namespace
-            .or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) })
+            .or_else(|| {
+                if self.active_namespace.is_empty() {
+                    None
+                } else {
+                    Some(self.active_namespace.clone())
+                }
+            })
             .unwrap_or_else(|| "default".to_string());
 
         let mut logs_state = LogsViewState::new_multi_pod(
@@ -6629,38 +9315,53 @@ impl App {
             })
             .collect();
 
-        let _ = self.logs_manager.start(
-            sink,
-            ctx,
-            target_ns,
-            targets,
-            channel,
-            Some(logs_state.timestamps),
-            None,
-            Some(200),
-        ).await;
+        let _ = self
+            .logs_manager
+            .start(
+                sink,
+                ctx,
+                target_ns,
+                targets,
+                channel,
+                Some(logs_state.timestamps),
+                None,
+                Some(200),
+            )
+            .await;
 
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Logs(logs_state));
         self.nav_stack.push(old_view);
     }
 
-    pub async fn get_workload_pods(&self, workload_kind: &str, workload_name: &str, namespace: &str) -> Vec<String> {
+    pub async fn get_workload_pods(
+        &self,
+        workload_kind: &str,
+        workload_name: &str,
+        namespace: &str,
+    ) -> Vec<String> {
         let mut matching_pods = Vec::new();
 
         // 1. Check in-memory resource_cache
         for ((_, ns, kind), items) in &self.resource_cache {
             if kind.eq_ignore_ascii_case("pods") && (ns == namespace || ns.is_empty()) {
                 for item in items {
-                    let pod_name = item.get("name").and_then(|v| v.as_str())
+                    let pod_name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
                         .or_else(|| item.pointer("/metadata/name").and_then(|v| v.as_str()));
                     if let Some(pname) = pod_name {
-                        let owner_match = item.pointer("/metadata/ownerReferences")
+                        let owner_match = item
+                            .pointer("/metadata/ownerReferences")
                             .and_then(|v| v.as_array())
                             .map(|owners| {
                                 owners.iter().any(|o| {
-                                    let oname = o.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                    let okind = o.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                                    if okind.eq_ignore_ascii_case(workload_kind) && oname == workload_name {
+                                    let oname =
+                                        o.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                    let okind =
+                                        o.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                    if okind.eq_ignore_ascii_case(workload_kind)
+                                        && oname == workload_name
+                                    {
                                         return true;
                                     }
                                     if workload_kind.eq_ignore_ascii_case("Deployment")
@@ -6692,22 +9393,30 @@ impl App {
         // 2. Query Kubernetes API
         let ctx = self.active_context.clone();
         if let Ok(client) = self.client_cache.get(&ctx).await {
-            let api: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(client, namespace);
+            let api: kube::Api<k8s_openapi::api::core::v1::Pod> =
+                kube::Api::namespaced(client, namespace);
             if let Ok(pod_list) = api.list(&kube::api::ListParams::default()).await {
                 for pod in pod_list {
                     let pname = pod.metadata.name.unwrap_or_default();
-                    let owner_match = pod.metadata.owner_references.as_deref().unwrap_or(&[]).iter().any(|o| {
-                        if o.kind.eq_ignore_ascii_case(workload_kind) && o.name == workload_name {
-                            return true;
-                        }
-                        if workload_kind.eq_ignore_ascii_case("Deployment")
-                            && o.kind.eq_ignore_ascii_case("ReplicaSet")
-                            && o.name.starts_with(workload_name)
-                        {
-                            return true;
-                        }
-                        false
-                    });
+                    let owner_match = pod
+                        .metadata
+                        .owner_references
+                        .as_deref()
+                        .unwrap_or(&[])
+                        .iter()
+                        .any(|o| {
+                            if o.kind.eq_ignore_ascii_case(workload_kind) && o.name == workload_name
+                            {
+                                return true;
+                            }
+                            if workload_kind.eq_ignore_ascii_case("Deployment")
+                                && o.kind.eq_ignore_ascii_case("ReplicaSet")
+                                && o.name.starts_with(workload_name)
+                            {
+                                return true;
+                            }
+                            false
+                        });
                     if owner_match || pname.starts_with(workload_name) {
                         if !matching_pods.contains(&pname) {
                             matching_pods.push(pname);
@@ -6724,15 +9433,29 @@ impl App {
         for ((_, _, kind), items) in &self.resource_cache {
             if kind.eq_ignore_ascii_case("nodes") {
                 for item in items {
-                    let name = item.get("name").and_then(|v| v.as_str())
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
                         .or_else(|| item.pointer("/metadata/name").and_then(|v| v.as_str()))
                         .unwrap_or("");
                     if name == node_name {
-                        let alloc_cpu = item.get("allocatableCpuMillicores").and_then(|v| v.as_i64())
-                            .or_else(|| item.pointer("/status/allocatable/cpu").and_then(|v| v.as_str()).map(srelens_kube::metrics::cpu_millicores))
+                        let alloc_cpu = item
+                            .get("allocatableCpuMillicores")
+                            .and_then(|v| v.as_i64())
+                            .or_else(|| {
+                                item.pointer("/status/allocatable/cpu")
+                                    .and_then(|v| v.as_str())
+                                    .map(srelens_kube::metrics::cpu_millicores)
+                            })
                             .unwrap_or(0);
-                        let alloc_mem = item.get("allocatableMemoryMiB").and_then(|v| v.as_i64())
-                            .or_else(|| item.pointer("/status/allocatable/memory").and_then(|v| v.as_str()).map(srelens_kube::metrics::mem_mib))
+                        let alloc_mem = item
+                            .get("allocatableMemoryMiB")
+                            .and_then(|v| v.as_i64())
+                            .or_else(|| {
+                                item.pointer("/status/allocatable/memory")
+                                    .and_then(|v| v.as_str())
+                                    .map(srelens_kube::metrics::mem_mib)
+                            })
                             .unwrap_or(0);
                         return (alloc_cpu, alloc_mem);
                     }
@@ -6742,30 +9465,51 @@ impl App {
         (0, 0)
     }
 
-    pub fn build_top_rows(&self) -> (Vec<crate::views::top_view::TopPodRow>, Vec<crate::views::top_view::TopNodeRow>) {
+    pub fn build_top_rows(
+        &self,
+    ) -> (
+        Vec<crate::views::top_view::TopPodRow>,
+        Vec<crate::views::top_view::TopNodeRow>,
+    ) {
         let mut pod_rows = Vec::new();
 
         for ((_, ns, kind), items) in &self.resource_cache {
             if kind.eq_ignore_ascii_case("pods") {
                 for item in items {
-                    let name = item.get("name").and_then(|v| v.as_str())
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
                         .or_else(|| item.pointer("/metadata/name").and_then(|v| v.as_str()))
-                        .unwrap_or("").to_string();
-                    if name.is_empty() { continue; }
-                    let namespace = item.get("namespace").and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let namespace = item
+                        .get("namespace")
+                        .and_then(|v| v.as_str())
                         .or_else(|| item.pointer("/metadata/namespace").and_then(|v| v.as_str()))
-                        .unwrap_or(ns).to_string();
+                        .unwrap_or(ns)
+                        .to_string();
 
                     if !self.active_namespace.is_empty() && namespace != self.active_namespace {
                         continue;
                     }
-                    if pod_rows.iter().any(|r: &crate::views::top_view::TopPodRow| r.name == name && r.namespace == namespace) {
+                    if pod_rows
+                        .iter()
+                        .any(|r: &crate::views::top_view::TopPodRow| {
+                            r.name == name && r.namespace == namespace
+                        })
+                    {
                         continue;
                     }
 
-                    let (req_cpu, lim_cpu, req_mem, lim_mem) = crate::views::top_view::TopViewState::extract_pod_resources(item);
+                    let (req_cpu, lim_cpu, req_mem, lim_mem) =
+                        crate::views::top_view::TopViewState::extract_pod_resources(item);
 
-                    let (cur_cpu, cur_mem) = self.pod_metrics_history.get(&name)
+                    let (cur_cpu, cur_mem) = self
+                        .pod_metrics_history
+                        .get(&name)
                         .and_then(|h| h.back())
                         .map(|s| (s.cpu_millicores as i64, s.memory_mib as i64))
                         .unwrap_or((0, 0));
@@ -6805,25 +9549,50 @@ impl App {
         for ((_, _, kind), items) in &self.resource_cache {
             if kind.eq_ignore_ascii_case("nodes") {
                 for item in items {
-                    let name = item.get("name").and_then(|v| v.as_str())
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
                         .or_else(|| item.pointer("/metadata/name").and_then(|v| v.as_str()))
-                        .unwrap_or("").to_string();
-                    if name.is_empty() { continue; }
-                    if node_rows.iter().any(|r: &crate::views::top_view::TopNodeRow| r.name == name) {
+                        .unwrap_or("")
+                        .to_string();
+                    if name.is_empty() {
                         continue;
                     }
-                    let status = item.get("status").and_then(|v| v.as_str())
-                        .unwrap_or("Ready").to_string();
+                    if node_rows
+                        .iter()
+                        .any(|r: &crate::views::top_view::TopNodeRow| r.name == name)
+                    {
+                        continue;
+                    }
+                    let status = item
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Ready")
+                        .to_string();
 
-                    let alloc_cpu = item.get("allocatableCpuMillicores").and_then(|v| v.as_i64())
-                        .or_else(|| item.pointer("/status/allocatable/cpu").and_then(|v| v.as_str()).map(srelens_kube::metrics::cpu_millicores))
+                    let alloc_cpu = item
+                        .get("allocatableCpuMillicores")
+                        .and_then(|v| v.as_i64())
+                        .or_else(|| {
+                            item.pointer("/status/allocatable/cpu")
+                                .and_then(|v| v.as_str())
+                                .map(srelens_kube::metrics::cpu_millicores)
+                        })
                         .unwrap_or(0);
 
-                    let alloc_mem = item.get("allocatableMemoryMiB").and_then(|v| v.as_i64())
-                        .or_else(|| item.pointer("/status/allocatable/memory").and_then(|v| v.as_str()).map(srelens_kube::metrics::mem_mib))
+                    let alloc_mem = item
+                        .get("allocatableMemoryMiB")
+                        .and_then(|v| v.as_i64())
+                        .or_else(|| {
+                            item.pointer("/status/allocatable/memory")
+                                .and_then(|v| v.as_str())
+                                .map(srelens_kube::metrics::mem_mib)
+                        })
                         .unwrap_or(0);
 
-                    let (cur_cpu, cur_mem) = self.node_metrics_history.get(&name)
+                    let (cur_cpu, cur_mem) = self
+                        .node_metrics_history
+                        .get(&name)
                         .and_then(|h| h.back())
                         .map(|s| (s.cpu_millicores as i64, s.memory_mib as i64))
                         .unwrap_or((0, 0));
@@ -6869,16 +9638,102 @@ impl App {
     }
 
     pub async fn open_yaml_view(&mut self, name: String, kind: String, namespace: Option<String>) {
+        self.open_yaml_view_in_group(name, kind, namespace, None)
+            .await;
+    }
+
+    /// As `open_yaml_view`, for a caller that already knows which CRD the row
+    /// came from. A kind name is not an identity — MetalLB and Calico both
+    /// ship a `BGPPeer` — so when `api_version` is given it decides the group,
+    /// the version and the scope, rather than the name-only table picking one.
+    pub async fn open_yaml_view_in_group(
+        &mut self,
+        name: String,
+        kind: String,
+        namespace: Option<String>,
+        api_version: Option<String>,
+    ) {
         let ctx = self.active_context.clone();
         let cache = self.client_cache.clone();
-        let ns = namespace.clone();
         let k = kind.clone();
         let n = name.clone();
         let kubeconfig_paths = self.kubeconfig_paths.clone();
-        let crd_opt = self.crds.iter().find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k)).cloned();
+        let pinned = api_version
+            .as_deref()
+            .and_then(|v| srelens_kube::manifest::api_resource_for_api_version(v, &k));
+        let crd_opt = if pinned.is_some() {
+            None
+        } else {
+            self.crds
+                .iter()
+                .find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k))
+                .cloned()
+        };
+
+        // A pinned CRD carries its own scope: the row knows whether its object
+        // lives in a namespace.
+        let is_cluster_scoped = if pinned.is_some() {
+            !namespace.as_deref().is_some_and(|ns| !ns.is_empty())
+        } else if namespace.is_some() {
+            match srelens_kube::manifest::gvk_for(&k) {
+                Some((gvk, false))
+                    if gvk.group.is_empty()
+                        || gvk.group == "rbac.authorization.k8s.io"
+                        || gvk.group == "storage.k8s.io"
+                        || gvk.group == "apiextensions.k8s.io"
+                        || gvk.group == "admissionregistration.k8s.io"
+                        || gvk.group == "scheduling.k8s.io"
+                        || gvk.group == "node.k8s.io" =>
+                {
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            match srelens_kube::manifest::gvk_for(&k) {
+                Some((_, namespaced)) => !namespaced,
+                None => {
+                    if let Some(ref crd) = crd_opt {
+                        !crd.namespaced
+                    } else {
+                        true
+                    }
+                }
+            }
+        };
+        let ns = if is_cluster_scoped {
+            None
+        } else {
+            namespace.clone()
+        };
+        let ns_task = ns.clone();
+
+        // kubectl resolves a bare kind by name too, so the fallback command
+        // names the group as well: `bgppeers.metallb.io`.
+        let kubectl_kind = match pinned {
+            Some(ref ar) if !ar.group.is_empty() => format!("{}.{}", ar.plural, ar.group),
+            _ => k.clone(),
+        };
+        let pinned_api_version = pinned.as_ref().map(|ar| ar.api_version.clone());
 
         let yaml_text = tokio::task::spawn(async move {
+            let ns = ns_task;
             if let Ok(client) = cache.get(&ctx).await {
+                if let Some(ar) = pinned.clone() {
+                    let api: kube::Api<kube::core::DynamicObject> = match ns.as_deref() {
+                        Some(ns) if !ns.is_empty() => {
+                            kube::Api::namespaced_with(client.clone(), ns, &ar)
+                        }
+                        _ => kube::Api::all_with(client.clone(), &ar),
+                    };
+                    if let Ok(mut obj) = api.get(&n).await {
+                        obj.metadata.managed_fields = None;
+                        if let Ok(y) = serde_yaml::to_string(&obj) {
+                            return y;
+                        }
+                    }
+                }
+
                 if let Some(crd) = crd_opt {
                     let api_version = if crd.group.is_empty() {
                         crd.version.clone()
@@ -6893,9 +9748,13 @@ impl App {
                         plural: crd.plural,
                     };
                     let api: kube::Api<kube::core::DynamicObject> = if crd.namespaced {
-                        kube::Api::namespaced_with(client, ns.as_deref().unwrap_or("default"), &ar)
+                        kube::Api::namespaced_with(
+                            client.clone(),
+                            ns.as_deref().unwrap_or("default"),
+                            &ar,
+                        )
                     } else {
-                        kube::Api::all_with(client, &ar)
+                        kube::Api::all_with(client.clone(), &ar)
                     };
                     if let Ok(mut obj) = api.get(&n).await {
                         obj.metadata.managed_fields = None;
@@ -6903,12 +9762,22 @@ impl App {
                             return y;
                         }
                     }
-                } else if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
+                }
+
+                // Only when the caller did not pin a CRD: resolving this kind
+                // by name is what would reach the wrong group.
+                if let Some((gvk, namespaced)) =
+                    srelens_kube::manifest::gvk_for(&k).filter(|_| pinned.is_none())
+                {
                     let ar = kube::core::ApiResource::from_gvk(&gvk);
                     let api: kube::Api<kube::core::DynamicObject> = if namespaced {
-                        kube::Api::namespaced_with(client, ns.as_deref().unwrap_or("default"), &ar)
+                        kube::Api::namespaced_with(
+                            client.clone(),
+                            ns.as_deref().unwrap_or("default"),
+                            &ar,
+                        )
                     } else {
-                        kube::Api::all_with(client, &ar)
+                        kube::Api::all_with(client.clone(), &ar)
                     };
                     if let Ok(mut obj) = api.get(&n).await {
                         obj.metadata.managed_fields = None;
@@ -6916,9 +9785,46 @@ impl App {
                             return y;
                         }
                     }
-                } else if k.eq_ignore_ascii_case("application") || k.eq_ignore_ascii_case("applications") {
+                }
+
+                if k.starts_with("CiliumBGP")
+                    || k.starts_with("ciliumbgp")
+                    || k.starts_with("CiliumLoadBalancer")
+                {
+                    let k_lower = k.to_lowercase();
+                    let plural = if k_lower.ends_with('y') {
+                        format!("{}ies", &k_lower[..k_lower.len() - 1])
+                    } else if k_lower.ends_with('s') {
+                        k_lower.clone()
+                    } else {
+                        format!("{}s", k_lower)
+                    };
+                    for v in ["v2", "v2alpha1"] {
+                        let ar = kube::core::ApiResource {
+                            group: "cilium.io".to_string(),
+                            version: v.to_string(),
+                            api_version: format!("cilium.io/{}", v),
+                            kind: k.clone(),
+                            plural: plural.clone(),
+                        };
+                        let api: kube::Api<kube::core::DynamicObject> =
+                            kube::Api::all_with(client.clone(), &ar);
+                        if let Ok(mut obj) = api.get(&n).await {
+                            obj.metadata.managed_fields = None;
+                            if let Ok(y) = serde_yaml::to_string(&obj) {
+                                return y;
+                            }
+                        }
+                    }
+                }
+
+                if k.eq_ignore_ascii_case("application") || k.eq_ignore_ascii_case("applications") {
                     let ar = srelens_kube::argo::argo_application_resource();
-                    let api: kube::Api<kube::core::DynamicObject> = kube::Api::namespaced_with(client, ns.as_deref().unwrap_or("argocd"), &ar);
+                    let api: kube::Api<kube::core::DynamicObject> = kube::Api::namespaced_with(
+                        client.clone(),
+                        ns.as_deref().unwrap_or("argocd"),
+                        &ar,
+                    );
                     if let Ok(mut obj) = api.get(&n).await {
                         obj.metadata.managed_fields = None;
                         if let Ok(y) = serde_yaml::to_string(&obj) {
@@ -6931,7 +9837,7 @@ impl App {
             // Fallback: try kubectl get <kind> <name> -o yaml
             let mut cmd = tokio::process::Command::new("kubectl");
             cmd.arg("get");
-            cmd.arg(&k);
+            cmd.arg(&kubectl_kind);
             cmd.arg(&n);
             if let Some(ref ns_val) = ns {
                 if !ns_val.is_empty() {
@@ -6961,30 +9867,112 @@ impl App {
                 }
             }
 
-            format!(
-                "# Error: Unable to fetch live manifest for {}/{} in namespace {}\n",
-                k, n, ns.as_deref().unwrap_or("default")
-            )
-        }).await.unwrap_or_default();
+            if is_cluster_scoped || ns.is_none() {
+                format!("# Error: Unable to fetch live manifest for {}/{}\n", k, n)
+            } else {
+                format!(
+                    "# Error: Unable to fetch live manifest for {}/{} in namespace {}\n",
+                    k,
+                    n,
+                    ns.as_deref().unwrap_or("default")
+                )
+            }
+        })
+        .await
+        .unwrap_or_default();
 
-        let yaml_state = YamlViewState::new(name, kind, namespace, yaml_text);
+        let mut yaml_state = YamlViewState::new(name, kind, ns, yaml_text);
+        yaml_state.pinned_api_version = pinned_api_version;
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Yaml(yaml_state));
         self.nav_stack.push(old_view);
     }
 
-    pub async fn open_describe_view(&mut self, name: String, kind: String, namespace: Option<String>) {
+    pub async fn open_describe_view(
+        &mut self,
+        name: String,
+        kind: String,
+        namespace: Option<String>,
+    ) {
+        self.open_describe_view_in_group(name, kind, namespace, None)
+            .await;
+    }
+
+    /// As `open_describe_view`, for a caller that already knows which CRD the
+    /// row came from. See `open_yaml_view_in_group`.
+    pub async fn open_describe_view_in_group(
+        &mut self,
+        name: String,
+        kind: String,
+        namespace: Option<String>,
+        api_version: Option<String>,
+    ) {
         let ctx = self.active_context.clone();
         let cache = self.client_cache.clone();
-        let ns = namespace.clone();
         let k = kind.clone();
         let n = name.clone();
         let kubeconfig_paths = self.kubeconfig_paths.clone();
+        let pinned = api_version
+            .as_deref()
+            .and_then(|v| srelens_kube::manifest::api_resource_for_api_version(v, &k));
+        let crd_opt = if pinned.is_some() {
+            None
+        } else {
+            self.crds
+                .iter()
+                .find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k))
+                .cloned()
+        };
+
+        let is_cluster_scoped = if pinned.is_some() {
+            !namespace.as_deref().is_some_and(|ns| !ns.is_empty())
+        } else if namespace.is_some() {
+            match srelens_kube::manifest::gvk_for(&k) {
+                Some((gvk, false))
+                    if gvk.group.is_empty()
+                        || gvk.group == "rbac.authorization.k8s.io"
+                        || gvk.group == "storage.k8s.io"
+                        || gvk.group == "apiextensions.k8s.io"
+                        || gvk.group == "admissionregistration.k8s.io"
+                        || gvk.group == "scheduling.k8s.io"
+                        || gvk.group == "node.k8s.io" =>
+                {
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            match srelens_kube::manifest::gvk_for(&k) {
+                Some((_, namespaced)) => !namespaced,
+                None => {
+                    if let Some(ref crd) = crd_opt {
+                        !crd.namespaced
+                    } else {
+                        true
+                    }
+                }
+            }
+        };
+        let ns = if is_cluster_scoped {
+            None
+        } else {
+            namespace.clone()
+        };
+        let ns_task = ns.clone();
+
+        // kubectl resolves a bare kind by name too, so the command names the
+        // group as well: `bgppeers.metallb.io`.
+        let kubectl_kind = match pinned {
+            Some(ref ar) if !ar.group.is_empty() => format!("{}.{}", ar.plural, ar.group),
+            _ => k.clone(),
+        };
+        let pinned_api_version = pinned.as_ref().map(|ar| ar.api_version.clone());
 
         let desc_text = tokio::task::spawn(async move {
+            let ns = ns_task;
             // 1. Try kubectl describe for exact 100% fidelity
             let mut cmd = tokio::process::Command::new("kubectl");
             cmd.arg("describe");
-            cmd.arg(&k);
+            cmd.arg(&kubectl_kind);
             cmd.arg(&n);
             if let Some(ref ns_val) = ns {
                 if !ns_val.is_empty() {
@@ -7014,9 +10002,28 @@ impl App {
 
             // 2. Pure Rust native describe fallback
             if let Ok(client) = cache.get(&ctx).await {
-                let maybe_ar = if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
+                let maybe_ar = if let Some(ar) = pinned.clone() {
+                    let namespaced = ns.as_deref().is_some_and(|ns| !ns.is_empty());
+                    Some((ar, namespaced))
+                } else if let Some(ref crd) = crd_opt {
+                    let api_version = if crd.group.is_empty() {
+                        crd.version.clone()
+                    } else {
+                        format!("{}/{}", crd.group, crd.version)
+                    };
+                    let ar = kube::core::ApiResource {
+                        group: crd.group.clone(),
+                        version: crd.version.clone(),
+                        api_version,
+                        kind: crd.kind.clone(),
+                        plural: crd.plural.clone(),
+                    };
+                    Some((ar, crd.namespaced))
+                } else if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
                     Some((kube::core::ApiResource::from_gvk(&gvk), namespaced))
-                } else if k.eq_ignore_ascii_case("application") || k.eq_ignore_ascii_case("applications") {
+                } else if k.eq_ignore_ascii_case("application")
+                    || k.eq_ignore_ascii_case("applications")
+                {
                     Some((srelens_kube::argo::argo_application_resource(), true))
                 } else {
                     None
@@ -7024,7 +10031,11 @@ impl App {
 
                 if let Some((ar, namespaced)) = maybe_ar {
                     let api: kube::Api<kube::core::DynamicObject> = if namespaced {
-                        kube::Api::namespaced_with(client.clone(), ns.as_deref().unwrap_or("default"), &ar)
+                        kube::Api::namespaced_with(
+                            client.clone(),
+                            ns.as_deref().unwrap_or("default"),
+                            &ar,
+                        )
                     } else {
                         kube::Api::all_with(client.clone(), &ar)
                     };
@@ -7051,7 +10062,9 @@ impl App {
                             out.push_str(&format!("{:<26}", "Annotations:"));
                             let mut first = true;
                             for (anno_k, anno_v) in annotations {
-                                if anno_k.contains("managed-fields") { continue; }
+                                if anno_k.contains("managed-fields") {
+                                    continue;
+                                }
                                 if !first {
                                     out.push_str(&format!("\n{:<26}", ""));
                                 }
@@ -7064,24 +10077,41 @@ impl App {
                         // Spec details
                         if let Some(spec) = obj.data.get("spec") {
                             if let Some(sel) = spec.get("selector").and_then(|v| v.as_object()) {
-                                let sel_str = sel.iter().map(|(k, v)| format!("{}={}", k, v.as_str().unwrap_or(""))).collect::<Vec<_>>().join(",");
+                                let sel_str = sel
+                                    .iter()
+                                    .map(|(k, v)| format!("{}={}", k, v.as_str().unwrap_or("")))
+                                    .collect::<Vec<_>>()
+                                    .join(",");
                                 out.push_str(&format!("{:<26}{}\n", "Selector:", sel_str));
                             }
                             if let Some(typ) = spec.get("type").and_then(|v| v.as_str()) {
                                 out.push_str(&format!("{:<26}{}\n", "Type:", typ));
                             }
-                            if let Some(cluster_ip) = spec.get("clusterIP").and_then(|v| v.as_str()) {
+                            if let Some(cluster_ip) = spec.get("clusterIP").and_then(|v| v.as_str())
+                            {
                                 out.push_str(&format!("{:<26}{}\n", "IP:", cluster_ip));
                             }
                             if let Some(ports) = spec.get("ports").and_then(|v| v.as_array()) {
                                 for p in ports {
-                                    let port_num = p.get("port").and_then(|v| v.as_i64()).unwrap_or(0);
-                                    let proto = p.get("protocol").and_then(|v| v.as_str()).unwrap_or("TCP");
-                                    let name_p = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                    let target_p = p.get("targetPort").map(|v| v.to_string()).unwrap_or_default();
-                                    out.push_str(&format!("{:<26}{}  {}/{}\n", "Port:", name_p, port_num, proto));
+                                    let port_num =
+                                        p.get("port").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    let proto =
+                                        p.get("protocol").and_then(|v| v.as_str()).unwrap_or("TCP");
+                                    let name_p =
+                                        p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                    let target_p = p
+                                        .get("targetPort")
+                                        .map(|v| v.to_string())
+                                        .unwrap_or_default();
+                                    out.push_str(&format!(
+                                        "{:<26}{}  {}/{}\n",
+                                        "Port:", name_p, port_num, proto
+                                    ));
                                     if !target_p.is_empty() {
-                                        out.push_str(&format!("{:<26}{}\n", "TargetPort:", target_p));
+                                        out.push_str(&format!(
+                                            "{:<26}{}\n",
+                                            "TargetPort:", target_p
+                                        ));
                                     }
                                 }
                             }
@@ -7089,26 +10119,37 @@ impl App {
 
                         // Events
                         out.push_str("\nEvents:\n");
-                        let events_api: kube::Api<k8s_openapi::api::core::v1::Event> = if namespaced {
+                        let events_api: kube::Api<k8s_openapi::api::core::v1::Event> = if namespaced
+                        {
                             kube::Api::namespaced(client, ns.as_deref().unwrap_or("default"))
                         } else {
                             kube::Api::all(client)
                         };
 
-                        let lp = kube::api::ListParams::default().fields(&format!("involvedObject.name={}", n));
+                        let lp = kube::api::ListParams::default()
+                            .fields(&format!("involvedObject.name={}", n));
                         if let Ok(event_list) = events_api.list(&lp).await {
                             if event_list.items.is_empty() {
                                 out.push_str("  <none>\n");
                             } else {
-                                out.push_str("  Type     Reason      Age   From               Message\n");
-                                out.push_str("  ----     ------      ----  ----               -------\n");
+                                out.push_str(
+                                    "  Type     Reason      Age   From               Message\n",
+                                );
+                                out.push_str(
+                                    "  ----     ------      ----  ----               -------\n",
+                                );
                                 for ev in event_list.items {
                                     let ev_type = ev.type_.unwrap_or_else(|| "Normal".to_string());
                                     let reason = ev.reason.unwrap_or_default();
-                                    let from = ev.source.and_then(|s| s.component).unwrap_or_default();
+                                    let from =
+                                        ev.source.and_then(|s| s.component).unwrap_or_default();
                                     let msg = ev.message.unwrap_or_default();
-                                    let age = srelens_kube::humanize_age(ev.last_timestamp.as_ref());
-                                    out.push_str(&format!("  {:<8} {:<11} {:<5} {:<18} {}\n", ev_type, reason, age, from, msg));
+                                    let age =
+                                        srelens_kube::humanize_age(ev.last_timestamp.as_ref());
+                                    out.push_str(&format!(
+                                        "  {:<8} {:<11} {:<5} {:<18} {}\n",
+                                        ev_type, reason, age, from, msg
+                                    ));
                                 }
                             }
                         } else {
@@ -7120,16 +10161,29 @@ impl App {
                 }
             }
 
-            format!("Error: Unable to describe {}/{} in namespace {}\n", k, n, ns.as_deref().unwrap_or("default"))
-        }).await.unwrap_or_default();
+            if is_cluster_scoped || ns.is_none() {
+                format!("Error: Unable to describe {}/{}\n", k, n)
+            } else {
+                format!(
+                    "Error: Unable to describe {}/{} in namespace {}\n",
+                    k,
+                    n,
+                    ns.as_deref().unwrap_or("default")
+                )
+            }
+        })
+        .await
+        .unwrap_or_default();
 
-        let desc_state = DescribeViewState::new(name, kind, namespace, desc_text);
+        let mut desc_state = DescribeViewState::new(name, kind, ns, desc_text);
+        desc_state.pinned_api_version = pinned_api_version;
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Describe(desc_state));
         self.nav_stack.push(old_view);
     }
 
     pub fn open_resource_tree(&mut self, kind: String, name: String, namespace: Option<String>) {
-        let tree_state = tree_view::TreeViewState::new(kind.clone(), name.clone(), namespace.clone());
+        let tree_state =
+            tree_view::TreeViewState::new(kind.clone(), name.clone(), namespace.clone());
         let old_view = std::mem::replace(&mut self.active_view, ActiveView::Tree(tree_state));
         self.nav_stack.push(old_view);
 
@@ -7142,7 +10196,10 @@ impl App {
 
         tokio::spawn(async move {
             let res = match cache.get(&ctx).await {
-                Ok(client) => srelens_kube::lineage::resolve_resource_lineage(client, &k, &n, ns.as_deref()).await,
+                Ok(client) => {
+                    srelens_kube::lineage::resolve_resource_lineage(client, &k, &n, ns.as_deref())
+                        .await
+                }
                 Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
             };
             let _ = event_tx.send(crate::event::AppEvent::LineageResult {
@@ -7176,7 +10233,10 @@ impl App {
             let mem: Vec<u64> = hist.iter().map(|s| s.memory_mib).collect();
             inspector_state.update_metrics_history(&cpu, &mem);
         }
-        let old_view = std::mem::replace(&mut self.active_view, ActiveView::NodeInspector(inspector_state));
+        let old_view = std::mem::replace(
+            &mut self.active_view,
+            ActiveView::NodeInspector(inspector_state),
+        );
         self.nav_stack.push(old_view);
         self.refresh_node_metrics();
 
@@ -7293,6 +10353,42 @@ impl App {
         }
     }
 
+    pub fn reload_bgp_view(&mut self) {
+        if let ActiveView::Bgp(bgp) = &mut self.active_view {
+            bgp.is_loading = true;
+            bgp.error = None;
+            let ctx = self.active_context.clone();
+            let cache = self.client_cache.clone();
+            let event_tx = self.event_tx.clone();
+
+            tokio::spawn(async move {
+                let res = match cache.get(&ctx).await {
+                    Ok(client) => srelens_kube::bgp::fetch_bgp_summary(&client).await,
+                    Err(e) => Err(format!("Failed to connect to cluster: {}", e)),
+                };
+                let _ = event_tx.send(crate::event::AppEvent::BgpResult {
+                    context: ctx,
+                    result: res,
+                });
+            });
+        }
+    }
+
+    pub fn handle_bgp_result(
+        &mut self,
+        context: &str,
+        result: Result<srelens_kube::bgp::BgpClusterSummary, String>,
+    ) {
+        if let ActiveView::Bgp(bgp) = &mut self.active_view {
+            if self.active_context == context {
+                match result {
+                    Ok(summary) => bgp.set_summary(summary),
+                    Err(err) => bgp.set_error(err),
+                }
+            }
+        }
+    }
+
     pub fn refresh_helm_releases(&mut self) {
         if self.helm_refreshing {
             return;
@@ -7334,7 +10430,8 @@ impl App {
             if self.active_context == context && self.active_namespace == namespace {
                 match result {
                     Ok(summaries) => {
-                        let items: Vec<HelmReleaseItem> = summaries.into_iter().map(Into::into).collect();
+                        let items: Vec<HelmReleaseItem> =
+                            summaries.into_iter().map(Into::into).collect();
                         helm.set_releases(items);
                     }
                     Err(err) => helm.set_error(err),
@@ -7345,7 +10442,12 @@ impl App {
         }
     }
 
-    pub fn open_helm_detail(&mut self, name: String, namespace: String, initial_tab: HelmDetailTab) {
+    pub fn open_helm_detail(
+        &mut self,
+        name: String,
+        namespace: String,
+        initial_tab: HelmDetailTab,
+    ) {
         let mut detail_state = HelmDetailViewState::new(name.clone(), namespace.clone());
         detail_state.set_tab(initial_tab);
         let ctx = self.active_context.clone();
@@ -7355,7 +10457,9 @@ impl App {
         let ns_c = namespace.clone();
 
         tokio::spawn(async move {
-            let res = srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, None).await;
+            let res =
+                srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, None)
+                    .await;
             let _ = event_tx.send(crate::event::AppEvent::HelmDetailResult {
                 context: ctx,
                 namespace: ns_c,
@@ -7365,7 +10469,8 @@ impl App {
             });
         });
 
-        let old_view = std::mem::replace(&mut self.active_view, ActiveView::HelmDetail(detail_state));
+        let old_view =
+            std::mem::replace(&mut self.active_view, ActiveView::HelmDetail(detail_state));
         self.nav_stack.push(old_view);
     }
 
@@ -7381,7 +10486,9 @@ impl App {
         let ns_c = namespace.to_string();
 
         tokio::spawn(async move {
-            let res = srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, None).await;
+            let res =
+                srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, None)
+                    .await;
             let _ = event_tx.send(crate::event::AppEvent::HelmDetailResult {
                 context: ctx,
                 namespace: ns_c,
@@ -7401,7 +10508,10 @@ impl App {
         result: Result<srelens_kube::helm::HelmReleaseDetail, String>,
     ) {
         if let ActiveView::HelmDetail(detail) = &mut self.active_view {
-            if self.active_context == context && detail.namespace == namespace && detail.release_name == name {
+            if self.active_context == context
+                && detail.namespace == namespace
+                && detail.release_name == name
+            {
                 match result {
                     Ok(rel_detail) => {
                         if let Some(rev) = revision {
@@ -7423,7 +10533,14 @@ impl App {
                             let name_c = name.to_string();
                             let ns_c = namespace.to_string();
                             tokio::spawn(async move {
-                                let res = srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, Some(prev_rev)).await;
+                                let res = srelens_kube::helm::fetch_helm_release_detail(
+                                    &cache,
+                                    &ctx,
+                                    &ns_c,
+                                    &name_c,
+                                    Some(prev_rev),
+                                )
+                                .await;
                                 let _ = event_tx.send(crate::event::AppEvent::HelmDetailResult {
                                     context: ctx,
                                     namespace: ns_c,
@@ -7534,8 +10651,17 @@ impl App {
             if self.active_context == context {
                 match result {
                     Ok(fetch_res) => {
-                        let effective_hub = if fetch_res.is_remote_hub { hub_context } else { None };
-                        argo.set_applications(fetch_res.filtered_apps, fetch_res.all_apps, fetch_res.is_remote_hub, effective_hub);
+                        let effective_hub = if fetch_res.is_remote_hub {
+                            hub_context
+                        } else {
+                            None
+                        };
+                        argo.set_applications(
+                            fetch_res.filtered_apps,
+                            fetch_res.all_apps,
+                            fetch_res.is_remote_hub,
+                            effective_hub,
+                        );
                     }
                     Err(err) => argo.set_error(err),
                 }
@@ -7547,7 +10673,11 @@ impl App {
         }
     }
 
-    pub fn open_argo_detail(&mut self, app: srelens_kube::argo::ArgoApplication, hub_context: Option<String>) {
+    pub fn open_argo_detail(
+        &mut self,
+        app: srelens_kube::argo::ArgoApplication,
+        hub_context: Option<String>,
+    ) {
         let hub_ctx = hub_context.clone();
         let hub_kubeconfig = if hub_ctx.is_some() {
             self.tui_config.resolved_argo_hub_kubeconfig()
@@ -7564,7 +10694,10 @@ impl App {
 
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
-        let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+        let query_ctx = hub_ctx
+            .as_deref()
+            .unwrap_or(&self.active_context)
+            .to_string();
         let app_name = app.name.clone();
         let app_ns = app.namespace.clone();
 
@@ -7573,10 +10706,7 @@ impl App {
                 cache.ensure_paths(vec![path.clone()]).await;
             }
             let res = srelens_kube::argo::fetch_argo_application_detail(
-                &cache,
-                &query_ctx,
-                &app_name,
-                &app_ns,
+                &cache, &query_ctx, &app_name, &app_ns,
             )
             .await;
             let _ = event_tx.send(crate::event::AppEvent::ArgoDetailResult {
@@ -7587,7 +10717,8 @@ impl App {
             });
         });
 
-        let old_view = std::mem::replace(&mut self.active_view, ActiveView::ArgoDetail(detail_state));
+        let old_view =
+            std::mem::replace(&mut self.active_view, ActiveView::ArgoDetail(detail_state));
         self.nav_stack.push(old_view);
     }
 
@@ -7604,7 +10735,10 @@ impl App {
         } else {
             None
         };
-        let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+        let query_ctx = hub_ctx
+            .as_deref()
+            .unwrap_or(&self.active_context)
+            .to_string();
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
         let name_c = name.to_string();
@@ -7615,10 +10749,7 @@ impl App {
                 cache.ensure_paths(vec![path.clone()]).await;
             }
             let res = srelens_kube::argo::fetch_argo_application_detail(
-                &cache,
-                &query_ctx,
-                &name_c,
-                &ns_c,
+                &cache, &query_ctx, &name_c, &ns_c,
             )
             .await;
             let _ = event_tx.send(crate::event::AppEvent::ArgoDetailResult {
@@ -7638,8 +10769,14 @@ impl App {
         result: Result<srelens_kube::argo::ArgoApplication, String>,
     ) {
         if let ActiveView::ArgoDetail(detail) = &mut self.active_view {
-            let expected_ctx = detail.hub_context.as_deref().unwrap_or(&self.active_context);
-            if expected_ctx == context && detail.app_namespace == namespace && detail.app_name == name {
+            let expected_ctx = detail
+                .hub_context
+                .as_deref()
+                .unwrap_or(&self.active_context);
+            if expected_ctx == context
+                && detail.app_namespace == namespace
+                && detail.app_name == name
+            {
                 match result {
                     Ok(app) => detail.set_application(app),
                     Err(err) => detail.set_error(err),
@@ -7659,7 +10796,10 @@ impl App {
         } else {
             None
         };
-        let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
+        let query_ctx = hub_ctx
+            .as_deref()
+            .unwrap_or(&self.active_context)
+            .to_string();
         let cache = self.client_cache.clone();
         let event_tx = self.event_tx.clone();
         let name_c = name.to_string();
@@ -7669,13 +10809,9 @@ impl App {
             if let Some(ref path) = hub_kubeconfig {
                 cache.ensure_paths(vec![path.clone()]).await;
             }
-            let res = srelens_kube::argo::trigger_argo_hard_refresh(
-                &cache,
-                &query_ctx,
-                &name_c,
-                &ns_c,
-            )
-            .await;
+            let res =
+                srelens_kube::argo::trigger_argo_hard_refresh(&cache, &query_ctx, &name_c, &ns_c)
+                    .await;
             let action = format!("Hard Refresh '{}'", name_c);
             let _ = event_tx.send(crate::event::AppEvent::ArgoActionResult {
                 action,
@@ -7685,21 +10821,29 @@ impl App {
     }
 
     pub fn handle_argo_action_result(&mut self, action: &str, result: Result<String, String>) {
+        // A write refused because the Application changed since it was
+        // reviewed reloads it too, so "refresh and try again" has something
+        // current to try again on.
+        let reload = match &result {
+            Ok(_) => true,
+            Err(err) => srelens_kube::argo::is_stale_review(err),
+        };
         match result {
-            Ok(msg) => {
-                self.set_toast(format!("✓ {}", msg), Theme::status_ok());
-                match &self.active_view {
-                    ActiveView::Argo(_) => self.refresh_argo_applications_ext(true),
-                    ActiveView::ArgoDetail(d) => {
-                        let name = d.app_name.clone();
-                        let ns = d.app_namespace.clone();
-                        self.reload_argo_detail(&name, &ns);
-                    }
-                    _ => {}
+            Ok(msg) => self.set_toast(format!("✓ {}", msg), Theme::status_ok()),
+            Err(err) => self.set_toast(
+                format!("⚠ {} failed: {}", action, err),
+                Theme::status_error(),
+            ),
+        }
+        if reload {
+            match &self.active_view {
+                ActiveView::Argo(_) => self.refresh_argo_applications_ext(true),
+                ActiveView::ArgoDetail(d) => {
+                    let name = d.app_name.clone();
+                    let ns = d.app_namespace.clone();
+                    self.reload_argo_detail(&name, &ns);
                 }
-            }
-            Err(err) => {
-                self.set_toast(format!("⚠ {} failed: {}", action, err), Theme::status_error());
+                _ => {}
             }
         }
     }
@@ -7715,31 +10859,39 @@ impl App {
                         id: QuickActionId::AskAi,
                         key_hint: "ai".to_string(),
                         title: "🤖 Ask AI Assistant about this Pod".to_string(),
-                        description: "Inspect pod status, errors, exit codes & recent events".to_string(),
+                        description: "Inspect pod status, errors, exit codes & recent events"
+                            .to_string(),
                     },
                     QuickActionItem {
                         id: QuickActionId::PlaybookCrashLoop,
                         key_hint: "/crashloop".to_string(),
                         title: "⚡ AI Triage CrashLoopBackOff".to_string(),
-                        description: "Fetch previous container logs, termination exit codes & recent events".to_string(),
+                        description:
+                            "Fetch previous container logs, termination exit codes & recent events"
+                                .to_string(),
                     },
                     QuickActionItem {
                         id: QuickActionId::PlaybookPending,
                         key_hint: "/pending".to_string(),
                         title: "⚡ AI Diagnose Pending / Unschedulable".to_string(),
-                        description: "Analyze scheduling taints, node affinities, and PVC constraints".to_string(),
+                        description:
+                            "Analyze scheduling taints, node affinities, and PVC constraints"
+                                .to_string(),
                     },
                     QuickActionItem {
                         id: QuickActionId::PlaybookOom,
                         key_hint: "/oom".to_string(),
                         title: "⚡ AI Diagnose OOMKilled".to_string(),
-                        description: "Inspect memory limits, usage peaks, and OOM terminations".to_string(),
+                        description: "Inspect memory limits, usage peaks, and OOM terminations"
+                            .to_string(),
                     },
                     QuickActionItem {
                         id: QuickActionId::RelationshipTree,
                         key_hint: "t".to_string(),
                         title: "🌳 Resource Relationship Tree".to_string(),
-                        description: "Trace owner Deployment/ReplicaSet, Service, ConfigMaps & PVCs".to_string(),
+                        description:
+                            "Trace owner Deployment/ReplicaSet, Service, ConfigMaps & PVCs"
+                                .to_string(),
                     },
                     QuickActionItem {
                         id: QuickActionId::ViewLogs,
@@ -7751,7 +10903,8 @@ impl App {
                         id: QuickActionId::OpenShell,
                         key_hint: "s".to_string(),
                         title: "🐚 Open Shell".to_string(),
-                        description: "Attach interactive terminal session inside container".to_string(),
+                        description: "Attach interactive terminal session inside container"
+                            .to_string(),
                     },
                     QuickActionItem {
                         id: QuickActionId::PortForward,
@@ -7785,35 +10938,43 @@ impl App {
                     },
                 ];
 
-                let has_active_pf = !self.active_forwards_for("Pod", namespace.as_deref().unwrap_or(""), &name).is_empty();
+                let has_active_pf = !self
+                    .active_forwards_for("Pod", namespace.as_deref().unwrap_or(""), &name)
+                    .is_empty();
                 if has_active_pf {
-                    if let Some(pos) = acts.iter().position(|a| a.id == QuickActionId::PortForward) {
+                    if let Some(pos) = acts.iter().position(|a| a.id == QuickActionId::PortForward)
+                    {
                         acts.insert(
                             pos + 1,
                             QuickActionItem {
                                 id: QuickActionId::StopPortForward,
                                 key_hint: "F".to_string(),
                                 title: "⏹ Close Active Port Forward".to_string(),
-                                description: "Terminate running port forward tunnel for this pod".to_string(),
+                                description: "Terminate running port forward tunnel for this pod"
+                                    .to_string(),
                             },
                         );
                     }
                 }
 
                 acts
-            },
-            "deployment" | "deployments" | "statefulset" | "statefulsets" | "daemonset" | "daemonsets" => vec![
+            }
+            "deployment" | "deployments" | "statefulset" | "statefulsets" | "daemonset"
+            | "daemonsets" => vec![
                 QuickActionItem {
                     id: QuickActionId::AskAi,
                     key_hint: "ai".to_string(),
                     title: format!("🤖 Ask AI Assistant about this {}", kind),
-                    description: "Analyze workload health, failing replicas & recent events".to_string(),
+                    description: "Analyze workload health, failing replicas & recent events"
+                        .to_string(),
                 },
                 QuickActionItem {
                     id: QuickActionId::PlaybookRollout,
                     key_hint: "/rollout".to_string(),
                     title: "⚡ AI Diagnose Stalled Rollout".to_string(),
-                    description: "Examine rollout progression, updated vs available replicas & blockers".to_string(),
+                    description:
+                        "Examine rollout progression, updated vs available replicas & blockers"
+                            .to_string(),
                 },
                 QuickActionItem {
                     id: QuickActionId::RelationshipTree,
@@ -7882,13 +11043,15 @@ impl App {
                         id: QuickActionId::PlaybookEndpoints,
                         key_hint: "/endpoints".to_string(),
                         title: "⚡ AI Triage Missing Endpoints".to_string(),
-                        description: "Check selector matching, readiness probes, and backend pods".to_string(),
+                        description: "Check selector matching, readiness probes, and backend pods"
+                            .to_string(),
                     },
                     QuickActionItem {
                         id: QuickActionId::JumpToPods,
                         key_hint: "pods".to_string(),
                         title: "🎯 Jump to Backend Pods".to_string(),
-                        description: "Navigate to pods matching this service's selector".to_string(),
+                        description: "Navigate to pods matching this service's selector"
+                            .to_string(),
                     },
                     QuickActionItem {
                         id: QuickActionId::PortForward,
@@ -7916,23 +11079,28 @@ impl App {
                     },
                 ];
 
-                let has_active_pf = !self.active_forwards_for("Service", namespace.as_deref().unwrap_or(""), &name).is_empty();
+                let has_active_pf = !self
+                    .active_forwards_for("Service", namespace.as_deref().unwrap_or(""), &name)
+                    .is_empty();
                 if has_active_pf {
-                    if let Some(pos) = acts.iter().position(|a| a.id == QuickActionId::PortForward) {
+                    if let Some(pos) = acts.iter().position(|a| a.id == QuickActionId::PortForward)
+                    {
                         acts.insert(
                             pos + 1,
                             QuickActionItem {
                                 id: QuickActionId::StopPortForward,
                                 key_hint: "F".to_string(),
                                 title: "⏹ Close Active Port Forward".to_string(),
-                                description: "Terminate running port forward tunnel for this service".to_string(),
+                                description:
+                                    "Terminate running port forward tunnel for this service"
+                                        .to_string(),
                             },
                         );
                     }
                 }
 
                 acts
-            },
+            }
             "ingress" | "ingresses" => vec![
                 QuickActionItem {
                     id: QuickActionId::RelationshipTree,
@@ -7970,7 +11138,9 @@ impl App {
                     id: QuickActionId::PlaybookNodePressure,
                     key_hint: "/nodepressure".to_string(),
                     title: "⚡ AI Triage Node Pressure & Health".to_string(),
-                    description: "Analyze Memory/Disk pressure conditions, kubelet health & pod evictions".to_string(),
+                    description:
+                        "Analyze Memory/Disk pressure conditions, kubelet health & pod evictions"
+                            .to_string(),
                 },
                 QuickActionItem {
                     id: QuickActionId::RelationshipTree,
@@ -7988,7 +11158,8 @@ impl App {
                     id: QuickActionId::NodeSsh,
                     key_hint: "S".to_string(),
                     title: "🔑 SSH into Node (Host OS)".to_string(),
-                    description: "Direct SSH connection to host OS (works when kubelet is down)".to_string(),
+                    description: "Direct SSH connection to host OS (works when kubelet is down)"
+                        .to_string(),
                 },
                 QuickActionItem {
                     id: QuickActionId::OpenShell,
@@ -8008,13 +11179,16 @@ impl App {
                     id: QuickActionId::AskAi,
                     key_hint: "ai".to_string(),
                     title: "🤖 Ask AI Assistant about this Application".to_string(),
-                    description: "Analyze sync status, health, drift and recommended fixes".to_string(),
+                    description: "Analyze sync status, health, drift and recommended fixes"
+                        .to_string(),
                 },
                 QuickActionItem {
                     id: QuickActionId::PlaybookArgoProgressing,
                     key_hint: "/argo".to_string(),
                     title: "⚡ AI Diagnose Progressing / Stuck Sync / Degraded".to_string(),
-                    description: "Diagnose why application is stuck progressing, failing sync or degraded".to_string(),
+                    description:
+                        "Diagnose why application is stuck progressing, failing sync or degraded"
+                            .to_string(),
                 },
                 QuickActionItem {
                     id: QuickActionId::ArgoDetails,
@@ -8044,13 +11218,15 @@ impl App {
                     id: QuickActionId::RelationshipTree,
                     key_hint: "t".to_string(),
                     title: "🌳 Resource Relationship Tree".to_string(),
-                    description: "Trace managed cluster resources generated by this application".to_string(),
+                    description: "Trace managed cluster resources generated by this application"
+                        .to_string(),
                 },
                 QuickActionItem {
                     id: QuickActionId::Describe,
                     key_hint: "d".to_string(),
                     title: "📄 Describe Application".to_string(),
-                    description: "Inspect formatted Application CR describe details and conditions".to_string(),
+                    description: "Inspect formatted Application CR describe details and conditions"
+                        .to_string(),
                 },
                 QuickActionItem {
                     id: QuickActionId::ViewYaml,
@@ -8143,9 +11319,14 @@ impl App {
                 use crate::ui::dialogs::QuickActionId;
                 match chosen.id {
                     QuickActionId::AskAi => {
-                        let prompt = if resource_kind.eq_ignore_ascii_case("application") || resource_kind.eq_ignore_ascii_case("applications") {
+                        let prompt = if resource_kind.eq_ignore_ascii_case("application")
+                            || resource_kind.eq_ignore_ascii_case("applications")
+                        {
                             let app_opt = if let ActiveView::Argo(ref argo) = self.active_view {
-                                argo.applications.iter().find(|a| a.name == resource_name).cloned()
+                                argo.applications
+                                    .iter()
+                                    .find(|a| a.name == resource_name)
+                                    .cloned()
                             } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
                                 detail.application.clone()
                             } else {
@@ -8167,25 +11348,52 @@ impl App {
                                 };
                                 let mut details = vec![
                                     format!("Destination: {} / {}", dest, dest_ns),
-                                    format!("Sync: {}", if app.sync_status.is_empty() { "Unknown" } else { &app.sync_status }),
-                                    format!("Health: {}", if app.health_status.is_empty() { "Unknown" } else { &app.health_status }),
+                                    format!(
+                                        "Sync: {}",
+                                        if app.sync_status.is_empty() {
+                                            "Unknown"
+                                        } else {
+                                            &app.sync_status
+                                        }
+                                    ),
+                                    format!(
+                                        "Health: {}",
+                                        if app.health_status.is_empty() {
+                                            "Unknown"
+                                        } else {
+                                            &app.health_status
+                                        }
+                                    ),
                                 ];
                                 if !app.health_message.is_empty() {
                                     details.push(format!("Health Message: {}", app.health_message));
                                 }
                                 if !app.operation_message.is_empty() {
-                                    details.push(format!("Operation Message: {}", app.operation_message));
+                                    details.push(format!(
+                                        "Operation Message: {}",
+                                        app.operation_message
+                                    ));
                                 }
-                                let unhealthy: Vec<String> = app.resources.iter()
+                                let unhealthy: Vec<String> = app
+                                    .resources
+                                    .iter()
                                     .filter(|r| r.health != "Healthy" && !r.health.is_empty())
-                                    .map(|r| if r.message.is_empty() {
-                                        format!("{}/{} [{}]", r.kind, r.name, r.health)
-                                    } else {
-                                        format!("{}/{} [{} - {}]", r.kind, r.name, r.health, r.message)
+                                    .map(|r| {
+                                        if r.message.is_empty() {
+                                            format!("{}/{} [{}]", r.kind, r.name, r.health)
+                                        } else {
+                                            format!(
+                                                "{}/{} [{} - {}]",
+                                                r.kind, r.name, r.health, r.message
+                                            )
+                                        }
                                     })
                                     .collect();
                                 if !unhealthy.is_empty() {
-                                    details.push(format!("Stuck/Unhealthy Resources: {}", unhealthy.join("; ")));
+                                    details.push(format!(
+                                        "Stuck/Unhealthy Resources: {}",
+                                        unhealthy.join("; ")
+                                    ));
                                 }
 
                                 format!(
@@ -8215,7 +11423,10 @@ impl App {
                     }
                     QuickActionId::PlaybookArgoProgressing => {
                         let app_opt = if let ActiveView::Argo(ref argo) = self.active_view {
-                            argo.applications.iter().find(|a| a.name == resource_name).cloned()
+                            argo.applications
+                                .iter()
+                                .find(|a| a.name == resource_name)
+                                .cloned()
                         } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
                             detail.application.clone()
                         } else {
@@ -8237,32 +11448,53 @@ impl App {
                             };
                             let mut details = vec![
                                 format!("Destination: {} / {}", dest, dest_ns),
-                                format!("Sync: {}", if app.sync_status.is_empty() { "Unknown" } else { &app.sync_status }),
-                                format!("Health: {}", if app.health_status.is_empty() { "Unknown" } else { &app.health_status }),
+                                format!(
+                                    "Sync: {}",
+                                    if app.sync_status.is_empty() {
+                                        "Unknown"
+                                    } else {
+                                        &app.sync_status
+                                    }
+                                ),
+                                format!(
+                                    "Health: {}",
+                                    if app.health_status.is_empty() {
+                                        "Unknown"
+                                    } else {
+                                        &app.health_status
+                                    }
+                                ),
                             ];
                             if !app.health_message.is_empty() {
                                 details.push(format!("Health Message: {}", app.health_message));
                             }
                             if !app.operation_message.is_empty() {
-                                details.push(format!("Operation Message: {}", app.operation_message));
+                                details
+                                    .push(format!("Operation Message: {}", app.operation_message));
                             }
-                            let unhealthy: Vec<String> = app.resources.iter()
+                            let unhealthy: Vec<String> = app
+                                .resources
+                                .iter()
                                 .filter(|r| r.health != "Healthy" && !r.health.is_empty())
-                                .map(|r| if r.message.is_empty() {
-                                    format!("{}/{} [{}]", r.kind, r.name, r.health)
-                                } else {
-                                    format!("{}/{} [{} - {}]", r.kind, r.name, r.health, r.message)
+                                .map(|r| {
+                                    if r.message.is_empty() {
+                                        format!("{}/{} [{}]", r.kind, r.name, r.health)
+                                    } else {
+                                        format!(
+                                            "{}/{} [{} - {}]",
+                                            r.kind, r.name, r.health, r.message
+                                        )
+                                    }
                                 })
                                 .collect();
                             if !unhealthy.is_empty() {
-                                details.push(format!("Stuck/Unhealthy Resources: {}", unhealthy.join("; ")));
+                                details.push(format!(
+                                    "Stuck/Unhealthy Resources: {}",
+                                    unhealthy.join("; ")
+                                ));
                             }
 
-                            format!(
-                                "/argo {} (Context: {})",
-                                resource_name,
-                                details.join(", ")
-                            )
+                            format!("/argo {} (Context: {})", resource_name, details.join(", "))
                         } else {
                             format!("/argo {}", resource_name)
                         };
@@ -8273,49 +11505,98 @@ impl App {
                         self.nav_stack.push(old);
                     }
                     QuickActionId::ArgoDetails => {
-                        let (app_opt, hub_ctx) = if let ActiveView::Argo(ref argo) = self.active_view {
-                            (argo.applications.iter().find(|a| a.name == resource_name).cloned(), argo.hub_context_name.clone())
-                        } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
-                            (detail.application.clone(), detail.hub_context.clone())
-                        } else {
-                            (None, None)
-                        };
+                        let (app_opt, hub_ctx) =
+                            if let ActiveView::Argo(ref argo) = self.active_view {
+                                (
+                                    argo.applications
+                                        .iter()
+                                        .find(|a| a.name == resource_name)
+                                        .cloned(),
+                                    argo.hub_context_name.clone(),
+                                )
+                            } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                                (detail.application.clone(), detail.hub_context.clone())
+                            } else {
+                                (None, None)
+                            };
                         if let Some(app) = app_opt {
                             self.open_argo_detail(app, hub_ctx);
                         }
                     }
                     QuickActionId::ArgoSync => {
-                        let hub_ctx = if let ActiveView::Argo(ref argo) = self.active_view {
-                            argo.hub_context_name.clone()
-                        } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
-                            detail.hub_context.clone()
-                        } else {
-                            None
-                        };
-                        let query_ctx = hub_ctx.as_deref().unwrap_or(&self.active_context).to_string();
                         let ns = namespace.unwrap_or_else(|| "argocd".to_string());
-                        let payload = serde_json::json!({
-                            "ctx": query_ctx,
-                            "ns": ns,
-                            "name": resource_name,
-                            "prune": false,
-                            "dry_run": false,
-                        });
+                        // The sync is pinned to the Application as listed, so
+                        // it is looked up by namespace and name; one that is
+                        // not on screen has no reviewed identity to pin to.
+                        let is_reviewed = |a: &&srelens_kube::argo::ArgoApplication| {
+                            a.name == resource_name && a.namespace == ns
+                        };
+                        let (app_opt, hub_ctx) =
+                            if let ActiveView::Argo(ref argo) = self.active_view {
+                                (
+                                    argo.applications
+                                        .iter()
+                                        .chain(argo.all_applications.iter())
+                                        .find(is_reviewed)
+                                        .cloned(),
+                                    argo.hub_context_name.clone(),
+                                )
+                            } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
+                                (
+                                    detail.application.as_ref().filter(is_reviewed).cloned(),
+                                    detail.hub_context.clone(),
+                                )
+                            } else {
+                                (None, None)
+                            };
+                        let Some(app) = app_opt else {
+                            self.set_toast(
+                                format!(
+                                    "⚠ Cannot sync '{}/{}': the Application is not loaded; refresh and try again",
+                                    ns, resource_name
+                                ),
+                                Theme::status_error(),
+                            );
+                            return;
+                        };
+                        let query_ctx = hub_ctx
+                            .as_deref()
+                            .unwrap_or(&self.active_context)
+                            .to_string();
+                        let payload = argo_confirm_payload(
+                            &query_ctx,
+                            &app,
+                            serde_json::json!({"prune": false, "dry_run": false}),
+                        );
+                        let hub_info = if query_ctx != self.active_context {
+                            format!(" on hub cluster '{}'", query_ctx)
+                        } else {
+                            String::new()
+                        };
                         self.modal = Some(Modal::Confirm {
-                            title: format!("Sync ArgoCD Application [{}]", resource_name),
-                            message: format!("Trigger sync for '{}/{}'? (Prune: false)", ns, resource_name),
+                            title: format!("Sync ArgoCD Application [{}]", app.name),
+                            message: format!(
+                                "Trigger sync for '{}/{}'{hub_info}? (Prune: false)",
+                                app.namespace, app.name
+                            ),
                             action_name: format!("argo_sync:{}", payload),
                             is_destructive: false,
                         });
                     }
                     QuickActionId::ArgoRefresh => {
                         let ns = namespace.unwrap_or_else(|| "argocd".to_string());
-                        self.set_toast(format!("Triggering hard refresh for '{}'...", resource_name), Theme::status_ok());
+                        self.set_toast(
+                            format!("Triggering hard refresh for '{}'...", resource_name),
+                            Theme::status_ok(),
+                        );
                         self.trigger_argo_hard_refresh(&resource_name, &ns);
                     }
                     QuickActionId::ArgoOpenGit => {
                         let app_opt = if let ActiveView::Argo(ref argo) = self.active_view {
-                            argo.applications.iter().find(|a| a.name == resource_name).cloned()
+                            argo.applications
+                                .iter()
+                                .find(|a| a.name == resource_name)
+                                .cloned()
                         } else if let ActiveView::ArgoDetail(ref detail) = self.active_view {
                             detail.application.clone()
                         } else {
@@ -8324,11 +11605,20 @@ impl App {
                         if let Some(app) = app_opt {
                             if !app.repo_url.is_empty() {
                                 match open_browser_url(&app.repo_url) {
-                                    Ok(_) => self.set_toast(format!("Opened Git repo: {}", app.repo_url), Theme::status_ok()),
-                                    Err(err) => self.set_toast(format!("Could not open browser: {}", err), Theme::status_error()),
+                                    Ok(_) => self.set_toast(
+                                        format!("Opened Git repo: {}", app.repo_url),
+                                        Theme::status_ok(),
+                                    ),
+                                    Err(err) => self.set_toast(
+                                        format!("Could not open browser: {}", err),
+                                        Theme::status_error(),
+                                    ),
                                 }
                             } else {
-                                self.set_toast("Application has no repoURL configured".to_string(), Theme::status_warn());
+                                self.set_toast(
+                                    "Application has no repoURL configured".to_string(),
+                                    Theme::status_warn(),
+                                );
                             }
                         }
                     }
@@ -8375,29 +11665,41 @@ impl App {
                         self.prompt_pod_logs(resource_name, namespace).await;
                     }
                     QuickActionId::OpenShell => {
-                        if resource_kind.eq_ignore_ascii_case("node") || resource_kind.eq_ignore_ascii_case("nodes") {
-                            self.requires_terminal_suspend = Some(SuspendAction::NodeShell { node: resource_name });
+                        if resource_kind.eq_ignore_ascii_case("node")
+                            || resource_kind.eq_ignore_ascii_case("nodes")
+                        {
+                            self.requires_terminal_suspend = Some(SuspendAction::NodeShell {
+                                node: resource_name,
+                            });
                         } else {
-                            let target_ns = namespace.clone().or_else(|| if self.active_namespace.is_empty() { None } else { Some(self.active_namespace.clone()) });
+                            let target_ns = namespace.clone().or_else(|| {
+                                if self.active_namespace.is_empty() {
+                                    None
+                                } else {
+                                    Some(self.active_namespace.clone())
+                                }
+                            });
                             self.prompt_pod_shell(resource_name, target_ns).await;
                         }
                     }
                     QuickActionId::NodeSsh => {
                         let destination = match &self.active_view {
-                            ActiveView::Table(t) if t.kind == ResourceKind::Nodes => {
-                                t.selected_item()
-                                    .and_then(|item| {
-                                        item.get("internalIp").and_then(|v| v.as_str())
-                                            .or_else(|| item.get("externalIp").and_then(|v| v.as_str()))
-                                    })
-                                    .unwrap_or(&resource_name)
-                                    .to_string()
-                            }
-                            ActiveView::NodeInspector(inspector) => {
-                                inspector.details.as_ref()
-                                    .and_then(|d| d.internal_ip.clone().or_else(|| d.external_ip.clone()))
-                                    .unwrap_or_else(|| resource_name.clone())
-                            }
+                            ActiveView::Table(t) if t.kind == ResourceKind::Nodes => t
+                                .selected_item()
+                                .and_then(|item| {
+                                    item.get("internalIp")
+                                        .and_then(|v| v.as_str())
+                                        .or_else(|| item.get("externalIp").and_then(|v| v.as_str()))
+                                })
+                                .unwrap_or(&resource_name)
+                                .to_string(),
+                            ActiveView::NodeInspector(inspector) => inspector
+                                .details
+                                .as_ref()
+                                .and_then(|d| {
+                                    d.internal_ip.clone().or_else(|| d.external_ip.clone())
+                                })
+                                .unwrap_or_else(|| resource_name.clone()),
                             _ => resource_name.clone(),
                         };
                         let cursor_pos = destination.chars().count();
@@ -8410,10 +11712,16 @@ impl App {
                     QuickActionId::PortForward => {
                         let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
                         let mut detected_port = None;
-                        let target_kind = if resource_kind.eq_ignore_ascii_case("service") { "Service" } else { "Pod" }.to_string();
+                        let target_kind = if resource_kind.eq_ignore_ascii_case("service") {
+                            "Service"
+                        } else {
+                            "Pod"
+                        }
+                        .to_string();
                         if let Ok(client) = self.client_cache.get(&self.active_context).await {
                             if target_kind == "Service" {
-                                let api: kube::Api<k8s_openapi::api::core::v1::Service> = kube::Api::namespaced(client, &ns);
+                                let api: kube::Api<k8s_openapi::api::core::v1::Service> =
+                                    kube::Api::namespaced(client, &ns);
                                 if let Ok(svc) = api.get(&resource_name).await {
                                     if let Some(spec) = svc.spec {
                                         if let Some(ports) = spec.ports {
@@ -8424,7 +11732,8 @@ impl App {
                                     }
                                 }
                             } else {
-                                let api: kube::Api<k8s_openapi::api::core::v1::Pod> = kube::Api::namespaced(client, &ns);
+                                let api: kube::Api<k8s_openapi::api::core::v1::Pod> =
+                                    kube::Api::namespaced(client, &ns);
                                 if let Ok(pod) = api.get(&resource_name).await {
                                     if let Some(spec) = pod.spec {
                                         for container in spec.containers {
@@ -8450,34 +11759,53 @@ impl App {
                     }
                     QuickActionId::StopPortForward => {
                         let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
-                        let forwards = self.active_forwards_for(&resource_kind, &ns, &resource_name);
+                        let forwards =
+                            self.active_forwards_for(&resource_kind, &ns, &resource_name);
                         let count = forwards.len();
                         for f in forwards {
                             self.forward_manager.stop(f.id);
                         }
                         self.sync_port_forwards();
                         if count > 0 {
-                            self.set_toast(format!("✓ Closed {} active port forward(s) for {}", count, resource_name), Theme::status_ok());
+                            self.set_toast(
+                                format!(
+                                    "✓ Closed {} active port forward(s) for {}",
+                                    count, resource_name
+                                ),
+                                Theme::status_ok(),
+                            );
                         } else {
-                            self.set_toast("No active port forward to close".to_string(), Theme::status_warn());
+                            self.set_toast(
+                                "No active port forward to close".to_string(),
+                                Theme::status_warn(),
+                            );
                         }
                     }
                     QuickActionId::Describe => {
-                        self.open_describe_view(resource_name, resource_kind, namespace).await;
+                        self.open_describe_view(resource_name, resource_kind, namespace)
+                            .await;
                     }
                     QuickActionId::ViewYaml => {
-                        self.open_yaml_view(resource_name, resource_kind, namespace).await;
+                        self.open_yaml_view(resource_name, resource_kind, namespace)
+                            .await;
                     }
                     QuickActionId::EditYaml => {
-                        self.open_yaml_view(resource_name, resource_kind, namespace).await;
+                        self.open_yaml_view(resource_name, resource_kind, namespace)
+                            .await;
                         self.requires_terminal_suspend = Some(SuspendAction::EditYaml);
                     }
                     QuickActionId::RolloutRestart => {
                         let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
                         self.modal = Some(Modal::Confirm {
                             title: "Rollout Restart Workload".to_string(),
-                            message: format!("Trigger zero-downtime rolling restart for {} '{}/{}'?", resource_kind, ns, resource_name),
-                            action_name: format!("restart:{}:{}:{}", resource_kind, ns, resource_name),
+                            message: format!(
+                                "Trigger zero-downtime rolling restart for {} '{}/{}'?",
+                                resource_kind, ns, resource_name
+                            ),
+                            action_name: format!(
+                                "restart:{}:{}:{}",
+                                resource_kind, ns, resource_name
+                            ),
                             is_destructive: false,
                         });
                     }
@@ -8500,17 +11828,29 @@ impl App {
                         self.open_node_inspector(resource_name);
                     }
                     QuickActionId::CordonNode => {
-                        self.set_toast(format!("Cordoned node {}", resource_name), Theme::status_ok());
+                        self.set_toast(
+                            format!("Cordoned node {}", resource_name),
+                            Theme::status_ok(),
+                        );
                     }
                     QuickActionId::DrainNode => {
-                        self.set_toast(format!("Draining node {}", resource_name), Theme::status_warn());
+                        self.set_toast(
+                            format!("Draining node {}", resource_name),
+                            Theme::status_warn(),
+                        );
                     }
                     QuickActionId::Delete => {
                         let ns = namespace.unwrap_or_else(|| self.active_namespace.clone());
                         self.modal = Some(Modal::Confirm {
                             title: format!("Delete {}", resource_kind),
-                            message: format!("Are you sure you want to permanently delete {} '{}/{}'?", resource_kind, ns, resource_name),
-                            action_name: format!("delete:{}:{}:{}", resource_kind, ns, resource_name),
+                            message: format!(
+                                "Are you sure you want to permanently delete {} '{}/{}'?",
+                                resource_kind, ns, resource_name
+                            ),
+                            action_name: format!(
+                                "delete:{}:{}:{}",
+                                resource_kind, ns, resource_name
+                            ),
                             is_destructive: true,
                         });
                     }
@@ -8520,6 +11860,132 @@ impl App {
     }
 
     pub async fn execute_modal_confirm(&mut self, action_name: String) {
+        if action_name.starts_with("bulk_delete:") {
+            let payload = &action_name["bulk_delete:".len()..];
+            if let Ok(targets) = serde_json::from_str::<Vec<(String, String, String)>>(payload) {
+                let total = targets.len();
+                let mut succeeded: Vec<(String, String)> = Vec::new();
+                let mut fail_count = 0;
+                let mut last_err = String::new();
+
+                let ctx = self.active_context.clone();
+                let cache = self.client_cache.clone();
+
+                match cache.get(&ctx).await {
+                    Ok(client) => {
+                        for (kind, ns, name) in &targets {
+                            let maybe_ar = if let Some((gvk, namespaced)) =
+                                srelens_kube::manifest::gvk_for(kind)
+                            {
+                                Some((kube::core::ApiResource::from_gvk(&gvk), namespaced))
+                            } else if let Some(crd) = self.crds.iter().find(|c| {
+                                c.kind.eq_ignore_ascii_case(kind)
+                                    || c.plural.eq_ignore_ascii_case(kind)
+                            }) {
+                                let api_version = if crd.group.is_empty() {
+                                    crd.version.clone()
+                                } else {
+                                    format!("{}/{}", crd.group, crd.version)
+                                };
+                                Some((
+                                    kube::core::ApiResource {
+                                        group: crd.group.clone(),
+                                        version: crd.version.clone(),
+                                        api_version,
+                                        kind: crd.kind.clone(),
+                                        plural: crd.plural.clone(),
+                                    },
+                                    crd.namespaced,
+                                ))
+                            } else if kind.eq_ignore_ascii_case("application")
+                                || kind.eq_ignore_ascii_case("applications")
+                            {
+                                Some((srelens_kube::argo::argo_application_resource(), true))
+                            } else {
+                                None
+                            };
+
+                            if let Some((ar, namespaced)) = maybe_ar {
+                                let api: kube::Api<kube::core::DynamicObject> =
+                                    if namespaced && !ns.is_empty() {
+                                        kube::Api::namespaced_with(client.clone(), ns, &ar)
+                                    } else {
+                                        kube::Api::all_with(client.clone(), &ar)
+                                    };
+
+                                match api.delete(name, &kube::api::DeleteParams::default()).await {
+                                    Ok(_) => {
+                                        succeeded.push((ns.clone(), name.clone()));
+                                    }
+                                    Err(err) => {
+                                        fail_count += 1;
+                                        last_err = err.to_string();
+                                    }
+                                }
+                            } else {
+                                fail_count += 1;
+                                last_err = format!("Unknown kind '{}'", kind);
+                            }
+                        }
+
+                        if let ActiveView::Table(table) = &mut self.active_view {
+                            if !succeeded.is_empty() {
+                                table.raw_items.retain(|item| {
+                                    let item_name = crate::views::resource_table::extract_field_str(
+                                        item, "name",
+                                    );
+                                    let item_ns = crate::views::resource_table::extract_field_str(
+                                        item,
+                                        "namespace",
+                                    );
+                                    !succeeded.iter().any(|(s_ns, s_name)| {
+                                        s_name == &item_name
+                                            && (s_ns == &item_ns
+                                                || s_ns.is_empty()
+                                                || item_ns.is_empty())
+                                    })
+                                });
+                                table.marked_indices.clear();
+                                let filter = self.filter_buffer.clone();
+                                table.apply_filter(&filter);
+                            }
+                        }
+
+                        if let ActiveView::Argo(_) = &self.active_view {
+                            self.refresh_argo_applications_ext(true);
+                        }
+
+                        if fail_count == 0 {
+                            self.set_toast(
+                                format!("✓ Deleted {} resources", succeeded.len()),
+                                Theme::status_ok(),
+                            );
+                        } else if !succeeded.is_empty() {
+                            self.set_toast(
+                                format!(
+                                    "Deleted {}/{} resources ({} failed: {})",
+                                    succeeded.len(),
+                                    total,
+                                    fail_count,
+                                    last_err
+                                ),
+                                Theme::status_warn(),
+                            );
+                        } else {
+                            self.set_toast(
+                                format!("Delete failed: {}", last_err),
+                                Theme::status_error(),
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        self.set_toast(format!("Connection error: {}", err), Theme::status_error());
+                    }
+                }
+            }
+            return;
+        }
+
         if action_name.starts_with("delete:") {
             // Format: "delete:<kind>:<namespace>:<name>"
             let parts: Vec<&str> = action_name.splitn(4, ':').collect();
@@ -8533,42 +11999,88 @@ impl App {
 
                 match cache.get(&ctx).await {
                     Ok(client) => {
-                        let maybe_ar = if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&kind) {
+                        let maybe_ar = if let Some((gvk, namespaced)) =
+                            srelens_kube::manifest::gvk_for(&kind)
+                        {
                             Some((kube::core::ApiResource::from_gvk(&gvk), namespaced))
-                        } else if let Some(crd) = self.crds.iter().find(|c| c.kind.eq_ignore_ascii_case(&kind) || c.plural.eq_ignore_ascii_case(&kind)) {
-                            let api_version = if crd.group.is_empty() { crd.version.clone() } else { format!("{}/{}", crd.group, crd.version) };
-                            Some((kube::core::ApiResource {
-                                group: crd.group.clone(),
-                                version: crd.version.clone(),
-                                api_version,
-                                kind: crd.kind.clone(),
-                                plural: crd.plural.clone(),
-                            }, crd.namespaced))
-                        } else if kind.eq_ignore_ascii_case("application") || kind.eq_ignore_ascii_case("applications") {
+                        } else if let Some(crd) = self.crds.iter().find(|c| {
+                            c.kind.eq_ignore_ascii_case(&kind)
+                                || c.plural.eq_ignore_ascii_case(&kind)
+                        }) {
+                            let api_version = if crd.group.is_empty() {
+                                crd.version.clone()
+                            } else {
+                                format!("{}/{}", crd.group, crd.version)
+                            };
+                            Some((
+                                kube::core::ApiResource {
+                                    group: crd.group.clone(),
+                                    version: crd.version.clone(),
+                                    api_version,
+                                    kind: crd.kind.clone(),
+                                    plural: crd.plural.clone(),
+                                },
+                                crd.namespaced,
+                            ))
+                        } else if kind.eq_ignore_ascii_case("application")
+                            || kind.eq_ignore_ascii_case("applications")
+                        {
                             Some((srelens_kube::argo::argo_application_resource(), true))
                         } else {
                             None
                         };
 
                         if let Some((ar, namespaced)) = maybe_ar {
-                            let api: kube::Api<kube::core::DynamicObject> = if namespaced && !ns.is_empty() {
-                                kube::Api::namespaced_with(client, &ns, &ar)
-                            } else {
-                                kube::Api::all_with(client, &ar)
-                            };
+                            let api: kube::Api<kube::core::DynamicObject> =
+                                if namespaced && !ns.is_empty() {
+                                    kube::Api::namespaced_with(client, &ns, &ar)
+                                } else {
+                                    kube::Api::all_with(client, &ar)
+                                };
 
                             match api.delete(&name, &kube::api::DeleteParams::default()).await {
                                 Ok(_) => {
-                                    self.set_toast(format!("✓ Deleted {} '{}' in '{}'", kind, name, ns), Theme::status_ok());
+                                    self.set_toast(
+                                        format!("✓ Deleted {} '{}' in '{}'", kind, name, ns),
+                                        Theme::status_ok(),
+                                    );
                                     // Remove from active table immediately
                                     if let ActiveView::Table(table) = &mut self.active_view {
                                         table.raw_items.retain(|item| {
-                                            let item_name = item.get("name").or_else(|| item.pointer("/metadata/name")).and_then(|v| v.as_str()).unwrap_or("");
-                                            let item_ns = item.get("namespace").or_else(|| item.pointer("/metadata/namespace")).and_then(|v| v.as_str()).unwrap_or("");
-                                            !(item_name == name && (item_ns == ns || item_ns.is_empty() || ns.is_empty()))
+                                            let item_name = item
+                                                .get("name")
+                                                .or_else(|| item.pointer("/metadata/name"))
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            let item_ns = item
+                                                .get("namespace")
+                                                .or_else(|| item.pointer("/metadata/namespace"))
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            !(item_name == name
+                                                && (item_ns == ns
+                                                    || item_ns.is_empty()
+                                                    || ns.is_empty()))
                                         });
                                         let filter = self.filter_buffer.clone();
                                         table.apply_filter(&filter);
+                                    }
+                                    if let ActiveView::NodeInspector(ref mut ni) =
+                                        &mut self.active_view
+                                    {
+                                        if let Some(ref mut details) = ni.details {
+                                            details.pods.retain(|p| {
+                                                !(p.name == name
+                                                    && (p.namespace == ns
+                                                        || ns.is_empty()
+                                                        || p.namespace.is_empty()))
+                                            });
+                                            if ni.selected_pod_idx >= details.pods.len()
+                                                && !details.pods.is_empty()
+                                            {
+                                                ni.selected_pod_idx = details.pods.len() - 1;
+                                            }
+                                        }
                                     }
                                     if let ActiveView::Argo(_) = &self.active_view {
                                         self.refresh_argo_applications_ext(true);
@@ -8577,17 +12089,26 @@ impl App {
                                         if let Some(prev) = self.nav_stack.pop() {
                                             self.active_view = prev;
                                         } else {
-                                            self.switch_view_to_kind(ResourceKind::ArgoApplications).await;
+                                            self.switch_view_to_kind(
+                                                ResourceKind::ArgoApplications,
+                                            )
+                                            .await;
                                         }
                                         self.refresh_argo_applications_ext(true);
                                     }
                                 }
                                 Err(err) => {
-                                    self.set_toast(format!("Delete failed: {}", err), Theme::status_error());
+                                    self.set_toast(
+                                        format!("Delete failed: {}", err),
+                                        Theme::status_error(),
+                                    );
                                 }
                             }
                         } else {
-                            self.set_toast(format!("Cannot resolve resource kind '{}'", kind), Theme::status_error());
+                            self.set_toast(
+                                format!("Cannot resolve resource kind '{}'", kind),
+                                Theme::status_error(),
+                            );
                         }
                     }
                     Err(err) => {
@@ -8595,7 +12116,10 @@ impl App {
                     }
                 }
             } else {
-                self.set_toast("Resource deleted successfully".to_string(), Theme::status_ok());
+                self.set_toast(
+                    "Resource deleted successfully".to_string(),
+                    Theme::status_ok(),
+                );
             }
         } else if action_name.starts_with("restart:") {
             // Format: "restart:<kind>:<namespace>:<name>"
@@ -8610,18 +12134,21 @@ impl App {
 
                 match cache.get(&ctx).await {
                     Ok(client) => {
-                        let maybe_ar = if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&kind) {
+                        let maybe_ar = if let Some((gvk, namespaced)) =
+                            srelens_kube::manifest::gvk_for(&kind)
+                        {
                             Some((kube::core::ApiResource::from_gvk(&gvk), namespaced))
                         } else {
                             None
                         };
 
                         if let Some((ar, namespaced)) = maybe_ar {
-                            let api: kube::Api<kube::core::DynamicObject> = if namespaced && !ns.is_empty() {
-                                kube::Api::namespaced_with(client, &ns, &ar)
-                            } else {
-                                kube::Api::all_with(client, &ar)
-                            };
+                            let api: kube::Api<kube::core::DynamicObject> =
+                                if namespaced && !ns.is_empty() {
+                                    kube::Api::namespaced_with(client, &ns, &ar)
+                                } else {
+                                    kube::Api::all_with(client, &ar)
+                                };
 
                             let now = chrono::Utc::now().to_rfc3339();
                             let patch = serde_json::json!({
@@ -8637,16 +12164,31 @@ impl App {
                             });
 
                             let patch_params = kube::api::PatchParams::default();
-                            match api.patch(&name, &patch_params, &kube::api::Patch::Merge(&patch)).await {
+                            match api
+                                .patch(&name, &patch_params, &kube::api::Patch::Merge(&patch))
+                                .await
+                            {
                                 Ok(_) => {
-                                    self.set_toast(format!("✓ Rollout restart triggered for {} '{}'", kind, name), Theme::status_ok());
+                                    self.set_toast(
+                                        format!(
+                                            "✓ Rollout restart triggered for {} '{}'",
+                                            kind, name
+                                        ),
+                                        Theme::status_ok(),
+                                    );
                                 }
                                 Err(err) => {
-                                    self.set_toast(format!("Restart failed: {}", err), Theme::status_error());
+                                    self.set_toast(
+                                        format!("Restart failed: {}", err),
+                                        Theme::status_error(),
+                                    );
                                 }
                             }
                         } else {
-                            self.set_toast(format!("Cannot restart resource kind '{}'", kind), Theme::status_error());
+                            self.set_toast(
+                                format!("Cannot restart resource kind '{}'", kind),
+                                Theme::status_error(),
+                            );
                         }
                     }
                     Err(err) => {
@@ -8666,7 +12208,10 @@ impl App {
                 self.set_toast("Port forward stopped".to_string(), Theme::status_ok());
             }
         } else if action_name.starts_with("cordon:") {
-            let node_name = action_name.strip_prefix("cordon:").unwrap_or("").to_string();
+            let node_name = action_name
+                .strip_prefix("cordon:")
+                .unwrap_or("")
+                .to_string();
             let ctx = self.active_context.clone();
             let cache = self.client_cache.clone();
             let event_tx = self.event_tx.clone();
@@ -8676,7 +12221,13 @@ impl App {
                 if let Ok(client) = cache.get(&ctx).await {
                     let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(client);
                     let patch = serde_json::json!({ "spec": { "unschedulable": true } });
-                    let res = api.patch(&n_name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await;
+                    let res = api
+                        .patch(
+                            &n_name,
+                            &kube::api::PatchParams::default(),
+                            &kube::api::Patch::Merge(&patch),
+                        )
+                        .await;
                     let msg = format!("✓ Cordoned node '{}'", n_name);
                     let _ = event_tx.send(crate::event::AppEvent::ActionResult {
                         title: format!("cordon_node:{}", n_name),
@@ -8684,9 +12235,15 @@ impl App {
                     });
                 }
             });
-            self.set_toast(format!("Cordoning node '{}'...", node_name), Theme::status_warn());
+            self.set_toast(
+                format!("Cordoning node '{}'...", node_name),
+                Theme::status_warn(),
+            );
         } else if action_name.starts_with("uncordon:") {
-            let node_name = action_name.strip_prefix("uncordon:").unwrap_or("").to_string();
+            let node_name = action_name
+                .strip_prefix("uncordon:")
+                .unwrap_or("")
+                .to_string();
             let ctx = self.active_context.clone();
             let cache = self.client_cache.clone();
             let event_tx = self.event_tx.clone();
@@ -8696,7 +12253,13 @@ impl App {
                 if let Ok(client) = cache.get(&ctx).await {
                     let api: kube::Api<k8s_openapi::api::core::v1::Node> = kube::Api::all(client);
                     let patch = serde_json::json!({ "spec": { "unschedulable": false } });
-                    let res = api.patch(&n_name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await;
+                    let res = api
+                        .patch(
+                            &n_name,
+                            &kube::api::PatchParams::default(),
+                            &kube::api::Patch::Merge(&patch),
+                        )
+                        .await;
                     let msg = format!("✓ Uncordoned node '{}'", n_name);
                     let _ = event_tx.send(crate::event::AppEvent::ActionResult {
                         title: format!("cordon_node:{}", n_name),
@@ -8704,10 +12267,17 @@ impl App {
                     });
                 }
             });
-            self.set_toast(format!("Uncordoning node '{}'...", node_name), Theme::status_warn());
+            self.set_toast(
+                format!("Uncordoning node '{}'...", node_name),
+                Theme::status_warn(),
+            );
         } else if action_name.starts_with("helm-rollback:") {
-            if matches!(&self.active_view, ActiveView::Helm(helm) if helm.error.is_some() || self.helm_refreshing) {
-                self.set_toast("Refresh Helm releases successfully before rollback (R to retry)".to_string(), Theme::status_warn());
+            if matches!(&self.active_view, ActiveView::Helm(helm) if helm.error.is_some() || self.helm_refreshing)
+            {
+                self.set_toast(
+                    "Refresh Helm releases successfully before rollback (R to retry)".to_string(),
+                    Theme::status_warn(),
+                );
                 return;
             }
             let parts: Vec<&str> = action_name.splitn(4, ':').collect();
@@ -8725,7 +12295,11 @@ impl App {
                 let rev_val = rev_str.to_string();
 
                 tokio::spawn(async move {
-                    let args = srelens_kube::helm_cli::rollback_args(&name_c, rev.unwrap_or(1), Some(&ns_c));
+                    let args = srelens_kube::helm_cli::rollback_args(
+                        &name_c,
+                        rev.unwrap_or(1),
+                        Some(&ns_c),
+                    );
                     let res = srelens_kube::helm_cli::run_helm(&cache, &ctx, &args).await;
                     let title = format!("helm_rollback:{}:{}", ns_c, name_c);
                     match res {
@@ -8733,7 +12307,12 @@ impl App {
                             let msg = if output.trim().is_empty() {
                                 format!("✓ Rolled back '{}' to revision {}", name_c, rev_val)
                             } else {
-                                format!("✓ Rolled back '{}' to revision {}: {}", name_c, rev_val, output.trim())
+                                format!(
+                                    "✓ Rolled back '{}' to revision {}: {}",
+                                    name_c,
+                                    rev_val,
+                                    output.trim()
+                                )
                             };
                             let _ = event_tx.send(crate::event::AppEvent::ActionResult {
                                 title,
@@ -8748,7 +12327,10 @@ impl App {
                         }
                     }
                 });
-                self.set_toast(format!("Rolling back '{}' to revision {}...", name, rev_str), Theme::status_warn());
+                self.set_toast(
+                    format!("Rolling back '{}' to revision {}...", name, rev_str),
+                    Theme::status_warn(),
+                );
             }
         } else if action_name.starts_with("helm-uninstall:") {
             let parts: Vec<&str> = action_name.splitn(3, ':').collect();
@@ -8786,37 +12368,35 @@ impl App {
                         }
                     }
                 });
-                self.set_toast(format!("Uninstalling release '{}'...", name), Theme::status_warn());
+                self.set_toast(
+                    format!("Uninstalling release '{}'...", name),
+                    Theme::status_warn(),
+                );
             }
         } else if let Some(payload) = action_name.strip_prefix("argo_sync:") {
-            let parsed: Option<(String, String, String, bool, bool)> =
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
-                    let ctx = v.get("ctx").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                    let ns = v.get("ns").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                    let name = v.get("name").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            // Only the JSON payload carries the reviewed Application's uid and
+            // resourceVersion; a write that cannot be pinned to them is refused
+            // here rather than sent by namespace and name alone (#620).
+            let parsed = serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .and_then(|v| {
                     let prune = v.get("prune").and_then(|b| b.as_bool()).unwrap_or(false);
                     let dry_run = v.get("dry_run").and_then(|b| b.as_bool()).unwrap_or(false);
-                    if !name.is_empty() {
-                        Some((ctx, ns, name, prune, dry_run))
-                    } else {
-                        None
-                    }
-                } else {
-                    let parts: Vec<&str> = action_name.splitn(6, ':').collect();
-                    if parts.len() >= 6 {
-                        Some((
-                            parts[1].to_string(),
-                            parts[2].to_string(),
-                            parts[3].to_string(),
-                            parts[4] == "true",
-                            parts[5] == "true",
-                        ))
-                    } else {
-                        None
-                    }
-                };
+                    parse_argo_confirm_payload(&v).map(|(ctx, app)| (ctx, app, prune, dry_run))
+                });
 
-            if let Some((ctx, ns, name, prune, dry_run)) = parsed {
+            if let Some((ctx, app, prune, dry_run)) = parsed {
+                let name = app.name.clone();
+                if app.uid.is_empty() || app.resource_version.is_empty() {
+                    self.set_toast(
+                        format!(
+                            "⚠ Sync '{}' failed: the Application's reviewed identity is unknown; refresh and try again",
+                            name
+                        ),
+                        Theme::status_error(),
+                    );
+                    return;
+                }
                 let cache = self.client_cache.clone();
                 let event_tx = self.event_tx.clone();
                 let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
@@ -8826,49 +12406,44 @@ impl App {
                     if let Some(ref path) = hub_kubeconfig {
                         cache.ensure_paths(vec![path.clone()]).await;
                     }
-                    let res = srelens_kube::argo::trigger_argo_sync(
-                        &cache,
-                        &ctx,
-                        &app_name,
-                        &ns,
-                        prune,
-                        dry_run,
-                    ).await;
+                    let res =
+                        srelens_kube::argo::trigger_argo_sync(&cache, &ctx, &app, prune, dry_run)
+                            .await;
                     let action = format!("Sync '{}'", app_name);
                     let _ = event_tx.send(crate::event::AppEvent::ArgoActionResult {
                         action,
-                        result: res.map(|_| format!("Sync initiated for '{}' (prune={})", app_name, prune)),
+                        result: res.map(|_| {
+                            format!("Sync initiated for '{}' (prune={})", app_name, prune)
+                        }),
                     });
                 });
-                self.set_toast(format!("Triggering sync for '{}'...", name), Theme::status_warn());
+                self.set_toast(
+                    format!("Triggering sync for '{}'...", name),
+                    Theme::status_warn(),
+                );
             }
         } else if let Some(payload) = action_name.strip_prefix("argo_toggle_auto:") {
-            let parsed: Option<(String, String, String, bool)> =
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
-                    let ctx = v.get("ctx").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                    let ns = v.get("ns").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                    let name = v.get("name").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            // Pinned like a sync: see the `argo_sync:` arm above.
+            let parsed = serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .and_then(|v| {
                     let enable = v.get("enable").and_then(|b| b.as_bool()).unwrap_or(false);
-                    if !name.is_empty() {
-                        Some((ctx, ns, name, enable))
-                    } else {
-                        None
-                    }
-                } else {
-                    let parts: Vec<&str> = action_name.splitn(5, ':').collect();
-                    if parts.len() >= 5 {
-                        Some((
-                            parts[1].to_string(),
-                            parts[2].to_string(),
-                            parts[3].to_string(),
-                            parts[4] == "true",
-                        ))
-                    } else {
-                        None
-                    }
-                };
+                    parse_argo_confirm_payload(&v).map(|(ctx, app)| (ctx, app, enable))
+                });
 
-            if let Some((ctx, ns, name, enable)) = parsed {
+            if let Some((ctx, app, enable)) = parsed {
+                let name = app.name.clone();
+                if app.uid.is_empty() || app.resource_version.is_empty() {
+                    let action = if enable { "Enable" } else { "Pause" };
+                    self.set_toast(
+                        format!(
+                            "⚠ {} Auto-Sync for '{}' failed: the Application's reviewed identity is unknown; refresh and try again",
+                            action, name
+                        ),
+                        Theme::status_error(),
+                    );
+                    return;
+                }
                 let cache = self.client_cache.clone();
                 let event_tx = self.event_tx.clone();
                 let hub_kubeconfig = self.tui_config.resolved_argo_hub_kubeconfig();
@@ -8878,13 +12453,8 @@ impl App {
                     if let Some(ref path) = hub_kubeconfig {
                         cache.ensure_paths(vec![path.clone()]).await;
                     }
-                    let res = srelens_kube::argo::toggle_argo_auto_sync(
-                        &cache,
-                        &ctx,
-                        &app_name,
-                        &ns,
-                        enable,
-                    ).await;
+                    let res =
+                        srelens_kube::argo::toggle_argo_auto_sync(&cache, &ctx, &app, enable).await;
                     let action = if enable {
                         format!("Enable Auto-Sync for '{}'", app_name)
                     } else {
@@ -8914,9 +12484,15 @@ impl App {
     pub async fn execute_scale_workload(&mut self, name: String, replicas: i32) {
         let (kind, ns) = if let ActiveView::Table(table) = &self.active_view {
             let k = table.kind.to_string();
-            let ns = table.selected_item().and_then(|i| {
-                i.get("namespace").or_else(|| i.pointer("/metadata/namespace")).and_then(|v| v.as_str()).map(String::from)
-            }).unwrap_or_else(|| self.active_namespace.clone());
+            let ns = table
+                .selected_item()
+                .and_then(|i| {
+                    i.get("namespace")
+                        .or_else(|| i.pointer("/metadata/namespace"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| self.active_namespace.clone());
             (k, ns)
         } else {
             ("Deployment".to_string(), self.active_namespace.clone())
@@ -8927,18 +12503,33 @@ impl App {
 
         match cache.get(&ctx).await {
             Ok(client) => {
-                let query_ns = if ns.is_empty() { "default".to_string() } else { ns };
+                let query_ns = if ns.is_empty() {
+                    "default".to_string()
+                } else {
+                    ns
+                };
                 if let Some((gvk, _)) = srelens_kube::manifest::gvk_for(&kind) {
                     let ar = kube::core::ApiResource::from_gvk(&gvk);
-                    let api: kube::Api<kube::core::DynamicObject> = kube::Api::namespaced_with(client, &query_ns, &ar);
+                    let api: kube::Api<kube::core::DynamicObject> =
+                        kube::Api::namespaced_with(client, &query_ns, &ar);
                     let patch = serde_json::json!({
                         "spec": {
                             "replicas": replicas
                         }
                     });
-                    match api.patch(&name, &kube::api::PatchParams::default(), &kube::api::Patch::Merge(&patch)).await {
+                    match api
+                        .patch(
+                            &name,
+                            &kube::api::PatchParams::default(),
+                            &kube::api::Patch::Merge(&patch),
+                        )
+                        .await
+                    {
                         Ok(_) => {
-                            self.set_toast(format!("✓ Scaled {} '{}' to {} replicas", kind, name, replicas), Theme::status_ok());
+                            self.set_toast(
+                                format!("✓ Scaled {} '{}' to {} replicas", kind, name, replicas),
+                                Theme::status_ok(),
+                            );
                         }
                         Err(err) => {
                             self.set_toast(format!("Scale failed: {}", err), Theme::status_error());
@@ -8962,18 +12553,25 @@ impl App {
     ) {
         let sink = TuiSink::arc(self.event_tx.clone());
         let ctx = self.active_context.clone();
-        match self.forward_manager.start(
-            sink,
-            ctx,
-            ns.clone(),
-            target_kind.clone(),
-            target_name.clone(),
-            target_port,
-            Some(local_port),
-        ).await {
+        match self
+            .forward_manager
+            .start(
+                sink,
+                ctx,
+                ns.clone(),
+                target_kind.clone(),
+                target_name.clone(),
+                target_port,
+                Some(local_port),
+            )
+            .await
+        {
             Ok(info) => {
                 self.set_toast(
-                    format!("Port forward active: 127.0.0.1:{} -> {} {}:{}", info.local_port, target_kind, target_name, target_port),
+                    format!(
+                        "Port forward active: 127.0.0.1:{} -> {} {}:{}",
+                        info.local_port, target_kind, target_name, target_port
+                    ),
                     Theme::status_ok(),
                 );
                 self.sync_port_forwards();
@@ -8987,7 +12585,12 @@ impl App {
         }
     }
 
-    pub fn active_forwards_for(&self, kind: &str, namespace: &str, name: &str) -> Vec<srelens_streams::forward::ForwardEntry> {
+    pub fn active_forwards_for(
+        &self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+    ) -> Vec<srelens_streams::forward::ForwardEntry> {
         self.forward_manager
             .list()
             .into_iter()
@@ -9005,9 +12608,24 @@ impl App {
         let selected_info = match &self.active_view {
             ActiveView::Table(table) => {
                 if let Some(item) = table.selected_item() {
-                    let name = item.get("name").or_else(|| item.pointer("/metadata/name")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let ns = item.get("namespace").or_else(|| item.pointer("/metadata/namespace")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let kind = if table.kind == ResourceKind::Services { "Service" } else { "Pod" }.to_string();
+                    let name = item
+                        .get("name")
+                        .or_else(|| item.pointer("/metadata/name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let ns = item
+                        .get("namespace")
+                        .or_else(|| item.pointer("/metadata/namespace"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let kind = if table.kind == ResourceKind::Services {
+                        "Service"
+                    } else {
+                        "Pod"
+                    }
+                    .to_string();
                     Some((kind, ns, name))
                 } else {
                     None
@@ -9031,7 +12649,10 @@ impl App {
         if let Some((kind, ns, name)) = selected_info {
             let forwards = self.active_forwards_for(&kind, &ns, &name);
             if forwards.is_empty() {
-                self.set_toast(format!("No active port forward for {}/{}", kind, name), Theme::status_warn());
+                self.set_toast(
+                    format!("No active port forward for {}/{}", kind, name),
+                    Theme::status_warn(),
+                );
                 return;
             }
 
@@ -9046,12 +12667,18 @@ impl App {
 
             if count == 1 {
                 self.set_toast(
-                    format!("✓ Closed port forward: 127.0.0.1:{} -> {}:{}", first_loc, name, first_rem),
+                    format!(
+                        "✓ Closed port forward: 127.0.0.1:{} -> {}:{}",
+                        first_loc, name, first_rem
+                    ),
                     Theme::status_ok(),
                 );
             } else {
                 self.set_toast(
-                    format!("✓ Closed {} active port forwards for {}/{}", count, kind, name),
+                    format!(
+                        "✓ Closed {} active port forwards for {}/{}",
+                        count, kind, name
+                    ),
                     Theme::status_ok(),
                 );
             }
@@ -9060,7 +12687,8 @@ impl App {
 
     pub fn sync_port_forwards(&mut self) {
         let entries = self.forward_manager.list();
-        let mut active_map: std::collections::HashMap<(String, String), Vec<(u16, u16, String)>> = std::collections::HashMap::new();
+        let mut active_map: std::collections::HashMap<(String, String), Vec<(u16, u16, String)>> =
+            std::collections::HashMap::new();
         for f in &entries {
             if !f.ended && f.context == self.active_context {
                 active_map
@@ -9071,7 +12699,10 @@ impl App {
         }
 
         if let ActiveView::Table(ref mut table) = self.active_view {
-            if table.kind == ResourceKind::Pods || table.kind == ResourceKind::Services || table.kind == ResourceKind::Workloads {
+            if table.kind == ResourceKind::Pods
+                || table.kind == ResourceKind::Services
+                || table.kind == ResourceKind::Workloads
+            {
                 table.active_port_forwards = active_map.clone();
             } else {
                 table.active_port_forwards.clear();
@@ -9116,7 +12747,10 @@ impl App {
         if channel.starts_with("logs:") {
             if let ActiveView::Logs(logs) = &mut self.active_view {
                 if logs.channel == channel {
-                    let source = payload.get("source").and_then(|v| v.as_str()).map(String::from);
+                    let source = payload
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                     if let Some(line) = payload.get("line").and_then(|v| v.as_str()) {
                         logs.push_entry(source, line.to_string());
                     } else if let Some(status) = payload.get("status").and_then(|v| v.as_str()) {
@@ -9131,7 +12765,22 @@ impl App {
             self.sync_port_forwards();
             if channel.starts_with("forward:closed:") {
                 if let Some(err_str) = payload.as_str() {
-                    self.set_toast(format!("Port forward closed: {}", err_str), Theme::status_error());
+                    self.set_toast(
+                        format!("Port forward closed: {}", err_str),
+                        Theme::status_error(),
+                    );
+                }
+            }
+            return;
+        }
+
+        if let Some(err_msg) = payload.get("error").and_then(|v| v.as_str()) {
+            if let Some(cur_ch) = &self.current_watch_channel {
+                if *cur_ch == channel {
+                    if let ActiveView::Table(table) = &mut self.active_view {
+                        table.is_loading = false;
+                    }
+                    self.set_toast(format!("Watch error: {}", err_msg), Theme::status_error());
                 }
             }
             return;
@@ -9149,17 +12798,25 @@ impl App {
                     let ctx = parts[1].to_string();
                     let ns = parts[2].to_string();
                     let kind = parts[3].to_string();
-                    self.resource_cache.insert((ctx, ns, kind.clone()), items.clone());
+                    self.resource_cache
+                        .insert((ctx, ns, kind.clone()), items.clone());
 
                     let is_wl_table = if let ActiveView::Table(table) = &self.active_view {
                         table.kind == ResourceKind::Workloads
                     } else {
                         false
                     };
-                    if is_wl_table && matches!(kind.as_str(), "deployments" | "statefulsets" | "daemonsets" | "pods" | "cronjobs") {
+                    if is_wl_table
+                        && matches!(
+                            kind.as_str(),
+                            "deployments" | "statefulsets" | "daemonsets" | "pods" | "cronjobs"
+                        )
+                    {
                         self.rebuild_workloads_table();
                     }
-                    if matches!(self.active_view, ActiveView::Top(_)) && matches!(kind.as_str(), "nodes" | "pods") {
+                    if matches!(self.active_view, ActiveView::Top(_))
+                        && matches!(kind.as_str(), "nodes" | "pods")
+                    {
                         self.refresh_top_view_data();
                     }
                 }
@@ -9170,22 +12827,37 @@ impl App {
                     if let ActiveView::Table(table) = &mut self.active_view {
                         if table.kind == ResourceKind::Pods {
                             let mut merged_items = items.clone();
-                            let prev_metrics: std::collections::HashMap<String, (Option<String>, Option<String>)> = table.raw_items.iter().filter_map(|it| {
-                                let name = it.get("name")?.as_str()?.to_string();
-                                let cpu = it.get("cpu").and_then(|v| v.as_str()).map(String::from);
-                                let mem = it.get("memory").and_then(|v| v.as_str()).map(String::from);
-                                Some((name, (cpu, mem)))
-                            }).collect();
+                            let prev_metrics: std::collections::HashMap<
+                                String,
+                                (Option<String>, Option<String>),
+                            > = table
+                                .raw_items
+                                .iter()
+                                .filter_map(|it| {
+                                    let name = it.get("name")?.as_str()?.to_string();
+                                    let cpu =
+                                        it.get("cpu").and_then(|v| v.as_str()).map(String::from);
+                                    let mem =
+                                        it.get("memory").and_then(|v| v.as_str()).map(String::from);
+                                    Some((name, (cpu, mem)))
+                                })
+                                .collect();
 
                             for item in merged_items.iter_mut() {
                                 if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
                                     if let Some((cpu, mem)) = prev_metrics.get(name) {
                                         if let Some(obj) = item.as_object_mut() {
                                             if let Some(c) = cpu {
-                                                obj.insert("cpu".to_string(), serde_json::Value::String(c.clone()));
+                                                obj.insert(
+                                                    "cpu".to_string(),
+                                                    serde_json::Value::String(c.clone()),
+                                                );
                                             }
                                             if let Some(m) = mem {
-                                                obj.insert("memory".to_string(), serde_json::Value::String(m.clone()));
+                                                obj.insert(
+                                                    "memory".to_string(),
+                                                    serde_json::Value::String(m.clone()),
+                                                );
                                             }
                                         }
                                     }
@@ -9195,9 +12867,15 @@ impl App {
                         } else {
                             if let ResourceKind::CustomResource(crd) = &mut table.kind {
                                 if crd.printer_columns.is_empty() {
-                                    if let Some(discovered) = self.crds.iter().find(|c| c.crd_name == crd.crd_name || (c.group == crd.group && c.kind == crd.kind)) {
+                                    if let Some(discovered) = self.crds.iter().find(|c| {
+                                        c.crd_name == crd.crd_name
+                                            || (c.group == crd.group && c.kind == crd.kind)
+                                    }) {
                                         crd.printer_columns = discovered.printer_columns.clone();
-                                        table.columns = crate::views::resource_table::default_columns_for_kind(&table.kind);
+                                        table.columns =
+                                            crate::views::resource_table::default_columns_for_kind(
+                                                &table.kind,
+                                            );
                                     }
                                 }
                             }
@@ -9265,6 +12943,7 @@ impl App {
             ActiveView::NodeInspector(_) => "Node & GPU Hardware Inspector",
             ActiveView::Topology(_) => "Workload & Traffic Topology Flow",
             ActiveView::GpuInfo(_) => "GPU Info & VRAM Allocation",
+            ActiveView::Bgp(_) => "BGP Peering & Route Advertisements",
             ActiveView::Top(top) => match top.active_tab {
                 top_view::TopTab::Pods => "Top Pods Hotspots",
                 top_view::TopTab::Nodes => "Top Nodes Hotspots",
@@ -9283,7 +12962,8 @@ impl App {
             self.pod_count
         };
 
-        let context_chips: Vec<crate::ui::header::ContextChipInfo> = self.contexts
+        let context_chips: Vec<crate::ui::header::ContextChipInfo> = self
+            .contexts
             .iter()
             .enumerate()
             .map(|(i, c)| crate::ui::header::ContextChipInfo {
@@ -9309,6 +12989,7 @@ impl App {
                 active_view_name: active_view_title,
                 contexts: &context_chips,
                 context_chip_rects: Some(&self.context_chip_rects),
+                update_available: self.tui_config.update_available.as_deref(),
             },
         );
 
@@ -9338,16 +13019,21 @@ impl App {
             ActiveView::Helm(helm) => render_helm_view(f, chunks[1], helm),
             ActiveView::HelmDetail(detail) => render_helm_detail_view(f, chunks[1], detail),
             ActiveView::Argo(argo) => argo_view::render_argo_view(f, chunks[1], argo),
-            ActiveView::ArgoDetail(detail) => argo_detail_view::render_argo_detail_view(f, chunks[1], detail),
+            ActiveView::ArgoDetail(detail) => {
+                argo_detail_view::render_argo_detail_view(f, chunks[1], detail)
+            }
             ActiveView::Overview(ov) => render_overview_view(f, chunks[1], ov),
             ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
-            ActiveView::Assistant => render_assistant_view(f, chunks[1], &self.assistant_state, &self.ai_settings),
+            ActiveView::Assistant => {
+                render_assistant_view(f, chunks[1], &self.assistant_state, &self.ai_settings)
+            }
             ActiveView::Settings(s) => render_settings_view(f, chunks[1], s),
             ActiveView::TuiConfig(s) => render_tui_config_view(f, chunks[1], s, &self.tui_config),
             ActiveView::Tree(tree) => render_tree_view(f, chunks[1], tree),
             ActiveView::NodeInspector(ni) => render_node_inspector_view(f, chunks[1], ni),
             ActiveView::Topology(topo) => topology_view::render_topology_view(f, chunks[1], topo),
             ActiveView::GpuInfo(gpu) => gpu_view::render(f, chunks[1], gpu),
+            ActiveView::Bgp(bgp) => render_bgp_view(f, chunks[1], bgp),
             ActiveView::Top(top) => top_view::render_top_view(f, chunks[1], top),
         }
 
@@ -9358,59 +13044,123 @@ impl App {
             ActiveView::Yaml(yaml) => (yaml.search_matches.len(), yaml.lines.len(), true),
             ActiveView::Logs(logs) => (logs.search_matches.len(), logs.lines.len(), true),
             ActiveView::Helm(helm) => (helm.filtered_indices().len(), helm.releases.len(), false),
-            ActiveView::Argo(argo) => (argo.filtered_indices().len(), argo.applications.len(), false),
-            ActiveView::Top(top) => (top.visible_count(), if top.active_tab == top_view::TopTab::Pods { top.pods.len() } else { top.nodes.len() }, false),
-            ActiveView::HelmDetail(detail) => (detail.search_matches.len(), detail.total_lines_for_active_tab(), true),
+            ActiveView::Argo(argo) => (
+                argo.filtered_indices().len(),
+                argo.applications.len(),
+                false,
+            ),
+            ActiveView::Bgp(bgp) => {
+                let count = match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => bgp.filtered_peers().len(),
+                    bgp_view::BgpTab::Services => bgp.filtered_services().len(),
+                    bgp_view::BgpTab::IpPools => bgp.filtered_pools().len(),
+                };
+                let total = match bgp.active_tab {
+                    bgp_view::BgpTab::Peers => {
+                        bgp.summary.as_ref().map(|s| s.peers.len()).unwrap_or(0)
+                    }
+                    bgp_view::BgpTab::Services => bgp
+                        .summary
+                        .as_ref()
+                        .map(|s| s.advertised_services.len())
+                        .unwrap_or(0),
+                    bgp_view::BgpTab::IpPools => {
+                        bgp.summary.as_ref().map(|s| s.ip_pools.len()).unwrap_or(0)
+                    }
+                };
+                (count, total, false)
+            }
+            ActiveView::Top(top) => (
+                top.visible_count(),
+                if top.active_tab == top_view::TopTab::Pods {
+                    top.pods.len()
+                } else {
+                    top.nodes.len()
+                },
+                false,
+            ),
+            ActiveView::HelmDetail(detail) => (
+                detail.search_matches.len(),
+                detail.total_lines_for_active_tab(),
+                true,
+            ),
             ActiveView::ArgoDetail(_) => (0, 0, false),
             _ => (0, 0, false),
         };
 
-        let toast_prop = self.toast.as_ref().map(|(msg, _, style)| (msg.as_str(), *style));
+        let toast_prop = self
+            .toast
+            .as_ref()
+            .map(|(msg, _, style)| (msg.as_str(), *style));
 
         let suggestions = if self.input_mode == InputMode::Command {
-            Some(command_suggestions_with_crds(&self.command_buffer, &self.crds))
+            Some(command_suggestions_with_crds(
+                &self.command_buffer,
+                &self.crds,
+            ))
         } else {
             None
         };
-        let suggestions_prop = suggestions.as_ref().map(|s| (s.as_slice(), self.command_suggestion_idx));
+        let suggestions_prop = suggestions
+            .as_ref()
+            .map(|s| (s.as_slice(), self.command_suggestion_idx));
 
-        let selected_active_forwards: Vec<srelens_streams::forward::ForwardEntry> = match &self.active_view {
-            ActiveView::Table(table) => {
-                let is_pf_allowed = table.kind == ResourceKind::Pods
-                    || table.kind == ResourceKind::Services
-                    || (table.kind == ResourceKind::Workloads && table.selected_item().and_then(|item| item.get("kind")).and_then(|v| v.as_str()).unwrap_or("") == "Pod");
+        let selected_active_forwards: Vec<srelens_streams::forward::ForwardEntry> =
+            match &self.active_view {
+                ActiveView::Table(table) => {
+                    let is_pf_allowed = table.kind == ResourceKind::Pods
+                        || table.kind == ResourceKind::Services
+                        || (table.kind == ResourceKind::Workloads
+                            && table
+                                .selected_item()
+                                .and_then(|item| item.get("kind"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                == "Pod");
 
-                if is_pf_allowed {
-                    if let Some(item) = table.selected_item() {
-                        let name = item.get("name").or_else(|| item.pointer("/metadata/name")).and_then(|v| v.as_str()).unwrap_or("");
-                        let ns = item.get("namespace").or_else(|| item.pointer("/metadata/namespace")).and_then(|v| v.as_str()).unwrap_or("");
-                        let kind = if table.kind == ResourceKind::Services { "Service" } else { "Pod" };
-                        if !name.is_empty() {
-                            self.active_forwards_for(kind, ns, name)
+                    if is_pf_allowed {
+                        if let Some(item) = table.selected_item() {
+                            let name = item
+                                .get("name")
+                                .or_else(|| item.pointer("/metadata/name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let ns = item
+                                .get("namespace")
+                                .or_else(|| item.pointer("/metadata/namespace"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let kind = if table.kind == ResourceKind::Services {
+                                "Service"
+                            } else {
+                                "Pod"
+                            };
+                            if !name.is_empty() {
+                                self.active_forwards_for(kind, ns, name)
+                            } else {
+                                Vec::new()
+                            }
                         } else {
                             Vec::new()
                         }
                     } else {
                         Vec::new()
                     }
-                } else {
-                    Vec::new()
                 }
-            }
-            ActiveView::Top(top) => {
-                if top.active_tab == top_view::TopTab::Pods {
-                    let pods = top.filtered_pods();
-                    if let Some(pod) = pods.get(top.selected_idx) {
-                        self.active_forwards_for("Pod", &pod.namespace, &pod.name)
+                ActiveView::Top(top) => {
+                    if top.active_tab == top_view::TopTab::Pods {
+                        let pods = top.filtered_pods();
+                        if let Some(pod) = pods.get(top.selected_idx) {
+                            self.active_forwards_for("Pod", &pod.namespace, &pod.name)
+                        } else {
+                            Vec::new()
+                        }
                     } else {
                         Vec::new()
                     }
-                } else {
-                    Vec::new()
                 }
-            }
-            _ => Vec::new(),
-        };
+                _ => Vec::new(),
+            };
 
         let has_selected_pf = !selected_active_forwards.is_empty();
         let close_pf_button_data = if has_selected_pf {
@@ -9429,352 +13179,425 @@ impl App {
         };
 
         let custom_hints: Option<&[(&str, &str)]> = match &self.active_view {
-            ActiveView::Top(_) => if has_selected_pf {
-                Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "Pods/Nodes"),
-                    ("<c>", "Sort CPU"),
-                    ("<m>", "Sort MEM"),
-                    ("<f>", "New PF"),
-                    ("<F>", "Close PF"),
-                    ("<l>", "Logs"),
-                    ("<d>", "Describe"),
-                    ("<y>", "YAML"),
-                    ("<r>", "Refresh"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..])
-            } else {
-                Some(&[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "Pods/Nodes"),
-                    ("<c>", "Sort CPU"),
-                    ("<m>", "Sort MEM"),
-                    ("<S>", "Rev"),
-                    ("<l>", "Logs"),
-                    ("<d>", "Describe"),
-                    ("<y>", "YAML"),
-                    ("<r>", "Refresh"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..])
-            },
-            ActiveView::GpuInfo(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<↑/↓>", "Select"),
-                ("<Tab>", "Pane"),
-                ("<Enter>", "Inspect"),
-                ("<l>", "Logs"),
-                ("<d>", "Describe"),
-                ("<y>", "YAML"),
-                ("<r>", "Refresh"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::Topology(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<←/→>", "Lane"),
-                ("<↑/↓>", "Node"),
-                ("<Enter>", "Inspect"),
-                ("<d>", "Describe"),
-                ("<y>", "YAML"),
-                ("<l>", "Logs"),
-                ("<r>", "Refresh"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::NodeInspector(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::Tree(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<↑/↓>", "Move"),
-                ("<Enter>", "Jump"),
-                ("<x>", "Actions"),
-                ("<l>", "Logs"),
-                ("<y>", "YAML"),
-                ("<d>", "Describe"),
-                ("<c>", "Copy"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::Assistant => Some(&[
-                ("<:>", "Cmd"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::Describe(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<c>", "Copy"),
-                ("</>", "Search"),
-                ("<n/N>", "Next/Prev"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::Yaml(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<c>", "Copy"),
-                ("<e>", "Edit"),
-                ("</>", "Search"),
-                ("<n/N>", "Next/Prev"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::Table(table) => {
-                if self.cluster_unreachable && table.raw_items.is_empty() {
-                    Some(&[
-                        ("<:>", "Cmd"),
-                        ("<r>", "Retry"),
-                        ("<^x>", "SwitchCtx"),
-                        ("<?>", "Help"),
-                    ][..])
-                } else {
-                    match table.kind {
-                        ResourceKind::Workloads => Some(&[
+            ActiveView::Top(_) => {
+                if has_selected_pf {
+                    Some(
+                        &[
                             ("<:>", "Cmd"),
-                            ("<Tab>", "Segment"),
-                            ("</>", "Filter"),
-                            ("<Enter>", "Action"),
+                            ("<Tab>", "Pods/Nodes"),
+                            ("<c>", "Sort CPU"),
+                            ("<m>", "Sort MEM"),
+                            ("<f>", "New PF"),
+                            ("<F>", "Close PF"),
                             ("<l>", "Logs"),
                             ("<d>", "Describe"),
                             ("<y>", "YAML"),
-                            ("<e>", "Edit"),
-                            ("<^s>", "Scale"),
-                            ("<^r>", "Restart"),
-                            ("<^d>", "Delete"),
+                            ("<r>", "Refresh"),
+                            ("<Esc>", "Back"),
                             ("<?>", "Help"),
-                        ][..]),
-                        ResourceKind::Pods => if has_selected_pf {
-                            Some(&[
-                                ("<:>", "Cmd"),
-                                ("</>", "Filter"),
-                                ("<l>", "Logs"),
-                                ("<s>", "Shell"),
-                                ("<m>", "Metrics"),
-                                ("<f>", "New PF"),
-                                ("<F>", "Close PF"),
-                                ("<d>", "Describe"),
-                                ("<y>", "YAML"),
-                                ("<e>", "Edit"),
-                                ("<^d>", "Delete"),
-                                ("<?>", "Help"),
-                            ][..])
-                        } else {
-                            Some(&[
-                                ("<:>", "Cmd"),
-                                ("</>", "Filter"),
-                                ("<l>", "Logs"),
-                                ("<s>", "Shell"),
-                                ("<m>", "Metrics"),
-                                ("<f>/<F>", "PortForward"),
-                                ("<d>", "Describe"),
-                                ("<y>", "YAML"),
-                                ("<e>", "Edit"),
-                                ("<^d>", "Delete"),
-                                ("<?>", "Help"),
-                            ][..])
-                        },
-                ResourceKind::Deployments | ResourceKind::DaemonSets | ResourceKind::StatefulSets => Some(&[
-                    ("<:>", "Cmd"),
-                    ("</>", "Filter"),
-                    ("<Enter>", "Pods"),
-                    ("<l>", "Logs"),
-                    ("<d>", "Describe"),
-                    ("<y>", "YAML"),
-                    ("<e>", "Edit"),
-                    ("<^s>", "Scale"),
-                    ("<^r>", "Restart"),
-                    ("<^d>", "Delete"),
-                    ("<?>", "Help"),
-                ][..]),
-                ResourceKind::Jobs => Some(&[
-                    ("<:>", "Cmd"),
-                    ("</>", "Filter"),
-                    ("<l>", "Logs"),
-                    ("<d>", "Describe"),
-                    ("<y>", "YAML"),
-                    ("<^d>", "Delete"),
-                    ("<?>", "Help"),
-                ][..]),
-                ResourceKind::CronJobs => Some(&[
-                    ("<:>", "Cmd"),
-                    ("</>", "Filter"),
-                    ("<d>", "Describe"),
-                    ("<y>", "YAML"),
-                    ("<e>", "Edit"),
-                    ("<^d>", "Delete"),
-                    ("<?>", "Help"),
-                ][..]),
-                ResourceKind::Services => if has_selected_pf {
-                    Some(&[
-                        ("<:>", "Cmd"),
-                        ("</>", "Filter"),
-                        ("<Enter>", "Endpoints"),
-                        ("<f>", "New PF"),
-                        ("<F>", "Close PF"),
-                        ("<d>", "Describe"),
-                        ("<y>", "YAML"),
-                        ("<e>", "Edit"),
-                        ("<^d>", "Delete"),
-                        ("<?>", "Help"),
-                    ][..])
+                        ][..],
+                    )
                 } else {
-                    Some(&[
-                        ("<:>", "Cmd"),
-                        ("</>", "Filter"),
-                        ("<Enter>", "Endpoints"),
-                        ("<f>/<F>", "PortForward"),
-                        ("<d>", "Describe"),
-                        ("<y>", "YAML"),
-                        ("<e>", "Edit"),
-                        ("<^d>", "Delete"),
-                        ("<?>", "Help"),
-                    ][..])
-                },
-                ResourceKind::Ingresses => Some(&[
+                    Some(
+                        &[
+                            ("<:>", "Cmd"),
+                            ("<Tab>", "Pods/Nodes"),
+                            ("<c>", "Sort CPU"),
+                            ("<m>", "Sort MEM"),
+                            ("<S>", "Rev"),
+                            ("<l>", "Logs"),
+                            ("<d>", "Describe"),
+                            ("<y>", "YAML"),
+                            ("<r>", "Refresh"),
+                            ("<Esc>", "Back"),
+                            ("<?>", "Help"),
+                        ][..],
+                    )
+                }
+            }
+            ActiveView::GpuInfo(_) => Some(
+                &[
                     ("<:>", "Cmd"),
-                    ("</>", "Filter"),
+                    ("<↑/↓>", "Select"),
+                    ("<Tab>", "Pane"),
+                    ("<Enter>", "Inspect"),
+                    ("<l>", "Logs"),
                     ("<d>", "Describe"),
                     ("<y>", "YAML"),
-                    ("<e>", "Edit"),
-                    ("<^d>", "Delete"),
+                    ("<r>", "Refresh"),
+                    ("<Esc>", "Back"),
                     ("<?>", "Help"),
-                ][..]),
-                ResourceKind::Namespaces => Some(&[
+                ][..],
+            ),
+            ActiveView::Bgp(_) => Some(
+                &[
                     ("<:>", "Cmd"),
+                    ("<1-3/Tab>", "Tab"),
+                    ("<↑/↓/j/k>", "Select"),
                     ("</>", "Filter"),
-                    ("<Enter>", "Pods"),
+                    ("<Enter>", "Inspect Node/Svc"),
+                    ("<d>", "Describe"),
                     ("<y>", "YAML"),
-                    ("<d>", "Describe"),
-                    ("<^d>", "Delete"),
+                    ("<r>", "Refresh"),
+                    ("<Esc>", "Back"),
                     ("<?>", "Help"),
-                ][..]),
-                ResourceKind::Events => Some(&[
+                ][..],
+            ),
+            ActiveView::Topology(_) => Some(
+                &[
                     ("<:>", "Cmd"),
-                    ("</>", "Filter"),
-                    ("<w>", "Triage"),
-                    ("<R>", "Reasons"),
-                    ("<Enter>", "Resource"),
+                    ("<←/→>", "Lane"),
+                    ("<↑/↓>", "Node"),
+                    ("<Enter>", "Inspect"),
                     ("<d>", "Describe"),
+                    ("<y>", "YAML"),
+                    ("<l>", "Logs"),
+                    ("<r>", "Refresh"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            ActiveView::NodeInspector(_) => Some(&[("<:>", "Cmd"), ("<?>", "Help")][..]),
+            ActiveView::Tree(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<↑/↓>", "Move"),
+                    ("<Enter>", "Jump"),
+                    ("<x>", "Actions"),
                     ("<l>", "Logs"),
                     ("<y>", "YAML"),
+                    ("<d>", "Describe"),
                     ("<c>", "Copy"),
+                    ("<Esc>", "Back"),
                     ("<?>", "Help"),
-                ][..]),
-                ResourceKind::Nodes => Some(&[
+                ][..],
+            ),
+            ActiveView::Assistant => Some(&[("<:>", "Cmd"), ("<?>", "Help")][..]),
+            ActiveView::Describe(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<c>", "Copy"),
+                    ("</>", "Search"),
+                    ("<n/N>", "Next/Prev"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            ActiveView::Yaml(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<c>", "Copy"),
+                    ("<e>", "Edit"),
+                    ("</>", "Search"),
+                    ("<n/N>", "Next/Prev"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            ActiveView::Table(table) => {
+                if self.cluster_unreachable && table.raw_items.is_empty() {
+                    Some(
+                        &[
+                            ("<:>", "Cmd"),
+                            ("<r>", "Retry"),
+                            ("<^x>", "SwitchCtx"),
+                            ("<?>", "Help"),
+                        ][..],
+                    )
+                } else {
+                    match table.kind {
+                        ResourceKind::Workloads => Some(
+                            &[
+                                ("<:>", "Cmd"),
+                                ("<Tab>", "Segment"),
+                                ("</>", "Filter"),
+                                ("<Enter>", "Action"),
+                                ("<l>", "Logs"),
+                                ("<d>", "Describe"),
+                                ("<y>", "YAML"),
+                                ("<e>", "Edit"),
+                                ("<^s>", "Scale"),
+                                ("<^r>", "Restart"),
+                                ("<^d>", "Delete"),
+                                ("<?>", "Help"),
+                            ][..],
+                        ),
+                        ResourceKind::Pods => {
+                            if has_selected_pf {
+                                Some(
+                                    &[
+                                        ("<:>", "Cmd"),
+                                        ("</>", "Filter"),
+                                        ("<l>", "Logs"),
+                                        ("<s>", "Shell"),
+                                        ("<m>", "Metrics"),
+                                        ("<f>", "New PF"),
+                                        ("<F>", "Close PF"),
+                                        ("<d>", "Describe"),
+                                        ("<y>", "YAML"),
+                                        ("<e>", "Edit"),
+                                        ("<^d>", "Delete"),
+                                        ("<?>", "Help"),
+                                    ][..],
+                                )
+                            } else {
+                                Some(
+                                    &[
+                                        ("<:>", "Cmd"),
+                                        ("</>", "Filter"),
+                                        ("<l>", "Logs"),
+                                        ("<s>", "Shell"),
+                                        ("<m>", "Metrics"),
+                                        ("<f>/<F>", "PortForward"),
+                                        ("<d>", "Describe"),
+                                        ("<y>", "YAML"),
+                                        ("<e>", "Edit"),
+                                        ("<^d>", "Delete"),
+                                        ("<?>", "Help"),
+                                    ][..],
+                                )
+                            }
+                        }
+                        ResourceKind::Deployments
+                        | ResourceKind::DaemonSets
+                        | ResourceKind::StatefulSets => Some(
+                            &[
+                                ("<:>", "Cmd"),
+                                ("</>", "Filter"),
+                                ("<Enter>", "Pods"),
+                                ("<l>", "Logs"),
+                                ("<d>", "Describe"),
+                                ("<y>", "YAML"),
+                                ("<e>", "Edit"),
+                                ("<^s>", "Scale"),
+                                ("<^r>", "Restart"),
+                                ("<^d>", "Delete"),
+                                ("<?>", "Help"),
+                            ][..],
+                        ),
+                        ResourceKind::Jobs => Some(
+                            &[
+                                ("<:>", "Cmd"),
+                                ("</>", "Filter"),
+                                ("<l>", "Logs"),
+                                ("<d>", "Describe"),
+                                ("<y>", "YAML"),
+                                ("<^d>", "Delete"),
+                                ("<?>", "Help"),
+                            ][..],
+                        ),
+                        ResourceKind::CronJobs => Some(
+                            &[
+                                ("<:>", "Cmd"),
+                                ("</>", "Filter"),
+                                ("<d>", "Describe"),
+                                ("<y>", "YAML"),
+                                ("<e>", "Edit"),
+                                ("<^d>", "Delete"),
+                                ("<?>", "Help"),
+                            ][..],
+                        ),
+                        ResourceKind::Services => {
+                            if has_selected_pf {
+                                Some(
+                                    &[
+                                        ("<:>", "Cmd"),
+                                        ("</>", "Filter"),
+                                        ("<Enter>", "Endpoints"),
+                                        ("<f>", "New PF"),
+                                        ("<F>", "Close PF"),
+                                        ("<d>", "Describe"),
+                                        ("<y>", "YAML"),
+                                        ("<e>", "Edit"),
+                                        ("<^d>", "Delete"),
+                                        ("<?>", "Help"),
+                                    ][..],
+                                )
+                            } else {
+                                Some(
+                                    &[
+                                        ("<:>", "Cmd"),
+                                        ("</>", "Filter"),
+                                        ("<Enter>", "Endpoints"),
+                                        ("<f>/<F>", "PortForward"),
+                                        ("<d>", "Describe"),
+                                        ("<y>", "YAML"),
+                                        ("<e>", "Edit"),
+                                        ("<^d>", "Delete"),
+                                        ("<?>", "Help"),
+                                    ][..],
+                                )
+                            }
+                        }
+                        ResourceKind::Ingresses => Some(
+                            &[
+                                ("<:>", "Cmd"),
+                                ("</>", "Filter"),
+                                ("<d>", "Describe"),
+                                ("<y>", "YAML"),
+                                ("<e>", "Edit"),
+                                ("<^d>", "Delete"),
+                                ("<?>", "Help"),
+                            ][..],
+                        ),
+                        ResourceKind::Namespaces => Some(
+                            &[
+                                ("<:>", "Cmd"),
+                                ("</>", "Filter"),
+                                ("<Enter>", "Pods"),
+                                ("<y>", "YAML"),
+                                ("<d>", "Describe"),
+                                ("<^d>", "Delete"),
+                                ("<?>", "Help"),
+                            ][..],
+                        ),
+                        ResourceKind::Events => Some(
+                            &[
+                                ("<:>", "Cmd"),
+                                ("</>", "Filter"),
+                                ("<w>", "Triage"),
+                                ("<R>", "Reasons"),
+                                ("<Enter>", "Resource"),
+                                ("<d>", "Describe"),
+                                ("<l>", "Logs"),
+                                ("<y>", "YAML"),
+                                ("<c>", "Copy"),
+                                ("<?>", "Help"),
+                            ][..],
+                        ),
+                        ResourceKind::Nodes => Some(
+                            &[
+                                ("<:>", "Cmd"),
+                                ("</>", "Filter"),
+                                ("<Enter>", "Inspect"),
+                                ("<m>", "Metrics"),
+                                ("<d>", "Describe"),
+                                ("<y>", "YAML"),
+                                ("<x>", "Actions"),
+                                ("<s>", "Shell"),
+                                ("<S>", "SSH"),
+                                ("<?>", "Help"),
+                            ][..],
+                        ),
+                        _ => Some(
+                            &[
+                                ("<:>", "Cmd"),
+                                ("</>", "Filter"),
+                                ("<d>", "Describe"),
+                                ("<y>", "YAML"),
+                                ("<e>", "Edit"),
+                                ("<^d>", "Delete"),
+                                ("<?>", "Help"),
+                            ][..],
+                        ),
+                    }
+                }
+            }
+            ActiveView::Overview(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<s>", "Summarise"),
+                    ("<c>", "Copy"),
+                    ("<r>", "Refresh"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            ActiveView::Logs(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<c>", "Copy"),
+                    ("<f>", "Follow"),
+                    ("<t>", "Timestamps"),
+                    ("</>", "Search"),
+                    ("<n/N>", "Next/Prev"),
+                    ("<s>", "Save"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            ActiveView::PortForwards(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<c>", "CopyURL"),
+                    ("<d>", "Stop"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            ActiveView::Helm(_) => Some(
+                &[
                     ("<:>", "Cmd"),
                     ("</>", "Filter"),
                     ("<Enter>", "Inspect"),
-                    ("<m>", "Metrics"),
-                    ("<d>", "Describe"),
-                    ("<y>", "YAML"),
-                    ("<x>", "Actions"),
-                    ("<s>", "Shell"),
-                    ("<S>", "SSH"),
+                    ("<v>", "Values"),
+                    ("<y>", "Manifest"),
+                    ("<d>", "History"),
+                    ("<R>", "Refresh"),
+                    ("<r>", "Rollback"),
+                    ("<^d>", "Uninstall"),
+                    ("<c>", "CopyURL"),
+                    ("<Esc>", "Back"),
                     ("<?>", "Help"),
-                ][..]),
-                _ => Some(&[
+                ][..],
+            ),
+            ActiveView::HelmDetail(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("</>", "Search"),
+                    ("<n/N>", "Next/Prev"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            ActiveView::Argo(_) => Some(
+                &[
                     ("<:>", "Cmd"),
                     ("</>", "Filter"),
-                    ("<d>", "Describe"),
-                    ("<y>", "YAML"),
-                    ("<e>", "Edit"),
-                    ("<^d>", "Delete"),
+                    ("<Enter>", "Details"),
+                    ("<x>", "Actions / AI"),
+                    ("<s>", "Sync"),
+                    ("<p>", "Auto-Sync"),
+                    ("<R>", "Hard Refresh"),
+                    ("<g>", "Git"),
+                    ("<r>", "Reload"),
+                    ("<Esc>", "Back"),
                     ("<?>", "Help"),
-                ][..]),
-            }
-                }
-            }
-            ActiveView::Overview(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<s>", "Summarise"),
-                ("<c>", "Copy"),
-                ("<r>", "Refresh"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::Logs(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<c>", "Copy"),
-                ("<f>", "Follow"),
-                ("<t>", "Timestamps"),
-                ("</>", "Search"),
-                ("<n/N>", "Next/Prev"),
-                ("<s>", "Save"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::PortForwards(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<c>", "CopyURL"),
-                ("<d>", "Stop"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::Helm(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("</>", "Filter"),
-                ("<Enter>", "Inspect"),
-                ("<v>", "Values"),
-                ("<y>", "Manifest"),
-                ("<d>", "History"),
-                ("<R>", "Refresh"),
-                ("<r>", "Rollback"),
-                ("<^d>", "Uninstall"),
-                ("<c>", "CopyURL"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::HelmDetail(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("</>", "Search"),
-                ("<n/N>", "Next/Prev"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::Argo(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("</>", "Filter"),
-                ("<Enter>", "Details"),
-                ("<x>", "Actions / AI"),
-                ("<s>", "Sync"),
-                ("<p>", "Auto-Sync"),
-                ("<R>", "Hard Refresh"),
-                ("<g>", "Git"),
-                ("<r>", "Reload"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::ArgoDetail(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<1-4>", "Tabs"),
-                ("<x>", "Actions / AI"),
-                ("<s>", "Sync"),
-                ("<p>", "Auto-Sync"),
-                ("<R>", "Hard Refresh"),
-                ("<g>", "Git"),
-                ("<r>", "Reload"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::Settings(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::TuiConfig(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<j/k>", "Select"),
-                ("<h/l>", "Adjust"),
-                ("<r>", "Reset"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
-            ActiveView::Toolbox(_) => Some(&[
-                ("<:>", "Cmd"),
-                ("<c>", "CopyPath"),
-                ("<Esc>", "Back"),
-                ("<?>", "Help"),
-            ][..]),
+                ][..],
+            ),
+            ActiveView::ArgoDetail(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<1-4>", "Tabs"),
+                    ("<x>", "Actions / AI"),
+                    ("<s>", "Sync"),
+                    ("<p>", "Auto-Sync"),
+                    ("<R>", "Hard Refresh"),
+                    ("<g>", "Git"),
+                    ("<r>", "Reload"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            ActiveView::Settings(_) => Some(&[("<:>", "Cmd"), ("<?>", "Help")][..]),
+            ActiveView::TuiConfig(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<j/k>", "Select"),
+                    ("<h/l>", "Adjust"),
+                    ("<r>", "Reset"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            ActiveView::Toolbox(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<c>", "CopyPath"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
         };
 
         render_statusbar(
@@ -9839,7 +13662,11 @@ pub fn apply_screen_selection(
     };
     let a = clamp(anchor);
     let c = clamp(cursor);
-    let (start, end) = if (a.1, a.0) <= (c.1, c.0) { (a, c) } else { (c, a) };
+    let (start, end) = if (a.1, a.0) <= (c.1, c.0) {
+        (a, c)
+    } else {
+        (c, a)
+    };
 
     let mut out = String::new();
     for y in start.1..=end.1 {
@@ -9930,7 +13757,12 @@ pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
             let _ = child.wait();
             return Ok(());
         }
-        if let Ok(mut child) = Command::new("xclip").arg("-selection").arg("clipboard").stdin(Stdio::piped()).spawn() {
+        if let Ok(mut child) = Command::new("xclip")
+            .arg("-selection")
+            .arg("clipboard")
+            .stdin(Stdio::piped())
+            .spawn()
+        {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
                 drop(stdin);
@@ -9982,7 +13814,8 @@ pub fn get_clipboard_text() -> Option<String> {
 }
 
 pub fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(String, String, String)> {
-    let call_id = v.get("call_id")
+    let call_id = v
+        .get("call_id")
         .or_else(|| v.get("callId"))
         .and_then(|s| s.as_str())
         .unwrap_or("")
@@ -10001,7 +13834,11 @@ pub fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(String, St
     }
 
     if tool_name == "callMcpTool" || tool_name == "mcp" {
-        if let Some(t) = inner.pointer("/args/tool").or_else(|| inner.pointer("/args/name")).and_then(|s| s.as_str()) {
+        if let Some(t) = inner
+            .pointer("/args/tool")
+            .or_else(|| inner.pointer("/args/name"))
+            .and_then(|s| s.as_str())
+        {
             tool_name = t.to_string();
         }
     }
@@ -10041,7 +13878,8 @@ pub fn extract_tool_call_start_info(v: &serde_json::Value) -> Option<(String, St
 }
 
 pub fn extract_tool_call_completed_info(v: &serde_json::Value) -> Option<(String, bool)> {
-    let call_id = v.get("call_id")
+    let call_id = v
+        .get("call_id")
         .or_else(|| v.get("callId"))
         .and_then(|s| s.as_str())
         .unwrap_or("")
@@ -10056,7 +13894,8 @@ pub fn extract_tool_call_completed_info(v: &serde_json::Value) -> Option<(String
         }
     }
 
-    let is_error = v.get("is_error")
+    let is_error = v
+        .get("is_error")
         .or_else(|| v.get("isError"))
         .and_then(|b| b.as_bool())
         .unwrap_or(false);
@@ -10081,49 +13920,68 @@ pub fn parse_involved_object(item: &serde_json::Value) -> (String, String) {
 
 pub fn format_event_summary(item: &serde_json::Value) -> String {
     let age = item.get("age").and_then(|v| v.as_str()).unwrap_or("");
-    let type_str = item.get("type").or_else(|| item.get("type_")).and_then(|v| v.as_str()).unwrap_or("");
+    let type_str = item
+        .get("type")
+        .or_else(|| item.get("type_"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let reason = item.get("reason").and_then(|v| v.as_str()).unwrap_or("");
     let (obj_kind, obj_name) = parse_involved_object(item);
-    let obj = if !obj_kind.is_empty() { format!("{}/{}", obj_kind, obj_name) } else { "".to_string() };
+    let obj = if !obj_kind.is_empty() {
+        format!("{}/{}", obj_kind, obj_name)
+    } else {
+        "".to_string()
+    };
     let ns = item.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
     let msg = item.get("message").and_then(|v| v.as_str()).unwrap_or("");
 
-    format!("[{}] [{}] {} {} ({}): {}", age, type_str, reason, obj, ns, msg)
+    format!(
+        "[{}] [{}] {} {} ({}): {}",
+        age, type_str, reason, obj, ns, msg
+    )
 }
 
-pub(crate) fn extract_usage_metrics(v: &serde_json::Value) -> Option<(usize, usize, usize, usize, Option<u64>)> {
-    let usage = v.get("usage")
+pub(crate) fn extract_usage_metrics(
+    v: &serde_json::Value,
+) -> Option<(usize, usize, usize, usize, Option<u64>)> {
+    let usage = v
+        .get("usage")
         .or_else(|| v.get("model_usage"))
         .or_else(|| v.get("token_usage"))
         .or_else(|| v.get("tokens"))?;
 
-    let prompt = usage.get("inputTokens")
+    let prompt = usage
+        .get("inputTokens")
         .or_else(|| usage.get("prompt_tokens"))
         .or_else(|| usage.get("input_tokens"))
         .or_else(|| usage.get("promptTokens"))
         .and_then(|n| n.as_u64())
         .unwrap_or(0) as usize;
 
-    let completion = usage.get("outputTokens")
+    let completion = usage
+        .get("outputTokens")
         .or_else(|| usage.get("completion_tokens"))
         .or_else(|| usage.get("output_tokens"))
         .or_else(|| usage.get("completionTokens"))
         .and_then(|n| n.as_u64())
         .unwrap_or(0) as usize;
 
-    let cached = usage.get("cacheReadTokens")
+    let cached = usage
+        .get("cacheReadTokens")
         .or_else(|| usage.get("cached_tokens"))
         .or_else(|| usage.get("cache_read_input_tokens"))
         .and_then(|n| n.as_u64())
         .unwrap_or(0) as usize;
 
-    let total = usage.get("totalTokens")
+    let total = usage
+        .get("totalTokens")
         .or_else(|| usage.get("total_tokens"))
         .and_then(|n| n.as_u64())
         .map(|n| n as usize)
         .unwrap_or(prompt + completion);
 
-    let duration = v.get("duration_ms")
+    let duration = v
+        .get("duration_ms")
         .or_else(|| v.get("durationMs"))
         .or_else(|| usage.get("duration_ms"))
         .or_else(|| usage.get("durationMs"))
@@ -10134,14 +13992,106 @@ pub(crate) fn extract_usage_metrics(v: &serde_json::Value) -> Option<(usize, usi
 
 pub fn parse_ready_ratio(s: &str) -> (i64, i64) {
     let mut parts = s.split('/');
-    let have = parts.next().and_then(|p| p.trim().parse::<i64>().ok()).unwrap_or(0);
-    let want = parts.next().and_then(|p| p.trim().parse::<i64>().ok()).unwrap_or(0);
+    let have = parts
+        .next()
+        .and_then(|p| p.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    let want = parts
+        .next()
+        .and_then(|p| p.trim().parse::<i64>().ok())
+        .unwrap_or(0);
     (have, want)
+}
+
+/// The `(kind, namespace)` pairs whose cached lists an apply invalidates:
+/// one per document that was applied, in that document's EFFECTIVE
+/// namespace — its own `metadata.namespace`, else `fallback_ns` — by the same
+/// rule `apply_documents` uses to place it. Results arrive one per document,
+/// in order, so the two are zipped.
+///
+/// Invalidating every applied document under the YAML view's namespace left a
+/// multi-document manifest, or one editing a resource in another namespace,
+/// showing the pre-apply list in the namespace that actually changed.
+pub fn applied_document_scopes(
+    docs: &[serde_json::Value],
+    fallback_ns: Option<&str>,
+    results: &[srelens_kube::manifest::ApplyDoc],
+) -> Vec<(String, String)> {
+    let fallback = fallback_ns.unwrap_or("");
+    results
+        .iter()
+        .enumerate()
+        .filter(|(_, result)| result.applied)
+        .map(|(index, result)| {
+            let ns = docs
+                .get(index)
+                .and_then(|doc| doc.get("metadata"))
+                .and_then(|m| m.get("namespace"))
+                .and_then(|ns| ns.as_str())
+                .unwrap_or(fallback);
+            (result.kind.clone(), ns.to_string())
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn applied(kind: &str, name: &str, applied: bool) -> srelens_kube::manifest::ApplyDoc {
+        srelens_kube::manifest::ApplyDoc {
+            kind: kind.to_string(),
+            name: name.to_string(),
+            applied,
+            conflict: None,
+            error: None,
+        }
+    }
+
+    /// A manifest with documents in namespaces `a` and `b`, applied from a
+    /// view in namespace `c`, invalidates `a` and `b` — not `c` twice. A
+    /// document naming no namespace lands where the apply put it: the
+    /// fallback.
+    #[test]
+    fn each_applied_document_is_invalidated_in_its_own_namespace() {
+        let docs = vec![
+            serde_json::json!({"kind": "Deployment", "metadata": {"name": "web", "namespace": "a"}}),
+            serde_json::json!({"kind": "Service", "metadata": {"name": "web", "namespace": "b"}}),
+            serde_json::json!({"kind": "ConfigMap", "metadata": {"name": "web"}}),
+        ];
+        let results = vec![
+            applied("Deployment", "web", true),
+            applied("Service", "web", true),
+            applied("ConfigMap", "web", true),
+        ];
+
+        let scopes = applied_document_scopes(&docs, Some("c"), &results);
+
+        assert_eq!(
+            scopes,
+            vec![
+                ("Deployment".to_string(), "a".to_string()),
+                ("Service".to_string(), "b".to_string()),
+                ("ConfigMap".to_string(), "c".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_document_that_failed_to_apply_invalidates_nothing() {
+        let docs = vec![
+            serde_json::json!({"kind": "Deployment", "metadata": {"name": "web", "namespace": "a"}}),
+            serde_json::json!({"kind": "Service", "metadata": {"name": "web", "namespace": "b"}}),
+        ];
+        let results = vec![
+            applied("Deployment", "web", false),
+            applied("Service", "web", true),
+        ];
+
+        let scopes = applied_document_scopes(&docs, None, &results);
+
+        assert_eq!(scopes, vec![("Service".to_string(), "b".to_string())]);
+    }
 
     #[test]
     fn test_delete_prev_word_simple() {

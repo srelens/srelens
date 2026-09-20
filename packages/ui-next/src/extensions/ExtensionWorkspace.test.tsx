@@ -148,6 +148,89 @@ it("reports failed summaries instead of displaying zero healthy resources", asyn
   await waitFor(() => expect(readExtension).toHaveBeenCalledTimes(2));
 });
 
+it("says when event reads were capped and pages matching rows", async () => {
+  const eventPlugin = structuredClone(plugin);
+  eventPlugin.manifest.contributions.pages[0].dashboard!.events = {
+    capability: "events",
+    apiGroups: ["kustomize.toolkit.fluxcd.io"],
+  };
+  const events = Array.from({ length: 120 }, (_, i) => ({
+    name: `ev-${i}`,
+    namespace: "flux-system",
+    object: "Kustomization/apps",
+    objectApiVersion: "kustomize.toolkit.fluxcd.io/v1",
+    message: `Event ${i}`,
+    type: "Normal",
+    count: 1,
+    age: "1m",
+  }));
+  vi.mocked(readExtension).mockImplementation(
+    async (_id, _revision, capability) =>
+      (capability === "events"
+        ? { events, truncated: true }
+        : { items: [] }) as never,
+  );
+  render(
+    <ExtensionWorkspace
+      plugin={eventPlugin}
+      page={eventPlugin.manifest.contributions.pages[0]}
+      context="staging"
+    />,
+  );
+  expect(
+    await screen.findByText(
+      "Showing the first 120 events; more remain on the cluster.",
+    ),
+  ).toBeTruthy();
+  expect(screen.getByText("Events")).toBeTruthy();
+  expect(screen.getByText(/\(120\+\)/)).toBeTruthy();
+  expect(screen.getByText("Event 0")).toBeTruthy();
+  expect(screen.queryByText("Event 100")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /Show 20 more/ }));
+  expect(screen.getByText("Event 100")).toBeTruthy();
+});
+
+it("resets event paging when the extension revision changes", async () => {
+  const eventPlugin = structuredClone(plugin);
+  eventPlugin.manifest.contributions.pages[0].dashboard!.events = {
+    capability: "events",
+    apiGroups: ["kustomize.toolkit.fluxcd.io"],
+  };
+  const events = Array.from({ length: 120 }, (_, i) => ({
+    name: `ev-${i}`,
+    namespace: "flux-system",
+    object: "Kustomization/apps",
+    objectApiVersion: "kustomize.toolkit.fluxcd.io/v1",
+    message: `Event ${i}`,
+    type: "Normal",
+    count: 1,
+    age: "1m",
+  }));
+  vi.mocked(readExtension).mockImplementation(
+    async (_id, _revision, capability) =>
+      (capability === "events" ? { events } : { items: [] }) as never,
+  );
+  const { rerender } = render(
+    <ExtensionWorkspace
+      plugin={eventPlugin}
+      page={eventPlugin.manifest.contributions.pages[0]}
+      context="staging"
+    />,
+  );
+  await screen.findByText("Event 0");
+  fireEvent.click(screen.getByRole("button", { name: /Show 20 more/ }));
+  expect(screen.getByText("Event 100")).toBeTruthy();
+  rerender(
+    <ExtensionWorkspace
+      plugin={{ ...eventPlugin, revision: eventPlugin.revision + 1 }}
+      page={eventPlugin.manifest.contributions.pages[0]}
+      context="staging"
+    />,
+  );
+  await waitFor(() => expect(screen.queryByText("Event 100")).toBeNull());
+  expect(screen.getByText("Event 0")).toBeTruthy();
+});
+
 it("filters events by API group and search, not just a matching kind name", async () => {
   const eventPlugin = structuredClone(plugin);
   eventPlugin.manifest.contributions.pages[0].dashboard!.events = {

@@ -1,9 +1,11 @@
 //! Durable, native declarative extensions for desktop hosts.
 mod catalog;
-mod resource;
-mod signing;
+pub(crate) mod crd;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
+mod limits;
+mod resource;
+mod signing;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -13,7 +15,6 @@ use srelens_plugin_host::{
 };
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -21,7 +22,11 @@ use std::{
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Installed {
-    #[serde(default, rename = "signatureProof", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "signatureProof",
+        skip_serializing_if = "Option::is_none"
+    )]
     signature_proof: Option<SignatureProof>,
     /// Why this host refused to trust the stored entry when loading it. Recomputed
     /// on every read, reported to the UI, and never written to disk.
@@ -38,6 +43,70 @@ pub struct Installed {
     installed_at: u64,
     /// The versions this one replaced, newest first, at most [`KEPT_VERSIONS`].
     history: Vec<PreviousVersion>,
+    /// The keys of the kubeconfig contexts the app is enabled for (`ResolvedContext::key`:
+    /// `{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports
+    /// under `key`); `None` is every cluster. A context's display name is not identity: it
+    /// changes when another kubeconfig declares the same name (#265). A stable ID is not
+    /// either: `a` + `b#c` and `a#b` + `c` share one (#623).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    contexts: Option<Vec<String>>,
+}
+/// What the broker answers when an app is used on a cluster it is not enabled for.
+const NOT_ENABLED_FOR_CLUSTER: &str = "App is not enabled for this cluster";
+impl Installed {
+    /// Refuses a limited app on a context outside its list. A context the host could not
+    /// resolve is refused too, but with why: whether the app is enabled there is unknown.
+    fn check_scope(
+        &self,
+        context: &Result<srelens_kube::context_resolve::ResolvedContext, String>,
+    ) -> Result<(), CapabilityError> {
+        let Some(contexts) = &self.contexts else {
+            return Ok(());
+        };
+        match context {
+            Ok(resolved) if contexts.contains(&resolved.key()) => Ok(()),
+            Ok(_) => Err(CapabilityError::Handler(NOT_ENABLED_FOR_CLUSTER.into())),
+            Err(reason) => Err(CapabilityError::Handler(format!(
+                "Could not check whether this app is enabled for this cluster: {reason}"
+            ))),
+        }
+    }
+}
+/// The context a request names, resolved against the kubeconfig files the host connects
+/// with, the same way a connection resolves it. When there is no such context, why: no
+/// kubeconfig declares it, or the files that could not be read.
+///
+/// Scope is checked against its key, and the request goes out under its pinned ID:
+/// capabilities resolve their context again, and by name a kubeconfig change in between could
+/// reach a cluster that took the name since.
+async fn request_context(
+    cache: &srelens_kube::client_cache::ClientCache,
+    context: &str,
+) -> Result<srelens_kube::context_resolve::ResolvedContext, String> {
+    let paths = cache.paths().await;
+    let all = srelens_kube::context_resolve::resolve_contexts(&paths);
+    if let Some(resolved) = srelens_kube::context_resolve::find_context(&all, context) {
+        // The request goes on under the pinned ID; without one it cannot go on safely.
+        if resolved.pinned_id().is_none() {
+            return Err(format!(
+                "the kubeconfig path of \"{context}\" cannot be made absolute"
+            ));
+        }
+        return Ok(resolved);
+    }
+    let unreadable = srelens_kube::context_resolve::unreadable_kubeconfigs(&paths);
+    Err(if unreadable.is_empty() {
+        format!("no kubeconfig declares the context \"{context}\"")
+    } else {
+        format!(
+            "the context \"{context}\" was not found, and these kubeconfig files could not be read: {}",
+            unreadable
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })
 }
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -95,8 +164,13 @@ impl Default for Inventory {
 enum Configure {
     #[serde(rename = "install")]
     Install {
-        #[serde(default)]
+        /// An Ed25519 signature: exactly 64 bytes.
+        #[serde(default, deserialize_with = "limits::signature")]
+        #[schemars(length(equal = 64))]
         signature: Option<Vec<u8>>,
+        /// The manifest text: at most 256 KiB.
+        #[serde(deserialize_with = "limits::manifest")]
+        #[schemars(length(max = 262144))]
         manifest: String,
         grants: Vec<String>,
     },
@@ -107,6 +181,8 @@ enum Configure {
     #[serde(rename = "settings")]
     Settings {
         id: String,
+        /// At most 64 KiB as compact JSON.
+        #[serde(deserialize_with = "limits::settings")]
         settings: serde_json::Map<String, Value>,
     },
     /// Restores a kept version. Its permissions are granted again, so `grants` is the
@@ -117,6 +193,22 @@ enum Configure {
         revision: u64,
         grants: Vec<String>,
     },
+    /// Limits the app to these kubeconfig context names, or with `null` allows every cluster.
+    #[serde(rename = "clusters")]
+    Clusters {
+        id: String,
+        /// Required: leaving it out is refused rather than read as `null`, which would
+        /// quietly allow the app on every cluster.
+        #[serde(deserialize_with = "Option::deserialize")]
+        #[schemars(schema_with = "context_names_or_null")]
+        contexts: Option<Vec<String>>,
+    },
+}
+/// The schema of the clusters action's `contexts`: a list of names or `null`, never absent.
+fn context_names_or_null(
+    generator: &mut schemars::gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    <Option<Vec<String>>>::json_schema(generator)
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -135,12 +227,19 @@ struct Read {
 struct Empty {}
 
 fn read(path: &Path) -> Result<Inventory, String> {
-    let raw = match fs::read(path) {
-        Ok(v) => v,
+    // One byte past the limit is enough to refuse it, so an oversized file is never loaded whole.
+    let mut raw = Vec::new();
+    match fs::File::open(path).and_then(|file| {
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(file, MAX_INVENTORY_BYTES as u64 + 1),
+            &mut raw,
+        )
+    }) {
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Inventory::default()),
         Err(e) => return Err(format!("read extension inventory: {e}")),
     };
-    if raw.len() > 1024 * 1024 {
+    if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
     }
     let mut stored: Value =
@@ -197,7 +296,13 @@ fn read(path: &Path) -> Result<Inventory, String> {
     Ok(state)
 }
 fn reverify(plugin: &Installed) -> Result<(), String> {
+    // An entry stored before the namespace was reserved, or added by hand, gets no more
+    // trust from the file than an install would give it.
+    if let Some(reason) = unsigned_reserved(&plugin.manifest.id, plugin.signature_proof.is_some()) {
+        return Err(reason);
+    }
     plugin.manifest.validate()?;
+    crd::group_problems(&plugin.manifest).into_result()?;
     if let Some(proof) = &plugin.signature_proof {
         verify_proof(proof, &plugin.manifest)?;
     }
@@ -233,17 +338,7 @@ fn write(path: &Path, state: &Inventory) -> Result<(), String> {
     if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
     }
-    let parent = path
-        .parent()
-        .ok_or("extension inventory has no parent directory")?;
-    let result = (|| -> Result<(), std::io::Error> {
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        file.write_all(&raw)?;
-        file.as_file().sync_all()?;
-        file.persist(path).map_err(|e| e.error)?;
-        Ok(())
-    })();
-    result.map_err(|e| format!("save extension inventory: {e}"))
+    crate::durable::replace(path, &raw).map_err(|e| format!("save extension inventory: {e}"))
 }
 /// The manifest's own rules and this app's narrower ones, reporting every violation.
 fn validate_app(
@@ -363,6 +458,13 @@ fn validate_app(
             ),
         }
     }
+    // Built-in groups such as apps are not custom resources, whatever their syntax.
+    let groups: Vec<_> = crd::group_problems(manifest)
+        .0
+        .into_iter()
+        .filter(|found| !problems.0.iter().any(|p| p.path == found.path))
+        .collect();
+    problems.0.extend(groups);
     // Table surfaces have a resource-row contract; event readers are only valid
     // in the explicitly typed dashboard event slot.
     let contributions: [(&str, Vec<&String>); 3] = [
@@ -468,6 +570,13 @@ fn validate_app(
     }
     problems.into_result()
 }
+/// Why an app under `id` cannot be trusted without a publisher signature, when it has none
+/// and `id` is in a trusted publisher's namespace. Install refuses it; loading quarantines
+/// a stored one, which `enable` then refuses; rollback refuses to restore one.
+fn unsigned_reserved(id: &str, signed: bool) -> Option<String> {
+    (!signed && signing::reserved(id))
+        .then(|| format!("App ID {id} is reserved for signed srelens releases"))
+}
 /// Every reason installing `source` with these grants and signature would be refused.
 fn check_install(
     source: &str,
@@ -479,24 +588,21 @@ fn check_install(
     let mut problems = validate_app(&manifest, grants, core)
         .err()
         .unwrap_or_default();
-    match signature {
-        // Without this, a pasted manifest could replace a signed app, or take an
-        // official ID and its logo, differing from the real one only by a label.
-        None if signing::reserved(&manifest.id) => problems.push(
+    // Without this, a pasted manifest could replace a signed app, or take an
+    // official ID and its logo, differing from the real one only by a label.
+    if let Some(reason) = unsigned_reserved(&manifest.id, signature.is_some()) {
+        problems.push(
             Code::ReservedId,
             "id",
             format!(
-                "App ID {} is reserved for signed srelens releases. Install it from the Catalog, or give your local manifest its own ID.",
-                manifest.id
+                "{reason}. Install it from the Catalog, or give your local manifest its own ID."
             ),
-        ),
-        None => {}
-        // The signature covers the exact bytes, so it is checked whatever else is wrong.
-        Some(signature) => {
-            if let Err(reason) = signing::verify_for(&manifest.id, source.as_bytes(), signature)
-            {
-                problems.push(Code::InvalidSignature, "", reason);
-            }
+        );
+    }
+    // The signature covers the exact bytes, so it is checked whatever else is wrong.
+    if let Some(signature) = signature {
+        if let Err(reason) = signing::verify_for(&manifest.id, source.as_bytes(), signature) {
+            problems.push(Code::InvalidSignature, "", reason);
         }
     }
     problems.into_result()?;
@@ -548,8 +654,9 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 .iter()
                 .position(|p| p.manifest.id == manifest.id)
                 .map(|i| state.plugins.remove(i));
-            // An update keeps the app's settings, and the version it replaces for rollback.
-            let (settings, history) = match previous {
+            // An update keeps the app's settings and clusters, and the version it replaces
+            // for rollback.
+            let (settings, history, contexts) = match previous {
                 Some(Installed {
                     signature_proof: replaced_proof,
                     manifest: replaced,
@@ -559,6 +666,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                     installed_at: replaced_at,
                     settings,
                     mut history,
+                    contexts,
                     ..
                 }) => {
                     history.insert(
@@ -573,9 +681,9 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                         },
                     );
                     history.truncate(KEPT_VERSIONS);
-                    (settings, history)
+                    (settings, history, contexts)
                 }
-                None => (Default::default(), Vec::new()),
+                None => (Default::default(), Vec::new(), None),
             };
             state.plugins.push(Installed {
                 signature_proof,
@@ -588,6 +696,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 source: origin,
                 installed_at: now(),
                 history,
+                contexts,
             });
             state
                 .plugins
@@ -624,6 +733,11 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             let target = app.history[index].clone();
             // A restored version is checked as installing it now would be: against its
             // publisher signature, and against this host's rules with the grants given now.
+            if let Some(reason) =
+                unsigned_reserved(&target.manifest.id, target.signature_proof.is_some())
+            {
+                return Err(format!("{reason}. Reinstall it from the Catalog."));
+            }
             if let Some(proof) = &target.signature_proof {
                 verify_proof(proof, &target.manifest)?;
             }
@@ -638,6 +752,28 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             app.quarantined = None;
             // A new revision, so views pinned to the rolled-away version refresh.
             app.revision = next;
+        }
+        Configure::Clusters { id, contexts } => {
+            if let Some(contexts) = &contexts {
+                // An empty list would be a second way to disable the app.
+                if contexts.is_empty() || contexts.len() > 256 {
+                    return Err("Choose 1–256 clusters, or allow the app on every cluster".into());
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for context in contexts {
+                    if context.trim().is_empty() || !seen.insert(context.as_str()) {
+                        return Err(format!(
+                            "Cluster names must be non-empty and listed once: {context:?}"
+                        ));
+                    }
+                }
+            }
+            state
+                .plugins
+                .iter_mut()
+                .find(|p| p.manifest.id == id)
+                .ok_or("Extension is not installed")?
+                .contexts = contexts;
         }
         Configure::Enable { id, enabled } => {
             let p = state
@@ -678,10 +814,15 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ValidateIn {
+    /// The manifest text: at most 256 KiB.
+    #[serde(deserialize_with = "limits::manifest")]
+    #[schemars(length(max = 262144))]
     manifest: String,
     #[serde(default)]
     grants: Vec<String>,
-    #[serde(default)]
+    /// An Ed25519 signature: exactly 64 bytes.
+    #[serde(default, deserialize_with = "limits::signature")]
+    #[schemars(length(equal = 64))]
     signature: Option<Vec<u8>>,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -689,9 +830,14 @@ struct ValidationReport {
     /// Empty when the manifest could be installed with these grants.
     errors: Vec<ValidationError>,
 }
-pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
+pub fn register(
+    reg: &mut Registry,
+    path: PathBuf,
+    core: Arc<Registry>,
+    cache: Arc<srelens_kube::client_cache::ClientCache>,
+) {
     catalog::register(reg, path.with_extension("catalog.json"), core.clone());
-    resource::register(reg, path.clone(), core.clone());
+    resource::register(reg, path.clone(), core.clone(), cache.clone());
     let p = path.clone();
     reg.register(Capability::typed::<Empty, Inventory, _, _>(
         "extensions.list",
@@ -748,7 +894,9 @@ pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
         move |input: Read| {
             let p = path.clone();
             let c = core.clone();
+            let k = cache.clone();
             async move {
+                let resolved = request_context(&k, &input.context).await;
                 if input.context.trim().is_empty() {
                     return Err(CapabilityError::InvalidInput(
                         "An explicit cluster context is required".into(),
@@ -782,19 +930,35 @@ pub fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
                             "Extension was disabled, removed or updated; refresh the view".into(),
                         )
                     })?;
+                plugin.check_scope(&resolved)?;
                 validate_app(&plugin.manifest, &plugin.grants, c.clone())
                     .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
                 let mut manifest = plugin.manifest.clone();
                 if input.use_crd_columns {
-                    if let Some(binding) = manifest.capabilities.iter_mut().find(|b| b.name == input.capability && b.target == "k8s.listCustomResource") {
-                        binding.arguments.insert("useCrdColumns".into(), json!(true));
+                    if let Some(binding) = manifest.capabilities.iter_mut().find(|b| {
+                        b.name == input.capability && b.target == "k8s.listCustomResource"
+                    }) {
+                        binding
+                            .arguments
+                            .insert("useCrdColumns".into(), json!(true));
                     }
+                }
+                let context = resolved
+                    .ok()
+                    .and_then(|context| context.pinned_id())
+                    .unwrap_or(input.context);
+                if let Some(binding) =
+                    plugin.manifest.capabilities.iter().find(|b| {
+                        b.name == input.capability && b.target == "k8s.listCustomResource"
+                    })
+                {
+                    crd::require(&c, &context, binding).await?;
                 }
                 let mut registry = Registry::new();
                 let _registration = PluginHost::new(c)
                     .register(&mut registry, manifest, &plugin.grants)
                     .map_err(CapabilityError::Handler)?;
-                let mut args = json!({"context":input.context});
+                let mut args = json!({ "context": context });
                 if plugin
                     .manifest
                     .capabilities
@@ -977,14 +1141,132 @@ mod tests {
         );
     }
 
-    fn setup(path: &std::path::Path) -> Registry {
-        let core = crate::build_registry_with_paths(
-            srelens_kube::client_cache::ClientCache::new_many(vec![]),
-            vec![],
+    #[tokio::test]
+    async fn oversized_caller_inputs_are_refused_with_the_field_and_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = setup(&dir.path().join("extensions.json"));
+        let grants = json!(["k8s.listCustomResource"]);
+        let refused = |capability: &'static str, input: Value| {
+            let reg = &reg;
+            async move {
+                match reg.invoke(capability, input).await {
+                    Err(CapabilityError::InvalidInput(message)) => message,
+                    other => panic!("{capability} was not refused as invalid input: {other:?}"),
+                }
+            }
+        };
+
+        let huge_signature = vec![0u8; 1024 * 1024];
+        let message = refused(
+            "extensions.validate",
+            json!({"manifest": manifest(), "grants": grants, "signature": huge_signature}),
+        )
+        .await;
+        assert!(
+            message.contains("signature must be exactly 64 bytes"),
+            "{message}"
         );
+        let message = refused(
+            "extensions.configure",
+            json!({"action": "install", "manifest": manifest(), "grants": grants, "signature": huge_signature}),
+        )
+        .await;
+        assert!(
+            message.contains("signature must be exactly 64 bytes"),
+            "{message}"
+        );
+        let message = refused(
+            "extensions.validate",
+            json!({"manifest": manifest(), "grants": grants, "signature": [1, 2, 3]}),
+        )
+        .await;
+        assert!(
+            message.contains("signature must be exactly 64 bytes"),
+            "{message}"
+        );
+
+        let huge_manifest = " ".repeat(srelens_plugin_host::MAX_MANIFEST_BYTES + 1);
+        for (capability, input) in [
+            (
+                "extensions.validate",
+                json!({"manifest": huge_manifest, "grants": grants}),
+            ),
+            (
+                "extensions.configure",
+                json!({"action": "install", "manifest": huge_manifest, "grants": grants}),
+            ),
+        ] {
+            let message = refused(capability, input).await;
+            assert!(message.contains("manifest exceeds 256 KiB"), "{message}");
+        }
+
+        // Within the limits, the calls behave as before.
+        assert_eq!(
+            reg.invoke(
+                "extensions.validate",
+                json!({"manifest": manifest(), "grants": grants})
+            )
+            .await
+            .unwrap(),
+            json!({"errors": []})
+        );
+        reg.invoke(
+            "extensions.configure",
+            json!({"action": "install", "manifest": manifest(), "grants": grants}),
+        )
+        .await
+        .unwrap();
+        let message = refused(
+            "extensions.configure",
+            json!({"action": "settings", "id": "org.example.argocd",
+                   "settings": {"note": "x".repeat(64 * 1024)}}),
+        )
+        .await;
+        assert!(message.contains("settings exceed 64 KiB"), "{message}");
+        let listed = reg.invoke("extensions.list", json!({})).await.unwrap();
+        assert_eq!(listed["plugins"][0]["settings"], json!({}));
+        reg.invoke(
+            "extensions.configure",
+            json!({"action": "settings", "id": "org.example.argocd", "settings": {"team": "platform"}}),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn an_oversized_inventory_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        fs::write(&path, vec![b' '; MAX_INVENTORY_BYTES + 1]).unwrap();
+        assert_eq!(
+            read(&path).err().as_deref(),
+            Some("extension inventory exceeds 1 MiB")
+        );
+        // Exactly at the limit it is parsed, so the refusal above is about size alone.
+        fs::write(&path, vec![b' '; MAX_INVENTORY_BYTES]).unwrap();
+        let parsed = read(&path).err().unwrap_or_default();
+        assert!(parsed.starts_with("parse extension inventory"), "{parsed}");
+    }
+
+    fn setup(path: &std::path::Path) -> Registry {
+        setup_with(path, vec![]).0
+    }
+    /// A registry whose client cache connects with `kubeconfigs`, returned so a test can
+    /// change the files it resolves contexts from.
+    fn setup_with(
+        path: &std::path::Path,
+        kubeconfigs: Vec<PathBuf>,
+    ) -> (Registry, Arc<srelens_kube::client_cache::ClientCache>) {
+        let cache = srelens_kube::client_cache::ClientCache::new_many(kubeconfigs.clone());
+        let core = crate::build_registry_with_paths(cache.clone(), kubeconfigs);
         let mut reg = Registry::new();
-        register(&mut reg, path.to_path_buf(), std::sync::Arc::new(core));
-        reg
+        register(
+            &mut reg,
+            path.to_path_buf(),
+            std::sync::Arc::new(core),
+            cache.clone(),
+        );
+        (reg, cache)
     }
     #[test]
     fn signed_install_rechecks_and_persists_proof_without_trusting_labels() {
@@ -992,11 +1274,19 @@ mod tests {
         let path = dir.path().join("apps.json");
         let source = include_str!("../tests/fixtures/argocd-manifest.json");
         let signature = include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec();
-        let install = |manifest: String, signature: Vec<u8>| serde_json::from_value::<Configure>(json!({
-            "action": "install", "manifest": manifest,
-            "signature": signature, "grants": ["k8s.listCustomResource"]
-        })).unwrap();
-        mutate(&path, fake_core(), install(source.into(), signature.clone())).unwrap();
+        let install = |manifest: String, signature: Vec<u8>| {
+            serde_json::from_value::<Configure>(json!({
+                "action": "install", "manifest": manifest,
+                "signature": signature, "grants": ["k8s.listCustomResource"]
+            }))
+            .unwrap()
+        };
+        mutate(
+            &path,
+            fake_core(),
+            install(source.into(), signature.clone()),
+        )
+        .unwrap();
         assert!(read(&path).unwrap().plugins[0].signature_proof.is_some());
         assert!(mutate(&path, fake_core(), install(format!("{source} "), signature)).is_err());
         let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -1011,7 +1301,7 @@ mod tests {
             .contains("does not match"));
     }
     /// The example manifest under an unreserved ID, as a local author would install it.
-    fn manifest() -> String {
+    pub(super) fn manifest() -> String {
         include_str!("../tests/fixtures/argocd-manifest.json")
             .replace("\"org.srelens.argocd\"", "\"org.example.argocd\"")
     }
@@ -1130,13 +1420,15 @@ mod tests {
     fn kept_versions_give_way_before_the_inventory_outgrows_its_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("apps.json");
-        // A valid manifest with thousands of small entries. The inventory is saved
-        // pretty-printed, so each copy takes about 400 KiB there: the installed version
-        // and three kept ones cannot all fit in 1 MiB.
+        // A valid manifest padded under the 256 KiB decode limit. The inventory is
+        // saved pretty-printed, so the installed version and three kept ones cannot
+        // all fit in 1 MiB. Inflate via `$schema` (host-ignored) rather than
+        // printerColumns, which are capped at 32 (#609).
         let large = |version: &str| {
             let mut value: Value = serde_json::from_str(&manifest_at(version)).unwrap();
-            value["capabilities"][0]["arguments"]["printerColumns"] =
-                json!(vec![json!({"name": "c", "jsonPath": ".a"}); 4300]);
+            let base = value.to_string().len();
+            let pad = (256 * 1024usize).saturating_sub(base + 32);
+            value["$schema"] = json!("x".repeat(pad));
             value.to_string()
         };
         for minor in 1..=4 {
@@ -1159,6 +1451,343 @@ mod tests {
             "the newest are kept"
         );
         assert!(fs::metadata(&path).unwrap().len() <= 1024 * 1024);
+    }
+    #[tokio::test]
+    async fn an_app_limited_to_some_clusters_is_refused_on_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let config = kubeconfig(dir.path(), "clusters.yaml", &["cluster/a", "cluster/b"]);
+        let (reg, _cache) = setup_with(&path, vec![config.clone()]);
+        let a = format!("{}#cluster/a", config.display());
+        let revision = install(&path, fake_core());
+        let limit = |contexts: Value| {
+            configure(
+                &path,
+                json!({"action":"clusters","id":"org.example.argocd","contexts":contexts}),
+            )
+        };
+        // An empty list would be a second way to disable the app; a blank or repeated name
+        // is a mistake.
+        assert!(limit(json!([])).is_err());
+        assert!(limit(json!([" "])).is_err());
+        assert!(limit(json!([&a, &a])).is_err());
+        let only_a = Some(vec![a.clone()]);
+        assert_eq!(limit(json!([&a])).unwrap().plugins[0].contexts, only_a);
+
+        let selected =
+            json!({"id":"org.example.argocd","revision":revision,"capability":"applications"});
+        let on = |context: &str, extra: Value| {
+            let mut payload = selected.clone();
+            payload["context"] = json!(context);
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            payload
+        };
+        let resource = on("cluster/b", json!({"namespace":"team","name":"app"}));
+        for (capability, payload) in [
+            ("extensions.read", on("cluster/b", json!({"namespace":""}))),
+            ("extensions.resource", resource.clone()),
+            (
+                "extensions.action",
+                json!({"resource":resource,"action":"suspend","uid":"u","resourceVersion":"1"}),
+            ),
+        ] {
+            let error = reg
+                .invoke(capability, payload)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("App is not enabled for this cluster"),
+                "{capability}: {error}"
+            );
+        }
+
+        // An update keeps the list, like settings; clearing it allows every cluster again.
+        let updated = configure(
+            &path,
+            json!({"action":"install","manifest":manifest_at("0.2.0"),"grants":["k8s.listCustomResource"]}),
+        )
+        .unwrap();
+        assert_eq!(updated.plugins[0].contexts, only_a);
+        assert_eq!(limit(Value::Null).unwrap().plugins[0].contexts, None);
+    }
+    #[test]
+    fn the_clusters_action_needs_an_explicit_list_or_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        install(&path, fake_core());
+        let only_a = Some(vec!["cluster/a".to_owned()]);
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd","contexts":["cluster/a"]}),
+        )
+        .unwrap();
+        // Leaving the list out must not quietly allow the app on every cluster.
+        assert!(configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd"})
+        )
+        .is_err());
+        assert_eq!(read(&path).unwrap().plugins[0].contexts, only_a);
+        // The input schema callers such as MCP clients see says the same.
+        let reg = setup(&path);
+        let input = &reg.get("extensions.configure").unwrap().input_schema;
+        let clusters = input["oneOf"]
+            .as_array()
+            .expect("a tagged union of actions")
+            .iter()
+            .find(|variant| variant["properties"]["action"]["enum"] == json!(["clusters"]))
+            .expect("a clusters action");
+        assert!(
+            clusters["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&json!("contexts"))),
+            "{clusters}"
+        );
+    }
+    /// A kubeconfig declaring each of `contexts` against an unreachable server, for tests
+    /// that resolve context names without a cluster.
+    pub(super) fn kubeconfig(dir: &Path, file: &str, contexts: &[&str]) -> PathBuf {
+        let path = dir.join(file);
+        let mut yaml = String::from(
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1\nusers:\n- name: u\n  user: {}\ncontexts:\n",
+        );
+        for context in contexts {
+            yaml.push_str(&format!(
+                "- name: {context}\n  context:\n    cluster: c\n    user: u\n"
+            ));
+        }
+        fs::write(&path, yaml).unwrap();
+        path
+    }
+    #[tokio::test]
+    async fn clusters_are_kept_by_stable_id_so_a_same_named_context_cannot_inherit_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let (reg, cache) = setup_with(&path, vec![first.clone()]);
+        let revision = install(&path, fake_core());
+        let first_default = format!("{}#default", first.display());
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd","contexts":[first_default]}),
+        )
+        .unwrap();
+        let refused = |context: &str| {
+            let reg = reg.clone();
+            let payload = json!({"id":"org.example.argocd","revision":revision,
+                "capability":"applications","context":context,"namespace":""});
+            async move {
+                reg.invoke("extensions.read", payload)
+                    .await
+                    .is_err_and(|error| error.to_string().contains(NOT_ENABLED_FOR_CLUSTER))
+            }
+        };
+        // The chosen context is allowed; the read then fails to reach the fixture server.
+        assert!(!refused("default").await);
+
+        // Another kubeconfig declaring `default` renames both to `first/default` and
+        // `second/default`: the app follows its own cluster, not the name.
+        let second = kubeconfig(dir.path(), "second.yaml", &["default"]);
+        cache.ensure_paths(vec![second.clone()]).await;
+        assert!(!refused("first/default").await);
+        assert!(refused("second/default").await);
+
+        // With the first kubeconfig gone, the remaining `default` is another cluster.
+        cache.set_paths(vec![second]).await;
+        assert!(refused("default").await);
+    }
+    /// Scope is checked against one resolution of the context name. The read goes out under
+    /// the stable ID that was checked, so a kubeconfig change in between cannot hand the name
+    /// to another cluster when the capability resolves it again.
+    #[tokio::test]
+    async fn a_read_goes_to_the_cluster_its_scope_was_checked_against() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let core = fake_core();
+        let revision = install(&path, core.clone());
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![first.clone()]),
+        );
+        let output = reg
+            .invoke(
+                "extensions.read",
+                json!({"id":"org.example.argocd","revision":revision,
+                    "capability":"applications","context":"default","namespace":""}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            output["context"],
+            format!("srelens-context:{}#default", first.display())
+        );
+    }
+    /// A context can be named anything, including another context's stable ID. A request the
+    /// broker sends under that ID reaches the context the ID names, and never the one that
+    /// happens to be called it, even once the named context is gone.
+    #[test]
+    fn a_context_named_like_a_stable_id_cannot_take_a_pinned_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let first_default = format!("srelens-context:{}#default", first.display());
+        let impostor = kubeconfig(dir.path(), "impostor.yaml", &[&first_default]);
+        let reached = |paths: &[PathBuf]| {
+            srelens_kube::context_resolve::resolve_context(paths, &first_default)
+                .map(|context| context.source)
+        };
+        // Alone, the ID reaches its context; with the impostor listed, the string means two
+        // things, so it reaches nothing rather than either.
+        assert_eq!(reached(&[first.clone()]), Some(first.clone()));
+        assert_eq!(reached(&[impostor.clone(), first]), None);
+        assert_eq!(reached(&[impostor]), None);
+    }
+    /// A kubeconfig can be given by a relative path, and its contexts' stable IDs keep that
+    /// path: they are persisted (context profiles, remembered namespaces, app clusters), so
+    /// they must not change. A checked request still goes on under an absolute ID, which a
+    /// context named after it cannot take.
+    #[tokio::test]
+    async fn a_relative_kubeconfig_keeps_its_stable_id_but_requests_pin_an_absolute_one() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let relative = PathBuf::from(dir.path().file_name().unwrap()).join("first.yaml");
+        let stable = format!("{}#default", relative.display());
+        let given = [relative.clone()];
+        let listed = srelens_kube::context_resolve::resolve_contexts(&given);
+        assert_eq!(listed[0].stable_id(), stable);
+
+        let path = dir.path().join("extensions.json");
+        let core = fake_core();
+        let revision = install(&path, core.clone());
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd","contexts":[&stable]}),
+        )
+        .unwrap();
+        let mut reg = Registry::new();
+        let cache = srelens_kube::client_cache::ClientCache::new_many(vec![relative.clone()]);
+        register(&mut reg, path, core, cache);
+        let output = reg
+            .invoke(
+                "extensions.read",
+                json!({"id":"org.example.argocd","revision":revision,
+                    "capability":"applications","context":"default","namespace":""}),
+            )
+            .await
+            .unwrap();
+        let pinned = output["context"].as_str().unwrap().to_owned();
+        assert!(
+            Path::new(pinned.strip_prefix("srelens-context:").unwrap()).is_absolute()
+                && pinned.ends_with("first.yaml#default"),
+            "{pinned}"
+        );
+
+        let impostor = kubeconfig(dir.path(), "impostor.yaml", &[&pinned]);
+        let reached = |paths: &[PathBuf]| {
+            srelens_kube::context_resolve::resolve_context(paths, &pinned)
+                .map(|context| context.original_name)
+        };
+        assert_eq!(reached(&[relative.clone()]), Some("default".to_owned()));
+        assert_eq!(reached(&[impostor.clone(), relative]), None);
+        assert_eq!(reached(&[impostor]), None);
+    }
+    /// A file path and a context name can both contain `#`, so two contexts can share one
+    /// stable ID: `a` + `b#c` and `a#b` + `c`. The cluster list keys on the context key, which
+    /// encodes both parts, so the chosen cluster is the only one that gets the app, even
+    /// when the other is added after the chosen one is gone (they need never coexist).
+    #[tokio::test]
+    async fn an_apps_cluster_list_keys_on_the_context_key_not_the_shared_stable_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "a", &["b#c"]);
+        let second = kubeconfig(dir.path(), "a#b", &["c"]);
+        let listed =
+            srelens_kube::context_resolve::resolve_contexts(&[first.clone(), second.clone()]);
+        assert_eq!(listed[0].stable_id(), listed[1].stable_id());
+        let (reg, cache) = setup_with(&path, vec![first.clone(), second.clone()]);
+        let revision = install(&path, fake_core());
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd","contexts":[listed[0].key()]}),
+        )
+        .unwrap();
+        let refused = |context: String| {
+            let reg = reg.clone();
+            let payload = json!({"id":"org.example.argocd","revision":revision,
+                "capability":"applications","context":context,"namespace":""});
+            async move {
+                reg.invoke("extensions.read", payload)
+                    .await
+                    .is_err_and(|error| error.to_string().contains(NOT_ENABLED_FOR_CLUSTER))
+            }
+        };
+        assert!(!refused(listed[0].pinned_id().unwrap()).await);
+        assert!(refused(listed[1].pinned_id().unwrap()).await);
+        // The chosen context is gone and the other is the sole holder of the stable ID.
+        cache.set_paths(vec![second]).await;
+        assert!(refused("c".to_owned()).await);
+    }
+    /// A limited app is refused on a context the host cannot resolve, but with why: whether
+    /// the app is enabled there is unknown, which is not the same as not enabled.
+    #[tokio::test]
+    async fn an_unresolvable_context_is_refused_with_the_reason_not_as_a_denial() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let first = kubeconfig(dir.path(), "first.yaml", &["default"]);
+        let (reg, _cache) = setup_with(&path, vec![first.clone()]);
+        let revision = install(&path, fake_core());
+        configure(
+            &path,
+            json!({"action":"clusters","id":"org.example.argocd",
+                "contexts":[format!("{}#default", first.display())]}),
+        )
+        .unwrap();
+        let refusal = |context: &str| {
+            let reg = reg.clone();
+            let payload = json!({"id":"org.example.argocd","revision":revision,
+                "capability":"applications","context":context,"namespace":""});
+            async move {
+                reg.invoke("extensions.read", payload)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+            }
+        };
+        let missing = refusal("elsewhere").await;
+        assert!(!missing.contains(NOT_ENABLED_FOR_CLUSTER), "{missing}");
+        assert!(
+            missing.contains("no kubeconfig declares the context \"elsewhere\""),
+            "{missing}"
+        );
+
+        // The allowed context's kubeconfig can no longer be read: still refused, and says so.
+        fs::write(&first, "contexts: [").unwrap();
+        let unreadable = refusal("default").await;
+        assert!(
+            !unreadable.contains(NOT_ENABLED_FOR_CLUSTER),
+            "{unreadable}"
+        );
+        assert!(
+            unreadable.contains("could not be read") && unreadable.contains("first.yaml"),
+            "{unreadable}"
+        );
+
+        // Only the path: a parse error can quote the file's contents, credentials included.
+        fs::write(
+            &first,
+            "apiVersion: v1\nkind: Config\nusers: \"hunter2-token\"\n",
+        )
+        .unwrap();
+        let quoted = refusal("default").await;
+        assert!(quoted.contains("first.yaml"), "{quoted}");
+        assert!(!quoted.contains("hunter2-token"), "{quoted}");
     }
     #[test]
     fn history_keeps_the_three_versions_before_the_installed_one() {
@@ -1328,6 +1957,239 @@ mod tests {
             json!([])
         );
     }
+    /// The reader binding of `manifest()` retargeted at a built-in API.
+    fn bind_builtin(source: &mut Value, group: &str, plural: &str, kind: &str) {
+        let arguments = &mut source["capabilities"][0]["arguments"];
+        arguments["group"] = json!(group);
+        arguments["version"] = json!("v1");
+        arguments["plural"] = json!(plural);
+        arguments["kind"] = json!(kind);
+    }
+    #[tokio::test]
+    async fn built_in_api_groups_cannot_be_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = setup(&dir.path().join("extensions.json"));
+        for (group, plural, kind) in [
+            ("apps", "deployments", "Deployment"),
+            ("batch", "jobs", "Job"),
+            ("apps.", "deployments", "Deployment"),
+        ] {
+            let mut source: Value = serde_json::from_str(&manifest()).unwrap();
+            bind_builtin(&mut source, group, plural, kind);
+            let manifest = source.to_string();
+            let grants = json!(["k8s.listCustomResource"]);
+            let report = reg
+                .invoke(
+                    "extensions.validate",
+                    json!({"manifest": manifest, "grants": grants}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                report["errors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| (e["code"].as_str().unwrap(), e["path"].as_str().unwrap()))
+                    .collect::<Vec<_>>(),
+                [(
+                    "EXTENSION_INVALID_BINDING",
+                    "capabilities[0].arguments.group"
+                )],
+                "{group}"
+            );
+            let refused = reg
+                .invoke(
+                    "extensions.configure",
+                    json!({"action":"install","manifest": manifest,"grants": grants}),
+                )
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                refused.contains("capabilities[0].arguments.group"),
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            reg.invoke("extensions.list", json!({})).await.unwrap()["plugins"],
+            json!([])
+        );
+    }
+    /// A dotted group under `k8s.io` may be a CRD's, so installing it is left to the
+    /// per-cluster check; the built-in `networking.k8s.io` is refused there instead.
+    #[tokio::test]
+    async fn crd_groups_under_k8s_io_install_and_are_checked_per_cluster() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let mut core = (*fake_core()).clone();
+        serve_crds(&mut core, &["gateways.gateway.networking.k8s.io/v1"]);
+        let core = Arc::new(core);
+        let reader = |id: &str, group: &str, plural: &str, kind: &str| {
+            let mut source: Value = serde_json::from_str(&manifest()).unwrap();
+            source["id"] = json!(id);
+            bind_builtin(&mut source, group, plural, kind);
+            Configure::Install {
+                signature: None,
+                manifest: source.to_string(),
+                grants: vec!["k8s.listCustomResource".into()],
+            }
+        };
+        let state = mutate(
+            &path,
+            core.clone(),
+            reader(
+                "org.example.gateway",
+                "gateway.networking.k8s.io",
+                "gateways",
+                "Gateway",
+            ),
+        )
+        .unwrap();
+        let gateway = find(&state, "org.example.gateway").revision;
+        let state = mutate(
+            &path,
+            core.clone(),
+            reader(
+                "org.example.ingress",
+                "networking.k8s.io",
+                "ingresses",
+                "Ingress",
+            ),
+        )
+        .unwrap();
+        let ingress = find(&state, "org.example.ingress").revision;
+        assert!(read(&path)
+            .unwrap()
+            .plugins
+            .iter()
+            .all(|p| p.enabled && p.quarantined.is_none()));
+
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        let read_args = |id: &str, revision: u64| json!({"id":id,"revision":revision,"capability":"applications","context":"staging","namespace":""});
+        assert!(reg
+            .invoke("extensions.read", read_args("org.example.gateway", gateway))
+            .await
+            .is_ok());
+        let refused = reg
+            .invoke("extensions.read", read_args("org.example.ingress", ingress))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("No CustomResourceDefinition ingresses.networking.k8s.io serving v1"),
+            "{refused}"
+        );
+    }
+    #[tokio::test]
+    async fn a_stored_app_binding_a_built_in_group_is_quarantined_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let core = fake_core();
+        let revision = install(&path, core.clone());
+        let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        bind_builtin(
+            &mut stored["plugins"][0]["manifest"],
+            "apps",
+            "deployments",
+            "Deployment",
+        );
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let state = read(&path).unwrap();
+        let app = &state.plugins[0];
+        assert!(!app.enabled);
+        let reason = app.quarantined.as_deref().unwrap();
+        assert!(
+            reason.contains("capabilities[0].arguments.group"),
+            "{reason}"
+        );
+
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            path.clone(),
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        assert!(reg
+            .invoke(
+                "extensions.read",
+                json!({"id":"org.example.argocd","revision":revision,
+                    "capability":"applications","context":"staging","namespace":""}),
+            )
+            .await
+            .is_err());
+    }
+    #[tokio::test]
+    async fn a_read_is_refused_unless_the_cluster_has_the_bound_crd() {
+        static LISTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let revision = install(&path, fake_core());
+        let read_on = |crds: &'static [&'static str], failing: bool| {
+            let mut core = (*fake_core()).clone();
+            let mut cap = core.get("k8s.listCustomResource").unwrap().clone();
+            cap.handler = Arc::new(|args| {
+                LISTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move { Ok(args) })
+            });
+            core.register(cap);
+            serve_crds(&mut core, crds);
+            if failing {
+                let mut cap = core.get(crd::CHECK).unwrap().clone();
+                cap.handler = Arc::new(|_| {
+                    Box::pin(async { Err(CapabilityError::Handler("forbidden".into())) })
+                });
+                core.register(cap);
+            }
+            let mut reg = Registry::new();
+            register(
+                &mut reg,
+                path.clone(),
+                Arc::new(core),
+                srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            );
+            async move {
+                reg.invoke(
+                    "extensions.read",
+                    json!({"id":"org.example.argocd","revision":revision,
+                        "capability":"applications","context":"staging","namespace":""}),
+                )
+                .await
+            }
+        };
+        // A dotted group served by an aggregated API, or a CRD this cluster lacks.
+        let absent = read_on(&[], false).await.unwrap_err().to_string();
+        assert!(
+            absent
+                .contains("No CustomResourceDefinition applications.argoproj.io serving v1alpha1"),
+            "{absent}"
+        );
+        // The CRD exists but does not serve the bound version, which another API may.
+        assert!(read_on(&["applications.argoproj.io/v1beta1"], false)
+            .await
+            .is_err());
+        // A lookup that failed says so, and is not reported as an absence.
+        let failed = read_on(&["applications.argoproj.io/v1alpha1"], true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(failed.contains("Could not confirm"), "{failed}");
+        assert!(failed.contains("forbidden"), "{failed}");
+        assert_eq!(LISTED.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        assert!(read_on(&["applications.argoproj.io/v1alpha1"], false)
+            .await
+            .is_ok());
+        assert_eq!(LISTED.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
     pub(super) fn fake_core() -> Arc<Registry> {
         let mut core = crate::build_registry_with_paths(
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
@@ -1336,14 +2198,34 @@ mod tests {
         let mut cap = core.get("k8s.listCustomResource").unwrap().clone();
         cap.handler = Arc::new(|args| Box::pin(async move { Ok(args) }));
         core.register(cap);
+        serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
         Arc::new(core)
+    }
+    /// Answers the broker's CRD check as a cluster whose CRDs serve exactly these
+    /// `{plural}.{group}/{version}` would.
+    pub(super) fn serve_crds(core: &mut Registry, names: &'static [&'static str]) {
+        let mut cap =
+            crd::check_capability(srelens_kube::client_cache::ClientCache::new_many(vec![]));
+        cap.handler = Arc::new(move |args| {
+            Box::pin(async move {
+                let name = format!(
+                    "{}.{}/{}",
+                    args["plural"].as_str().unwrap_or_default(),
+                    args["group"].as_str().unwrap_or_default(),
+                    args["version"].as_str().unwrap_or_default()
+                );
+                Ok(json!(names.contains(&name.as_str())))
+            })
+        });
+        core.register(cap);
     }
     pub(super) fn install(path: &Path, core: Arc<Registry>) -> u64 {
         mutate(
             path,
             core,
             Configure::Install {
-                    signature: None,                manifest: manifest(),
+                signature: None,
+                manifest: manifest(),
                 grants: vec!["k8s.listCustomResource".into()],
             },
         )
@@ -1358,7 +2240,12 @@ mod tests {
         let core = fake_core();
         let revision = install(&path, core.clone());
         let mut reader = Registry::new();
-        register(&mut reader, path.clone(), core.clone());
+        register(
+            &mut reader,
+            path.clone(),
+            core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
         let args = json!({"id":"org.example.argocd","revision":revision,"capability":"applications","context":"staging","namespace":"argo"});
         let output = reader
             .invoke("extensions.read", args.clone())
@@ -1467,7 +2354,8 @@ mod tests {
                 &path,
                 core.clone(),
                 Configure::Install {
-                    signature: None,                    manifest: source.to_string(),
+                    signature: None,
+                    manifest: source.to_string(),
                     grants: vec!["k8s.listCustomResource".into()]
                 }
             )
@@ -1489,7 +2377,8 @@ mod tests {
                 &path,
                 core.clone(),
                 Configure::Install {
-                    signature: None,                    manifest: source.to_string(),
+                    signature: None,
+                    manifest: source.to_string(),
                     grants: vec!["k8s.listCustomResource".into()]
                 }
             )
@@ -1570,7 +2459,8 @@ mod tests {
                         path,
                         core,
                         Configure::Install {
-                    signature: None,                            manifest: source.to_string(),
+                            signature: None,
+                            manifest: source.to_string(),
                             grants: vec!["k8s.listCustomResource".into()],
                         },
                     )
@@ -1612,7 +2502,12 @@ mod tests {
         assert!(healthy.enabled && healthy.quarantined.is_none());
 
         let mut reg = Registry::new();
-        register(&mut reg, path.clone(), core.clone());
+        register(
+            &mut reg,
+            path.clone(),
+            core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
         let listed = reg.invoke("extensions.list", json!({})).await.unwrap();
         assert!(listed["plugins"]
             .as_array()
@@ -1715,6 +2610,100 @@ mod tests {
 
         let lookalike = official.replace("\"org.srelens.argocd\"", "\"org.srelensx.argocd\"");
         assert!(mutate(&path, core, unsigned(&lookalike)).is_ok());
+    }
+    /// The saved inventory with the signature proof stripped from the app at `pointer`.
+    fn strip_proof(path: &Path, pointer: &str) {
+        let mut stored: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let removed = stored
+            .pointer_mut(pointer)
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .remove("signatureProof");
+        assert!(removed.is_some(), "{pointer} had no signature proof");
+        fs::write(path, serde_json::to_vec(&stored).unwrap()).unwrap();
+    }
+    #[test]
+    fn a_stored_unsigned_app_under_a_reserved_id_is_quarantined_and_cannot_be_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let core = fake_core();
+        mutate(&path, core.clone(), signed_argocd()).unwrap();
+        install(&path, core.clone());
+        // Signed and unsigned-elsewhere apps load as they were saved.
+        let state = read(&path).unwrap();
+        for id in ["org.srelens.argocd", "org.example.argocd"] {
+            let app = find(&state, id);
+            assert!(app.enabled && app.quarantined.is_none(), "{id}");
+        }
+        // As an entry saved before the namespace was reserved would be.
+        let official = state
+            .plugins
+            .iter()
+            .position(|p| p.manifest.id == "org.srelens.argocd")
+            .unwrap();
+        strip_proof(&path, &format!("/plugins/{official}"));
+
+        let state = read(&path).unwrap();
+        let stored = find(&state, "org.srelens.argocd");
+        assert!(!stored.enabled);
+        let reason = stored.quarantined.clone().unwrap();
+        assert_eq!(
+            reason,
+            "App ID org.srelens.argocd is reserved for signed srelens releases"
+        );
+        let local = find(&state, "org.example.argocd");
+        assert!(local.enabled && local.quarantined.is_none());
+
+        let refused = mutate(
+            &path,
+            core.clone(),
+            Configure::Enable {
+                id: "org.srelens.argocd".into(),
+                enabled: true,
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(refused.contains(&reason), "{refused}");
+        assert!(
+            refused.contains("reinstall it from the Catalog"),
+            "{refused}"
+        );
+
+        // Reinstalling the signed release lifts it.
+        mutate(&path, core, signed_argocd()).unwrap();
+        let restored = read(&path).unwrap();
+        let restored = find(&restored, "org.srelens.argocd");
+        assert!(restored.enabled && restored.quarantined.is_none());
+    }
+    #[test]
+    fn rollback_refuses_an_unsigned_version_under_a_reserved_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let core = fake_core();
+        mutate(&path, core.clone(), signed_argocd()).unwrap();
+        mutate(&path, core.clone(), signed_argocd()).unwrap();
+        strip_proof(&path, "/plugins/0/history/0");
+        let state = read(&path).unwrap();
+        let app = find(&state, "org.srelens.argocd");
+        assert!(app.enabled && app.quarantined.is_none());
+        let before = fs::read(&path).unwrap();
+        let refused = mutate(
+            &path,
+            core,
+            Configure::Rollback {
+                id: "org.srelens.argocd".into(),
+                revision: app.history[0].revision,
+                grants: vec!["k8s.listCustomResource".into()],
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(
+            refused.contains("reserved for signed srelens releases"),
+            "{refused}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
     #[test]
     fn facade_refuses_a_host_reader_that_requires_stronger_consent() {

@@ -11,7 +11,7 @@ import { defaultState } from "../lib/tabs";
 import { resetView, setLink } from "../lib/workspace";
 
 const ctx = (stableId: string, name: string): ClusterContext => ({
-  stableId, name, cluster: name, server: `https://${stableId}.example`, isCurrent: false,
+  stableId, key: stableId, name, cluster: name, server: `https://${stableId}.example`, isCurrent: false,
   sourceFile: "/mock/config", authKind: "client certificate",
 });
 const { listContexts } = vi.hoisted(() => ({ listContexts: vi.fn() }));

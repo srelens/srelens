@@ -48,8 +48,9 @@ credential plugins you configure.
   plugins (e.g. `kubectl oidc-login`, cloud CLIs) run locally exactly as
   `kubectl` would run them.
 - **MCP is opt-in** — the MCP server runs only when explicitly started
-  (`--mcp-stdio` / `--mcp-http`); the HTTP transport binds to loopback only,
-  and destructive tools require an explicit confirmation argument.
+  (`--mcp-stdio` / `--mcp-http`); the HTTP transport binds to loopback only
+  unless explicitly exposed with `--mcp-expose-http`, and destructive tools
+  require an explicit confirmation argument.
 - **Signed builds** — macOS builds are Developer-ID signed and notarized;
   in-app updater artifacts are signed and verified before install. Windows
   code signing and GPG-signed release assets are on the

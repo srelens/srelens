@@ -8,12 +8,12 @@ Consent rules are in [permissions.md](permissions.md).
 | Capability | Kind | Purpose |
 |---|---|---|
 | `extensions.list` | Read-only | The installed apps, with revision, grants, settings, source, install time, up to three replaced versions and any quarantine reason. |
-| `extensions.read` | Read-only | Run one of an installed app's declared readers, given its ID, revision, operation and context. |
+| `extensions.read` | Read-only | Run one of an installed app's declared readers, given its ID, revision, operation and context. Refused with "App is not enabled for this cluster" on a cluster the app is not enabled for; so are `extensions.resource` and `extensions.action`. All three also refuse a custom-resource reader unless a CustomResourceDefinition named `{plural}.{group}` serves its bound version on the cluster. |
 | `extensions.resource` | Read-only | Inspect one resource of an enabled app, with its events and supported actions. |
 | `extensions.catalog` | Read-only | Browse the catalog, from a 24-hour cache. Reports the host's supported API versions as `hostApiVersions`; the deprecated `hostApiVersion` still gives the newest. |
 | `extensions.catalogManifest` | Read-only | Download and verify one catalog release for review. Does not install it. |
-| `extensions.validate` | Read-only | Check a manifest, with its grants and optional signature, exactly as installing it would, and return every problem as `{code, path, message}` (see [Validation errors](specification.md#validation-errors)). Does not install it. |
-| `extensions.configure` | Mutating | Install, enable, remove or configure an app. An install that fails validation is refused with the same problems. |
+| `extensions.validate` | Read-only | Check a manifest, with its grants and optional signature, exactly as installing it would, and return every problem as `{code, path, message}` (see [Validation errors](specification.md#validation-errors)). Does not install it. A `signature` other than 64 bytes or a `manifest` over 256 KiB is refused as invalid input, not reported as a problem. |
+| `extensions.configure` | Mutating | Install, enable, remove or configure an app. An install that fails validation is refused with the same problems. `clusters` limits an app to chosen kubeconfig contexts by context key (`{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports under `key`; a stable ID can be shared by two contexts, #623), or with `null` allows every cluster. As with `extensions.validate`, a `signature` must be 64 bytes and a `manifest` at most 256 KiB, and `settings` must be at most 64 KiB as compact JSON. |
 | `extensions.action` | Mutating | Request a host GitOps action on an app resource. |
 
 The app facade refuses a host reader with stronger consent annotations than the

@@ -126,9 +126,9 @@ export async function listCustomResource(
   crd: CrdRef,
   namespace: string | null,
   invoke: Invoker = invokeCapability,
-): Promise<{ items?: CustomRow[]; error?: string }> {
+): Promise<{ items?: CustomRow[]; truncated?: boolean; error?: string }> {
   try {
-    const out = await invoke<{ items: CustomRow[] }>("k8s.listCustomResource", {
+    const out = await invoke<{ items: CustomRow[]; truncated?: boolean }>("k8s.listCustomResource", {
       context,
       group: crd.group,
       version: crd.version,
@@ -138,7 +138,7 @@ export async function listCustomResource(
       namespace: namespace ?? "",
       printerColumns: crd.printerColumns ?? [],
     });
-    return { items: out.items };
+    return { items: out.items, truncated: out.truncated };
   } catch (e) {
     return { error: String(e) };
   }

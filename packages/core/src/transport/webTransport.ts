@@ -88,3 +88,17 @@ export async function subscribe(channel: string, handler: (payload: unknown) => 
  * key handler are both gated to the desktop for this reason.
  */
 export async function setWebviewZoom(_factor: number): Promise<void> {}
+
+/** No-op on the web: window closure is managed by the browser. */
+export function onWindowCloseRequested(
+  _handler: () => Promise<void> | void,
+  _timeoutMs = 500,
+): () => void {
+  return () => {};
+}
+
+/** Web has a single window context labelled "main". */
+export function currentWindowLabel(): string {
+  return "main";
+}
+

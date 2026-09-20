@@ -138,6 +138,44 @@ fn render_node(width: u16, height: u16, state: &NodeInspectorState) -> String {
     })
 }
 
+/// The REST column is sized from the number it draws. The thresholds this
+/// replaced padded a four-digit count as five and gave a seven-digit count
+/// five cells: `pad_display` pads but never truncates, so the excess pushed
+/// every later column of that row out of line with the header.
+#[test]
+fn node_inspector_sizes_the_restart_column_from_a_seven_digit_count() {
+    let mut details = node_details("node-1");
+    let mut restarted = pod("default", "crashy", "Running");
+    restarted.restarts = 1_000_000;
+    details.pods = vec![restarted, pod("kube-system", "quiet", "Running")];
+    let state = node_state(details);
+
+    let lines = common::render_lines(200, 40, |f| render_node_inspector_view(f, f.area(), &state));
+    let header = &lines[row_of(&lines, "NAMESPACE")];
+    let crashy = &lines[row_of(&lines, "crashy")];
+    let quiet = &lines[row_of(&lines, "quiet")];
+
+    assert_eq!(
+        col(crashy, "1000000"),
+        col(header, "REST"),
+        "the count starts under its header:\n{header}\n{crashy}"
+    );
+    // Every column after REST lines up with the header in both rows — the
+    // one carrying the wide count and the one that does not.
+    for (heading, cell) in [("CPU REQ", "100m"), ("AGE", "3d")] {
+        assert_eq!(
+            col(crashy, cell),
+            col(header, heading),
+            "{heading} drifted on the wide row:\n{header}\n{crashy}"
+        );
+        assert_eq!(
+            col(quiet, cell),
+            col(header, heading),
+            "{heading} drifted on the narrow row:\n{header}\n{quiet}"
+        );
+    }
+}
+
 #[test]
 fn node_inspector_starts_loading_and_draws_the_loading_placeholder() {
     let state = NodeInspectorState::new("node-1".to_string());
@@ -265,6 +303,22 @@ fn node_inspector_metrics_history_is_replaced_wholesale() {
     state.update_metrics_history(&[9], &[]);
     assert_eq!(state.cpu_history, vec![9]);
     assert!(state.mem_history.is_empty());
+}
+
+#[test]
+fn node_inspector_pods_table_gpu_emoji_cell_width_alignment() {
+    let mut details = node_details("gpu-node-1");
+    let mut gpu_pod = pod("default", "vllm-llama-70b", "Running");
+    gpu_pod.gpu_mem_requests_mib = 81920; // 80 GiB
+    gpu_pod.gpu_requests = 1;
+    gpu_pod.age = "2d".to_string();
+    details.pods = vec![gpu_pod];
+
+    let state = node_state(details);
+    let text = render_node(140, 30, &state);
+    assert!(text.contains("80.0 GiB"), "{text}");
+    assert!(text.contains("AGE"), "{text}");
+    assert!(text.contains("2d"), "{text}");
 }
 
 #[test]
@@ -632,7 +686,10 @@ fn node_inspector_pods_table_lists_pods_and_marks_the_selected_one() {
     assert!(small.contains("128 MiB"), "{small}");
 
     let long = &lines[row_of(&lines, "a-very-long-pod-name")];
-    assert!(long.contains("a-very-long-pod-name-that-will-be-truncated"), "{long}");
+    assert!(
+        long.contains("a-very-long-pod-name-that-will-be-truncated"),
+        "{long}"
+    );
 
     let buf = render_buffer(160, 40, |f| render_node_inspector_view(f, f.area(), &state));
     let sel_row = row_of(&lines, "trainer") as u16;
@@ -1164,6 +1221,30 @@ fn settings_view_highlights_the_focused_field_on_the_selected_card() {
     let r = row_of(&l, "1. Anthropic (Claude)") + 1;
     let kx = col(&l[r], "API Key:");
     assert_eq!(b[(kx, r as u16)].fg, Theme::YELLOW);
+
+    s.selected_provider_idx = 3;
+    s.selected_field = SettingField::BaseUrl;
+    let b = render_buffer(120, 40, |f| render_settings_view(f, f.area(), &s));
+    let l = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &s));
+    let r = row_of(&l, "4. OpenAI-Compatible / Ollama (Local)") + 3;
+    assert!(l[r].contains("Base URL: http://localhost:11434/v1"), "{}", l[r]);
+    let bx = col(&l[r], "Base URL:");
+    assert_eq!(b[(bx, r as u16)].fg, Theme::YELLOW);
+    let vx = col(&l[r], "http://localhost:11434/v1");
+    assert_eq!(b[(vx, r as u16)].fg, Theme::YELLOW);
+}
+
+#[test]
+fn settings_view_renders_base_url_for_openai_compatible_provider() {
+    let state = settings_state();
+    let lines = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &state));
+    let oai_compat_row = row_of(&lines, "4. OpenAI-Compatible / Ollama (Local)");
+    let base_url_row = oai_compat_row + 3;
+    assert!(
+        lines[base_url_row].contains("Base URL: http://localhost:11434/v1"),
+        "Base URL row must be rendered: {}",
+        lines[base_url_row]
+    );
 }
 
 #[test]
@@ -2042,23 +2123,27 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     assert_eq!(state.selected_field, 5);
 
     state.select_next_field();
+    assert_eq!(state.selected_field, 6);
+
+    state.select_next_field();
     assert_eq!(state.selected_field, 0);
 
     state.select_prev_field();
-    assert_eq!(state.selected_field, 5);
+    assert_eq!(state.selected_field, 6);
 
     state.select_prev_field();
-    assert_eq!(state.selected_field, 4);
+    assert_eq!(state.selected_field, 5);
 
     let mut config = TuiConfig::default();
     assert_eq!(config.command_popup_max_width, 65);
     assert_eq!(config.command_popup_max_visible, 6);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
     assert!(config.show_feature_banner);
+    assert!(config.check_updates);
     assert_eq!(config.argo_hub_context, None);
     assert_eq!(config.argo_hub_kubeconfig, None);
 
-    // Selected field 4: ArgoCD Hub Context cycling and editing
+    // Selected field 5: ArgoCD Hub Context cycling and editing
     state.available_contexts = vec!["ctx-mgmt".to_string(), "ctx-prod".to_string()];
     let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.argo_hub_context.as_deref(), Some("ctx-mgmt"));
@@ -2067,7 +2152,7 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.argo_hub_context, None); // cycled back to None
 
-    // Direct editing of field 4 with cursor movement and insertion
+    // Direct editing of field 5 with cursor movement and insertion
     state.start_editing(&config);
     assert!(state.is_editing);
     assert_eq!(state.cursor_pos(), 0);
@@ -2109,23 +2194,35 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     let _ = state.clear_current(&mut config);
     assert_eq!(config.argo_hub_context, None);
 
-    // Selected field 5: ArgoCD Hub Kubeconfig Path editing and clearing
+    // Selected field 6: ArgoCD Hub Kubeconfig Path editing and clearing
     state.select_next_field();
-    assert_eq!(state.selected_field, 5);
+    assert_eq!(state.selected_field, 6);
     state.start_editing(&config);
     assert!(state.is_editing);
     state.edit_buffer = "/path/to/custom/kubeconfig".to_string();
     let _ = state.finish_editing(&mut config);
     assert_eq!(
-        config.argo_hub_kubeconfig.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        config
+            .argo_hub_kubeconfig
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
         Some("/path/to/custom/kubeconfig".to_string())
     );
 
     let _ = state.clear_current(&mut config);
     assert_eq!(config.argo_hub_kubeconfig, None);
 
-    // Selected field 3: Startup Feature Banner toggle
+    // Selected field 4: Startup Update Check toggle
     state.select_prev_field();
+    state.select_prev_field();
+    assert_eq!(state.selected_field, 4);
+    assert!(config.check_updates);
+    let _ = state.adjust_current(1, &mut config);
+    assert!(!config.check_updates);
+    let _ = state.cycle_current(&mut config);
+    assert!(config.check_updates);
+
+    // Selected field 3: Startup Feature Banner toggle
     state.select_prev_field();
     assert_eq!(state.selected_field, 3);
     let _ = state.adjust_current(1, &mut config);
@@ -2142,13 +2239,22 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     let _ = state.adjust_current(1, &mut config);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Large);
     let _ = state.adjust_current(1, &mut config);
-    assert_eq!(config.command_popup_density, CommandPopupDensity::ExtraLarge);
+    assert_eq!(
+        config.command_popup_density,
+        CommandPopupDensity::ExtraLarge
+    );
     let _ = state.adjust_current(1, &mut config);
-    assert_eq!(config.command_popup_density, CommandPopupDensity::ExtraLarge); // Clamped at 4
+    assert_eq!(
+        config.command_popup_density,
+        CommandPopupDensity::ExtraLarge
+    ); // Clamped at 4
     let _ = state.adjust_current(-1, &mut config);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Large);
     let _ = state.cycle_current(&mut config);
-    assert_eq!(config.command_popup_density, CommandPopupDensity::ExtraLarge);
+    assert_eq!(
+        config.command_popup_density,
+        CommandPopupDensity::ExtraLarge
+    );
     let _ = state.cycle_current(&mut config);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
 
@@ -2184,6 +2290,7 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     assert_eq!(config.command_popup_max_visible, 6);
     assert_eq!(config.command_popup_density, CommandPopupDensity::Compact);
     assert!(config.show_feature_banner);
+    assert!(config.check_updates);
 }
 
 #[test]
@@ -2194,8 +2301,10 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         command_popup_max_visible: 8,
         command_popup_density: CommandPopupDensity::Compact,
         show_feature_banner: true,
+        check_updates: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        update_available: None,
     };
 
     // Wide render (120x30)
@@ -2205,15 +2314,40 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
     let full = lines.join("\n");
 
     assert!(full.contains("TUI Configuration"), "has title");
-    assert!(full.contains("Command Popup Max Width"), "has width setting card");
-    assert!(full.contains("Command Popup Max Visible Rows"), "has rows setting card");
-    assert!(full.contains("Command Popup Text Size"), "has text size setting card");
-    assert!(full.contains("Startup Feature Banner"), "has startup banner setting card");
-    assert!(full.contains("ArgoCD Hub Context"), "has hub context setting card");
-    assert!(full.contains("ArgoCD Hub Kubeconfig Path"), "has hub kubeconfig setting card");
+    assert!(
+        full.contains("Command Popup Max Width"),
+        "has width setting card"
+    );
+    assert!(
+        full.contains("Command Popup Max Visible Rows"),
+        "has rows setting card"
+    );
+    assert!(
+        full.contains("Command Popup Text Size"),
+        "has text size setting card"
+    );
+    assert!(
+        full.contains("Startup Feature Banner"),
+        "has startup banner setting card"
+    );
+    assert!(
+        full.contains("Startup Update Check"),
+        "has startup update check setting card"
+    );
+    assert!(
+        full.contains("ArgoCD Hub Context"),
+        "has hub context setting card"
+    );
+    assert!(
+        full.contains("ArgoCD Hub Kubeconfig Path"),
+        "has hub kubeconfig setting card"
+    );
     assert!(full.contains("80 cols"), "shows configured width");
     assert!(full.contains("8 rows"), "shows configured visible rows");
-    assert!(full.contains("Live Preview: Command Popup"), "shows live preview title");
+    assert!(
+        full.contains("Live Preview: Command Popup"),
+        "shows live preview title"
+    );
     assert!(full.contains(":po█"), "shows simulated command bar prompt");
     assert!(full.contains("pods"), "shows sample suggestions in preview");
 
@@ -2224,24 +2358,52 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         render_tui_config_view(f, f.area(), &banner_state, &config)
     });
     let banner_full = banner_lines.join("\n");
-    assert!(banner_full.contains("Live Preview: Startup Feature Banner"), "shows banner preview title");
-    assert!(banner_full.contains("Welcome to SRElens"), "shows banner contents in preview");
+    assert!(
+        banner_full.contains("Live Preview: Startup Feature Banner"),
+        "shows banner preview title"
+    );
+    assert!(
+        banner_full.contains("Welcome to SRElens"),
+        "shows banner contents in preview"
+    );
 
-    // ArgoCD GitOps Live Preview when selected_field == 4
+    // Startup update check preview when selected_field == 4
+    let mut update_state = TuiConfigViewState::new();
+    update_state.selected_field = 4;
+    let update_lines = common::render_lines(120, 30, |f| {
+        render_tui_config_view(f, f.area(), &update_state, &config)
+    });
+    let update_full = update_lines.join("\n");
+    assert!(
+        update_full.contains("Live Preview: Startup Update Check"),
+        "shows update check preview title"
+    );
+    assert!(
+        update_full.contains("Header Indicator Preview"),
+        "shows header indicator preview"
+    );
+
+    // ArgoCD GitOps Live Preview when selected_field == 5
     let mut argo_state = TuiConfigViewState::new();
-    argo_state.selected_field = 4;
+    argo_state.selected_field = 5;
     argo_state.available_contexts = vec!["ctx-mgmt".to_string(), "ctx-worker".to_string()];
     let argo_lines = common::render_lines(120, 30, |f| {
         render_tui_config_view(f, f.area(), &argo_state, &config)
     });
     let argo_full = argo_lines.join("\n");
-    assert!(argo_full.contains("Live Preview: ArgoCD GitOps Hub-and-Spoke Topology"), "shows argo gitops preview title");
+    assert!(
+        argo_full.contains("Live Preview: ArgoCD GitOps Hub-and-Spoke Topology"),
+        "shows argo gitops preview title"
+    );
     assert!(argo_full.contains("Topology Mode"), "shows topology mode");
-    assert!(argo_full.contains("ctx-mgmt"), "shows available contexts in preview");
+    assert!(
+        argo_full.contains("ctx-mgmt"),
+        "shows available contexts in preview"
+    );
 
     // Edit modal dialog when is_editing == true
     let mut edit_state = TuiConfigViewState::new();
-    edit_state.selected_field = 4;
+    edit_state.selected_field = 5;
     edit_state.is_editing = true;
     edit_state.edit_buffer = "my-argo-hub".to_string();
     edit_state.edit_cursor = "my-argo-hub".chars().count();
@@ -2249,8 +2411,14 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         render_tui_config_view(f, f.area(), &edit_state, &config)
     });
     let edit_full = edit_lines.join("\n");
-    assert!(edit_full.contains("Edit ArgoCD Hub Context"), "renders edit modal title");
-    assert!(edit_full.contains("my-argo-hub"), "renders edit buffer text in modal");
+    assert!(
+        edit_full.contains("Edit ArgoCD Hub Context"),
+        "renders edit modal title"
+    );
+    assert!(
+        edit_full.contains("my-argo-hub"),
+        "renders edit buffer text in modal"
+    );
 
     // Narrow render (70x24) — should not panic, uses vertical split layout
     let narrow_lines = common::render_lines(70, 24, |f| {
@@ -2262,4 +2430,3 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
     assert!(narrow_full.contains("Command Popup Text Size"));
     assert!(narrow_full.contains("Startup Feature Banner"));
 }
-

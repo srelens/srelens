@@ -46,6 +46,7 @@ pub enum ResourceKind {
     GpuInfo,
     TopPods,
     TopNodes,
+    BgpPeers,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -69,6 +70,78 @@ pub struct CrdMeta {
     pub short_names: Vec<String>,
     #[serde(default)]
     pub printer_columns: Vec<PrinterColumn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+/// Returns the cache file path for discovered CRDs for a cluster context.
+pub fn crd_cache_path(context: &str) -> Option<std::path::PathBuf> {
+    if context.trim().is_empty() {
+        return None;
+    }
+    // In automated tests or when using fake/test contexts, avoid writing to user cache
+    // unless SRELENS_CACHE_DIR is explicitly configured.
+    let has_explicit_cache = std::env::var("SRELENS_CACHE_DIR")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    if !has_explicit_cache
+        && (context.starts_with("test-")
+            || context.starts_with("fake-")
+            || context.starts_with("srelens-fake-"))
+    {
+        return None;
+    }
+    let base = if let Ok(custom) = std::env::var("SRELENS_CACHE_DIR") {
+        if custom.trim().is_empty() {
+            dirs::cache_dir()
+                .map(|p| p.join("srelens"))
+                .or_else(|| dirs::home_dir().map(|h| h.join(".cache").join("srelens")))?
+        } else {
+            std::path::PathBuf::from(custom)
+        }
+    } else {
+        dirs::cache_dir()
+            .map(|p| p.join("srelens"))
+            .or_else(|| dirs::home_dir().map(|h| h.join(".cache").join("srelens")))?
+    };
+    let sanitized_ctx: String = context
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(base.join("crds").join(format!("{}.json", sanitized_ctx)))
+}
+
+/// Loads cached CRDs for a given context from disk.
+pub fn load_cached_crds(context: &str) -> Vec<CrdMeta> {
+    if let Some(path) = crd_cache_path(context) {
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            if let Ok(crds) = serde_json::from_str::<Vec<CrdMeta>>(&data) {
+                return crds;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Persists discovered CRDs for a given context to disk.
+pub fn save_cached_crds(context: &str, crds: &[CrdMeta]) {
+    if crds.is_empty() {
+        return;
+    }
+    if let Some(path) = crd_cache_path(context) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string(crds) {
+            let _ = std::fs::write(path, json);
+        }
+    }
 }
 
 impl ResourceKind {
@@ -115,6 +188,7 @@ impl ResourceKind {
             Self::GpuInfo => "GPU Info & VRAM Allocation",
             Self::TopPods => "Top Pods",
             Self::TopNodes => "Top Nodes",
+            Self::BgpPeers => "BGP Peering & Routes",
         }
     }
 
@@ -195,7 +269,8 @@ impl ResourceKind {
             | Self::CustomResourceDefinitions
             | Self::Overview
             | Self::Toolbox
-            | Self::Assistant => false,
+            | Self::Assistant
+            | Self::BgpPeers => false,
             _ => true,
         }
     }
@@ -226,6 +301,8 @@ pub enum CommandTarget {
     ThemePicker,
     SetTheme(String),
     FeatureBanner,
+    Update,
+    AddCluster,
 }
 
 pub const COMMAND_REGISTRY: &[CommandDef] = &[
@@ -330,6 +407,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         aliases: &["np", "netpol"],
         description: "Pod network traffic filtering and isolation rules",
         target: CommandTarget::Resource(ResourceKind::NetworkPolicies),
+    },
+    CommandDef {
+        name: "bgp",
+        aliases: &["peers", "bgppeers", "peering", "bgproutes"],
+        description: "BGP control plane peering sessions, advertised VIPs & IP pools",
+        target: CommandTarget::Resource(ResourceKind::BgpPeers),
     },
     CommandDef {
         name: "configmaps",
@@ -440,6 +523,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         target: CommandTarget::Contexts,
     },
     CommandDef {
+        name: "import",
+        aliases: &["add-cluster", "import-kubeconfig", "add-ctx", "kubeconfig-add"],
+        description: "Import a new Kubernetes cluster / kubeconfig from clipboard or file path",
+        target: CommandTarget::AddCluster,
+    },
+    CommandDef {
         name: "overview",
         aliases: &["info", "cluster"],
         description: "Cluster overview, health summary and node/pod capacity",
@@ -472,7 +561,7 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
     CommandDef {
         name: "features",
         aliases: &["banner", "guide", "welcome"],
-        description: "Show SRElens feature highlights banner (:helm, :overview, :gpuinfo, :workloads, :argo, :ai, :ai-settings, :config, :banner)",
+        description: "Show SRElens feature highlights banner (:helm, :overview, :gpuinfo, :workloads, :argo, :ai, :ai-settings, :config, :import, :banner)",
         target: CommandTarget::FeatureBanner,
     },
     CommandDef {
@@ -492,6 +581,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         aliases: &["goto", "url"],
         description: "Open deep link URL or resource (:open <url>)",
         target: CommandTarget::OpenUrl(String::new()),
+    },
+    CommandDef {
+        name: "update",
+        aliases: &["self-update", "upgrade"],
+        description: "Check for updates or view update status",
+        target: CommandTarget::Update,
     },
 ];
 
@@ -558,7 +653,8 @@ impl DynamicCommandDef {
                 | ResourceKind::Endpoints
                 | ResourceKind::EndpointSlices
                 | ResourceKind::Ingresses
-                | ResourceKind::NetworkPolicies => "Network",
+                | ResourceKind::NetworkPolicies
+                | ResourceKind::BgpPeers => "Network",
                 ResourceKind::ConfigMaps
                 | ResourceKind::Secrets
                 | ResourceKind::ResourceQuotas
@@ -590,11 +686,12 @@ impl DynamicCommandDef {
             },
             CommandTarget::CustomResource(_) => "CRD",
             CommandTarget::ThemePicker | CommandTarget::SetTheme(_) => "Themes",
-            CommandTarget::Contexts => "Context",
+            CommandTarget::Contexts | CommandTarget::AddCluster => "Context",
             CommandTarget::Namespaces => "Namespace",
             CommandTarget::Help => "Help",
             CommandTarget::FeatureBanner => "Guide",
             CommandTarget::Quit => "System",
+            CommandTarget::Update => "System",
             CommandTarget::OpenUrl(_) => "Navigation",
         }
     }
@@ -621,9 +718,11 @@ impl DynamicCommandDef {
             CommandTarget::SetTheme(_) => ":theme <name>",
             CommandTarget::Namespaces => ":namespaces",
             CommandTarget::Contexts => ":contexts",
+            CommandTarget::AddCluster => ":import",
             CommandTarget::Help => ":help",
             CommandTarget::FeatureBanner => ":features",
             CommandTarget::Quit => ":quit",
+            CommandTarget::Update => ":update",
             CommandTarget::OpenUrl(_) => ":open <url>",
             _ => "",
         }
@@ -748,7 +847,10 @@ pub fn command_suggestions(query: &str) -> Vec<(DynamicCommandDef, usize)> {
     command_suggestions_with_crds(query, &[])
 }
 
-pub fn command_suggestions_with_crds(query: &str, crds: &[CrdMeta]) -> Vec<(DynamicCommandDef, usize)> {
+pub fn command_suggestions_with_crds(
+    query: &str,
+    crds: &[CrdMeta],
+) -> Vec<(DynamicCommandDef, usize)> {
     let q = query.trim().trim_start_matches(':').to_lowercase();
     let mut matches = Vec::new();
 
@@ -764,10 +866,17 @@ pub fn command_suggestions_with_crds(query: &str, crds: &[CrdMeta]) -> Vec<(Dyna
 
     // Direct theme name suggestions when typing ":theme <subquery>" or ":colors <subquery>"
     if q.starts_with("theme ") || q.starts_with("colors ") {
-        let prefix = if q.starts_with("theme ") { "theme " } else { "colors " };
+        let prefix = if q.starts_with("theme ") {
+            "theme "
+        } else {
+            "colors "
+        };
         let sub = q.strip_prefix(prefix).unwrap().trim();
         for p in crate::theme::ALL_THEMES {
-            if sub.is_empty() || p.name.starts_with(sub) || p.display_name.to_lowercase().starts_with(sub) {
+            if sub.is_empty()
+                || p.name.starts_with(sub)
+                || p.display_name.to_lowercase().starts_with(sub)
+            {
                 matches.push((
                     DynamicCommandDef {
                         name: format!("theme {}", p.name),
@@ -819,7 +928,11 @@ pub fn command_suggestions_with_crds(query: &str, crds: &[CrdMeta]) -> Vec<(Dyna
             || norm_singular.starts_with(&q)
         {
             matches.push((crd_def, 105));
-        } else if crd_def.aliases.iter().any(|a| a.to_lowercase().starts_with(&q)) {
+        } else if crd_def
+            .aliases
+            .iter()
+            .any(|a| a.to_lowercase().starts_with(&q))
+        {
             matches.push((crd_def, 95));
         } else if crd.plural.to_lowercase().contains(&q)
             || crd.kind.to_lowercase().contains(&q)

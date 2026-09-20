@@ -11,6 +11,7 @@ const ctx = (over: Partial<ClusterContext> = {}): ClusterContext => ({
   // Unique per name unless a test says otherwise, so a list of rows has a list
   // of keys.
   stableId: over.name ?? "prod-eu",
+  key: over.key ?? over.name ?? "prod-eu",
   cluster: "prod",
   server: "https://prod:6443",
   namespace: "",
@@ -53,7 +54,7 @@ describe("SourcesRail", () => {
         files={["/k/config"]}
         rows={[
           row({ sourceFile: "/k/config", isCurrent: true }),
-          row({ sourceFile: "/k/config", stableId: "b", name: "b" }),
+          row({ sourceFile: "/k/config", stableId: "b", key: "b", name: "b" }),
         ]}
       />,
     );

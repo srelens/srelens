@@ -11,6 +11,12 @@ cluster's RBAC.
 - A declaration is not an authorization. The host supplies grants separately:
   installation shows the requested permissions for review, and **Install and grant
   permissions** grants that list.
+- A grant covers whatever the manifest binds to that capability, so the review also
+  shows the bindings once the host has accepted the manifest: for each
+  `k8s.listCustomResource` reader its group, version, kind, plural, scope and printer
+  columns (with their JSON paths); for each `k8s.listEvents` reader the API groups its
+  dashboards show; for anything else its fixed arguments. **View manifest** opens the
+  full manifest before installing, whether it came from the Catalog or was pasted.
 - Installing a new version of an installed app shows its permissions again. The
   application never silently replaces a manifest or expands its grants. A
   permission diff on update is planned
@@ -24,6 +30,11 @@ version, plural, kind and scope, plus explicitly granted `k8s.listEvents` reader
 - Only `context` and `namespace` are forwarded from the host view.
 - Core-group resources, caller-supplied resource selectors, executable entry points
   and operations that need consent are rejected.
+- A reader reaches custom resources only. A group with no dot, such as `apps` or
+  `batch`, is refused at install and quarantines an installed app. Each read,
+  inspection and action first confirms that a CustomResourceDefinition named
+  `{plural}.{group}` serves the bound version on the cluster, so a dotted built-in
+  group such as `networking.k8s.io`, or an aggregated API, is refused there.
 - The app receives no kubeconfig or token.
 - Reads remain subject to the selected cluster's RBAC. RBAC and discovery failures are
   shown as errors, never as empty results.
@@ -33,7 +44,7 @@ version, plural, kind and scope, plus explicitly granted `k8s.listEvents` reader
 Annotations come from the host capability and cannot be weakened by a binding. The
 app-level operations follow the normal MCP consent gate:
 
-- `extensions.configure` (install, enable, remove, settings, rollback) is mutating. A
+- `extensions.configure` (install, enable, remove, settings, rollback, clusters) is mutating. A
   rollback takes the grants explicitly, like an install, because it grants the restored
   version's permissions again.
 - `extensions.action` (host GitOps actions) is mutating, and in the UI every action

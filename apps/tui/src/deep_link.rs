@@ -14,9 +14,7 @@ pub enum DeepLink {
     },
     /// Deep link to switch to a cluster context
     /// `srelens://cluster/<context>`
-    Cluster {
-        context: String,
-    },
+    Cluster { context: String },
     /// Deep link to a specific view
     /// `srelens://view/<context>/<namespace>/<view>`
     View {
@@ -30,7 +28,12 @@ impl DeepLink {
     /// Formats the canonical URL string for this deep link
     pub fn to_url(&self) -> String {
         match self {
-            Self::Resource { context, namespace, kind, name } => {
+            Self::Resource {
+                context,
+                namespace,
+                kind,
+                name,
+            } => {
                 let ctx = if context.is_empty() { "_" } else { context };
                 let ns = namespace.as_deref().unwrap_or("_");
                 let ns_part = if ns.is_empty() { "_" } else { ns };
@@ -39,7 +42,11 @@ impl DeepLink {
             Self::Cluster { context } => {
                 format!("srelens://cluster/{}", context)
             }
-            Self::View { context, namespace, target } => {
+            Self::View {
+                context,
+                namespace,
+                target,
+            } => {
                 let ctx = context.as_deref().unwrap_or("_");
                 let ns = namespace.as_deref().unwrap_or("_");
                 let target_name = match target {
@@ -50,17 +57,20 @@ impl DeepLink {
                         crate::commands::ResourceKind::Settings => "settings".to_string(),
                         crate::commands::ResourceKind::TuiConfig => "config".to_string(),
                         crate::commands::ResourceKind::ArgoApplications => "argo".to_string(),
+                        crate::commands::ResourceKind::BgpPeers => "bgp".to_string(),
                         other => other.to_string().to_lowercase(),
                     },
                     CommandTarget::CustomResource(crd) => crd.plural.to_lowercase(),
                     CommandTarget::Help => "help".to_string(),
                     CommandTarget::Contexts => "contexts".to_string(),
+                    CommandTarget::AddCluster => "import".to_string(),
                     CommandTarget::Namespaces => "namespaces".to_string(),
                     CommandTarget::Quit => "quit".to_string(),
                     CommandTarget::ThemePicker => "themes".to_string(),
                     CommandTarget::SetTheme(t) => format!("theme/{}", t),
                     CommandTarget::FeatureBanner => "features".to_string(),
                     CommandTarget::OpenUrl(u) => format!("open/{}", u),
+                    CommandTarget::Update => "update".to_string(),
                 };
                 format!("srelens://view/{}/{}/{}", ctx, ns, target_name)
             }
@@ -176,11 +186,16 @@ impl DeepLink {
                         name,
                     })
                 }
-                _ => Err(format!("Unrecognized shorthand format '{}'. Expected [context/][namespace/]kind/name", trimmed)),
+                _ => Err(format!(
+                    "Unrecognized shorthand format '{}'. Expected [context/][namespace/]kind/name",
+                    trimmed
+                )),
             }
         } else {
             // Direct command target (e.g. "pods", "nodes")
-            if let Some(target) = resolve_command(format!(":{}", trimmed).as_str()).or_else(|| resolve_command(trimmed)) {
+            if let Some(target) = resolve_command(format!(":{}", trimmed).as_str())
+                .or_else(|| resolve_command(trimmed))
+            {
                 Ok(Self::View {
                     context: None,
                     namespace: None,

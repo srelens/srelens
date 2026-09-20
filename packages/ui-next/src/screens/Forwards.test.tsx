@@ -132,14 +132,14 @@ function fixture(now: number): ActiveForward[] {
  */
 const PROD: ClusterContext = {
   name: "prod-eu",
-  stableId: "prod",
+  stableId: "prod", key: "prod",
   cluster: "prod",
   server: "https://prod",
   isCurrent: true,
   sourceFile: "/home/dana/.kube/config",
   authKind: "client certificate",
 };
-const STAGE: ClusterContext = { ...PROD, name: "stage-eu", stableId: "stage", cluster: "stage", server: "https://stage", isCurrent: false };
+const STAGE: ClusterContext = { ...PROD, name: "stage-eu", stableId: "stage", key: "stage", cluster: "stage", server: "https://stage", isCurrent: false };
 
 /** Both clusters in the workspace, with `PROD` in focus — the rail's start. */
 function withClusters() {

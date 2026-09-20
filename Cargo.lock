@@ -69,9 +69,9 @@ dependencies = [
 
 [[package]]
 name = "aho-corasick"
-version = "1.1.4"
+version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
 dependencies = [
  "memchr",
 ]
@@ -6511,6 +6511,7 @@ dependencies = [
 name = "srelens-mcp"
 version = "0.14.0"
 dependencies = [
+ "aho-corasick",
  "async-trait",
  "axum",
  "futures-core",
@@ -6548,6 +6549,7 @@ version = "0.14.0"
 dependencies = [
  "dirs",
  "libc",
+ "log",
  "proptest",
  "reqwest 0.13.4",
  "ring",
@@ -6563,6 +6565,7 @@ dependencies = [
  "srelens-plugin-host",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

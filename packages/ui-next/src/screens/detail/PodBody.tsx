@@ -123,7 +123,8 @@ function ImageValue({ images }: { images: string[] }) {
  *
  * The frame's ten facts are not everything srelens knows, and the extras it
  * carries over from classic (Pod IPs, Priority class, Runtime class, Image
- * pull secrets, Last restart) stay: the frame is a design, not a schema. They
+ * pull secrets, Last restart) stay, as do the pod's Reason and Message when
+ * the API sets them: the frame is a design, not a schema. They
  * sit beside their own kin rather than in a heap at the end, so the reading
  * order the frame set survives them.
  *
@@ -169,6 +170,12 @@ export const podFacts: FactsFor = ({ object }) => {
   const qosClass = str(status.qosClass);
   const images = imagesOf(spec.containers);
   const statusLine = resourceStatusLine("Pod", object);
+  // The pod's own why, set only when the pod as a whole is in trouble
+  // (Evicted, NodeLost, …) and often the only place it is written — no
+  // container status carries it. Under Status, where `kubectl describe pod`
+  // prints them. (#619)
+  const reason = str(status.reason);
+  const message = str(status.message);
 
   const facts: DetailFact[] = [];
   if (statusLine) {
@@ -177,6 +184,8 @@ export const podFacts: FactsFor = ({ object }) => {
       value: <StatusPill status={statusLine.status} kind={statusLine.health} tinted />,
     });
   }
+  if (reason) facts.push({ label: "Reason", value: reason });
+  if (message) facts.push({ label: "Message", value: message });
   if (nodeName) facts.push({ label: "Node", value: nodeName, mono: true });
   if (podIP) facts.push({ label: "Pod IP", value: podIP, mono: true });
   if (podIPs.length > 0) facts.push({ label: "Pod IPs", value: <StringList items={podIPs} /> });

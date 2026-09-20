@@ -10,7 +10,7 @@ import { defaultState } from "../../lib/tabs";
 import { getView, loadNamespaces, setNamespaces } from "../../lib/workspace";
 const backend = vi.hoisted(() => ({ deleteContext: vi.fn(), listContexts: vi.fn(), isTauri: vi.fn(() => true) }));
 vi.mock("@srelens/core", async (original) => ({ ...await original<object>(), ...backend }));
-const contexts: ClusterContext[] = ["prod", "staging"].map(name => ({ name, stableId: name + "-id", cluster: name, server: "https://" + name, sourceFile: "/config", authKind: "token", isCurrent: false }));
+const contexts: ClusterContext[] = ["prod", "staging"].map(name => ({ name, stableId: name + "-id", key: name + "-id", cluster: name, server: "https://" + name, sourceFile: "/config", authKind: "token", isCurrent: false }));
 beforeEach(() => {
   localStorage.clear(); vi.clearAllMocks(); backend.isTauri.mockReturnValue(true);
   loadNamespaces();
@@ -88,7 +88,7 @@ it("keeps identity and shows the reason when removal fails", async () => {
   expect(loadContextProfiles()["prod-id"].displayName).toBe("Production Europe");
 });
 it("retains the remaining contexts when relisting after removal fails", async () => {
-  const added = { ...contexts[1], name: "new-context", stableId: "new-id" };
+  const added = { ...contexts[1], name: "new-context", stableId: "new-id", key: "new-id" };
   backend.deleteContext.mockImplementation(async () => {
     setContexts([...contexts, added]);
     return { success: true };
@@ -112,7 +112,7 @@ it("retains the remaining contexts when relisting after removal fails", async ()
   expect(screen.queryByRole("button", {name: "Edit Production Europe"})).toBeNull();
 });
 it("does not let a post-removal relist overwrite a concurrent context update", async () => {
-  const added = { ...contexts[1], name: "new-context", stableId: "new-id" };
+  const added = { ...contexts[1], name: "new-context", stableId: "new-id", key: "new-id" };
   backend.deleteContext.mockResolvedValue({ success: true });
   backend.listContexts.mockImplementation(async () => {
     setContexts([contexts[1], added]);
@@ -133,7 +133,7 @@ it("filters by saved short name and distinguishes list failure from an empty lis
   expect(screen.getAllByRole("listitem")).toHaveLength(1);
   view.unmount();
   setContexts([], "kubeconfig permission denied");
-  const added = { ...contexts[1], name: "new-context", stableId: "new-id" };
+  const added = { ...contexts[1], name: "new-context", stableId: "new-id", key: "new-id" };
   backend.listContexts.mockImplementation(async () => {
     setContexts([...contexts, added]);
     return { contexts };

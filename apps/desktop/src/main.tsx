@@ -1,8 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { applyPersistedTimeout } from "@srelens/core";
+import { applyPersistedTimeout, currentWindowLabel, initializeSettingsStorage } from "@srelens/core";
 import { isTauri } from "@srelens/core/platform";
-import { initializeSettingsStorage } from "@srelens/core";
 // The service layer says what to notify; this decides how. Installed before
 // render so a toast raised during startup is not dropped on the floor.
 import { installToastNotifier } from "./ui/notifier";
@@ -94,6 +93,7 @@ async function bootstrap(root: HTMLElement): Promise<void> {
     applyNextDesignTheme(hasChosenTheme);
     createRoot(root).render(
       <NextApp
+        windowLabel={currentWindowLabel()}
         ported={PORTED_SCREENS.map((s) => s.name)}
         // The lock surface draws srelens's own mark, and ui-next cannot reach
         // this asset: `apps/desktop` depends on that package, so the import

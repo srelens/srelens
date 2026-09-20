@@ -1,0 +1,750 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit review configuration for srelens.
+#
+# The path instructions below are the rules in AGENTS.md, CONTRIBUTING.md and
+# docs/DEVELOPMENT.md restated as things a reviewer checks. Those files are the
+# source of truth and are also fed to the knowledge base; when a rule changes
+# there, change it here too, or the reviewer enforces the old one.
+#
+# Keep this file to what a person reviewing a diff cannot see from CI: CI
+# already enforces coverage floors, catalog/schema sync, MCP exposure and the
+# consent-gate predicate, so the reviewer is told to trust those and look for
+# what they miss.
+
+language: en-US
+
+tone_instructions: >-
+  Direct and specific. Name the file, the input and the wrong result. No praise,
+  no restating the diff, no formatting nits. If unsure whether something is a
+  bug, say what you would need to see to know.
+
+early_access: false
+
+reviews:
+  profile: assertive
+  # Requests changes while its comments are open and approves once they are
+  # resolved and no pre-merge check errors. That approval can satisfy dev's
+  # one required review, so dev's branch protection dismisses stale approvals:
+  # a push after CodeRabbit approves clears the approval instead of riding on
+  # it. Do not turn that protection off while this is true.
+  request_changes_workflow: true
+
+  high_level_summary: true
+  high_level_summary_instructions: >-
+    Summarise what changed for the user of each affected surface (desktop, web,
+    TUI, MCP, extensions) and why. Call out any new or changed capability, any
+    change to consent annotations, Secret handling, web-host denials, auth, or
+    release/CI behaviour. Keep it short.
+  high_level_summary_in_walkthrough: true
+  review_status: true
+  review_details: false
+  commit_status: true
+  fail_commit_status: false
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: true
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  poem: false
+  in_progress_fortune: false
+  enable_prompt_for_ai_agents: true
+  abort_on_close: true
+
+  suggested_labels: true
+  auto_apply_labels: false
+  labeling_instructions:
+    - label: area/backend
+      instructions: Changes under crates/ (other than crates/kube and crates/mcp), apps/desktop/src-tauri or apps/tui.
+    - label: area/kube
+      instructions: Changes under crates/kube or crates/streams, or anything that changes how the app talks to a Kubernetes API server.
+    - label: area/mcp
+      instructions: Changes under crates/mcp, docs/MCP.md, or anything that changes MCP tools, prompts, resources, subscriptions, consent policy, auth or audit.
+    - label: area/frontend
+      instructions: Changes under packages/ or apps/desktop/src.
+    - label: area/ci
+      instructions: Changes under .github/, the Dockerfile, docker-compose.yml, fuzz/, or root build/tooling config.
+    - label: area/distribution
+      instructions: Changes under packaging/, the updater, install scripts, release signing, KEYS, Homebrew or AUR publishing.
+    - label: area/docs
+      instructions: Changes that are only documentation (*.md, docs/).
+    - label: type/security
+      instructions: >-
+        Changes to authentication, OIDC, tokens, encryption, Secret redaction or
+        reveal, consent annotations or policy, web-host denial lists, extension
+        signing/quarantine/trust, input size bounds, SSRF or DNS-rebinding
+        protections, or anything in docs/extensions/threat-model.md.
+    - label: type/feature
+      instructions: The PR title starts with feat.
+    - label: bug
+      instructions: The PR title starts with fix.
+    - label: type/quality
+      instructions: The PR title starts with refactor, test, perf or chore and changes no user-visible behaviour.
+
+  suggested_reviewers: true
+  auto_assign_reviewers: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 5
+    base_branches:
+      - dev
+      - main
+      - feat/ui-next
+    ignore_title_keywords:
+      - "chore(release)"
+      - "[skip ci]"
+      - "WIP"
+      - "DO NOT REVIEW"
+    ignore_usernames:
+      - dependabot[bot]
+      - release-bot
+
+  # Generated, binary or vendored content. Generated files that are checked
+  # against the code by a test (the capability catalog, the manifest and
+  # inventory schemas) stay IN review: their diff is how a reader sees a
+  # contract change.
+  path_filters:
+    - "!**/node_modules/**"
+    - "!**/target/**"
+    - "!**/dist/**"
+    - "!**/coverage/**"
+    - "!pnpm-lock.yaml"
+    - "!Cargo.lock"
+    - "!apps/desktop/src-tauri/icons/**"
+    - "!apps/desktop/src-tauri/gen/**"
+    - "!docs/assets/**"
+    - "!**/*.png"
+    - "!**/*.ico"
+    - "!**/*.icns"
+    - "!**/*.sig"
+    - "!crates/registry/tests/fixtures/argocd-manifest.json"
+    - "!fuzz/corpus/**"
+    - "!fuzz/artifacts/**"
+
+  path_instructions:
+    # ------------------------------------------------------------------ all
+    - path: "**/*"
+      instructions: |
+        Repository-wide rules (AGENTS.md is the source; read it):
+
+        - Test-driven development is mandatory. A behaviour change with no new or
+          changed test that would have failed before it is a finding. A fix whose
+          test would also pass against the old code does not test the fix.
+        - Never lower a coverage floor (vitest.config.ts thresholds, the Rust
+          llvm-cov floor in .github/workflows/ci.yml) and never widen a coverage
+          exclusion to make a number pass.
+        - "Say what you know, not what you guess." A failed call (refused, timed
+          out, unreachable, failed to deserialize) must never be rendered, logged,
+          returned or toasted as a fact about the cluster ("no schema", "no
+          changes", "no items", "success"). Flag any code path that collapses an
+          error into an empty result, a default, `None`, `[]`, or a success.
+        - Do not flag formatting, import order or naming style unless it causes a
+          bug; there is no enforced formatter across the tree. Do flag a diff that
+          reformats files unrelated to the change (a sign of `rustfmt` on a binary
+          target or `cargo fmt` on the workspace) and ask for those files to be
+          restored from the base branch.
+        - One logical change per PR. Point out unrelated changes mixed in.
+        - Tests that are known to fail only on Windows (SmallPanes.test.tsx,
+          tailwind-sources.test.ts, the Unix-symlink test in
+          crates/kube/src/toolbox.rs) must not be "fixed" by changing what they
+          assert.
+
+    # ------------------------------------------------------ capabilities (Rust)
+    - path: "crates/**/*.rs"
+      instructions: |
+        Shared Rust core. Check:
+
+        - No host-specific logic in crates/ (except crates/server, which IS the web
+          host). Desktop-only or web-only behaviour belongs in
+          apps/desktop/src-tauri or crates/server.
+        - Capability input structs (`*In`, deserialized from the JSON the
+          `@srelens/core` wrapper sends): the wrapper writes camelCase, Rust writes
+          snake_case. Every multi-word field needs `#[serde(rename = "...")]` (or a
+          container-level `rename_all = "camelCase"`) naming it exactly as the
+          caller sends it. Open the matching wrapper in packages/core/src/lib and
+          compare field by field; this bug shipped once (OpenApiSchemaIn,
+          api_version vs apiVersion) and broke a feature in every release.
+        - Tests that hand-write a capability payload must use the caller's
+          spelling, not the struct's. Prefer a unit test that deserializes the
+          wrapper's payload and asserts the wrong spelling is rejected.
+        - Safety annotations: anything not `read_only` must be `requires_confirm`;
+          set `destructive` and `sensitive` where they apply. Question an
+          annotation that looks too permissive for what the handler does (e.g. a
+          `read_only` handler that patches, deletes, execs, or returns Secret data).
+        - Caller-supplied sizes and counts must be bounded (see #633): strings,
+          lists, byte payloads, tail lines, timeouts.
+        - Tests must not assert serde_json map key order: the workspace build
+          enables `preserve_order` through another crate, so order differs between
+          `cargo test -p <crate>` and `cargo test --workspace`.
+        - A crate that builds a rustls/kube client must name its crypto provider
+          itself; both `ring` and `aws-lc-rs` are linked in the workspace build.
+        - Errors: no `unwrap()`/`expect()` on data from the cluster, the network,
+          a file, or the caller outside tests. Errors carry enough context for
+          `describeError` to say what failed.
+        - Blocking I/O or a sync mutex held across `.await` inside async handlers.
+        - Unit tests live in `#[cfg(test)]` modules beside the code. Live-cluster
+          tests are `#[ignore]`d.
+
+    - path: "crates/registry/**"
+      instructions: |
+        The single place capabilities are registered; it must stay Tauri-free
+        (no `tauri` dependency or import, directly or through a new crate).
+        packages/core/src/lib/capability-catalog.json holds only each
+        capability's id and its read_only / destructive / requires_confirm /
+        sensitive flags (`CatalogEntry`). It must be regenerated (with
+        `UPDATE_CATALOG=1 cargo test -p srelens-registry`) when a capability is
+        added, removed or renamed, or its safety annotations change. A schema-only
+        or handler-only change leaves it unchanged; do not ask for a catalog diff
+        then. Beyond the catalog, it depends on the change (a rename is both a
+        removal and an addition):
+        - Added or changed: add or explicitly exclude an e2e case in
+          apps/desktop/src-tauri/tests/e2e.rs, and consume it in the UI only
+          through a wrapper in @srelens/core.
+        - Removed: its e2e case or exclusion is deleted, and no @srelens/core
+          wrapper, UI caller, MCP prompt or WEB_DENIED_CAPABILITIES entry still
+          names its id. Do not ask for e2e coverage of a removed capability.
+        Flag whichever of these is missing.
+
+    - path: "crates/capability/**"
+      instructions: |
+        The Capability and Registry types. No Kubernetes knowledge belongs here.
+        Changes to annotation semantics ripple into MCP consent, UI confirmation
+        and the catalog; check every consumer was updated.
+
+    - path: "crates/kube/**"
+      instructions: |
+        Everything Kubernetes. Check RBAC-denied, NotFound, timeout and
+        unreachable are distinguishable in what the handler returns (never mapped
+        to an empty list). Watches must handle relist/410 Gone and must not report
+        recovery before a complete relist. A custom kind is resolved with its API
+        group, not by kind name alone (a CRD may reuse a built-in kind's name,
+        including for delete). Secrets returned by `k8s.getManifest` are redacted
+        by the frontend; `k8s.getSecret` is the consent-gated read, so do not add a
+        second unconditional path that returns Secret values.
+
+    - path: "crates/streams/**"
+      instructions: |
+        Host-agnostic streaming cores emitting into an EventSink. No Tauri or
+        axum types. Check for leaked tasks/child processes on stop, cancellation on
+        drop, bounded buffers, and that a stream failure is emitted as an error
+        event rather than as a silent end-of-stream.
+
+    - path: "crates/mcp/**"
+      instructions: |
+        MCP server. Security-critical; fail closed everywhere:
+        - A host that wires nothing must deny every gated call, resolve no kinds
+          and refuse every subscription.
+        - Gated read_only capability => ConsentKind::SensitiveRead; any other
+          gated => Destructive. `_confirm: true` alone never authorizes; headless
+          runs also need --mcp-allow-destructive / --mcp-allow-sensitive-reads, and
+          neither flag implies the other.
+        - HTTP transport: loopback only unless --mcp-expose-http; bearer token only
+          from SRELENS_MCP_TOKEN (never a CLI flag, argv is visible in ps); Host
+          header checked on every route (DNS rebinding).
+        - Secrets are never addressable as `k8s://` resources.
+        - Every tool a prompt names must exist and be on the read-only allowlist.
+        - The audit log must not record secret values or extension settings in
+          the clear (see #625).
+        - Subscriptions are scoped to the stream that requested them.
+
+    - path: "crates/server/**"
+      instructions: |
+        Multi-user web host (axum, SQLite, OIDC). Check:
+        - Fail-closed startup: refuses to run without SRELENS_MASTER_KEY, and
+          without OIDC config or SRELENS_DEV_LOGIN. Do not add defaults.
+        - Per-user isolation: anything touching per-user state (kubeconfigs,
+          materialized files, helm home, tokens, settings) goes through
+          `users::UserEnvs`, never a process-wide path or global.
+        - Web denial is for what cannot be made safe on a shared multi-user
+          container: host shell, toolbox installs, helm repo/plugin operations,
+          app-extension capabilities, and anything else that would act as the
+          shared UID or leak state across users. Such a capability goes in
+          WEB_DENIED_CAPABILITIES (api.rs); such a streaming command goes in
+          WEB_DENIED_COMMANDS / HELM_DENIED_SUBCOMMANDS (api_command.rs). The
+          server enforces it; UI-only denial is never enough. Do NOT ask for
+          denial of a capability that touches files or host state only through
+          per-user paths the server supplies from `UserEnvs` (e.g. the user's
+          own materialized kubeconfig); that isolation is what makes it safe.
+        - Every route authenticates and authorizes the session user; a user can
+          never read or act on another user's clusters, kubeconfigs, tokens,
+          streams or port-forwards.
+        - OIDC HTTP clients must not follow redirects (issuer URLs can come from a
+          user's kubeconfig; following redirects is an SSRF primitive).
+        - Crypto: no hand-rolled primitives, nonces never reused, keys never
+          logged. Cookies Secure/HttpOnly/SameSite as appropriate.
+        - SQL via sqlx with bound parameters only. A schema change needs a new
+          numbered migration; never edit an existing one.
+        - The web host is single-instance; do not introduce assumptions that
+          quietly break (or pretend to support) multiple replicas.
+
+    - path: "crates/server/migrations/**"
+      instructions: |
+        Migrations are append-only. Editing or renumbering an existing migration
+        breaks every deployed database. Check new migrations are backwards
+        compatible with the running binary during upgrade.
+
+    - path: "crates/plugin-host/**"
+      instructions: |
+        Extension manifest parsing and validation. The manifest contract is
+        schemas/extension-manifest.v0.1.json (regenerated with
+        `UPDATE_CATALOG=1 cargo test -p srelens-plugin-host --test schema`); a
+        field change without the schema update, or a breaking change without a
+        version/migration note in docs/extensions, is a finding. Parsers take
+        untrusted input: bound sizes and depth, never panic, report every problem
+        with a code and JSON path. Identifiers and display strings refuse bidi
+        overrides, zero-width and other Unicode format characters. If fuzz/ targets
+        cover the parser, new parsing paths should be reachable from them.
+
+    - path: "crates/{llm,agent}/**"
+      instructions: |
+        LLM providers and coding-agent adapters. API keys and tokens never appear
+        in logs, errors, Debug output, or persisted chat history. Tool calls issued
+        by a model go through the capability registry and its consent gate, never
+        around it. Bound response sizes and loop iterations; handle provider
+        errors, rate limits and cancelled streams explicitly. Child processes for
+        agent CLIs must not inherit secrets they do not need and must be killed on
+        cancel.
+
+    # ------------------------------------------------------------- desktop host
+    - path: "apps/desktop/src-tauri/**"
+      instructions: |
+        Tauri shell. `capabilities.rs` only re-exports crates/registry; new
+        capabilities are registered there, not here. Host-specific code belongs
+        here, not in crates/. Check:
+        - Tauri permissions in capabilities/default.json: flag any widening
+          (fs/shell/http scopes, new plugins) and ask why it is needed.
+        - Vault, OIDC and settings code: secrets never logged or written in the
+          clear; biometric/password flows fail closed.
+        - Updater and deep links: signatures verified, deep-link input treated as
+          untrusted and validated before it opens a route or runs anything.
+        - External command execution (terminal, toolbox, helm): no shell string
+          interpolation of user or cluster input.
+        - Stream commands have matching stop commands and clean up on window close.
+
+    - path: "apps/desktop/src-tauri/tests/e2e.rs"
+      instructions: |
+        The full capability suite against a live kind cluster. Every registered
+        capability is exercised or excluded with a concrete reason ("needs a
+        cloud provider", not "later"). Payloads here are contracts: they must use
+        the exact JSON field names the @srelens/core wrapper sends (camelCase),
+        not the Rust struct's field names. Fixtures and CRDs are torn down.
+
+    # --------------------------------------------------------------------- TUI
+    - path: "apps/tui/**"
+      instructions: |
+        Terminal UI (ratatui). Keep input responsive when clusters are
+        unreachable: no blocking network calls on the render/event loop. Same
+        "failed call is not an empty result" rule as the GUI. Do not run rustfmt on
+        apps/tui/src/main.rs (it reformats every module); flag unrelated
+        reformatting of views. Self-update must verify what it downloads.
+
+    # ----------------------------------------------------------------- frontend
+    - path: "packages/core/**"
+      instructions: |
+        @srelens/core: the data layer and the transport shim.
+        - `@tauri-apps/api` may only be imported under packages/core/src/transport/.
+          Anywhere else is a finding.
+        - Capability wrappers: the JSON they send is the contract. When a wrapper's
+          payload changes, the Rust `*In` struct must accept exactly those field
+          names; check them side by side.
+        - Must not import React outside the React entry (see no-react.test.ts).
+        - Errors from invokeCapability propagate or are surfaced through
+          `describeError`; never swallowed into `[]`, `null` or a default.
+        - Persistent preferences go through `settingsStorage`, never direct
+          localStorage/sessionStorage/IndexedDB writes. Before reloading after a
+          preference change, `flushSettingsWrites({ throwOnError: true })` is
+          awaited.
+        - capability-catalog.json and extension-inventory.schema.json are
+          generated; review them only for whether the change matches the Rust
+          change in the same PR.
+
+    - path: "packages/{ui-next,ui-kit}/**"
+      instructions: |
+        The new design (read design.md). Check:
+        - Routes are identity. `openTab` dedupes by route string, so anything that
+          distinguishes two things a reader can have open at once (cluster, kind
+          with API group e.g. `acme.io%2FDeployment`, namespace, name) must be in
+          the route. Screens are keyed by route, never by the rail's cluster /
+          stableId (that remounts, re-pins and sends writes to the wrong cluster).
+        - A new route needs a screen in `lib/routes.ts` (SCREENS or screenFor) AND
+          something in the app that opens it; otherwise it renders the Placeholder.
+        - Secrets: manifests from `k8s.getManifest` are redacted on arrival with
+          `redactSecretManifest`, failing closed; the editor stays read-only until
+          reveal through `k8s.getSecret`; Apply is disabled while placeholders are
+          shown.
+        - Failure vs absence: a failed call renders what failed (via
+          `describeError`) with a retry; only a successful empty answer renders as
+          "none". An apply with no documents is not a success; a failed dry-run
+          diff is not "No changes."
+        - Any list of cluster-supplied values (namespaces, contexts, containers,
+          kinds) uses `Combobox`/`MultiSelect` (or NamespacePicker /
+          NamespaceChoice from screens/resourceShell.tsx), not a native `<select>`.
+          Do not mix the kit's native `Select` with a `Combobox` in one control
+          cluster.
+        - Layout is edge to edge: flush regions divided by hairlines, each
+          scrolling on its own; no gutters, rounded bordered cards, or page scroll
+          around a region. Prose keeps a gutter.
+        - Machine text (YAML, annotations, IDs, logs) does not wrap or `break-all`;
+          it scrolls horizontally.
+        - Long unchanged diff runs collapse behind a counted, expandable gap with
+          context; a no-change diff is shown whole.
+        - Colour is never the only signal. Use the design's tokens, not ad-hoc
+          colours; check contrast in all themes including High contrast.
+        - Accessibility: icon-only controls have `aria-label` with `aria-hidden`
+          icons; dialogs move and restore focus; Esc closes.
+        - Components call capabilities only through @srelens/core wrappers.
+        - Tests: `Foo.test.tsx` beside `Foo.tsx`, Testing Library against a mocked
+          transport. A UI change should say in the PR how it was verified by
+          running it (screenshots/recording); green tests alone have missed every
+          UI regression this repo has shipped.
+
+    - path: "packages/ui-next/src/extensions/**"
+      instructions: |
+        Extension UI. Apps are declarative data: no third-party JavaScript,
+        iframes, remote fetches or dynamic imports. The frontend never fetches
+        catalog URLs or writes catalog caches to browser storage. Every UI action
+        from an app opens a host-owned review that keeps the UID and
+        resourceVersion the reader saw. App-supplied names, titles and logos are
+        untrusted: rendered as text, never as HTML.
+
+    - path: "apps/desktop/src/**"
+      instructions: |
+        Classic design (shadcn/radix in src/components/ui, src/ui). Use this
+        design's own tokens. No `@tauri-apps/api` imports here (only in
+        packages/core/src/transport). Components call capabilities through
+        @srelens/core, never `invoke` directly. Tests beside the component.
+
+    - path: "**/*.test.{ts,tsx}"
+      instructions: |
+        Check the test would fail without the change it accompanies. Flag tests
+        that assert only that a mock was called, snapshot large trees with no
+        targeted assertion, depend on timers without fake timers, or share state
+        between cases. Do not supply a shared `--localstorage-file` or re-enable
+        Node Web Storage to make a test pass (see vitest.shared.ts).
+
+    # ------------------------------------------------------- contracts & docs
+    - path: "schemas/**"
+      instructions: |
+        Generated from Rust (`Manifest::schema()`). Hand edits are a finding;
+        the PR must change the Rust type and regenerate. A breaking change to a
+        published schema version needs a new version, not an edit in place.
+
+    - path: "examples/extensions/**"
+      instructions: |
+        Example manifests are validated against the schema by Vitest. Check they
+        use only documented fields and request the least permissions needed.
+
+    - path: "docs/extensions/**"
+      instructions: |
+        The extension specification, permissions and threat model are contracts.
+        Check prose agrees with the code in the same PR, and that security.md's
+        "What holds today" is not extended to claim a protection the code does not
+        implement ("Not yet protected" lists what is still open).
+
+    - path: "**/*.md"
+      instructions: |
+        Check commands and paths in docs actually exist in the repo and match the
+        current behaviour. Don't flag prose style or line wrapping.
+
+    # ------------------------------------------------------------ CI & release
+    - path: ".github/workflows/**"
+      instructions: |
+        - Actions are pinned to a full commit SHA with a version comment; flag any
+          tag- or branch-pinned `uses:`.
+        - Least-privilege `permissions:` per job; no `pull_request_target` checking
+          out PR head code; no untrusted `${{ github.event.* }}` interpolated into
+          `run:` (pass through env instead).
+        - `pnpm/action-setup` must not carry its own `version:`; the pnpm version
+          lives only in `packageManager` in the root package.json.
+        - CI runs `cargo test --workspace`; do not narrow it to `-p` builds, which
+          miss feature-unification bugs.
+        - release.yml publishes from pushes to main (GitHub release, Homebrew, AUR,
+          ghcr.io latest). Check signing steps still verify the key against the
+          `**current**` fingerprint row in docs/INSTALL.md and KEYS, and that
+          secrets are never echoed.
+        - Do not lower coverage floors or add `continue-on-error` to gates.
+
+    - path: "{Dockerfile,docker-compose.yml,.dockerignore}"
+      instructions: |
+        The image installs pnpm from `packageManager` in package.json; a second
+        hard-coded pnpm version is a finding (it went stale before and dropped the
+        CVE overrides in pnpm-workspace.yaml). Base images pinned by digest; run as
+        non-root; no secrets baked into layers; `pnpm install --frozen-lockfile`.
+        Web mode is single-instance: compose must not scale the server.
+
+    - path: "{package.json,pnpm-workspace.yaml,**/package.json}"
+      instructions: |
+        `packageManager` in the root package.json is the only place the pnpm
+        version is written. CVE overrides live in pnpm-workspace.yaml; do not
+        remove or duplicate them in package.json. New dependencies: check they are
+        needed, maintained, and not duplicating one already in the workspace.
+
+    - path: "{Cargo.toml,**/Cargo.toml,rust-toolchain.toml}"
+      instructions: |
+        Crates inherit `version` from [workspace.package]; a member must not set
+        its own. New dependencies: justify, prefer `default-features = false` with
+        explicit features, and watch for feature unification effects across the
+        workspace (e.g. serde_json preserve_order, a second rustls provider).
+        Tauri must not become a dependency of crates/registry or anything it pulls.
+
+    - path: "packaging/**"
+      instructions: |
+        install.sh is POSIX sh (checked by `shellcheck -s sh`), served straight
+        into `sh`: no bashisms, LF line endings (.gitattributes), verify checksums
+        and signatures of what it downloads, fail on any error, never `curl | sh`
+        a second script. Homebrew/AUR metadata must match the release assets.
+
+    - path: "KEYS"
+      instructions: |
+        The published release-signing keys, and CUMULATIVE: a verifier of an
+        older release still needs the key that signed it and its revocation
+        status. CI checks only that the current key is present, so this review is
+        what catches a lost key. Flag any diff that removes a key block or shrinks
+        the file instead of appending. A rotation must also add a new row to the
+        fingerprint table in docs/INSTALL.md and move the `**current**` marker,
+        keeping the previous row's fingerprint with its release range filled in.
+
+    - path: "fuzz/**"
+      instructions: |
+        Fuzz targets must exercise the same parsing entry points production uses,
+        not a test-only copy.
+
+  pre_merge_checks:
+    override_requested_reviewers_only: false
+    docstrings:
+      mode: "off"
+    title:
+      mode: error
+      requirements: >-
+        Conventional Commits, which drive stable releases and release notes:
+        `type(scope): imperative summary`, lower-case type from feat, fix, perf,
+        refactor, test, docs, ci, chore, build, revert; `!` before the colon for a
+        breaking change. The scope names the area (e.g. mcp, extensions, ui-next,
+        tui, server, kube, desktop, release) and the summary reads well after
+        "**scope:**" in release notes. Exceptions: the release-promotion PR from
+        dev to main and bot release commits.
+    description:
+      mode: warning
+    issue_assessment:
+      mode: warning
+    custom_checks:
+      # The built-in description check is skipped while high_level_summary is
+      # on, so the PR template is checked here instead.
+      - name: PR template completed
+        mode: warning
+        instructions: |
+          The description must follow .github/PULL_REQUEST_TEMPLATE.md. Pass only
+          if ALL hold:
+          1. "What changed and why" states the problem and the resulting
+             behaviour, not only a list of files.
+          2. "Related issues" references an issue (e.g. "Closes #123", or "Part of
+             #123" when the PR does not fully resolve it). The release-promotion
+             PR from dev to main and bot release PRs are exempt.
+          3. "Validation" lists the commands actually run and their results (e.g.
+             pnpm typecheck / pnpm build / pnpm test, cargo test --workspace), or
+             for a docs/config-only change says how it was checked; any check that
+             could not be run is named with the reason. A bare "tests pass" fails.
+          4. Optional sections that do not apply are removed, not left holding the
+             template's HTML comments.
+          Name each condition that fails.
+      - name: Capability change completeness
+        mode: error
+        instructions: |
+          Applies only if the PR adds, removes or renames a capability, or changes
+          a capability's input/output schema or safety annotations (look for
+          changes to `*_capability` functions, `*In`/`*Out` structs, or
+          registrations in crates/registry/src/lib.rs). Otherwise pass.
+          Treat a rename as removing the old id and adding the new one, and apply
+          both sets of conditions.
+
+          For each capability ADDED or CHANGED, pass only if ALL hold:
+          1. It is registered in crates/registry/src/lib.rs (not only in
+             apps/desktop/src-tauri).
+          2. If it is added, or its safety annotations changed,
+             packages/core/src/lib/capability-catalog.json is updated in the same
+             PR. The catalog holds only ids and annotation flags, so this
+             condition passes for a schema-only or handler-only change.
+          3. apps/desktop/src-tauri/tests/e2e.rs exercises it or excludes it with a
+             concrete reason.
+          4. Every multi-word input field's serialized name matches the JSON the
+             @srelens/core wrapper sends (camelCase via serde rename).
+          5. It is `read_only`, or `requires_confirm` (with `destructive` /
+             `sensitive` where applicable).
+          6. If it cannot be safe on the shared multi-user web container (it runs
+             a host shell, installs toolbox binaries, performs helm repo/plugin
+             operations, or otherwise acts as the shared UID or reads/writes
+             state outside the caller's per-user `UserEnvs` paths), it is in
+             WEB_DENIED_CAPABILITIES in crates/server/src/api.rs. Touching files
+             only through per-user paths the server supplies (e.g. the user's own
+             kubeconfig) does not require denial.
+
+          For each capability REMOVED, pass only if ALL hold:
+          1. Its registration is gone from crates/registry/src/lib.rs.
+          2. Its entry is gone from packages/core/src/lib/capability-catalog.json.
+          3. apps/desktop/src-tauri/tests/e2e.rs no longer exercises or excludes it.
+          4. No @srelens/core wrapper, UI caller, MCP prompt, or web-host denial
+             list entry still names its id.
+
+          Name each condition that fails and the capability it fails for.
+      - name: Tests accompany behaviour changes
+        mode: warning
+        instructions: |
+          Pass if the PR changes no runtime behaviour (docs, comments, CI-only, or
+          pure renames), or if it adds or modifies a test that exercises the
+          changed behaviour. Fail if production code under crates/, apps/ or
+          packages/ changes behaviour with no corresponding test change, or if a
+          coverage threshold or coverage exclusion was loosened.
+      - name: UI changes verified by running
+        mode: warning
+        instructions: |
+          Applies only if the PR changes rendered UI under packages/ui-next,
+          packages/ui-kit or apps/desktop/src (not only tests). Pass if the PR
+          description's "UI evidence" section contains screenshots, a recording,
+          or a concrete description of the screen interactions performed in a
+          running app or harness. Fail if it is empty or only cites tests.
+      - name: Failure not shown as absence
+        mode: warning
+        instructions: |
+          Fail if the diff introduces a code path where an error from a capability
+          call, fetch, or Kubernetes API request is converted into an empty list,
+          null/None, default value, "not found"/"none"/"no changes" message, or a
+          success toast, without surfacing the error. Pass otherwise. Quote the
+          offending lines.
+      - name: No secrets or unscoped Tauri imports
+        mode: error
+        instructions: |
+          Fail if the diff (a) adds hard-coded credentials, tokens or private keys,
+          (b) logs or persists Secret values, API keys or bearer tokens in the
+          clear, or (c) imports `@tauri-apps/api` outside
+          packages/core/src/transport/. Pass otherwise.
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: true
+    simplify:
+      enabled: false
+    autofix:
+      enabled: true
+    fix_ci:
+      enabled: true
+    resolve_merge_conflict:
+      enabled: true
+
+  tools:
+    # Rust
+    clippy:
+      enabled: true
+    # GitHub Actions
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    github-checks:
+      enabled: true
+    # Shell / containers / config
+    shellcheck:
+      enabled: true
+    hadolint:
+      enabled: true
+    yamllint:
+      enabled: true
+    trivy:
+      enabled: true
+    checkov:
+      enabled: false
+    squawk:
+      enabled: true
+    sqlfluff:
+      enabled: false
+    # Secrets and dependencies
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    osvScanner:
+      enabled: true
+    # Structural search
+    ast-grep:
+      enabled: true
+      essential_rules: true
+    semgrep:
+      enabled: true
+    opengrep:
+      enabled: false
+    # Docs
+    markdownlint:
+      enabled: true
+    languagetool:
+      enabled: false
+    vale:
+      enabled: false
+    # JS/TS/CSS: the repo has no ESLint/Biome/oxc/Stylelint config, so these
+    # would impose a style the codebase does not follow. `pnpm typecheck` and
+    # Vitest are the gates.
+    eslint:
+      enabled: false
+    biome:
+      enabled: false
+    oxc:
+      enabled: false
+    stylelint:
+      enabled: false
+    htmlhint:
+      enabled: false
+    reactDoctor:
+      enabled: true
+    # Not used in this repository
+    checkmake:
+      enabled: false
+    presidio:
+      enabled: false
+
+chat:
+  auto_reply: true
+  art: false
+
+knowledge_base:
+  opt_out: false
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - AGENTS.md
+      - CONTRIBUTING.md
+      - docs/DEVELOPMENT.md
+      - design.md
+      - docs/MCP.md
+      - docs/WEB.md
+      - docs/extensions/security.md
+      - docs/extensions/threat-model.md
+      - docs/extensions/permissions.md
+  learnings:
+    scope: local
+  issues:
+    scope: local
+  pull_requests:
+    scope: local
+
+code_generation:
+  unit_tests:
+    path_instructions:
+      - path: "**/*.rs"
+        instructions: |
+          Unit tests go in a `#[cfg(test)] mod tests` beside the code. Never assert
+          serde_json map key order. Capability payloads in tests use the caller's
+          camelCase JSON, and include a case asserting the snake_case spelling is
+          rejected. Tests needing a live cluster are `#[ignore]`d.
+      - path: "**/*.{ts,tsx}"
+        instructions: |
+          Vitest + Testing Library, file `Foo.test.tsx` beside `Foo.tsx`. Mock the
+          transport from @srelens/core, never Tauri. Cover the failure path
+          (rejected call renders the error and a retry) separately from the empty
+          path (successful empty answer). Query by role and accessible name.

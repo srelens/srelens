@@ -411,6 +411,10 @@ pub struct ListCustomOut {
     #[serde(rename = "columnsError", skip_serializing_if = "Option::is_none")]
     pub columns_error: Option<String>,
     pub items: Vec<CustomRow>,
+    /// True when the list was cut at [`crate::list_cap::APP_LIST_CAP`] and more
+    /// resources remain on the API server (#609).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// Build a dynamic ApiResource for an arbitrary CRD GVK + plural.
@@ -452,6 +456,41 @@ async fn discover_columns(
         .map_err(|e| e.to_string())?;
     columns_for_named_version(&crd.data["spec"], version)
 }
+
+/// Whether a CustomResourceDefinition named `{plural}.{group}` serves `version` of that
+/// group and plural, so a caller can tell a custom resource from a built-in or aggregated
+/// API before reading it. A CRD that exists but does not serve the version is not enough:
+/// the same group and plural at another version may be served by something else.
+/// `Ok(false)` means only that the API server answered and no such CRD serves it; a failed
+/// lookup is an error, never an absence.
+pub async fn custom_resource_serves(
+    client: kube::Client,
+    group: &str,
+    version: &str,
+    plural: &str,
+) -> Result<bool, String> {
+    let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+        "apiextensions.k8s.io",
+        "v1",
+        "CustomResourceDefinition",
+    ));
+    let api: Api<DynamicObject> = Api::all_with(client, &ar);
+    let found = tokio::time::timeout(request_timeout(), api.get_opt(&format!("{plural}.{group}")))
+        .await
+        .map_err(|_| "CustomResourceDefinition lookup timed out".to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(found.is_some_and(|crd| crd_serves(&crd.data["spec"], group, version, plural)))
+}
+/// Whether a CRD `spec` declares this group and plural and serves this version.
+fn crd_serves(spec: &serde_json::Value, group: &str, version: &str, plural: &str) -> bool {
+    spec["group"] == group
+        && spec["names"]["plural"] == plural
+        && spec["versions"].as_array().is_some_and(|versions| {
+            versions
+                .iter()
+                .any(|v| v["name"] == version && v["served"] == true)
+        })
+}
 fn columns_for_named_version(
     spec: &serde_json::Value,
     version: &str,
@@ -487,13 +526,16 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                 } else {
                     Api::all_with(client.clone(), &ar)
                 };
-                let list =
-                    tokio::time::timeout(request_timeout(), api.list(&ListParams::default()))
+                // No outer timeout: `list_capped` spends `request_timeout()` on
+                // each page, which is what that budget measures. Wrapping the
+                // walk gave four pages one request's time, and a cluster large
+                // enough to need paging was the one most likely to be cut off.
+                // The error mapping — an API error's own words, a sentence of
+                // ours only for a timeout — is `into_capability_error`'s.
+                let (objects, truncated) =
+                    crate::list_cap::list_capped(&api, ListParams::default())
                         .await
-                        .map_err(|_| {
-                            CapabilityError::Handler("list custom resource timed out".into())
-                        })?
-                        .map_err(handler_err)?;
+                        .map_err(|e| e.into_capability_error("list custom resource"))?;
                 let (columns, columns_error) = if input.use_crd_columns {
                     match discover_columns(client, &input.group, &input.plural, &input.version)
                         .await
@@ -504,9 +546,13 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                 } else {
                     (input.printer_columns, None)
                 };
+                // Cap columns evaluated per row as well as those a binding may
+                // declare (#609) — a CRD can declare more than the manifest cap.
+                // Keep in sync with `MAX_PRINTER_COLUMNS` in plugin-host.
+                const MAX_COLUMNS: usize = 32;
+                let columns: Vec<_> = columns.into_iter().take(MAX_COLUMNS).collect();
                 let printer_columns = input.use_crd_columns.then(|| columns.clone());
-                let items = list
-                    .items
+                let items = objects
                     .into_iter()
                     .map(|o| {
                         let (values, sort_keys) = if columns.is_empty() {
@@ -534,6 +580,7 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                     items,
                     printer_columns,
                     columns_error,
+                    truncated,
                 })
             }
         },
@@ -908,10 +955,167 @@ mod tests {
         assert_eq!(resolve_json_path(&whole, ".spec.version"), "4.1.2");
     }
 
+    /// The whole-walk timeout this PR removed, re-created at the capability
+    /// level: three pages that each answer inside the per-request budget but
+    /// together outlast it. `k8s.listCustomResource` completes; a handler that
+    /// wrapped the walk in one `request_timeout()` would have cut it off.
+    #[tokio::test]
+    async fn list_custom_resource_walks_pages_that_together_outlast_one_request_budget() {
+        let _budget = crate::list_cap::test_support::hold_request_timeout(1);
+        let per_page = std::time::Duration::from_millis(450);
+        let widget = |name: &str| {
+            serde_json::json!({"apiVersion":"example.io/v1","kind":"Widget",
+                "metadata":{"name":name,"namespace":"default"}})
+        };
+        let page = |items: Vec<serde_json::Value>, next: Option<&str>| {
+            serde_json::json!({"apiVersion":"example.io/v1","kind":"WidgetList",
+                "metadata":{"continue":next},"items":items})
+        };
+        let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+            vec![
+                page(vec![widget("w1")], Some("p2")),
+                page(vec![widget("w2")], Some("p3")),
+                page(vec![widget("w3")], None),
+            ],
+            per_page,
+        );
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache.preload("fake", client).await;
+        let capability = list_custom_resource_capability(cache);
+
+        let started = std::time::Instant::now();
+        let out = (capability.handler)(serde_json::json!({
+            "context": "fake", "group": "example.io", "version": "v1",
+            "plural": "widgets", "kind": "Widget", "namespaced": false
+        }))
+        .await
+        .expect("every page answered inside the per-request budget");
+
+        assert!(
+            started.elapsed() > crate::connect::request_timeout(),
+            "the walk must have outlasted one request's budget to prove anything"
+        );
+        // A false `truncated` is omitted on the wire (`skip_serializing_if`).
+        assert_ne!(out["truncated"], true, "{out}");
+        assert_eq!(out["items"].as_array().map(Vec::len), Some(3), "{out}");
+        assert_eq!(uris.lock().unwrap().len(), 3);
+    }
+
     #[test]
     fn builds_namespaced_api_version() {
         let ar = custom_api_resource("gateway.networking.k8s.io", "v1", "Gateway", "gateways");
         assert_eq!(ar.api_version, "gateway.networking.k8s.io/v1");
         assert_eq!(ar.plural, "gateways");
+    }
+
+    /// A client whose API server answers every request with `status`, recording each path.
+    fn answering(status: u16) -> (kube::Client, Arc<std::sync::Mutex<Vec<String>>>) {
+        let paths = Arc::new(std::sync::Mutex::new(vec![]));
+        let seen = paths.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            seen.lock().unwrap().push(request.uri().path().to_owned());
+            async move {
+                let body = if status == 200 {
+                    serde_json::json!({"apiVersion":"apiextensions.k8s.io/v1",
+                        "kind":"CustomResourceDefinition",
+                        "metadata":{"name":"applications.argoproj.io"},
+                        "spec":{"group":"argoproj.io","names":{"plural":"applications","kind":"Application"},
+                            "scope":"Namespaced",
+                            "versions":[{"name":"v1alpha1","served":true,"storage":true},
+                                {"name":"v1beta1","served":false,"storage":false}]}})
+                } else {
+                    let reason = if status == 404 {
+                        "NotFound"
+                    } else {
+                        "Forbidden"
+                    };
+                    serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure",
+                        "code":status,"reason":reason,"message":"rejected"})
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        (kube::Client::new(service, "default"), paths)
+    }
+
+    #[tokio::test]
+    async fn a_crd_lookup_checks_the_served_version_and_tells_absence_from_failure() {
+        let (client, paths) = answering(200);
+        assert_eq!(
+            custom_resource_serves(client, "argoproj.io", "v1alpha1", "applications").await,
+            Ok(true)
+        );
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["/apis/apiextensions.k8s.io/v1/customresourcedefinitions/applications.argoproj.io"]
+        );
+        // The CRD exists, but another API may serve this version of the group.
+        let (client, _) = answering(200);
+        assert_eq!(
+            custom_resource_serves(client, "argoproj.io", "v1beta1", "applications").await,
+            Ok(false)
+        );
+        let (client, _) = answering(200);
+        assert_eq!(
+            custom_resource_serves(client, "argoproj.io", "v1", "applications").await,
+            Ok(false)
+        );
+        let (client, _) = answering(404);
+        assert_eq!(
+            custom_resource_serves(client, "apps", "v1", "deployments").await,
+            Ok(false)
+        );
+        // Forbidden is not "no such CRD".
+        let (client, _) = answering(403);
+        assert!(
+            custom_resource_serves(client, "argoproj.io", "v1alpha1", "applications")
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_crd_serves_only_its_own_group_plural_and_served_versions() {
+        let spec = serde_json::json!({"group":"argoproj.io","names":{"plural":"applications"},
+            "versions":[{"name":"v1alpha1","served":true},{"name":"v1beta1","served":false},
+                {"name":"v1"}]});
+        assert!(crd_serves(&spec, "argoproj.io", "v1alpha1", "applications"));
+        assert!(!crd_serves(&spec, "argoproj.io", "v1beta1", "applications"));
+        assert!(!crd_serves(&spec, "argoproj.io", "v1", "applications"));
+        assert!(!crd_serves(&spec, "argoproj.io", "v2", "applications"));
+        assert!(!crd_serves(&spec, "argoproj.io", "v1alpha1", "appprojects"));
+        assert!(!crd_serves(&spec, "other.io", "v1alpha1", "applications"));
+        assert!(!crd_serves(
+            &serde_json::json!({}),
+            "argoproj.io",
+            "v1alpha1",
+            "applications"
+        ));
+    }
+
+    #[test]
+    fn list_custom_out_omits_truncated_when_false() {
+        let raw = serde_json::to_value(ListCustomOut {
+            printer_columns: None,
+            columns_error: None,
+            items: vec![],
+            truncated: false,
+        })
+        .unwrap();
+        assert!(raw.get("truncated").is_none());
+        let cut = serde_json::to_value(ListCustomOut {
+            printer_columns: None,
+            columns_error: None,
+            items: vec![],
+            truncated: true,
+        })
+        .unwrap();
+        assert_eq!(cut["truncated"], true);
     }
 }

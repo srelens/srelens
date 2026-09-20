@@ -14,6 +14,7 @@ pub const MIN_COMMAND_POPUP_TEXT_SCALE: u8 = 1;
 pub const MAX_COMMAND_POPUP_TEXT_SCALE: u8 = 4;
 
 pub const DEFAULT_SHOW_FEATURE_BANNER: bool = true;
+pub const DEFAULT_CHECK_UPDATES: bool = true;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommandPopupDensity {
@@ -138,6 +139,14 @@ impl CommandPopupDensity {
     }
 }
 
+/// The container-level `default` is load-bearing, not decoration: every field
+/// here is required by serde unless something supplies one, and a `tui.json`
+/// written by an earlier build has none of the fields added since. Without it,
+/// adding a single field would make every older file fail to deserialize, and
+/// `load()` — which falls back to `Self::default()` on any error — would answer
+/// with defaults, silently discarding popup width, visible rows, density, the
+/// banner flag and the Argo hub settings on upgrade. `field_added_later_does_not_discard_the_rest`
+/// below is the regression test; do not drop this attribute.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TuiConfig {
@@ -146,8 +155,11 @@ pub struct TuiConfig {
     #[serde(alias = "commandPopupTextScale")]
     pub command_popup_density: CommandPopupDensity,
     pub show_feature_banner: bool,
+    pub check_updates: bool,
     pub argo_hub_context: Option<String>,
     pub argo_hub_kubeconfig: Option<PathBuf>,
+    #[serde(skip)]
+    pub update_available: Option<String>,
 }
 
 impl Default for TuiConfig {
@@ -157,8 +169,10 @@ impl Default for TuiConfig {
             command_popup_max_visible: DEFAULT_COMMAND_POPUP_MAX_VISIBLE,
             command_popup_density: CommandPopupDensity::default(),
             show_feature_banner: DEFAULT_SHOW_FEATURE_BANNER,
+            check_updates: DEFAULT_CHECK_UPDATES,
             argo_hub_context: None,
             argo_hub_kubeconfig: None,
+            update_available: None,
         }
     }
 }
@@ -290,5 +304,44 @@ mod tests {
         // Explicit context overrides kubeconfig current-context
         cfg.argo_hub_context = Some("explicit-ctx".to_string());
         assert_eq!(cfg.resolved_argo_hub_context(), Some("explicit-ctx".to_string()));
+    }
+
+    /// A `tui.json` written before a field existed still loads, and keeps every
+    /// setting it DOES carry.
+    ///
+    /// This is the whole reason `TuiConfig` is `#[serde(default)]` at the
+    /// container. `load()` treats any deserialize error as "no config" and
+    /// answers `Self::default()`, so one field without a default would not
+    /// reset that field — it would reset the file. The payload below is what
+    /// the build before `checkUpdates` and the Argo hub settings wrote.
+    #[test]
+    fn field_added_later_does_not_discard_the_rest() {
+        let older = r#"{
+            "commandPopupMaxWidth": 120,
+            "commandPopupMaxVisible": 14,
+            "commandPopupDensity": "large",
+            "showFeatureBanner": false
+        }"#;
+
+        let config: TuiConfig =
+            serde_json::from_str(older).expect("a config written without the newer fields loads");
+
+        // The settings the file does carry survive.
+        assert_eq!(config.command_popup_max_width, 120);
+        assert_eq!(config.command_popup_max_visible, 14);
+        assert_eq!(config.command_popup_density, CommandPopupDensity::Large);
+        assert!(!config.show_feature_banner);
+        // And the ones it does not come back as the documented defaults.
+        assert_eq!(config.check_updates, DEFAULT_CHECK_UPDATES);
+        assert_eq!(config.argo_hub_context, None);
+        assert_eq!(config.argo_hub_kubeconfig, None);
+    }
+
+    /// The same for a file from before ANY of these fields existed: an empty
+    /// object is a valid config, not a parse failure.
+    #[test]
+    fn an_empty_config_object_is_the_defaults_rather_than_an_error() {
+        let config: TuiConfig = serde_json::from_str("{}").expect("an empty object loads");
+        assert_eq!(config, TuiConfig::default());
     }
 }

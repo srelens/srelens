@@ -9,6 +9,16 @@ is the bug.
 Tracking: [#163](https://github.com/srelens/srelens/issues/163). Field reference:
 [manifest.md](manifest.md).
 
+## Scope
+
+- **Hosts.** Apps run in the desktop app, whose extension capabilities are also exposed
+  over MCP. The web host refuses every `extensions.*` capability.
+- **The terminal UI is out of scope for extension API 1.0.** The TUI neither loads nor
+  renders apps, and nothing in this specification applies to it.
+- **Clusters.** An app is installed for the whole application. It may be limited to
+  chosen kubeconfig contexts; on the others it is hidden and the host refuses its reads
+  and actions.
+
 ## Terms
 
 - **Extension API version**: the version of this contract, in SemVer form
@@ -183,8 +193,16 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   app's settings and assigns a new revision.
 - **Names inside a manifest.** Capability `name`s are unique. Contribution `id`s are
   unique across `pages`, `detailTabs` and `detailLinks`. Both use `A–Z`, `a–z`, `0–9`
-  and `-`, up to 64 characters. Titles are 1–120 characters with no control
-  characters.
+  and `-`, up to 64 characters.
+- **Names, titles and groups.** The app `name`, every `title` and a page `group` are
+  1–120 characters. They may not contain control characters (Unicode category Cc) or
+  format characters (category Cf), which change how text displays without being seen:
+  bidirectional marks, embeddings, overrides and isolates (U+200E–U+200F,
+  U+202A–U+202E, U+2066–U+2069), zero-width spaces and joiners (U+200B–U+200D, U+2060),
+  the byte order mark (U+FEFF), the soft hyphen (U+00AD) and tags. Letters, marks and
+  symbols in any script are allowed, but an emoji sequence joined with U+200D is not.
+  A catalog entry's `name` and `description` are held to the same rule, and refuse both
+  control and format characters.
 - **Derived names.** Operations are addressed as `plugin/<id>/<name>`. App routes
   carry the cluster, app ID, page and, where relevant, namespace and resource name.
 - **Kinds.** `forKinds` entries are group-qualified: `argoproj.io/Application`, and
@@ -204,9 +222,10 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ### 0.1.0
 
-The only supported API version. Apart from one pre-release rename (#537), the manifest
-contract has not changed since it was introduced; the other entries are host additions
-that existing `^0.1` manifests receive without an update.
+The only supported API version. Apart from one pre-release rename (#537) and one
+security fix (#603), the manifest contract has not changed since it was introduced; the
+other entries are host additions that existing `^0.1` manifests receive without an
+update.
 
 - **#508:** API 0.1 manifests.
   - Contributions: `pages` (with `group`, `statusColumns`, `dashboard`), `detailTabs`, `rowActions` (renamed `detailLinks` in #537).
@@ -244,12 +263,32 @@ that existing `^0.1` manifests receive without an update.
   - `extensions.configure` gains `rollback`, which restores a kept version with explicit grants, keeps settings and assigns a new revision.
   - Settings → Apps shows an app's manifest, grants with their annotations, source and install time; it exports settings as JSON, resets them to defaults, and rolls back.
   - The capability catalog carries a `sensitive` flag.
+- **#535:**
+  - An installed app may be limited to chosen kubeconfig contexts in `contexts`. Each is kept by context key (`{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports under `key`), because a display name changes when another kubeconfig declares the same name (#265), and a stable ID can be shared by two contexts (#623). Without the list the app is offered on every cluster, as before.
+  - `extensions.configure` gains `clusters`. On a cluster the app is not enabled for, `extensions.read`, `extensions.resource` and `extensions.action` refuse with "App is not enabled for this cluster", and both desktop designs hide its pages, detail tabs and detail links.
+  - Those three send the request on under the checked context's pinned ID (the reserved `srelens-context:` prefix followed by the absolute kubeconfig path and encoded context name), and a context lookup accepts either ID as well as a name, so a kubeconfig change mid-request cannot move it to another cluster. Pinned requests never fall back to merged kubeconfig entries, and managed authentication resolves the pinned context's original name. Stable IDs themselves are unchanged, since settings persist them. A pinned ID names exactly one context (`#` and `%` in the path are percent-encoded); a stable ID that two contexts share (`a` + `b#c` and `a#b` + `c`) is refused for both, since it does not say which cluster was chosen.
+  - A limited app's page waits while the contexts are listed, and shows the failure with a retry if the listing fails. Resource views do the same for a limited app's tabs and actions. A failed refresh keeps the contexts already known.
+  - On a context the host cannot resolve, a limited app is refused with the reason (no kubeconfig declares it, or which kubeconfig could not be read), not with "App is not enabled for this cluster".
+  - The terminal UI is recorded as out of scope for extension API 1.0 (see [Scope](#scope)).
+- **#623:**
+  - `k8s.listContexts` reports a `key` next to `stableId`: the stable ID with `#` and `%` percent-encoded in the file and the name, so no two contexts share it (`a` + `b#c` and `a#b` + `c` share a stable ID). The stable ID itself is unchanged.
+  - An app's `contexts` list holds keys, and the broker checks a request's context by key. A context added later under a stable ID that a removed, allowed context carried cannot inherit the app.
 - **#537:** pre-release rename.
   - The `rowActions` contribution is now `detailLinks`, with the same shape. Each entry opens a read-only results panel from the resource detail view's **App links** menu; it was never a row menu or a cluster write.
   - A manifest that still uses `rowActions` is rejected with `EXTENSION_UNKNOWN_FIELD`. There is no alias and API 0.1 is not bumped: a rename is breaking under [Compatibility rules](#compatibility-rules), and this one is an exception made because extensions had not gone live.
   - `rowActions` is reserved for declared mutations ([#549](https://github.com/srelens/srelens/issues/549)).
   - The official releases moved to `detailLinks` as Argo CD 0.2.0 and Flux 0.3.0, signed with a rotated srelens publisher key ([#560](https://github.com/srelens/srelens/issues/560)) that the host now pins. Signatures under the previous key no longer verify; nothing had been released under it, so no transition is kept.
+- **#603:** security fix.
+  - The app `name`, every `title` and a page `group` refuse Unicode format characters (category Cf), such as right-to-left overrides and zero-width spaces, with `EXTENSION_INVALID_VALUE` at the field's path. See [Identifiers](#identifiers).
+  - A catalog entry whose `name` or `description` holds a control or format character is refused, and the catalog with it, as for any other invalid entry.
+  - The install review shows a manifest's own name only once the host has accepted it; until then, and for one it refuses, it says "This manifest".
+  - This narrows accepted values within API 0.1, which [Compatibility rules](#compatibility-rules) classify as breaking. The exception is made because such a label can display as a different app's name. An installed app whose label holds one fails re-verification and is quarantined.
 - **#604:** security fix, in catalog validation rather than the manifest contract.
   - A catalog entry's `repository` is matched against the trusted-publisher table case-insensitively, as GitHub resolves owner and repository names. An entry whose repository is `https://github.com/SRELENS/…` must carry the srelens signature, exactly as the lowercase form must.
   - A lookalike owner such as `srelensx` is a different repository, and its entries stay ordinary unsigned third-party apps.
   - The release asset URL must still equal the pinned repository's `v<version>/manifest.json`, so an official entry writes it in the pinned form.
+- **#601:** security fix.
+  - A `k8s.listCustomResource` binding's `group` must be shaped like a CustomResourceDefinition group. A group without a dot (`apps`, `batch`, `policy`) or with an empty label is refused with `EXTENSION_INVALID_BINDING` at `capabilities[i].arguments.group`, by `extensions.validate`, install and rollback. Dotted groups under `k8s.io` are accepted here, since some, such as `gateway.networking.k8s.io`, are CRD groups.
+  - An installed app whose binding breaks the rule fails re-verification and is quarantined.
+  - `extensions.read`, `extensions.resource` and `extensions.action` confirm, before dispatching, that a CustomResourceDefinition named `{plural}.{group}` declares that group and plural and serves the bound `version` on the cluster, and refuse the call when none does. That covers dotted built-in groups such as `networking.k8s.io`, aggregated APIs, and a version of a CRD's group and plural that the CRD does not serve. A lookup that fails refuses the call with the reason, not as a missing CRD. `k8s.listCustomResource` itself is unchanged.
+  - This narrows accepted values within API 0.1, which [Compatibility rules](#compatibility-rules) classify as breaking. The exception is made because such a binding exposed built-in objects, such as a Deployment's environment, under a permission that reads as custom resources only. The Flux and Argo CD releases are unaffected.

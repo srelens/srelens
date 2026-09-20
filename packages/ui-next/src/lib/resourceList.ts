@@ -8,6 +8,8 @@ export interface ResourceList<Row> {
   rows: Row[];
   status: ResourceListStatus;
   error?: string;
+  /** True when the polled list stopped at a backend row cap (#609). */
+  truncated?: boolean;
   watch: WatchStatus;
   reload(): void;
 }
@@ -76,6 +78,8 @@ function mergeMetrics<Row extends ListRow>(rows: Row[], metrics: Map<RowKey, Par
 interface ListState {
   rows: unknown[];
   error?: string;
+  /** Set only for poll sources that report a backend row cap (#609). */
+  truncated?: boolean;
   loading: boolean;
   watch: WatchStatus;
   forKey: string;
@@ -222,16 +226,32 @@ export function useResourceList<Row extends ListRow>(
         (result) => {
           if (gen.current !== mine) return;
           if (result.error) {
-            setState((s) => ({ ...s, error: result.error, loading: false }));
+            setState((s) => ({
+              ...s,
+              error: result.error,
+              truncated: undefined,
+              loading: false,
+            }));
             return;
           }
           const rows = result.rows ?? [];
           cacheSet(key, rows);
-          setState((s) => ({ ...s, rows, error: undefined, loading: false }));
+          setState((s) => ({
+            ...s,
+            rows,
+            error: undefined,
+            truncated: result.truncated || undefined,
+            loading: false,
+          }));
         },
         (e: unknown) => {
           if (gen.current !== mine) return;
-          setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e), loading: false }));
+          setState((s) => ({
+            ...s,
+            error: e instanceof Error ? e.message : String(e),
+            truncated: undefined,
+            loading: false,
+          }));
         },
       );
     };
@@ -253,13 +273,14 @@ export function useResourceList<Row extends ListRow>(
   // guard above; the required field is what stops a future full write from
   // dropping it.
   if (state.forKey !== key) {
-    return { rows: [], status: "loading", error: undefined, watch: "live", reload };
+    return { rows: [], status: "loading", error: undefined, truncated: undefined, watch: "live", reload };
   }
 
   return {
     rows: mergeMetrics(state.rows as Row[], metrics),
     status: deriveStatus(state.rows, state.error, state.loading),
     error: state.error,
+    truncated: state.truncated,
     watch: state.watch,
     reload,
   };

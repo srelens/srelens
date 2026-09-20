@@ -36,7 +36,7 @@ before publishing.
 |---|---|---|
 | `$schema` | No | The JSON Schema URL, for editors. The host ignores it. |
 | `id` | Yes | Reverse-domain identifier. See [Identifiers](specification.md#identifiers). |
-| `name` | Yes | Display name, 1–120 characters. |
+| `name` | Yes | Display name, 1–120 characters, with no control characters and no bidirectional or invisible format characters. See [Identifiers](specification.md#identifiers). |
 | `version` | Yes | The app's own SemVer version. |
 | `srelensApiVersion` | Yes | A SemVer range of extension API versions, for example `^0.1`. See [Versioning](specification.md#versioning). |
 | `kind` | Yes | `declarative`. No other kind is accepted. |
@@ -53,9 +53,9 @@ Each entry in `capabilities` binds a local operation to a trusted host capabilit
 | Field | Meaning |
 |---|---|
 | `name` | Local operation name, unique within the manifest. Addressed as `plugin/<id>/<name>`. |
-| `title` | Display title. |
+| `title` | Display title, held to the same rules as `name`. |
 | `target` | The host capability ID. It cannot start with `plugin/`; apps cannot call other apps. |
-| `arguments` | Fixed arguments, merged into every call. Callers cannot override them. |
+| `arguments` | Fixed arguments, merged into every call. Callers cannot override them. A `k8s.listCustomResource` binding may declare at most 32 `printerColumns`. |
 | `inputs` | The argument names a caller may supply. They cannot overlap with `arguments`. |
 
 Every required argument of the target must come from `arguments` or `inputs`, and the
@@ -77,7 +77,7 @@ contribution names a declared capability.
 | Field | Meaning |
 |---|---|
 | `id`, `title`, `capability` | Identity, navigation label, and the binding that lists the page's resources. |
-| `group` | Optional navigation group label. |
+| `group` | Optional navigation group label, held to the same rules as `name`. |
 | `statusColumns` | Optional `{ ready, suspended?, progressing? }`: zero-based indices into the binding's `printerColumns`, each below 64. |
 | `dashboard` | Optional `{ pages, events? }`. `pages` references 1–12 resource pages that have `statusColumns` and are not dashboards. `events` is `{ capability, apiGroups }`, where `capability` binds `k8s.listEvents` and `apiGroups` lists 1–32 dotted groups. |
 
@@ -108,6 +108,14 @@ The desktop app accepts a narrower surface than the developer broker:
   and `kind` (letters, digits, `.` and `-`) and a boolean `namespaced`. It must accept
   `context`, may not fix `context` or `namespace`, and a namespaced binding must accept
   `namespace`.
+- That `group` must be shaped like a CustomResourceDefinition group: dot-separated labels
+  such as `argoproj.io` or `gateway.networking.k8s.io`, so built-in groups such as `apps`
+  and `batch` are refused. The problem is reported at `capabilities[i].arguments.group`,
+  and an installed app that breaks the rule is quarantined when the inventory loads.
+  Every read, inspection and action also checks that a CustomResourceDefinition named
+  `{plural}.{group}` serves the bound `version` on the cluster, and is refused when none
+  does. That refuses dotted built-in groups such as `networking.k8s.io` and aggregated
+  APIs.
 - A `k8s.listEvents` binding has no fixed arguments and accepts both `context` and
   `namespace`.
 - Every page, detail tab and detail link references a `k8s.listCustomResource` binding.

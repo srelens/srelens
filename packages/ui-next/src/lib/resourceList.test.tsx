@@ -124,6 +124,20 @@ describe("useResourceList", () => {
     expect(result.current.rows).toHaveLength(1);
   });
 
+  it("stores truncated from a capped poll and clears it when a later poll fails", async () => {
+    const load = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ name: "a" }], truncated: true })
+      .mockResolvedValueOnce({ error: "connection refused" });
+    const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+    const { result } = renderHook(() => useResourceList("prod", "widgets", polled, "default", []));
+    await waitFor(() => expect(result.current.truncated).toBe(true));
+    expect(result.current.rows).toHaveLength(1);
+    act(() => result.current.reload());
+    await waitFor(() => expect(result.current.error).toBe("connection refused"));
+    expect(result.current.truncated).toBeUndefined();
+    expect(result.current.rows).toHaveLength(1);
+  });
+
   it("evicts the oldest view key at the 40-entry cap, but spares one just refreshed", async () => {
     // Seed a view's cache entry by mounting it, waiting for its first
     // snapshot, and emitting rows for it — this both inserts (a new key)

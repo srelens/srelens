@@ -1,7 +1,9 @@
 //! A fixed public catalog; official manifests require a pinned publisher signature.
 use super::*;
 use sha2::{Digest, Sha256};
-use srelens_plugin_host::{negotiate_api_version, MAX_MANIFEST_BYTES, SUPPORTED_API_VERSIONS};
+use srelens_plugin_host::{
+    is_format_character, negotiate_api_version, MAX_MANIFEST_BYTES, SUPPORTED_API_VERSIONS,
+};
 use std::{
     collections::BTreeSet,
     io::Read as _,
@@ -162,6 +164,19 @@ pub(super) fn parse_catalog(raw: &[u8]) -> Result<Catalog, String> {
         {
             return Err("Missing catalog metadata".into());
         }
+        // A format character, such as a right-to-left override, can make one app's name
+        // display as another's, and a control character can hide or reshape the rest of
+        // the line. The catalog's name, description and license are rendered as a manifest
+        // label is, so they are held to the same rule (`label` in srelens-plugin-host).
+        if [&entry.name, &entry.description, &entry.license]
+            .iter()
+            .any(|s| s.chars().any(|c| c.is_control() || is_format_character(c)))
+        {
+            return Err(format!(
+                "Catalog app {} has a control or invisible formatting character in its name, description or license",
+                entry.id
+            ));
+        }
         https_url(&entry.repository)?;
         https_url(&entry.tested_host.repository)?;
         let url = https_url(&entry.release.manifest_url)?;
@@ -273,14 +288,8 @@ fn load_with(
         host_api_version: newest_api_version(),
         host_api_versions: host_api_versions(),
     };
-    let mut file =
-        tempfile::NamedTempFile::new_in(path.parent().ok_or("Catalog cache has no parent")?)
-            .map_err(|e| e.to_string())?;
-    file.write_all(&serde_json::to_vec(&state).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    file.as_file().sync_all().map_err(|e| e.to_string())?;
-    file.persist(path)
-        .map_err(|e| format!("Save extension catalog: {e}"))?;
+    let raw = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
+    crate::durable::replace(path, &raw).map_err(|e| format!("Save extension catalog: {e}"))?;
     Ok(state)
 }
 fn load(path: &Path, refresh: bool) -> Result<Snapshot, String> {
@@ -518,15 +527,22 @@ mod tests {
     async fn catalog_capabilities_registered_and_invoked() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog.json");
-        fs::write(&path, fixture()).unwrap();
+        // Seed the cache in the shape `load` writes — a `Snapshot`, not a bare
+        // catalog. A bare catalog fails the cache parse, so the capability
+        // fetched the live catalog: red offline, and online it tested mutable
+        // live data instead of this fixture (#615).
+        let seeded = load_with(&path, false, || Ok(fixture())).unwrap();
 
         let mut reg = Registry::new();
         let core = Arc::new(Registry::new());
         register(&mut reg, path, core);
 
         let cap_list = reg.get("extensions.catalog").unwrap();
-        let list_res = (cap_list.handler)(serde_json::json!({"refresh": false})).await;
-        assert!(list_res.is_ok());
+        let list_res = (cap_list.handler)(serde_json::json!({"refresh": false}))
+            .await
+            .unwrap();
+        // Served from the seeded cache, not a fresh download.
+        assert_eq!(list_res["fetchedAt"], json!(seeded.fetched_at));
 
         let cap_manifest = reg.get("extensions.catalogManifest").unwrap();
         let err_res =
@@ -637,6 +653,44 @@ mod tests {
                 .unwrap()
                 .refresh
         );
+    }
+    #[test]
+    fn refuses_bidirectional_and_invisible_characters_in_names_and_descriptions() {
+        let base: Value = serde_json::from_slice(&fixture()).unwrap();
+        for (pointer, text) in [
+            // A right-to-left override displays this name as "Argo CD".
+            ("/extensions/0/name", "\u{202E}DC ogrA"),
+            ("/extensions/0/name", "Argo CD\u{200B}"),
+            ("/extensions/0/description", "Soft\u{00AD}hyphen"),
+            (
+                "/extensions/1/description",
+                "GitOps \u{2066}dashboards\u{2069}",
+            ),
+            ("/extensions/1/description", "\u{FEFF}Flux"),
+            // Control characters are refused too: catalog text is rendered as a name and a
+            // description, exactly as a manifest label is.
+            ("/extensions/0/name", "Argo CD\u{0008}\u{0008}X"),
+            ("/extensions/1/name", "Flux\u{007F}"),
+            ("/extensions/0/description", "GitOps\nresources"),
+            // The license is rendered beside the version, so it is held to the same rule.
+            ("/extensions/0/license", "MIT\u{202E}"),
+            ("/extensions/1/license", "Apache\u{0000}2.0"),
+        ] {
+            let mut value = base.clone();
+            *value.pointer_mut(pointer).unwrap() = json!(text);
+            let parsed = parse_catalog(&serde_json::to_vec(&value).unwrap()).map(|_| ());
+            assert!(
+                parsed
+                    .as_ref()
+                    .is_err_and(|reason| reason.contains("invisible")),
+                "{pointer} {text:?}: {parsed:?}"
+            );
+        }
+        let mut value = base;
+        value["extensions"][0]["name"] = json!("Argo CD — Übersicht");
+        value["extensions"][0]["description"] =
+            json!("GitOps アプリケーション, приложения и عمليات");
+        parse_catalog(&serde_json::to_vec(&value).unwrap()).unwrap();
     }
     #[test]
     fn snapshot_lists_every_supported_api_version_and_reuses_legacy_caches() {

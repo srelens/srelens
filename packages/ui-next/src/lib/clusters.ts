@@ -139,6 +139,7 @@ export function resetContexts(): void {
   contexts = [];
   status = "loading";
   failure = "";
+  pinnedKey = null;
   for (const listener of listeners) listener();
 }
 
@@ -163,10 +164,55 @@ export function useContextsError(): string {
   return useSyncExternalStore(subscribe, getContextsError, getContextsError);
 }
 
+/**
+ * The context KEY this window was opened for, when it was opened for one.
+ *
+ * Workspaces persist `stableId`, and two contexts can share one (#623): a
+ * kubeconfig `a` declaring `b#c` and a kubeconfig `a#b` declaring `c`. A
+ * context window is opened by `key`, which tells them apart, but the moment
+ * the key is turned into the workspace's `activeCluster` that distinction is
+ * gone, and every `stableId` lookup answers with whichever of the pair is
+ * listed first — so the window could draw and act on the wrong cluster while
+ * its own query named the other. The key is kept here, beside the persisted
+ * id rather than in place of it, and {@link resolveContext} prefers the
+ * context carrying it whenever a lookup is ambiguous. Not persisted: window
+ * identity never is, and a window without a query has nothing to prefer.
+ */
+let pinnedKey: string | null = null;
+
+export function pinContextKey(key: string | null): void {
+  pinnedKey = key;
+  for (const listener of listeners) listener();
+}
+
+export function getPinnedContextKey(): string | null {
+  return pinnedKey;
+}
+
+/**
+ * The context a stable id stands for, among `list`. When several share the
+ * id, the one this window was opened for wins (see {@link pinContextKey});
+ * otherwise the first, as before. Callers holding the list as a prop use
+ * this directly; {@link contextFor} and {@link useActiveContext} use it with
+ * the store's own list.
+ */
+export function resolveContext(
+  list: readonly ClusterContext[],
+  stableId: string | null | undefined,
+): ClusterContext | undefined {
+  if (!stableId) return undefined;
+  let first: ClusterContext | undefined;
+  for (const context of list) {
+    if (context.stableId !== stableId) continue;
+    if (pinnedKey !== null && context.key === pinnedKey) return context;
+    first ??= context;
+  }
+  return first;
+}
+
 /** The context a workspace's cluster id stands for, if the kubeconfig still has it. */
 export function contextFor(stableId: string | null | undefined): ClusterContext | undefined {
-  if (!stableId) return undefined;
-  return contexts.find((c) => c.stableId === stableId);
+  return resolveContext(contexts, stableId);
 }
 
 /**
@@ -182,5 +228,5 @@ export function contextFor(stableId: string | null | undefined): ClusterContext 
 export function useActiveContext(): ClusterContext | undefined {
   const active = useActiveCluster();
   const all = useContexts();
-  return active ? all.find((c) => c.stableId === active) : undefined;
+  return resolveContext(all, active);
 }

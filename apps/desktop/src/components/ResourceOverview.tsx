@@ -730,6 +730,12 @@ function PodDetailView({
               ),
             ],
             ["Status", <StatusPill key="s" status={phase || "—"} kind={phaseKind(phase)} />],
+            // Set only when the pod as a whole is in trouble (Evicted,
+            // NodeLost, …) — `kubectl describe pod` prints them under Status,
+            // and they are often the only place the why is written. `KV`
+            // drops the rows when they are empty. (#619)
+            ["Reason", str(status.reason)],
+            ["Message", str(status.message)],
             ["Container restarts", str(podRestartCount)],
             ["Last restart", timestampWithAge(podLastRestart, now)],
             [

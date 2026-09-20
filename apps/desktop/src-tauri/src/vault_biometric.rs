@@ -211,5 +211,6 @@ pub async fn vault_biometric_unlock(
     vault.unlock_with(key, "biometric").map_err(|e| {
         purge(&app);
         format!("{e} — the stale biometric item was removed; later launches fall back to the password")
-    })
+    })?;
+    crate::vault_password::emit_vault_unlocked(&app)
 }

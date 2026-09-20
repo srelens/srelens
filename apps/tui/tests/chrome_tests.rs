@@ -23,7 +23,6 @@ use srelens_tui::ui::dialogs::{
 use srelens_tui::ui::header::{render_header, ContextChipInfo, HeaderProps};
 use srelens_tui::ui::help::{centered_rect, render_help_modal};
 use srelens_tui::ui::statusbar::{command_popup_rect, render_statusbar, InputMode, StatusBarProps};
-use srelens_tui::CommandPopupDensity;
 use srelens_tui::views::assistant_view::{
     format_message_content, format_message_content_with_width, parse_inline_markdown,
     render_assistant_view, render_markdown_table, wrap_line, AssistantViewState, ChatMessage,
@@ -32,6 +31,7 @@ use srelens_tui::views::assistant_view::{
 use srelens_tui::views::metrics_panel_view::MetricsPanelState;
 use srelens_tui::views::reason_rail::ReasonTally;
 use srelens_tui::AiSettings;
+use srelens_tui::CommandPopupDensity;
 
 // ───────────────────────── helpers ─────────────────────────
 
@@ -146,6 +146,7 @@ fn header_props<'a>(contexts: &'a [ContextChipInfo]) -> HeaderProps<'a> {
         active_view_name: "Pods",
         contexts,
         context_chip_rects: None,
+        update_available: None,
     }
 }
 
@@ -343,6 +344,58 @@ fn a_non_destructive_confirmation_uses_its_own_action_verb() {
 }
 
 #[test]
+fn argo_sync_confirmation_modal_formats_action_cleanly_without_json_leak() {
+    let payload = serde_json::json!({
+        "ctx": "tools",
+        "ns": "argocd",
+        "name": "hs-interface-stage-eu-dus1-external-secrets",
+        "prune": false,
+        "dry_run": false,
+    });
+    let modal = Modal::Confirm {
+        title: "Sync ArgoCD Application [hs-interface-stage-eu-dus1-external-secrets]".into(),
+        message: "Trigger sync for 'argocd/hs-interface-stage-eu-dus1-external-secrets' on hub cluster 'tools'? (Prune: false)".into(),
+        action_name: format!("argo_sync:{}", payload),
+        is_destructive: false,
+    };
+    let text = modal_text(120, 40, &modal);
+    assert!(
+        text.contains("Press [Enter/y] to Sync Application  |  [Esc/n] to Cancel"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("argo_sync:"),
+        "must not leak internal action string: {text}"
+    );
+    assert!(
+        !text.contains("\"ctx\":\"tools\""),
+        "must not leak json payload in prompt: {text}"
+    );
+}
+
+#[test]
+fn argo_sync_with_prune_confirmation_modal_formats_action_cleanly() {
+    let payload = serde_json::json!({
+        "ctx": "tools",
+        "ns": "argocd",
+        "name": "my-app",
+        "prune": true,
+        "dry_run": false,
+    });
+    let modal = Modal::Confirm {
+        title: "Sync ArgoCD Application with Prune [my-app]".into(),
+        message: "Trigger sync with PRUNE for 'argocd/my-app' on hub cluster 'tools'?".into(),
+        action_name: format!("argo_sync:{}", payload),
+        is_destructive: true,
+    };
+    let text = modal_text(120, 40, &modal);
+    assert!(
+        text.contains("Press [Enter/y] to Sync with Prune  |  [Esc/n] to Cancel"),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_long_confirmation_message_wraps_inside_the_modal() {
     let modal = Modal::Confirm {
         title: "Drain Node".into(),
@@ -494,7 +547,7 @@ fn the_context_picker_lists_every_context_with_badges_and_marks_the_active_one()
     );
     assert!(text.contains("  [remote] staging ns:[web]"), "{text}");
     assert!(
-        text.contains("Showing 3/3 contexts  •  Enter: Switch  Esc: Cancel"),
+        text.contains("Showing 3/3 contexts  •  Enter: Switch  Ctrl+i: Import  Esc: Cancel"),
         "{text}"
     );
 }
@@ -597,8 +650,14 @@ fn the_namespace_picker_windows_when_selected_at_the_end_of_a_long_list() {
         filter: String::new(),
     };
     let text = modal_text(100, 20, &modal);
-    assert!(text.contains("▶ ns-30"), "selected item at the end is visible: {text}");
-    assert!(!text.contains("ns-01"), "first item scrolled out of view: {text}");
+    assert!(
+        text.contains("▶ ns-30"),
+        "selected item at the end is visible: {text}"
+    );
+    assert!(
+        !text.contains("ns-01"),
+        "first item scrolled out of view: {text}"
+    );
 }
 
 #[test]
@@ -612,7 +671,10 @@ fn the_namespace_picker_renders_selection_marker_even_when_selected_idx_is_out_o
     };
     let text = modal_text(80, 15, &modal);
     // Clamped selection is index 2 ("gamma"), which must be marked with ▶
-    assert!(text.contains("▶ gamma"), "clamped row is marked selected: {text}");
+    assert!(
+        text.contains("▶ gamma"),
+        "clamped row is marked selected: {text}"
+    );
 }
 
 // ───────────────────────── dialogs: ActionPalette ─────────────────────────
@@ -720,7 +782,11 @@ fn every_modal_still_draws_its_frame_on_a_cramped_terminal() {
         for (w, h) in [(30u16, 8u16), (24, 6)] {
             let text = modal_text(w, h, &modal);
             assert!(
-                text.contains('┌') || text.contains('─'),
+                text.contains('┌')
+                    || text.contains('─')
+                    || text.contains('┏')
+                    || text.contains('━')
+                    || text.contains('╭'),
                 "{w}x{h} {modal:?}: {text:?}"
             );
         }
@@ -820,7 +886,9 @@ fn the_help_modal_truncates_from_the_bottom_when_the_terminal_is_short() {
 fn the_help_modal_degrades_to_a_border_on_a_tiny_terminal() {
     let text = common::render_text(20, 6, |f| render_help_modal(f, f.area()));
     assert!(
-        (text.contains('┌') && text.contains('┘')) || (text.contains('╭') && text.contains('╰')),
+        (text.contains('┌') && text.contains('┘'))
+            || (text.contains('╭') && text.contains('╰'))
+            || (text.contains('┏') && text.contains('┛')),
         "{text:?}"
     );
 }
@@ -894,10 +962,7 @@ fn command_mode_pops_up_the_matching_commands_above_the_bar_and_arrows_the_selec
             "{first_row}"
         );
     }
-    let popup_row = lines
-        .iter()
-        .position(|l| l.contains("Commands"))
-        .unwrap();
+    let popup_row = lines.iter().position(|l| l.contains("Commands")).unwrap();
     assert!(popup_row < 22, "popup opens above the bar");
     assert!(lines[23].starts_with(":po█"), "{:?}", lines[23]);
 }
@@ -943,8 +1008,16 @@ fn command_popup_keeps_last_selection_visible_in_a_short_terminal() {
     props.suggestions = Some((&suggs, suggs.len() - 1));
     props.command_popup_max_visible = Some(20);
     props.command_popup_density = Some(CommandPopupDensity::ExtraLarge);
-    let text = common::render_text(100, 24, |f| render_statusbar(f, Rect::new(0, 22, 100, 2), props));
-    assert!(text.contains(&format!("▶ {}", suggs.last().unwrap().0.name.to_uppercase())), "{text}");
+    let text = common::render_text(100, 24, |f| {
+        render_statusbar(f, Rect::new(0, 22, 100, 2), props)
+    });
+    assert!(
+        text.contains(&format!(
+            "▶ {}",
+            suggs.last().unwrap().0.name.to_uppercase()
+        )),
+        "{text}"
+    );
 }
 
 #[test]
@@ -1009,7 +1082,9 @@ fn command_popup_rendering_large_density_mode() {
     let content_lines = &lines[popup_title_row + 1..22];
     let rendered_text = content_lines.join("\n");
     assert!(
-        rendered_text.contains("THEMES") || rendered_text.contains("WORKLOADS") || rendered_text.contains("PODS"),
+        rendered_text.contains("THEMES")
+            || rendered_text.contains("WORKLOADS")
+            || rendered_text.contains("PODS"),
         "large mode renders uppercase command names, got:\n{rendered_text}"
     );
 }
@@ -1037,7 +1112,10 @@ fn command_popup_rendering_extra_large_density_mode() {
         .iter()
         .position(|l| l.contains("Commands [1/"))
         .expect("popup title present");
-    assert_eq!(popup_title_row, 11, "top border of extra large popup is at y=11");
+    assert_eq!(
+        popup_title_row, 11,
+        "top border of extra large popup is at y=11"
+    );
 
     // ExtraLarge mode renders 3 lines per item including Usage line
     let content_lines = &lines[popup_title_row + 1..22];
@@ -1094,7 +1172,10 @@ fn normal_mode_shows_the_default_key_palette() {
         assert!(text.contains(hint), "missing {hint}: {text}");
     }
     for excluded in ["PortForward", "Logs", "Shell", "Restart", "Scale"] {
-        assert!(!text.contains(excluded), "unexpected {excluded} in default palette: {text}");
+        assert!(
+            !text.contains(excluded),
+            "unexpected {excluded} in default palette: {text}"
+        );
     }
     assert!(!text.contains("Filter:"), "{text}");
     assert!(!text.contains('➜'), "{text}");
@@ -1126,7 +1207,10 @@ fn normal_mode_appends_active_search_when_is_text_search_is_true() {
     props.total_count = 100;
     props.is_text_search = true;
     let text = statusbar_text(props);
-    assert!(text.contains(" | Search: \"token\" [2 matches, n/N]"), "{text}");
+    assert!(
+        text.contains(" | Search: \"token\" [2 matches, n/N]"),
+        "{text}"
+    );
 
     let mut props = status_props(&mode);
     props.filter_input = "token";
@@ -1134,7 +1218,10 @@ fn normal_mode_appends_active_search_when_is_text_search_is_true() {
     props.total_count = 100;
     props.is_text_search = true;
     let text = statusbar_text(props);
-    assert!(text.contains(" | Search: \"token\" [1 match, n/N]"), "{text}");
+    assert!(
+        text.contains(" | Search: \"token\" [1 match, n/N]"),
+        "{text}"
+    );
 
     let mut props = status_props(&mode);
     props.filter_input = "token";
@@ -1207,6 +1294,32 @@ fn an_empty_namespace_reads_as_all_and_a_bare_version_gains_a_v_prefix() {
         text.contains("● unknown Nodes: 3"),
         "a version with no dots is left alone: {text}"
     );
+}
+
+#[test]
+fn header_renders_update_available_badge() {
+    let mut props = header_props(&[]);
+    props.update_available = Some("v0.14.0");
+    let text = header_text(120, 3, props);
+    assert!(
+        text.contains("Update: v0.14.0"),
+        "expected update badge in header, got: {text}"
+    );
+}
+
+#[test]
+fn header_renders_full_update_badge_even_with_long_cluster_version() {
+    let mut props = header_props(&[]);
+    props.version = "v1.35.7-gke.1222000";
+    props.node_count = 45;
+    props.pod_count = 840;
+    props.update_available = Some("v0.14.0");
+    let text = header_text(160, 3, props);
+    assert!(
+        text.contains("Update: v0.14.0"),
+        "expected complete update badge without truncation for long version, got: {text}"
+    );
+    assert!(text.contains("v1.35.7-gke.1222000"), "{text}");
 }
 
 #[test]
@@ -1384,7 +1497,9 @@ fn the_assistant_title_reflects_context_caveman_tokens_selection_and_folded_tool
         "{text}"
     );
     assert!(
-        text.contains("[⚡  1,234 tokens, <Ctrl+c> Copy Selection, <Ctrl+t> Fold Tools, <Ctrl+o> Save"),
+        text.contains(
+            "[⚡  1,234 tokens, <Ctrl+c> Copy Selection, <Ctrl+t> Fold Tools, <Ctrl+o> Save"
+        ),
         "{text}"
     );
 }
@@ -2263,11 +2378,11 @@ async fn the_app_renders_the_assistant_view_with_the_active_context_in_its_title
 
 #[tokio::test]
 async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
-    use srelens_tui::views::helm_view::{HelmReleaseItem, HelmViewState, render_helm_view};
-    use srelens_tui::views::helm_detail_view::{
-        HelmDetailTab, HelmDetailViewState, render_helm_detail_view,
-    };
     use srelens_kube::helm::{HelmReleaseDetail, HelmRevision};
+    use srelens_tui::views::helm_detail_view::{
+        render_helm_detail_view, HelmDetailTab, HelmDetailViewState,
+    };
+    use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
 
     // 1. render_helm_view states
     let mut helm_state = HelmViewState::new();
@@ -2293,7 +2408,10 @@ async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
         updated: "2026-09-01T00:00:00Z".into(),
     }]);
     let text = common::render_text(160, 40, |f| render_helm_view(f, f.area(), &helm_state));
-    assert!(text.contains("test-release") && text.contains("my-chart"), "{text}");
+    assert!(
+        text.contains("test-release") && text.contains("my-chart"),
+        "{text}"
+    );
 
     helm_state.filter_query = "nonexistent".into();
     let text = common::render_text(160, 40, |f| render_helm_view(f, f.area(), &helm_state));
@@ -2301,11 +2419,15 @@ async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
 
     // 2. render_helm_detail_view across all tabs
     let mut detail_state = HelmDetailViewState::new("test-release".into(), "default".into());
-    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    let text = common::render_text(160, 40, |f| {
+        render_helm_detail_view(f, f.area(), &detail_state)
+    });
     assert!(text.contains("Loading Helm release details"), "{text}");
 
     detail_state.set_error("failed to query helm".into());
-    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    let text = common::render_text(160, 40, |f| {
+        render_helm_detail_view(f, f.area(), &detail_state)
+    });
     assert!(text.contains("Failed to load release"), "{text}");
 
     let mock_detail = HelmReleaseDetail {
@@ -2343,91 +2465,206 @@ async fn the_app_renders_helm_and_helm_detail_views_across_all_tabs() {
 
     // Overview tab
     detail_state.set_tab(HelmDetailTab::Overview);
-    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
-    assert!(text.contains("Release Overview") && text.contains("Deployment") && text.contains("Service"), "{text}");
+    let text = common::render_text(160, 40, |f| {
+        render_helm_detail_view(f, f.area(), &detail_state)
+    });
+    assert!(
+        text.contains("Release Overview")
+            && text.contains("Deployment")
+            && text.contains("Service"),
+        "{text}"
+    );
 
     // Values Diff tab
     detail_state.set_tab(HelmDetailTab::ValuesDiff);
-    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
-    assert!(text.contains("Values Diff") && text.contains("replicaCount"), "{text}");
+    let text = common::render_text(160, 40, |f| {
+        render_helm_detail_view(f, f.area(), &detail_state)
+    });
+    assert!(
+        text.contains("Values Diff") && text.contains("replicaCount"),
+        "{text}"
+    );
 
     detail_state.toggle_diff_mode(); // CustomVsComputed -> CustomVsDefault
-    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
+    let text = common::render_text(160, 40, |f| {
+        render_helm_detail_view(f, f.area(), &detail_state)
+    });
     assert!(text.contains("User Values vs Chart Defaults"), "{text}");
 
     detail_state.toggle_diff_mode(); // CustomVsDefault -> RevisionVsPrevious
-    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
-    assert!(text.contains("Current Revision vs Previous Revision Values"), "{text}");
+    let text = common::render_text(160, 40, |f| {
+        render_helm_detail_view(f, f.area(), &detail_state)
+    });
+    assert!(
+        text.contains("Current Revision vs Previous Revision Values"),
+        "{text}"
+    );
 
     // Revisions tab
     detail_state.set_tab(HelmDetailTab::Revisions);
-    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
-    assert!(text.contains("Revision History") && text.contains("2 (current)") && text.contains("Upgrade complete"), "{text}");
+    let text = common::render_text(160, 40, |f| {
+        render_helm_detail_view(f, f.area(), &detail_state)
+    });
+    assert!(
+        text.contains("Revision History")
+            && text.contains("2 (current)")
+            && text.contains("Upgrade complete"),
+        "{text}"
+    );
 
     // Manifest tab
     detail_state.set_tab(HelmDetailTab::Manifest);
-    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
-    assert!(text.contains("Rendered Kubernetes Manifests") && text.contains("kind: Deployment"), "{text}");
+    let text = common::render_text(160, 40, |f| {
+        render_helm_detail_view(f, f.area(), &detail_state)
+    });
+    assert!(
+        text.contains("Rendered Kubernetes Manifests") && text.contains("kind: Deployment"),
+        "{text}"
+    );
 
     // Manifest search rendering
     detail_state.set_search_query("Deployment");
-    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
-    assert!(text.contains("[Search: \"Deployment\" (1/1 matches, n/N)]"), "{text}");
+    let text = common::render_text(160, 40, |f| {
+        render_helm_detail_view(f, f.area(), &detail_state)
+    });
+    assert!(
+        text.contains("[Search: \"Deployment\" (1/1 matches, n/N)]"),
+        "{text}"
+    );
 
     detail_state.set_search_query("nonexistent");
-    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
-    assert!(text.contains("[Search: \"nonexistent\" (0 matches)]"), "{text}");
+    let text = common::render_text(160, 40, |f| {
+        render_helm_detail_view(f, f.area(), &detail_state)
+    });
+    assert!(
+        text.contains("[Search: \"nonexistent\" (0 matches)]"),
+        "{text}"
+    );
     detail_state.clear_search();
 
     // Notes tab
     detail_state.set_tab(HelmDetailTab::Notes);
-    let text = common::render_text(160, 40, |f| render_helm_detail_view(f, f.area(), &detail_state));
-    assert!(text.contains("Chart Release Notes") && text.contains("everything is ready"), "{text}");
+    let text = common::render_text(160, 40, |f| {
+        render_helm_detail_view(f, f.area(), &detail_state)
+    });
+    assert!(
+        text.contains("Chart Release Notes") && text.contains("everything is ready"),
+        "{text}"
+    );
     assert!(text.contains("<y> Copy"), "{text}");
     assert!(!text.contains("<c> Copy"), "{text}");
 }
 
 #[test]
 fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
-    let modal_enabled = Modal::FeatureBanner { show_on_startup: true };
+    let modal_enabled = Modal::FeatureBanner {
+        show_on_startup: true,
+        update_available: None,
+    };
     let text_enabled = modal_text(100, 30, &modal_enabled);
 
-    assert!(text_enabled.contains("Welcome to SRElens — Feature Highlights"), "has header title");
+    assert!(
+        text_enabled.contains("Welcome to SRElens — Feature Highlights"),
+        "has header title"
+    );
     assert!(text_enabled.contains(":helm"), "shows helm command");
     assert!(text_enabled.contains(":overview"), "shows overview command");
     assert!(text_enabled.contains(":gpuinfo"), "shows gpuinfo command");
-    assert!(text_enabled.contains(":workloads"), "shows workloads command");
+    assert!(
+        text_enabled.contains(":workloads"),
+        "shows workloads command"
+    );
     assert!(text_enabled.contains(":argo"), "shows argo gitops command");
     assert!(text_enabled.contains(":ai"), "shows ai assistant command");
-    assert!(text_enabled.contains(":ai-settings"), "shows ai-settings command");
+    assert!(
+        text_enabled.contains(":ai-settings"),
+        "shows ai-settings command"
+    );
     assert!(text_enabled.contains(":config"), "shows config command");
     assert!(text_enabled.contains(":banner"), "shows banner command");
     assert!(text_enabled.contains(":nodes"), "shows nodes command");
+    assert!(text_enabled.contains(":bgp"), "shows bgp command");
+    assert!(text_enabled.contains(":import"), "shows import command");
+    assert!(text_enabled.contains(":update"), "shows update command");
+    assert!(text_enabled.contains("[b]"), "shows bgp shortcut key");
+    assert!(text_enabled.contains("[i]"), "shows import shortcut key");
+    assert!(text_enabled.contains("[u]"), "shows update shortcut key");
     assert!(text_enabled.contains("[0]"), "shows jump key 0");
     assert!(text_enabled.contains("[9]"), "shows jump key 9");
+    assert!(
+        text_enabled.contains("Version v"),
+        "shows version in banner header"
+    );
     assert!(text_enabled.contains("[●]"), "shows enabled checkbox dot");
-    assert!(text_enabled.contains("Show this feature banner on startup"), "shows checkbox label");
-    assert!(text_enabled.contains("to dismiss"), "shows dismiss key hint");
+    assert!(
+        text_enabled.contains("Show this feature banner on startup"),
+        "shows checkbox label"
+    );
+    assert!(
+        text_enabled.contains("to dismiss"),
+        "shows dismiss key hint"
+    );
     assert!(text_enabled.contains("to jump directly"), "shows jump hint");
 
-    let modal_disabled = Modal::FeatureBanner { show_on_startup: false };
+    let modal_disabled = Modal::FeatureBanner {
+        show_on_startup: false,
+        update_available: None,
+    };
     let text_disabled = modal_text(100, 30, &modal_disabled);
     assert!(text_disabled.contains("[○]"), "shows unchecked checkbox");
     assert!(text_disabled.contains("Disabled"), "shows disabled state");
 }
 
 #[test]
+fn feature_banner_modal_renders_update_available_alert_and_version() {
+    let modal_update = Modal::FeatureBanner {
+        show_on_startup: true,
+        update_available: Some("0.99.0".to_string()),
+    };
+    let text = modal_text(100, 30, &modal_update);
+
+    assert!(
+        text.contains("UPDATE AVAILABLE"),
+        "shows update alert header"
+    );
+    assert!(
+        text.contains("v0.99.0 is available!"),
+        "shows target version in banner"
+    );
+    assert!(
+        text.contains("srelens-tui update"),
+        "shows install command in banner"
+    );
+    assert!(text.contains(":update"), "shows :update command in list");
+    assert!(
+        text.contains("▲ New version v0.99.0 available!"),
+        "shows update description in list"
+    );
+}
+
+#[test]
 fn feature_banner_stays_inside_small_preview_regions() {
-    for area in [Rect::new(4, 5, 35, 6), Rect::new(4, 5, 20, 1), Rect::new(4, 5, 0, 0)] {
+    for area in [
+        Rect::new(4, 5, 35, 6),
+        Rect::new(4, 5, 20, 1),
+        Rect::new(4, 5, 0, 0),
+    ] {
         let lines = common::render_lines(80, 30, |f| {
             for y in 0..30 {
-                f.render_widget(ratatui::widgets::Paragraph::new("X".repeat(80)), Rect::new(0, y, 80, 1));
+                f.render_widget(
+                    ratatui::widgets::Paragraph::new("X".repeat(80)),
+                    Rect::new(0, y, 80, 1),
+                );
             }
-            srelens_tui::ui::dialogs::render_feature_banner_modal(f, area, true);
+            srelens_tui::ui::dialogs::render_feature_banner_modal(f, area, true, None);
         });
         for (y, line) in lines.iter().enumerate() {
             for (x, c) in line.chars().enumerate() {
-                if x < area.x as usize || x >= area.right() as usize || y < area.y as usize || y >= area.bottom() as usize {
+                if x < area.x as usize
+                    || x >= area.right() as usize
+                    || y < area.y as usize
+                    || y >= area.bottom() as usize
+                {
                     assert_eq!(c, 'X', "banner escaped preview at {x},{y}");
                 }
             }
@@ -2442,14 +2679,26 @@ fn long_helm_errors_show_the_reason_and_recovery_with_and_without_stale_rows() {
         let mut state = HelmViewState::new();
         if stale {
             state.set_releases(vec![HelmReleaseItem {
-                name: "cached-release".into(), namespace: "default".into(), revision: 3,
-                status: "deployed".into(), chart: "web".into(), chart_version: "1".into(),
-                app_version: "1".into(), updated: "today".into(),
+                name: "cached-release".into(),
+                namespace: "default".into(),
+                revision: 3,
+                status: "deployed".into(),
+                chart: "web".into(),
+                chart_version: "1".into(),
+                app_version: "1".into(),
+                updated: "today".into(),
             }]);
         }
-        state.set_error(format!("{} permission denied", "Unable to list Helm release secrets in the selected Kubernetes namespace. ".repeat(3)));
+        state.set_error(format!(
+            "{} permission denied",
+            "Unable to list Helm release secrets in the selected Kubernetes namespace. ".repeat(3)
+        ));
         let text = common::render_text(80, 24, |f| render_helm_view(f, f.area(), &state));
-        let content = text.lines().map(|line| line.trim_matches('│')).collect::<Vec<_>>().join(" ");
+        let content = text
+            .lines()
+            .map(|line| line.trim_matches('│'))
+            .collect::<Vec<_>>()
+            .join(" ");
         let words = content.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(words.contains("permission denied"), "{text}");
         assert!(words.contains("Press R to retry."), "{text}");
@@ -2468,14 +2717,24 @@ fn oversized_helm_errors_preserve_recovery_and_stale_rows() {
             let mut state = HelmViewState::new();
             if stale {
                 state.set_releases(vec![HelmReleaseItem {
-                    name: "cached".into(), namespace: "ns".into(), revision: 3,
-                    status: "deployed".into(), chart: "web".into(), chart_version: "1".into(),
-                    app_version: "1".into(), updated: "today".into(),
+                    name: "cached".into(),
+                    namespace: "ns".into(),
+                    revision: 3,
+                    status: "deployed".into(),
+                    chart: "web".into(),
+                    chart_version: "1".into(),
+                    app_version: "1".into(),
+                    updated: "today".into(),
                 }]);
             }
             state.set_error("Permission denied while listing Helm secrets. ".repeat(100));
-            let text = common::render_text(width, height, |f| render_helm_view(f, f.area(), &state));
-            let content = text.lines().map(|line| line.trim_matches('│')).collect::<Vec<_>>().join(" ");
+            let text =
+                common::render_text(width, height, |f| render_helm_view(f, f.area(), &state));
+            let content = text
+                .lines()
+                .map(|line| line.trim_matches('│'))
+                .collect::<Vec<_>>()
+                .join(" ");
             let words = content.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(words.contains("Press R to retry."), "{text}");
             assert!(words.contains("error truncated"), "{text}");

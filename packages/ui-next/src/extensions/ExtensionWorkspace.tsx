@@ -163,7 +163,7 @@ function Events({
 }) {
   const result = useResource(
     () =>
-      readExtension<{ events: EventSummary[] }>(
+      readExtension<{ events: EventSummary[]; truncated?: boolean }>(
         plugin.manifest.id,
         plugin.revision,
         config.capability,
@@ -179,6 +179,13 @@ function Events({
       refresh,
     ],
   );
+  // Bound how many matching rows enter the DOM; Load more reveals the next page
+  // of the already-capped backend result (#609).
+  const PAGE = 100;
+  const [visible, setVisible] = useState(PAGE);
+  useEffect(() => {
+    setVisible(PAGE);
+  }, [plugin.manifest.id, plugin.revision, config.capability, context, namespace, search, refresh]);
   if (result.status === "error")
     return <ErrorNotice cluster message={result.error} retry={result.reload} />;
   if (result.status === "loading")
@@ -195,12 +202,19 @@ function Events({
         .toLowerCase()
         .includes(search.toLowerCase()),
   );
+  const shown = events.slice(0, visible);
+  const hidden = Math.max(0, events.length - shown.length);
   return (
     <section className="extension-results">
       <h3 className="extension-message">
-        Events <small>({events.length})</small>
+        Events <small>({events.length}{result.data?.truncated ? "+" : ""})</small>
       </h3>
-      {events.length ? (
+      {result.data?.truncated && (
+        <p className="extension-message" role="status">
+          Showing the first {(result.data.events ?? []).length.toLocaleString()} events; more remain on the cluster.
+        </p>
+      )}
+      {shown.length ? (
         <div className="extension-table-scroll">
           <table>
             <thead>
@@ -220,7 +234,7 @@ function Events({
               </tr>
             </thead>
             <tbody>
-              {events.map((e) => (
+              {shown.map((e) => (
                 <tr key={e.name}>
                   <td>{e.type}</td>
                   <td title={e.message}>{e.message}</td>
@@ -234,6 +248,14 @@ function Events({
               ))}
             </tbody>
           </table>
+          {hidden > 0 && (
+            <p className="extension-message">
+              <button type="button" className="extension-resource-link" onClick={() => setVisible((n) => n + PAGE)}>
+                Show {Math.min(PAGE, hidden).toLocaleString()} more
+              </button>
+              <span> · {hidden.toLocaleString()} matching rows not shown</span>
+            </p>
+          )}
         </div>
       ) : (
         <p className="extension-message">No matching events.</p>

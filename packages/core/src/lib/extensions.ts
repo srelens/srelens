@@ -71,6 +71,12 @@ export interface InstalledExtension {
   installedAt: number;
   /** The versions this one replaced, newest first; at most three. */
   history: ExtensionPreviousVersion[];
+  /**
+   * The keys (`ClusterContext.key`) of the kubeconfig contexts the app is enabled for; absent
+   * means every cluster. A context's name is presentation only (#265), and its stable ID can
+   * be shared by two contexts (#623), so neither is the identity here.
+   */
+  contexts?: string[];
 }
 export interface ExtensionInventory {
   schemaVersion: number;
@@ -83,7 +89,18 @@ export type ExtensionChange =
   | { action: "remove"; id: string }
   /** Restores a kept version; `grants` are what the user reviewed and grants again. */
   | { action: "rollback"; id: string; revision: number; grants: string[] }
+  /** Limits the app to these stable context IDs, or with `null` allows every cluster. */
+  | { action: "clusters"; id: string; contexts: string[] | null }
   | { action: "settings"; id: string; settings: Record<string, unknown> };
+/**
+ * Whether an installed app may be used on a context, given that context's key
+ * (`ClusterContext.key`). A limited app is not enabled on a context whose key is not
+ * known yet; the host enforces the same scope on every read and action.
+ */
+export const extensionEnabledFor = (
+  plugin: Pick<InstalledExtension, "contexts">,
+  contextKey: string | undefined,
+) => !plugin.contexts || (contextKey !== undefined && plugin.contexts.includes(contextKey));
 export const EXTENSIONS_CHANGED = "srelens:extensions-changed";
 export const listExtensions = () =>
   invokeCapability<ExtensionInventory>("extensions.list", {});
@@ -116,6 +133,8 @@ export const validateExtension = (manifest: string, grants: string[], signature?
 export interface ExtensionResourceResult {
   printerColumns?: Array<{name:string;jsonPath:string;type?:string}>;
   columnsError?: string;
+  /** True when the backend stopped at its row cap and more remain (#609). */
+  truncated?: boolean;
   items: Array<{
     name: string;
     namespace: string;
@@ -148,16 +167,23 @@ export function extensionRoute(
 ) {
   return `/extensions/${[context, id, page, namespace].map(encodeURIComponent).join("/")}`;
 }
+/** A cluster identity route; legacy `/extensions/` routes still carry display names. */
+export function extensionClusterRoute(clusterId: string, id: string, page: string, namespace = "") {
+  return extensionRoute(clusterId, id, page, namespace).replace("/extensions/", "/extension-clusters/");
+}
+export function extensionClusterResourceRoute(clusterId: string, id: string, page: string, namespace: string, name: string) {
+  return `${extensionClusterRoute(clusterId, id, page, namespace)}/${encodeURIComponent(name)}`;
+}
 export function parseExtensionRoute(route: string) {
   const pieces = route.split("/");
-  if ((pieces.length !== 6 && pieces.length !== 7) || pieces[1] !== "extensions") return null;
+  if ((pieces.length !== 6 && pieces.length !== 7) || !["extensions", "extension-clusters"].includes(pieces[1])) return null;
   try {
     const [context, id, page, namespace] = pieces
       .slice(2)
       .map(decodeURIComponent);
     const resourceName = pieces.length === 7 ? decodeURIComponent(pieces[6]) : undefined;
     if (pieces.length === 7 && !resourceName) return null;
-    return context && id && page ? { context, id, page, namespace, ...(resourceName ? { resourceName } : {}) } : null;
+    return context && id && page ? { context, id, page, namespace, ...(pieces[1] === "extension-clusters" ? { clusterId: context } : {}), ...(resourceName ? { resourceName } : {}) } : null;
   } catch {
     return null;
   }
