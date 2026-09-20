@@ -125,7 +125,7 @@ describe("Sidebar", () => {
       render(
         <Sidebar
           {...base}
-          clusterId={(name) => (name === "kind-dev" ? "/k/config#kind-dev" : undefined)}
+          contextKey={(name) => (name === "kind-dev" ? "/k/config#kind-dev" : undefined)}
         />,
       );
       const btn = screen.getByRole("button", { name: "Open in new window" });
@@ -143,11 +143,11 @@ describe("Sidebar", () => {
     }
   });
 
-  it("withholds open-in-new-window when the stable id is unknown", () => {
+  it("withholds open-in-new-window when the context key is unknown", () => {
     (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
     coreMock.invokeCommand.mockClear();
     try {
-      render(<Sidebar {...base} clusterId={() => undefined} />);
+      render(<Sidebar {...base} contextKey={() => undefined} />);
       const btn = screen.getByRole("button", {
         name: "Open in new window once this cluster's identity is known",
       });

@@ -165,6 +165,17 @@ export function App() {
   const stableIdOf = (cluster: string) =>
     knownContexts.find((context) => context.name === cluster)?.stableId
     ?? tabs.find((tab) => tab.cluster === cluster)?.clusterId;
+  // A window's identity, which is NOT the persisted one. `stableId` joins the
+  // kubeconfig path and the context name with a bare `#`, so a path `a` with
+  // context `b#c` and a path `a#b` with context `c` produce the same string:
+  // one window label and one `?context=` for two clusters, so the second
+  // focused the first's window and this resolver could answer with either
+  // (#623). `key` encodes `#` and `%` in each part, so it names exactly one
+  // context. No fallback to a restored tab's `clusterId` — that is a stable
+  // id, and sending one into `?context=` would never match the key a later
+  // listing offers. The button stays disabled until the listing answers.
+  const contextKeyOf = (cluster: string) =>
+    knownContexts.find((context) => context.name === cluster)?.key;
   const contextProfiles = projectToNames(contextProfilesById, knownContexts);
   const contextOrder = projectOrderToNames(contextOrderById, knownContexts);
   const clusterNs = projectToNames(clusterNsById, knownContexts);
@@ -300,9 +311,10 @@ export function App() {
   }, [contexts]);
 
   // A context window's first tab, from the `?context=` in its URL. Both
-  // designs write a `stableId` into that query (Rail always did; classic's
-  // Sidebar now does too): matching by display name as well would collide
-  // when one cluster's name equals another's id, and open the wrong overview.
+  // designs write a context `key` into that query: matching by display name as
+  // well would collide when one cluster's name equals another's id, and open
+  // the wrong overview. The key rather than the `stableId` because two
+  // different contexts can share a stable ID — see `contextKeyOf` above.
   const contextParam = useMemo(
     () => new URLSearchParams(window.location.search).get("context"),
     [],
@@ -323,7 +335,7 @@ export function App() {
     // Partial listings can return readable contexts alongside an unrelated
     // kubeconfig error. Resolve a present match first — treating any error as
     // "keep waiting" left a valid target unopened forever.
-    const match = contexts.find((c) => c.stableId === contextParam);
+    const match = contexts.find((c) => c.key === contextParam);
     if (match) {
       contextParamConsumed.current = true;
       if (!restored?.tabs?.length) openView(match.name, "overview");
@@ -1121,7 +1133,7 @@ export function App() {
           onSelectCrd={(c, crd) => openCrdView(c, crd)}
           onOpenApp={openAppPage}
           contextProfiles={contextProfiles}
-          clusterId={stableIdOf}
+          contextKey={contextKeyOf}
           width={sidebarWidth}
           onResize={setSidebarWidth}
         />

@@ -338,6 +338,37 @@ describe("Rail draws a symbol mark", () => {
       errorSpy.mockRestore();
     }
   });
+
+  /**
+   * The window is opened under the context's `key`, never its `stableId`.
+   *
+   * A kubeconfig `a` declaring `b#c` and a kubeconfig `a#b` declaring `c` share
+   * a stable id, so a window keyed on it focused the first cluster's window
+   * when the reader asked for the second, and the second could never be opened
+   * (#623). The rail still keys marks and workspaces on `stableId` — that one
+   * is persisted and must not move.
+   */
+  it("opens the window under the context key rather than the colliding stable id", async () => {
+    (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {};
+    const colliding = {
+      ...ctx("prod-eu"),
+      stableId: "/k/a#b#c",
+      key: "/k/a#b%23c",
+    };
+    const contexts = [colliding];
+    setState(defaultState(contexts));
+
+    try {
+      render(<Rail contexts={contexts} onConnect={vi.fn()} />);
+      await pick("prod-eu", "Open in new window");
+
+      expect(coreMock.invokeCommand).toHaveBeenCalledWith("open_context_window", {
+        contextId: "/k/a#b%23c",
+      });
+    } finally {
+      delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    }
+  });
 });
 
 it("uses classic context order for the workspace rail", async () => {

@@ -264,12 +264,16 @@ export function Window({
         let saved = usableTabsState(loadTabsState(undefined, undefined, windowLabel));
 
         if (!saved && ctxQuery && windowLabel !== "main") {
-          // Classic Sidebar puts a display name in `?context=`; Rail puts a
-          // `stableId`. Workspaces key clusters on stable ids, so resolve the
-          // query first — looking up `clusters.includes(ctxQuery)` with a name
-          // misses the right workspace and then seeds the wrong one.
+          // Both designs put a context KEY in `?context=` — not a display
+          // name, and not a `stableId`: a path `a` with context `b#c` and a
+          // path `a#b` with context `c` share a stable ID, so resolving by one
+          // could pick the wrong cluster for this window (#623). Workspaces
+          // still key clusters on stable ids, so resolve the query to a
+          // context first — looking up `clusters.includes(ctxQuery)` with
+          // anything but a stable id misses the right workspace and then seeds
+          // the wrong one.
           const targetContext = found.find(
-            (context) => context.stableId === ctxQuery,
+            (context) => context.key === ctxQuery,
           );
           if (targetContext) {
             let mainSaved = usableTabsState(loadTabsState(undefined, undefined, "main"));
@@ -325,7 +329,7 @@ export function Window({
         } else if (
           ctxQuery &&
           windowLabel !== "main" &&
-          !found.some((context) => context.stableId === ctxQuery)
+          !found.some((context) => context.key === ctxQuery)
         ) {
           if (failure !== "") {
             // Own saved state already existed; still retain the query across a
@@ -403,7 +407,7 @@ export function Window({
     const query = pendingCtxQuery.current;
     if (!booted || !query) return;
     const target = contexts.find(
-      (context) => context.stableId === query,
+      (context) => context.key === query,
     );
     if (target) {
       pendingCtxQuery.current = null;

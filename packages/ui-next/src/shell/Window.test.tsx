@@ -420,6 +420,32 @@ describe("Window boot", () => {
     window.history.replaceState({}, "", "/");
   });
 
+  /**
+   * `?context=` is a context KEY, not a `stableId`.
+   *
+   * A kubeconfig `a` declaring `b#c` and a kubeconfig `a#b` declaring `c`
+   * produce the same stable id, so resolving the query by that could open this
+   * window on the wrong cluster — and the second of the pair could not be
+   * opened at all, since its window label collided too (#623). Both clusters
+   * below share a stable id; only their keys tell them apart.
+   */
+  it("resolves ?context= by key, so two clusters sharing a stable id do not swap", async () => {
+    const first = { ...ctx("dup", "left"), key: "a#b%23c" };
+    const second = { ...ctx("dup", "right"), key: "a%23b#c" };
+    window.history.replaceState({}, "", `/?context=${encodeURIComponent(second.key)}`);
+    listContexts.mockResolvedValue({ contexts: [first, second] });
+    loadTabsState.mockReturnValue(null);
+    render(
+      <ConsoleProvider>
+        <Window ported={[]} onOpenInClassic={() => {}} windowLabel="ctx-right" />
+      </ConsoleProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("tablist", { name: "Open tabs" })).toBeDefined());
+    expect(store.getState().workspaces.find((w) => w.id === store.getState().currentId)?.tabs.map((t) => t.sub))
+      .toContain("right");
+    window.history.replaceState({}, "", "/");
+  });
+
   it("applies a pending ?context= after a later successful listing", async () => {
     window.history.replaceState({}, "", "/?context=stage");
     listContexts.mockResolvedValue({ error: "kubeconfig unreadable" });

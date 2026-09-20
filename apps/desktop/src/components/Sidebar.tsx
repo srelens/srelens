@@ -98,7 +98,7 @@ export function Sidebar({
   width = 200,
   onResize,
   contextProfiles = {},
-  clusterId,
+  contextKey,
 }: {
   clusters: string[];
   activeCluster?: string | null;
@@ -110,8 +110,14 @@ export function Sidebar({
   width?: number;
   onResize?: (width: number) => void;
   contextProfiles?: ContextProfiles;
-  /** Display name → `stableId`. Window labels and `?context=` key on the id. */
-  clusterId?: (name: string) => string | undefined;
+  /**
+   * Display name → the context's collision-free `key`. Window labels and
+   * `?context=` key on THAT, not on `stableId`: a path `a` with context `b#c`
+   * and a path `a#b` with context `c` share a stable ID, so the second
+   * cluster's window focused the first's and could never be opened (#623).
+   * `stableId` remains the persisted identity everywhere else.
+   */
+  contextKey?: (name: string) => string | undefined;
 }) {
   const handleRef = useRef<HTMLDivElement>(null);
   const startX = useRef(0);
@@ -164,7 +170,7 @@ export function Sidebar({
     <aside className="fl-sidebar" aria-label="Cluster resources">
       <div className="flex flex-col p-1 text-sm">
         {clusters.map((cluster) => {
-          const contextId = clusterId?.(cluster);
+          const contextId = contextKey?.(cluster);
           return (
           <div key={cluster}>
             {/* Cluster (level 0) */}
@@ -187,9 +193,10 @@ export function Sidebar({
                   title={contextId ? "Open in new window" : "Open in new window once this cluster's identity is known"}
                   onClick={(e) => {
                     e.stopPropagation();
-                    // Same key Rail writes. Withhold until the stable id is known —
-                    // a display-name fallback opens a window whose `?context=` can
-                    // never match after a later successful listing.
+                    // Same key Rail writes. Withhold until the context key is
+                    // known — a display-name fallback opens a window whose
+                    // `?context=` can never match after a later successful
+                    // listing.
                     if (!contextId) return;
                     void invokeCommand("open_context_window", { contextId }).catch((err) => {
                       notify.error(`Couldn't open window for ${cluster}`, describeError(err).detail);
