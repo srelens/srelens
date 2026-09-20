@@ -936,8 +936,17 @@ pub(crate) fn build_cilium_bgp_summary(
                 Some(s) => s,
                 None => continue,
             };
-            let matching_nodes: Vec<String> =
-                find_matching_nodes(spec.get("nodeSelectors"), node_labels);
+            // `CiliumBGPPeeringPolicy` spells this `nodeSelector`, singular.
+            // Reading only the plural made every targeted policy look
+            // unscoped, and `find_matching_nodes` then put the peer on every
+            // node in the cluster. The plural is still accepted so a
+            // hand-written manifest with the MetalLB spelling is not silently
+            // widened either.
+            let matching_nodes: Vec<String> = find_matching_nodes(
+                spec.get("nodeSelector")
+                    .or_else(|| spec.get("nodeSelectors")),
+                node_labels,
+            );
 
             if let Some(routers) = spec.get("virtualRouters").and_then(|v| v.as_array()) {
                 for router in routers {
@@ -2801,6 +2810,53 @@ mod tests {
         let calico_summary = build_calico_bgp_summary(vec![empty_calico], &node_labels);
         assert_eq!(calico_summary.engine, BgpEngineType::Calico);
         assert_eq!(calico_summary.peers.len(), 0);
+    }
+
+    #[test]
+    fn a_legacy_singular_node_selector_limits_the_peer_to_matching_nodes() {
+        let mut pol = DynamicObject::new("legacy-pol", &cilium_bgp_peering_policy_resource());
+        // The CRD's own spelling: `spec.nodeSelector`, singular.
+        pol.data = json!({
+            "spec": {
+                "nodeSelector": {"matchLabels": {"zone": "east"}},
+                "virtualRouters": [{
+                    "localASN": 64512,
+                    "neighbors": [{"peerAddress": "10.1.1.1", "peerASN": 64513}]
+                }]
+            }
+        });
+
+        let mut node_labels = HashMap::new();
+        node_labels.insert(
+            "east-1".to_string(),
+            BTreeMap::from([("zone".to_string(), "east".to_string())]),
+        );
+        node_labels.insert(
+            "west-1".to_string(),
+            BTreeMap::from([("zone".to_string(), "west".to_string())]),
+        );
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![pol],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &[],
+        );
+
+        let nodes: Vec<&str> = summary.peers.iter().map(|p| p.node_name.as_str()).collect();
+        assert_eq!(
+            nodes,
+            ["east-1"],
+            "a policy scoped to one zone must not peer the whole cluster"
+        );
+        assert_eq!(summary.bgp_nodes, 1);
+        assert_eq!(summary.total_peers, 1);
     }
 
     /// A Cilium cluster config peering one node, so the summary has an engine
