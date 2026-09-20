@@ -675,14 +675,24 @@ async fn discover_cilium_bgp(
         .await,
     );
 
-    let adv_items = take(
-        list_dynamic_resource(
-            client,
-            &cilium_bgp_advertisement_v2_resource(),
-            &cilium_bgp_advertisement_v2alpha1_resource(),
-        )
-        .await,
-    );
+    // Kept as a lookup rather than flattened to a list: a refused or timed-out
+    // advertisement list and a successful empty one both hold no objects, but
+    // they say opposite things about a peer whose config selects
+    // advertisements by label (see `AdvertisementLookup`).
+    let adv_lookup = match list_dynamic_resource(
+        client,
+        &cilium_bgp_advertisement_v2_resource(),
+        &cilium_bgp_advertisement_v2alpha1_resource(),
+    )
+    .await
+    {
+        Ok(items) => AdvertisementLookup::Read(items),
+        Err(e) => {
+            // Recorded through `take`, which owns the failures list here.
+            let _ = take(Err(e));
+            AdvertisementLookup::Failed
+        }
+    };
 
     let cluster_cfg_items = take(
         list_dynamic_resource(
@@ -713,10 +723,10 @@ async fn discover_cilium_bgp(
             .map(Listed::into_items),
     );
 
-    let mut summary = build_cilium_bgp_summary(
+    let mut summary = build_cilium_bgp_summary_from(
         pool_items,
         peer_cfg_items,
-        adv_items,
+        adv_lookup,
         cluster_cfg_items,
         node_cfg_items,
         policy_items,
@@ -739,6 +749,21 @@ fn join_failures(failures: &[String]) -> Option<String> {
     }
 }
 
+/// What the `CiliumBGPAdvertisement` list came back with.
+///
+/// `Read(vec![])` is the API server answering that there are no
+/// advertisements; a peer whose config selects advertisements by label then
+/// genuinely selects none. `Failed` is the list being refused or timing out,
+/// which says nothing about what the peer announces — the same peer keeps the
+/// union fallback, as a peer with no resolvable config does, and the failure
+/// itself travels on the summary's `error`.
+#[derive(Debug)]
+pub(crate) enum AdvertisementLookup {
+    Read(Vec<DynamicObject>),
+    Failed,
+}
+
+/// [`build_cilium_bgp_summary_from`] for an advertisement list that was read.
 pub(crate) fn build_cilium_bgp_summary(
     pool_items: Vec<DynamicObject>,
     peer_cfg_items: Vec<DynamicObject>,
@@ -751,6 +776,40 @@ pub(crate) fn build_cilium_bgp_summary(
     node_pod_cidrs: &HashMap<String, Vec<String>>,
     lb_services: &[LbService],
 ) -> BgpClusterSummary {
+    build_cilium_bgp_summary_from(
+        pool_items,
+        peer_cfg_items,
+        AdvertisementLookup::Read(adv_items),
+        cluster_cfg_items,
+        node_cfg_items,
+        policy_items,
+        cnode_items,
+        node_labels,
+        node_pod_cidrs,
+        lb_services,
+    )
+}
+
+// Ten arguments, like the wrapper above and its siblings: one per CRD list.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_cilium_bgp_summary_from(
+    pool_items: Vec<DynamicObject>,
+    peer_cfg_items: Vec<DynamicObject>,
+    adv_lookup: AdvertisementLookup,
+    cluster_cfg_items: Vec<DynamicObject>,
+    node_cfg_items: Vec<DynamicObject>,
+    policy_items: Vec<DynamicObject>,
+    cnode_items: Vec<DynamicObject>,
+    node_labels: &HashMap<String, BTreeMap<String, String>>,
+    node_pod_cidrs: &HashMap<String, Vec<String>>,
+    lb_services: &[LbService],
+) -> BgpClusterSummary {
+    // Whether the advertisements were read at all decides, below, whether a
+    // resolved peer config may be trusted to select from them.
+    let (adv_items, adv_read) = match adv_lookup {
+        AdvertisementLookup::Read(items) => (items, true),
+        AdvertisementLookup::Failed => (Vec::new(), false),
+    };
     let mut neighbors: Vec<BgpNeighbor> = Vec::new();
     let mut ip_pools: Vec<BgpIpPool> = Vec::new();
     let mut bgp_node_set: BTreeSet<String> = BTreeSet::new();
@@ -842,9 +901,11 @@ pub(crate) fn build_cilium_bgp_summary(
     // nothing, so what each peer advertises is resolved through its config
     // below. The union over every advertisement — what the cluster *could*
     // announce — stands in only for a peer whose config cannot be resolved:
-    // no `peerConfigRef`, or one naming a config that was not read. For such
-    // a peer the union is the pre-existing reading, kept because the
-    // alternative is to claim the peer announces nothing.
+    // no `peerConfigRef`, or one naming a config that was not read — and for
+    // every peer when the advertisement list itself could not be read, since
+    // a config selecting from a list we never saw selects nothing we can
+    // name. For such a peer the union is the pre-existing reading, kept
+    // because the alternative is to claim the peer announces nothing.
     let all_advs: Vec<&DynamicObject> = adv_items.iter().collect();
     let advertised_by_any = if adv_items.is_empty() {
         // Nothing was read about what is advertised — the legacy v2alpha1
@@ -941,8 +1002,11 @@ pub(crate) fn build_cilium_bgp_summary(
                         });
 
                         // What this session announces: the advertisements its
-                        // config selects, when the config was read (section C).
-                        let selection = resolved_cfg.map(|cfg| {
+                        // config selects, when both the config and the
+                        // advertisements were read (section C). A successful
+                        // empty advertisement list leaves a resolved peer
+                        // silent; a failed lookup does not.
+                        let selection = resolved_cfg.filter(|_| adv_read).map(|cfg| {
                             let selected: Vec<&DynamicObject> = all_advs
                                 .iter()
                                 .copied()
@@ -3735,6 +3799,118 @@ mod tests {
         assert_eq!(summary.total_peers, 0);
         assert_eq!(summary.total_nodes, 1);
         assert_eq!(summary.error, None);
+    }
+
+    #[test]
+    fn a_successful_empty_advertisement_list_leaves_a_resolved_peer_silent() {
+        // The API server answered: there are no CiliumBGPAdvertisement objects.
+        // A peer whose config selects advertisements by label selects none.
+        let node_labels = one_node_labels();
+        let lb_services = vec![lb("web", "default", "1.2.3.4", None)];
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![peer_config_selecting("cfg-public", ("advertise", "public"))],
+            vec![],
+            vec![cluster_config_with_peer_config("cfg-public")],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &lb_services,
+        );
+
+        assert!(
+            summary.advertised_services.is_empty(),
+            "got {:?}",
+            summary.advertised_services
+        );
+        assert_eq!(summary.peers[0].routes_count, 0);
+        assert!(!summary.peers[0].export_pod_cidr);
+    }
+
+    #[test]
+    fn a_failed_advertisement_lookup_keeps_the_union_for_a_resolved_peer() {
+        // The list was refused: nothing is known about what is advertised,
+        // and a resolved config must not turn that into "announces nothing".
+        let node_labels = one_node_labels();
+        let lb_services = vec![lb("web", "default", "1.2.3.4", None)];
+        let mut node_pod_cidrs = HashMap::new();
+        node_pod_cidrs.insert("node-1".to_string(), vec!["10.244.0.0/24".to_string()]);
+
+        let summary = build_cilium_bgp_summary_from(
+            vec![],
+            vec![peer_config_selecting("cfg-public", ("advertise", "public"))],
+            AdvertisementLookup::Failed,
+            vec![cluster_config_with_peer_config("cfg-public")],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &node_pod_cidrs,
+            &lb_services,
+        );
+
+        assert_eq!(summary.advertised_services.len(), 1, "the union stands in");
+        assert!(
+            summary.peers[0].export_pod_cidr,
+            "the PodCIDR default stands in"
+        );
+        assert_eq!(summary.peers[0].routes_count, 2, "one PodCIDR, one VIP");
+    }
+
+    #[tokio::test]
+    async fn a_refused_advertisement_list_is_reported_and_does_not_silence_the_peers() {
+        // End to end: cluster config and peer config are readable, the
+        // advertisement list is refused. The header warns, and the Services
+        // tab keeps the union rather than going empty.
+        let summary = fetch_bgp_summary(&cluster_answering(|path| match path {
+            "/api/v1/nodes" => (200, one_worker_node_list()),
+            "/api/v1/services" => (
+                200,
+                json!({"apiVersion":"v1","kind":"ServiceList","metadata":{},"items":[
+                    {"apiVersion":"v1","kind":"Service",
+                     "metadata":{"name":"web","namespace":"default"},
+                     "spec":{"type":"LoadBalancer"},
+                     "status":{"loadBalancer":{"ingress":[{"ip":"1.2.3.4"}]}}}]}),
+            ),
+            "/apis/cilium.io/v2/ciliumbgpclusterconfigs" => (
+                200,
+                json!({"apiVersion":"cilium.io/v2","kind":"CiliumBGPClusterConfigList",
+                    "metadata":{},"items":[{"apiVersion":"cilium.io/v2",
+                    "kind":"CiliumBGPClusterConfig","metadata":{"name":"cluster-cfg"},
+                    "spec":{"bgpInstances":[{"localASN":65000,"peers":[{
+                        "peerAddress":"172.16.1.1","peerASN":65001,
+                        "peerConfigRef":{"name":"cfg-public"}}]}]}}]}),
+            ),
+            "/apis/cilium.io/v2/ciliumbgppeerconfigs" => (
+                200,
+                json!({"apiVersion":"cilium.io/v2","kind":"CiliumBGPPeerConfigList",
+                    "metadata":{},"items":[{"apiVersion":"cilium.io/v2",
+                    "kind":"CiliumBGPPeerConfig","metadata":{"name":"cfg-public"},
+                    "spec":{"families":[{"afi":"ipv4","safi":"unicast",
+                        "advertisements":{"matchLabels":{"advertise":"public"}}}]}}]}),
+            ),
+            "/apis/cilium.io/v2/ciliumbgpadvertisements" => status(403),
+            _ => status(404),
+        }))
+        .await
+        .expect("nodes and services were readable");
+
+        assert_eq!(summary.engine, BgpEngineType::CiliumV2);
+        let err = summary
+            .error
+            .as_deref()
+            .expect("the refused advertisement list must be reported");
+        assert!(err.contains("CiliumBGPAdvertisement"), "{err}");
+        assert_eq!(summary.peers.len(), 1);
+        assert_eq!(
+            summary.advertised_services.len(),
+            1,
+            "a refused list must not empty the Services tab"
+        );
+        assert!(summary.peers[0].export_pod_cidr);
     }
 
     fn labelled_advertisement(name: &str, label: (&str, &str), blocks: Value) -> DynamicObject {
