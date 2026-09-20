@@ -143,6 +143,33 @@ pub struct ManifestIn {
     pub plural: Option<String>,
 }
 
+/// Build the dynamic `ApiResource` for an `apiVersion` (`group/version`, or a
+/// bare `version` for the core group) that a caller has already discovered.
+///
+/// `gvk_for` resolves by kind name alone, and a kind name is not an identity:
+/// MetalLB's `metallb.io/v1beta2 BGPPeer` and Calico's cluster-scoped
+/// `crd.projectcalico.org/v1 BGPPeer` share one. The table can only name one
+/// of them, so a caller that knows which CRD a row came from — the BGP
+/// dashboard carries it on the row — says so here instead of resolving by
+/// name and hoping. Returns `None` for an empty or malformed `apiVersion`,
+/// where the name-only table remains the caller's answer.
+pub fn api_resource_for_api_version(api_version: &str, kind: &str) -> Option<ApiResource> {
+    let api_version = api_version.trim();
+    if api_version.is_empty() || kind.trim().is_empty() {
+        return None;
+    }
+    let (group, version) = match api_version.split_once('/') {
+        Some((g, v)) => (g, v),
+        None => ("", api_version),
+    };
+    if version.is_empty() {
+        return None;
+    }
+    Some(ApiResource::from_gvk(&GroupVersionKind::gvk(
+        group, version, kind,
+    )))
+}
+
 /// Resolve the (ApiResource, namespaced) for a request: a dynamic CRD GVK if
 /// group/version/plural are supplied, else the static `gvk_for` table.
 fn resolve_api_resource(input: &ManifestIn) -> Result<(ApiResource, bool), CapabilityError> {
@@ -346,10 +373,12 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
         "ciliumnetworkpolicy" | "ciliumnetworkpolicies" | "cnp" => {
             ("cilium.io", "v2", "CiliumNetworkPolicy", true)
         }
-        "ciliumendpoint" | "ciliumendpoints" | "cep" => {
-            ("cilium.io", "v2", "CiliumEndpoint", true)
-        }
+        "ciliumendpoint" | "ciliumendpoints" | "cep" => ("cilium.io", "v2", "CiliumEndpoint", true),
         "ciliumidentity" | "ciliumidentities" => ("cilium.io", "v2", "CiliumIdentity", false),
+        // MetalLB ships a `BGPPeer` too (`metallb.io/v1beta2`, namespaced).
+        // This table is keyed by name, so it can only answer with one of
+        // them; a caller that knows which CRD it means resolves through
+        // `api_resource_for_api_version` instead.
         "bgppeer" | "bgppeers" => ("crd.projectcalico.org", "v1", "BGPPeer", false),
         "bgpconfiguration" | "bgpconfigurations" => {
             ("crd.projectcalico.org", "v1", "BGPConfiguration", false)
@@ -2276,6 +2305,37 @@ metadata:
         assert!(resolve_api_resource(&input).is_err());
     }
 
+    #[test]
+    fn a_discovered_api_version_resolves_the_bgppeer_the_caller_meant() {
+        // The name-only table can only name one of the two BGPPeer CRDs.
+        let (gvk, namespaced) = gvk_for("BGPPeer").unwrap();
+        assert_eq!(gvk.group, "crd.projectcalico.org");
+        assert!(!namespaced);
+
+        let metallb = api_resource_for_api_version("metallb.io/v1beta2", "BGPPeer").unwrap();
+        assert_eq!(metallb.group, "metallb.io");
+        assert_eq!(metallb.version, "v1beta2");
+        assert_eq!(metallb.kind, "BGPPeer");
+        assert_eq!(metallb.plural, "bgppeers");
+        assert_eq!(metallb.api_version, "metallb.io/v1beta2");
+
+        let calico = api_resource_for_api_version("crd.projectcalico.org/v1", "BGPPeer").unwrap();
+        assert_eq!(calico.group, "crd.projectcalico.org");
+        assert_eq!(calico.version, "v1");
+        assert_ne!(calico.api_version, metallb.api_version);
+
+        // A core-group apiVersion carries no slash.
+        let node = api_resource_for_api_version("v1", "Node").unwrap();
+        assert_eq!(node.group, "");
+        assert_eq!(node.version, "v1");
+
+        // Nothing pinned: the caller falls back to the name-only table.
+        assert!(api_resource_for_api_version("", "BGPPeer").is_none());
+        assert!(api_resource_for_api_version("   ", "BGPPeer").is_none());
+        assert!(api_resource_for_api_version("metallb.io/", "BGPPeer").is_none());
+        assert!(api_resource_for_api_version("metallb.io/v1beta2", "").is_none());
+    }
+
     // -- parse_api_version edge cases ------------------------------------------
 
     #[test]
@@ -2363,37 +2423,49 @@ metadata:
 
     #[test]
     fn test_cilium_bgp_gvk_scoping() {
-        let (gvk, namespaced) = gvk_for("CiliumBGPNodeConfig").expect("gvk for CiliumBGPNodeConfig");
+        let (gvk, namespaced) =
+            gvk_for("CiliumBGPNodeConfig").expect("gvk for CiliumBGPNodeConfig");
         assert_eq!(gvk.group, "cilium.io");
         assert_eq!(gvk.version, "v2");
         assert_eq!(gvk.kind, "CiliumBGPNodeConfig");
-        assert!(!namespaced, "CiliumBGPNodeConfig must be cluster-scoped (non-namespaced)");
+        assert!(
+            !namespaced,
+            "CiliumBGPNodeConfig must be cluster-scoped (non-namespaced)"
+        );
 
-        let (gvk, namespaced) = gvk_for("CiliumBGPClusterConfig").expect("gvk for CiliumBGPClusterConfig");
+        let (gvk, namespaced) =
+            gvk_for("CiliumBGPClusterConfig").expect("gvk for CiliumBGPClusterConfig");
         assert_eq!(gvk.group, "cilium.io");
         assert_eq!(gvk.version, "v2");
         assert_eq!(gvk.kind, "CiliumBGPClusterConfig");
         assert!(!namespaced, "CiliumBGPClusterConfig must be cluster-scoped");
 
-        let (gvk, namespaced) = gvk_for("CiliumBGPPeerConfig").expect("gvk for CiliumBGPPeerConfig");
+        let (gvk, namespaced) =
+            gvk_for("CiliumBGPPeerConfig").expect("gvk for CiliumBGPPeerConfig");
         assert_eq!(gvk.group, "cilium.io");
         assert_eq!(gvk.version, "v2");
         assert_eq!(gvk.kind, "CiliumBGPPeerConfig");
         assert!(!namespaced, "CiliumBGPPeerConfig must be cluster-scoped");
 
-        let (gvk, namespaced) = gvk_for("CiliumBGPAdvertisement").expect("gvk for CiliumBGPAdvertisement");
+        let (gvk, namespaced) =
+            gvk_for("CiliumBGPAdvertisement").expect("gvk for CiliumBGPAdvertisement");
         assert_eq!(gvk.group, "cilium.io");
         assert_eq!(gvk.version, "v2");
         assert_eq!(gvk.kind, "CiliumBGPAdvertisement");
         assert!(!namespaced, "CiliumBGPAdvertisement must be cluster-scoped");
 
-        let (gvk, namespaced) = gvk_for("CiliumLoadBalancerIPPool").expect("gvk for CiliumLoadBalancerIPPool");
+        let (gvk, namespaced) =
+            gvk_for("CiliumLoadBalancerIPPool").expect("gvk for CiliumLoadBalancerIPPool");
         assert_eq!(gvk.group, "cilium.io");
         assert_eq!(gvk.version, "v2");
         assert_eq!(gvk.kind, "CiliumLoadBalancerIPPool");
-        assert!(!namespaced, "CiliumLoadBalancerIPPool must be cluster-scoped");
+        assert!(
+            !namespaced,
+            "CiliumLoadBalancerIPPool must be cluster-scoped"
+        );
 
-        let (gvk, namespaced) = gvk_for("CiliumNetworkPolicy").expect("gvk for CiliumNetworkPolicy");
+        let (gvk, namespaced) =
+            gvk_for("CiliumNetworkPolicy").expect("gvk for CiliumNetworkPolicy");
         assert_eq!(gvk.group, "cilium.io");
         assert_eq!(gvk.version, "v2");
         assert_eq!(gvk.kind, "CiliumNetworkPolicy");

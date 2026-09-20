@@ -4440,6 +4440,7 @@ async fn bgp_view_keys_open_yaml_and_describe_with_correct_crd_kind() {
                 session_state: srelens_kube::bgp::BgpSessionState::Established,
                 policy_name: "cilium-bgp-fabric-peering".to_string(),
                 policy_kind: "CiliumBGPClusterConfig".to_string(),
+                policy_api_version: String::new(),
                 namespace: None,
                 export_pod_cidr: true,
                 hold_time_seconds: Some(90),
@@ -4532,6 +4533,7 @@ async fn bgp_view_namespaced_metallb_peer_and_pool_drilldown() {
                 session_state: srelens_kube::bgp::BgpSessionState::Configured,
                 policy_name: "metallb-peer-1".to_string(),
                 policy_kind: "BGPPeer".to_string(),
+                policy_api_version: "metallb.io/v1beta2".to_string(),
                 namespace: Some("metallb-system".to_string()),
                 export_pod_cidr: false,
                 hold_time_seconds: None,
@@ -4557,15 +4559,37 @@ async fn bgp_view_namespaced_metallb_peer_and_pool_drilldown() {
         bgp.set_summary(summary);
     }
 
-    // Press 'd' -> opens describe view with namespace "metallb-system"
+    // Press 'd' -> opens describe view with namespace "metallb-system",
+    // pinned to the MetalLB CRD the row came from. Resolving `BGPPeer` by
+    // kind alone lands on Calico's cluster-scoped one.
     press(&mut app, ch('d')).await;
     match &app.active_view {
         ActiveView::Describe(d) => {
             assert_eq!(d.resource_name, "metallb-peer-1");
             assert_eq!(d.resource_kind, "BGPPeer");
             assert_eq!(d.namespace.as_deref(), Some("metallb-system"));
+            assert_eq!(
+                d.pinned_api_version.as_deref(),
+                Some("metallb.io/v1beta2"),
+                "describe must query the MetalLB group, not resolve BGPPeer by name"
+            );
         }
         _ => panic!("expected ActiveView::Describe"),
+    }
+
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(matches!(app.active_view, ActiveView::Bgp(_)));
+
+    // Press 'y' -> the YAML view pins the same CRD.
+    press(&mut app, ch('y')).await;
+    match &app.active_view {
+        ActiveView::Yaml(y) => {
+            assert_eq!(y.resource_name, "metallb-peer-1");
+            assert_eq!(y.resource_kind, "BGPPeer");
+            assert_eq!(y.namespace.as_deref(), Some("metallb-system"));
+            assert_eq!(y.pinned_api_version.as_deref(), Some("metallb.io/v1beta2"));
+        }
+        _ => panic!("expected ActiveView::Yaml"),
     }
 
     press(&mut app, key(KeyCode::Esc)).await;

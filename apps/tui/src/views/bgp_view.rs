@@ -87,6 +87,19 @@ impl BgpViewState {
         self.error = Some(err);
     }
 
+    /// Why the view cannot speak for the cluster: the fetch itself failed, or
+    /// it came back with a lookup refused or timed out. A cluster that
+    /// answered and runs no BGP control plane reports neither — "no engine"
+    /// and "we were not allowed to look" are different facts.
+    pub fn discovery_error(&self) -> Option<&str> {
+        self.error.as_deref().or_else(|| {
+            self.summary
+                .as_ref()
+                .and_then(|s| s.error.as_deref())
+                .filter(|e| !e.is_empty())
+        })
+    }
+
     pub fn filtered_peers(&self) -> Vec<&BgpNeighbor> {
         let peers = self.summary.as_ref().map(|s| &s.peers[..]).unwrap_or(&[]);
         if self.search_query.trim().is_empty() {
@@ -257,6 +270,64 @@ impl BgpViewState {
     }
 }
 
+/// What a peer row's Describe/YAML should open: the object that configured
+/// the session, its kind, its namespace, and the `apiVersion` the row pinned.
+///
+/// The `apiVersion` matters because a kind name is not an identity: MetalLB
+/// and Calico both ship a `BGPPeer`, and resolving by name alone always lands
+/// on one of them — for a MetalLB peer, on the wrong group and without its
+/// namespace. `None` means the row pinned nothing and name-only resolution is
+/// right for that kind.
+pub fn peer_drilldown_target(
+    peer: &BgpNeighbor,
+    engine: Option<&BgpEngineType>,
+) -> (String, String, Option<String>, Option<String>) {
+    let pinned = (!peer.policy_api_version.is_empty()).then(|| peer.policy_api_version.clone());
+
+    if !peer.policy_name.is_empty()
+        && !peer.policy_kind.is_empty()
+        && peer.policy_name != "cilium-node-status"
+    {
+        return (
+            peer.policy_name.clone(),
+            peer.policy_kind.clone(),
+            peer.namespace.clone(),
+            pinned,
+        );
+    }
+
+    if !peer.policy_name.is_empty()
+        && peer.policy_name != "cilium-node-status"
+        && peer.policy_name != "cilium-bgp-node-config"
+        && peer.policy_name != "cilium-bgp-peering-policy"
+    {
+        // The row named no kind, so the engine is all there is to go on.
+        let fallback_kind = match engine {
+            Some(BgpEngineType::CiliumV2) => "CiliumBGPClusterConfig",
+            Some(BgpEngineType::CiliumV2Alpha1) => "CiliumBGPPeeringPolicy",
+            Some(BgpEngineType::MetalLB) | Some(BgpEngineType::Calico) => "BGPPeer",
+            _ => "CiliumBGPClusterConfig",
+        };
+        return (
+            peer.policy_name.clone(),
+            fallback_kind.to_string(),
+            peer.namespace.clone(),
+            pinned,
+        );
+    }
+
+    if !peer.node_name.is_empty() {
+        return (peer.node_name.clone(), "Node".to_string(), None, None);
+    }
+
+    (
+        peer.policy_name.clone(),
+        "CiliumBGPClusterConfig".to_string(),
+        peer.namespace.clone(),
+        pinned,
+    )
+}
+
 pub fn render_bgp_view(f: &mut Frame, area: Rect, state: &BgpViewState) {
     if area.width < 10 || area.height < 5 {
         return;
@@ -278,13 +349,23 @@ pub fn render_bgp_view(f: &mut Frame, area: Rect, state: &BgpViewState) {
 
 fn render_summary_header(f: &mut Frame, area: Rect, state: &BgpViewState) {
     let summary = state.summary.as_ref();
-    let engine_str = summary
-        .map(|s| s.engine.to_string())
-        .unwrap_or_else(|| "Scanning...".to_string());
-    let engine_color = match summary.map(|s| &s.engine) {
-        Some(BgpEngineType::CiliumV2 | BgpEngineType::CiliumV2Alpha1) => Theme::cyan(),
-        Some(BgpEngineType::MetalLB | BgpEngineType::Calico) => Theme::accent(),
-        _ => Theme::dim(),
+    let discovery_error = state.discovery_error();
+    // "No BGP Engine Detected" is a claim about the cluster. Only make it
+    // when the cluster actually answered.
+    let engine_str = match (summary, discovery_error) {
+        (Some(s), Some(_)) if s.engine == BgpEngineType::None => "Discovery Failed".to_string(),
+        (None, Some(_)) => "Discovery Failed".to_string(),
+        (Some(s), _) => s.engine.to_string(),
+        (None, None) => "Scanning...".to_string(),
+    };
+    let engine_color = if engine_str == "Discovery Failed" {
+        Theme::red()
+    } else {
+        match summary.map(|s| &s.engine) {
+            Some(BgpEngineType::CiliumV2 | BgpEngineType::CiliumV2Alpha1) => Theme::cyan(),
+            Some(BgpEngineType::MetalLB | BgpEngineType::Calico) => Theme::accent(),
+            _ => Theme::dim(),
+        }
     };
 
     let total_nodes = summary.map(|s| s.total_nodes).unwrap_or(0);
@@ -359,11 +440,22 @@ fn render_summary_header(f: &mut Frame, area: Rect, state: &BgpViewState) {
             format!("{} CIDR Pools", pools_count),
             Style::default().fg(Theme::accent()),
         ),
-        Span::styled(" │ Hotkeys: ", Theme::header_label()),
-        Span::styled(
-            "<Tab/1-3> Switch Tab  </> Filter  <r> Refresh  <Esc> Back",
-            Style::default().fg(Theme::dim()),
-        ),
+        // An engine was found but a lookup was refused or timed out: say so,
+        // rather than presenting a partial read as the whole cluster.
+        match discovery_error {
+            Some(err) => Span::styled(
+                format!(" │ ▲ Discovery incomplete: {}", err),
+                Style::default().fg(Theme::red()),
+            ),
+            None => Span::styled(" │ Hotkeys: ", Theme::header_label()),
+        },
+        match discovery_error {
+            Some(_) => Span::raw(""),
+            None => Span::styled(
+                "<Tab/1-3> Switch Tab  </> Filter  <r> Refresh  <Esc> Back",
+                Style::default().fg(Theme::dim()),
+            ),
+        },
     ]);
 
     let p = Paragraph::new(vec![l1, l2]);
@@ -433,7 +525,15 @@ fn render_tab_content(f: &mut Frame, area: Rect, state: &BgpViewState) {
         return;
     }
 
-    if let Some(err) = &state.error {
+    // A refused or timed-out lookup is shown instead of the tab when it left
+    // nothing to show, so a restricted RBAC never reads as an empty cluster.
+    // With an engine found, the tab still holds what was read and the header
+    // carries the warning.
+    let nothing_found = state
+        .summary
+        .as_ref()
+        .is_none_or(|s| s.engine == BgpEngineType::None);
+    if let Some(err) = state.discovery_error().filter(|_| nothing_found) {
         let p = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -1048,10 +1148,16 @@ fn render_detail_footer(f: &mut Frame, area: Rect, state: &BgpViewState) {
             ),
         ]);
 
-        let prefixes_summary = if peer.advertised_prefixes.is_empty() {
-            "None".to_string()
-        } else {
+        // LoadBalancer VIPs are no longer copied onto every neighbour — they
+        // are listed once, on the Advertised VIPs tab. So an empty prefix list
+        // beside a non-zero route count is not "this peer advertises
+        // nothing"; say where the VIPs are instead.
+        let prefixes_summary = if !peer.advertised_prefixes.is_empty() {
             peer.advertised_prefixes.join(" │ ")
+        } else if peer.routes_count > 0 {
+            "LoadBalancer VIPs — see the Advertised VIPs tab".to_string()
+        } else {
+            "None".to_string()
         };
 
         let l3 = Line::from(vec![
