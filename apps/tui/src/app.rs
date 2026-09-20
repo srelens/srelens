@@ -1691,7 +1691,15 @@ impl App {
     }
 
     pub async fn switch_context(&mut self, new_context: String) {
-        if self.active_context == new_context {
+        self.switch_context_internal(new_context, false).await;
+    }
+
+    pub async fn switch_context_forced(&mut self, new_context: String) {
+        self.switch_context_internal(new_context, true).await;
+    }
+
+    async fn switch_context_internal(&mut self, new_context: String, force: bool) {
+        if !force && self.active_context == new_context {
             return;
         }
 
@@ -1703,16 +1711,30 @@ impl App {
         self.resource_cache.clear();
         self.current_watch_channel = None;
 
-        // 1. Save outgoing context's assistant view state into map
-        let old_state = std::mem::replace(
-            &mut self.assistant_state,
-            AssistantViewState::for_context(&new_context),
-        );
-        self.assistant_states
-            .insert(self.active_context.clone(), old_state);
+        if self.active_context != new_context {
+            // 1. Save outgoing context's assistant view state into map
+            let old_state = std::mem::replace(
+                &mut self.assistant_state,
+                AssistantViewState::for_context(&new_context),
+            );
+            self.assistant_states
+                .insert(self.active_context.clone(), old_state);
 
-        // 2. Switch context and namespace
-        self.active_context = new_context;
+            // 2. Switch context and namespace
+            self.active_context = new_context;
+
+            // 3. Restore or initialize assistant state for the target context
+            if let Some(saved_state) = self.assistant_states.remove(&self.active_context) {
+                self.assistant_state = saved_state;
+                self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
+            } else {
+                self.assistant_state = AssistantViewState::for_context(&self.active_context);
+                self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
+            }
+        } else {
+            self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
+        }
+
         if let Some(ctx) = self.contexts.iter().find(|c| c.name == self.active_context) {
             self.cluster_name = ctx.cluster.clone();
             self.server_url = ctx.server.clone();
@@ -1721,15 +1743,6 @@ impl App {
             } else {
                 self.active_namespace = String::new();
             }
-        }
-
-        // 3. Restore or initialize assistant state for the target context
-        if let Some(saved_state) = self.assistant_states.remove(&self.active_context) {
-            self.assistant_state = saved_state;
-            self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
-        } else {
-            self.assistant_state = AssistantViewState::for_context(&self.active_context);
-            self.assistant_state.caveman_level = self.ai_settings.get_caveman_level();
         }
 
         self.cluster_version = "Connecting...".to_string();
@@ -2900,11 +2913,11 @@ impl App {
                     KeyCode::Enter => match self.import_kubeconfig(&input).await {
                         Ok(ctx_name) => {
                             self.modal = None;
+                            self.switch_context_forced(ctx_name.clone()).await;
                             self.set_toast(
                                 format!("✓ Imported and switched to context '{}'", ctx_name),
                                 Theme::status_ok(),
                             );
-                            self.switch_context(ctx_name).await;
                         }
                         Err(err) => {
                             error_message = Some(err);
@@ -2920,23 +2933,20 @@ impl App {
                         if key.modifiers.contains(KeyModifiers::CONTROL) =>
                     {
                         if let Some(clip) = get_clipboard_text() {
-                            let cleaned = clip.replace("\r\n", "\n");
-                            if input.len().saturating_add(cleaned.len()) > 1024 * 1024 {
-                                error_message =
-                                    Some("Clipboard content exceeds 1 MB limit".to_string());
-                            } else {
-                                let pos = cursor_pos.min(input.chars().count());
-                                let added_len = cleaned.chars().count();
-                                let byte_pos = input
-                                    .char_indices()
-                                    .nth(pos)
-                                    .map(|(b, _)| b)
-                                    .unwrap_or(input.len());
-                                input.insert_str(byte_pos, &cleaned);
-                                cursor_pos = pos + added_len;
-                                let (preview, err) = Self::parse_add_cluster_preview(&input);
-                                preview_contexts = preview;
-                                error_message = err;
+                            match Self::apply_add_cluster_paste(
+                                &mut input,
+                                &mut cursor_pos,
+                                &clip,
+                                "Clipboard content exceeds 1 MB limit",
+                            ) {
+                                Ok(()) => {
+                                    let (preview, err) = Self::parse_add_cluster_preview(&input);
+                                    preview_contexts = preview;
+                                    error_message = err;
+                                }
+                                Err(msg) => {
+                                    error_message = Some(msg);
+                                }
                             }
                             self.modal = Some(Modal::AddCluster {
                                 input,
@@ -8099,22 +8109,20 @@ impl App {
                     ref mut error_message,
                     ref mut preview_contexts,
                 } => {
-                    let cleaned = text.replace("\r\n", "\n");
-                    if input.len().saturating_add(cleaned.len()) > 1024 * 1024 {
-                        *error_message = Some("Pasted content exceeds 1 MB limit".to_string());
-                    } else {
-                        let pos = (*cursor_pos).min(input.chars().count());
-                        let added_len = cleaned.chars().count();
-                        let byte_pos = input
-                            .char_indices()
-                            .nth(pos)
-                            .map(|(b, _)| b)
-                            .unwrap_or(input.len());
-                        input.insert_str(byte_pos, &cleaned);
-                        *cursor_pos = pos + added_len;
-                        let (preview, err) = Self::parse_add_cluster_preview(input);
-                        *preview_contexts = preview;
-                        *error_message = err;
+                    match Self::apply_add_cluster_paste(
+                        input,
+                        cursor_pos,
+                        &text,
+                        "Pasted content exceeds 1 MB limit",
+                    ) {
+                        Ok(()) => {
+                            let (preview, err) = Self::parse_add_cluster_preview(input);
+                            *preview_contexts = preview;
+                            *error_message = err;
+                        }
+                        Err(msg) => {
+                            *error_message = Some(msg);
+                        }
                     }
                 }
                 _ => {}
@@ -8340,6 +8348,28 @@ impl App {
             error_message,
             preview_contexts,
         });
+    }
+
+    fn apply_add_cluster_paste(
+        input: &mut String,
+        cursor_pos: &mut usize,
+        raw_text: &str,
+        limit_error_message: &str,
+    ) -> Result<(), String> {
+        let cleaned = raw_text.replace("\r\n", "\n");
+        if input.len().saturating_add(cleaned.len()) > 1024 * 1024 {
+            return Err(limit_error_message.to_string());
+        }
+        let pos = (*cursor_pos).min(input.chars().count());
+        let added_len = cleaned.chars().count();
+        let byte_pos = input
+            .char_indices()
+            .nth(pos)
+            .map(|(b, _)| b)
+            .unwrap_or(input.len());
+        input.insert_str(byte_pos, &cleaned);
+        *cursor_pos = pos + added_len;
+        Ok(())
     }
 
     fn parse_add_cluster_preview(input: &str) -> (Vec<String>, Option<String>) {

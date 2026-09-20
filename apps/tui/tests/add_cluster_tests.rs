@@ -576,3 +576,115 @@ users:
     assert!(app.modal.is_none(), "successful import must close modal");
     assert_eq!(app.active_context, "submit-test-ctx");
 }
+
+#[tokio::test]
+async fn test_same_context_import_refreshes_metadata_and_reconnects() {
+    let _lock = ENV_LOCK.lock().await;
+    let (tx, _rx) = unbounded_channel::<AppEvent>();
+    let temp = tempfile::tempdir().unwrap();
+    let managed_dir = temp.path().join("managed_configs");
+    std::fs::create_dir_all(&managed_dir).unwrap();
+    let _guard = EnvVarGuard::set("SRELENS_KUBECONFIG_DIR", &managed_dir);
+
+    let initial_config = temp.path().join("config");
+    std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
+
+    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+        .await
+        .unwrap();
+
+    // 1. Initial import of secondary-cluster
+    let initial_yaml = r#"
+apiVersion: v1
+kind: Config
+current-context: same-ctx-test
+clusters:
+- name: initial-cluster
+  cluster:
+    server: https://10.100.0.1:6443
+    insecure-skip-tls-verify: true
+contexts:
+- name: same-ctx-test
+  context:
+    cluster: initial-cluster
+    user: initial-user
+    namespace: default
+users:
+- name: initial-user
+  user:
+    token: fake-tok-1
+"#;
+    let imported_ctx = app.import_kubeconfig(initial_yaml).await.unwrap();
+    app.switch_context_forced(imported_ctx.clone()).await;
+    assert_eq!(app.active_context, imported_ctx);
+    assert_eq!(app.cluster_name, "initial-cluster");
+    assert_eq!(app.server_url, "https://10.100.0.1:6443");
+    assert_eq!(app.active_namespace, "default");
+
+    // Populate resource cache and set connected
+    app.resource_cache.insert(
+        (
+            imported_ctx.clone(),
+            "default".to_string(),
+            "pods".to_string(),
+        ),
+        vec![serde_json::json!({"kind": "Pod", "metadata": {"name": "test-pod"}})],
+    );
+    app.is_connected = true;
+    assert!(!app.resource_cache.is_empty());
+
+    // 2. Re-import / update with the SAME active context via Modal::AddCluster Enter key event
+    let updated_yaml = r#"
+apiVersion: v1
+kind: Config
+current-context: same-ctx-test
+clusters:
+- name: updated-cluster
+  cluster:
+    server: https://10.200.0.1:6443
+    insecure-skip-tls-verify: true
+contexts:
+- name: same-ctx-test
+  context:
+    cluster: updated-cluster
+    user: updated-user
+    namespace: custom-ns
+users:
+- name: updated-user
+  user:
+    token: fake-tok-2
+"#;
+
+    app.modal = Some(Modal::AddCluster {
+        input: updated_yaml.to_string(),
+        cursor_pos: updated_yaml.len(),
+        error_message: None,
+        preview_contexts: vec!["same-ctx-test".to_string()],
+    });
+
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter))
+        .await;
+
+    assert!(app.modal.is_none(), "modal should close after re-import");
+    assert_eq!(
+        app.cluster_name, "updated-cluster",
+        "cluster_name must be refreshed"
+    );
+    assert_eq!(
+        app.server_url, "https://10.200.0.1:6443",
+        "server_url must be refreshed"
+    );
+    assert_eq!(
+        app.active_namespace, "custom-ns",
+        "active_namespace must be refreshed"
+    );
+    assert!(
+        app.resource_cache.is_empty(),
+        "resource_cache must be cleared on same-context re-import"
+    );
+    assert_eq!(
+        app.cluster_version, "Connecting...",
+        "connection state must be reset to connecting"
+    );
+    assert!(!app.is_connected);
+}
