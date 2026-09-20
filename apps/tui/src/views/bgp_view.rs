@@ -1090,10 +1090,16 @@ fn render_detail_footer(f: &mut Frame, area: Rect, state: &BgpViewState) {
             ),
         ]);
 
-        let prefixes_summary = if peer.advertised_prefixes.is_empty() {
-            "None".to_string()
-        } else {
+        // LoadBalancer VIPs are no longer copied onto every neighbour — they
+        // are listed once, on the Advertised VIPs tab. So an empty prefix list
+        // beside a non-zero route count is not "this peer advertises
+        // nothing"; say where the VIPs are instead.
+        let prefixes_summary = if !peer.advertised_prefixes.is_empty() {
             peer.advertised_prefixes.join(" │ ")
+        } else if peer.routes_count > 0 {
+            "LoadBalancer VIPs — see the Advertised VIPs tab".to_string()
+        } else {
+            "None".to_string()
         };
 
         let l3 = Line::from(vec![

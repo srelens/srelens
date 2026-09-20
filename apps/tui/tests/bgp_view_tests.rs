@@ -498,6 +498,7 @@ fn bgp_view_footer_inspector_with_missing_optional_fields() {
     summary.peers[0].keepalive_time_seconds = None;
     summary.peers[0].multihop_ttl = None;
     summary.peers[0].advertised_prefixes.clear();
+    summary.peers[0].routes_count = 0;
     state.set_summary(summary);
 
     let lines = render_lines(140, 24, |f| {
@@ -508,6 +509,24 @@ fn bgp_view_footer_inspector_with_missing_optional_fields() {
     assert!(text.contains("30s (default)"));
     assert!(text.contains("Disabled (direct L2)"));
     assert!(text.contains("None"));
+}
+
+#[test]
+fn bgp_view_points_at_the_vip_tab_rather_than_claiming_nothing_is_advertised() {
+    // VIPs are carried once, by the Services tab, not copied onto every
+    // neighbour — so an empty prefix list beside a route count is not an
+    // absence.
+    let mut state = BgpViewState::new();
+    let mut summary = sample_bgp_summary();
+    summary.peers[0].advertised_prefixes.clear();
+    summary.peers[0].routes_count = 4;
+    state.set_summary(summary);
+
+    let lines = render_lines(180, 24, |f| {
+        render_bgp_view(f, f.area(), &state);
+    });
+    let text = lines.join("\n");
+    assert!(text.contains("see the Advertised VIPs tab"), "{text}");
 }
 
 #[test]

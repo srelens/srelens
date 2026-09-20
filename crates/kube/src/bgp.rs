@@ -870,13 +870,12 @@ pub(crate) fn build_cilium_bgp_summary(
                                     }
                                 }
                             }
-                            for svc in lb_services {
-                                prefixes.push(format!(
-                                    "VIP: {} ({}/{})",
-                                    svc.load_balancer_ip, svc.namespace, svc.name
-                                ));
-                            }
-                            let routes_count = prefixes.len();
+                            // The advertised VIPs are counted, not copied:
+                            // `advertised_services` already carries each one
+                            // once, with its announcing nodes and peers. A
+                            // copy per neighbour grows as nodes × peers ×
+                            // services.
+                            let routes_count = prefixes.len() + advertised.len();
 
                             neighbors.push(BgpNeighbor {
                                 node_name: node.clone(),
@@ -921,7 +920,7 @@ pub(crate) fn build_cilium_bgp_summary(
                     "CiliumBGPNodeConfig",
                     export_pod_cidr_default,
                     node_pod_cidrs,
-                    lb_services,
+                    advertised.len(),
                 );
             }
         }
@@ -991,14 +990,9 @@ pub(crate) fn build_cilium_bgp_summary(
                                         }
                                     }
                                 }
-                                for svc in lb_services {
-                                    prefixes.push(format!(
-                                        "VIP: {} ({}/{})",
-                                        svc.load_balancer_ip, svc.namespace, svc.name
-                                    ));
-                                }
-
-                                let routes_count = prefixes.len();
+                                // Counted once at the summary level; see the
+                                // cluster-config path above.
+                                let routes_count = prefixes.len() + advertised.len();
                                 neighbors.push(BgpNeighbor {
                                     node_name: node.clone(),
                                     peer_address: peer_addr.clone(),
@@ -1042,7 +1036,7 @@ pub(crate) fn build_cilium_bgp_summary(
                     "CiliumNode",
                     export_pod_cidr_default,
                     node_pod_cidrs,
-                    lb_services,
+                    advertised.len(),
                 );
             }
         }
@@ -1120,7 +1114,9 @@ fn update_or_insert_neighbor(
     default_policy_kind: &str,
     export_pod_cidr: bool,
     node_pod_cidrs: &HashMap<String, Vec<String>>,
-    lb_services: &[LbService],
+    // How many LoadBalancer VIPs the cluster advertises. A count, not a list:
+    // the VIPs themselves are carried once, by `advertised_services`.
+    advertised_vips: usize,
 ) {
     if let Some(existing) = neighbors.iter_mut().find(|n| {
         (n.node_name == node_name || n.node_name.is_empty())
@@ -1155,16 +1151,10 @@ fn update_or_insert_neighbor(
                 }
             }
         }
-        for svc in lb_services {
-            prefixes.push(format!(
-                "VIP: {} ({}/{})",
-                svc.load_balancer_ip, svc.namespace, svc.name
-            ));
-        }
         let routes_count = if live.routes_advertised > 0 {
             live.routes_advertised
         } else {
-            prefixes.len()
+            prefixes.len() + advertised_vips
         };
 
         neighbors.push(BgpNeighbor {
@@ -1408,10 +1398,9 @@ pub(crate) fn build_metallb_bgp_summary(
                 connect_retry_seconds: None,
                 multihop_ttl: None,
                 graceful_restart: false,
-                advertised_prefixes: lb_services
-                    .iter()
-                    .map(|s| format!("VIP: {}", s.load_balancer_ip))
-                    .collect(),
+                // The VIPs are listed once, in `advertised_services`, rather
+                // than copied onto every neighbour of every node.
+                advertised_prefixes: Vec::new(),
                 routes_count: lb_services.len(),
                 routes_received: 0,
                 uptime_or_last_change: None,
@@ -2216,7 +2205,7 @@ mod tests {
             "CiliumBGPNodeConfig",
             true,
             &node_pod_cidrs,
-            &lb_services,
+            lb_services.len(),
         );
 
         assert_eq!(neighbors.len(), 1);
@@ -2245,7 +2234,7 @@ mod tests {
             "CiliumBGPNodeConfig",
             true,
             &node_pod_cidrs,
-            &lb_services,
+            lb_services.len(),
         );
 
         assert_eq!(neighbors.len(), 2);
@@ -2257,12 +2246,10 @@ mod tests {
         assert_eq!(n2.policy_name, "custom-peer-name");
         assert_eq!(n2.policy_kind, "CiliumBGPNodeConfig");
         assert!(n2.export_pod_cidr);
+        // The VIP is not copied onto the neighbour, only counted.
         assert_eq!(
             n2.advertised_prefixes,
-            vec![
-                "PodCIDR: 10.244.1.0/24".to_string(),
-                "VIP: 1.2.3.4 (default/web-svc)".to_string(),
-            ]
+            vec!["PodCIDR: 10.244.1.0/24".to_string()]
         );
         assert_eq!(n2.routes_count, 2);
 
@@ -2286,7 +2273,7 @@ mod tests {
             "CiliumNode",
             false,
             &node_pod_cidrs,
-            &lb_services,
+            lb_services.len(),
         );
 
         assert_eq!(neighbors.len(), 3);
@@ -2295,10 +2282,7 @@ mod tests {
         assert_eq!(n3.policy_name, "fallback-pol");
         assert_eq!(n3.policy_kind, "CiliumNode");
         assert!(!n3.export_pod_cidr);
-        assert_eq!(
-            n3.advertised_prefixes,
-            vec!["VIP: 1.2.3.4 (default/web-svc)".to_string()]
-        );
+        assert!(n3.advertised_prefixes.is_empty());
         assert_eq!(n3.routes_count, 1);
 
         // 4. Update matching existing with empty node_name
@@ -2342,7 +2326,7 @@ mod tests {
             "k",
             false,
             &node_pod_cidrs,
-            &lb_services,
+            lb_services.len(),
         );
 
         assert_eq!(empty_node_neighbor.len(), 1);
@@ -2826,6 +2810,60 @@ mod tests {
         let calico_summary = build_calico_bgp_summary(vec![empty_calico], &node_labels);
         assert_eq!(calico_summary.engine, BgpEngineType::Calico);
         assert_eq!(calico_summary.peers.len(), 0);
+    }
+
+    #[test]
+    fn a_neighbour_counts_the_advertised_vips_rather_than_copying_them() {
+        // `advertised_services` carries each VIP once, with its announcing
+        // nodes and peers. A copy per neighbour grows as nodes × peers ×
+        // services and says nothing new.
+        let mut node_labels = HashMap::new();
+        node_labels.insert("node-1".to_string(), BTreeMap::new());
+        node_labels.insert("node-2".to_string(), BTreeMap::new());
+        let mut node_pod_cidrs = HashMap::new();
+        node_pod_cidrs.insert("node-1".to_string(), vec!["10.244.0.0/24".to_string()]);
+        node_pod_cidrs.insert("node-2".to_string(), vec!["10.244.1.0/24".to_string()]);
+
+        let lb_services = vec![
+            lb("web", "default", "1.2.3.4", None),
+            lb("api", "default", "1.2.3.5", None),
+        ];
+
+        let summary = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![],
+            vec![one_node_cluster_config()],
+            vec![],
+            vec![],
+            vec![],
+            &node_labels,
+            &node_pod_cidrs,
+            &lb_services,
+        );
+
+        assert_eq!(summary.peers.len(), 2, "one peer per matching node");
+        for peer in &summary.peers {
+            assert!(
+                peer.advertised_prefixes.iter().all(|p| !p.contains("VIP:")),
+                "no VIP copies on a neighbour, got {:?}",
+                peer.advertised_prefixes
+            );
+            // One PodCIDR plus the two advertised VIPs.
+            assert_eq!(peer.routes_count, 3);
+        }
+        assert_eq!(summary.advertised_services.len(), 2);
+
+        // MetalLB neighbours carry none either.
+        let mut metallb_peer = DynamicObject::new("peer-1", &metallb_bgp_peer_resource());
+        metallb_peer.data = json!({"spec": {"peerAddress": "10.0.0.1", "peerASN": 64512}});
+        let metallb =
+            build_metallb_bgp_summary(vec![metallb_peer], vec![], &node_labels, &lb_services);
+        for peer in &metallb.peers {
+            assert!(peer.advertised_prefixes.is_empty());
+            assert_eq!(peer.routes_count, 2);
+        }
+        assert_eq!(metallb.advertised_services.len(), 2);
     }
 
     #[test]
