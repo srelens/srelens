@@ -268,6 +268,29 @@ impl BgpViewState {
         let list = self.filtered_pools();
         list.get(self.selected_pool_idx).copied()
     }
+
+    /// How many of the advertised Services this session carries: the rows
+    /// that name the peer's node among their announcing nodes and the peer
+    /// among their peers. A row spells a peer as its address alone (the
+    /// MetalLB path) or as `address:asn` (the Cilium path), so both are
+    /// accepted.
+    pub fn vips_announced_by(&self, peer: &BgpNeighbor) -> usize {
+        let Some(summary) = self.summary.as_ref() else {
+            return 0;
+        };
+        let with_asn = format!("{}:{}", peer.peer_address, peer.peer_asn);
+        summary
+            .advertised_services
+            .iter()
+            .filter(|svc| {
+                svc.announcing_nodes.contains(&peer.node_name)
+                    && svc
+                        .peers
+                        .iter()
+                        .any(|p| *p == peer.peer_address || *p == with_asn)
+            })
+            .count()
+    }
 }
 
 /// What a peer row's Describe/YAML should open: the object that configured
@@ -1148,16 +1171,26 @@ fn render_detail_footer(f: &mut Frame, area: Rect, state: &BgpViewState) {
             ),
         ]);
 
-        // LoadBalancer VIPs are no longer copied onto every neighbour — they
-        // are listed once, on the Advertised VIPs tab. So an empty prefix list
-        // beside a non-zero route count is not "this peer advertises
-        // nothing"; say where the VIPs are instead.
-        let prefixes_summary = if !peer.advertised_prefixes.is_empty() {
-            peer.advertised_prefixes.join(" │ ")
-        } else if peer.routes_count > 0 {
-            "LoadBalancer VIPs — see the Advertised VIPs tab".to_string()
-        } else {
-            "None".to_string()
+        // LoadBalancer VIPs are not copied onto every neighbour — they are
+        // listed once, on the Advertised VIPs tab — so the prefixes here are
+        // not everything the session exports. The VIPs that tab attributes
+        // to this session are counted beside them. A route count with
+        // nothing to show for it is the agent's own figure for the live
+        // session, which counts whatever the peer exports; it is not called
+        // VIPs, because nothing here says it is.
+        let vip_note = match state.vips_announced_by(peer) {
+            0 => None,
+            1 => Some("1 LoadBalancer VIP — see the Advertised VIPs tab".to_string()),
+            n => Some(format!(
+                "{n} LoadBalancer VIPs — see the Advertised VIPs tab"
+            )),
+        };
+        let prefixes_summary = match (peer.advertised_prefixes.is_empty(), vip_note) {
+            (false, Some(note)) => format!("{} │ {note}", peer.advertised_prefixes.join(" │ ")),
+            (false, None) => peer.advertised_prefixes.join(" │ "),
+            (true, Some(note)) => note,
+            (true, None) if peer.routes_count > 0 => "Not enumerated".to_string(),
+            (true, None) => "None".to_string(),
         };
 
         let l3 = Line::from(vec![

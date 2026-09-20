@@ -553,6 +553,9 @@ fn bgp_view_footer_inspector_with_missing_optional_fields() {
     summary.peers[0].multihop_ttl = None;
     summary.peers[0].advertised_prefixes.clear();
     summary.peers[0].routes_count = 0;
+    // The footer counts the VIPs the Services tab attributes to the
+    // session, so a peer with nothing advertised has none there either.
+    summary.advertised_services.clear();
     state.set_summary(summary);
 
     let lines = render_lines(140, 24, |f| {
@@ -580,7 +583,37 @@ fn bgp_view_points_at_the_vip_tab_rather_than_claiming_nothing_is_advertised() {
         render_bgp_view(f, f.area(), &state);
     });
     let text = lines.join("\n");
-    assert!(text.contains("see the Advertised VIPs tab"), "{text}");
+    // node-worker-01 / 10.0.0.254 carries both of the fixture's services.
+    assert!(
+        text.contains("2 LoadBalancer VIPs — see the Advertised VIPs tab"),
+        "{text}"
+    );
+}
+
+#[test]
+fn bgp_view_does_not_call_routes_it_cannot_enumerate_vips() {
+    // A route count can be the agent's own figure for the live session,
+    // which counts whatever the peer exports — pod CIDRs included. Which
+    // VIPs a session announces is known only through the Services tab; a
+    // peer that announces none is not pointed at it.
+    let mut state = BgpViewState::new();
+    let mut summary = sample_bgp_summary();
+    // node-worker-03 / 10.0.1.254 carries none of the fixture's services.
+    summary.peers[2].advertised_prefixes.clear();
+    summary.peers[2].routes_count = 4;
+    state.set_summary(summary);
+    state.selected_peer_idx = 2;
+
+    let lines = render_lines(180, 24, |f| {
+        render_bgp_view(f, f.area(), &state);
+    });
+    let text = lines.join("\n");
+    assert!(text.contains("4 Advertised"), "{text}");
+    assert!(
+        text.contains("Advertised Prefixes: Not enumerated"),
+        "{text}"
+    );
+    assert!(!text.contains("see the Advertised VIPs tab"), "{text}");
 }
 
 #[test]
