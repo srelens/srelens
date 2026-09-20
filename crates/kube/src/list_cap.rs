@@ -10,6 +10,7 @@ use kube::api::{Api, ListParams};
 use kube::Resource;
 use serde::de::DeserializeOwned;
 use srelens_capability::CapabilityError;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::time::Duration;
 
@@ -48,10 +49,11 @@ pub enum ListCappedError {
     /// actually applied — not whatever the process-wide setting reads when the
     /// message is rendered, which may differ from it.
     Timeout { pages_read: usize, budget: Duration },
-    /// A page answered with the same continue token it was asked for. The
-    /// server says more remain but has not moved; following it would read the
-    /// same page again until the page bound and hand back the duplicates as a
-    /// list. Refused instead, naming the token.
+    /// A page answered with a continue token this walk has already followed
+    /// — the one it was just asked for, or an earlier one. The server says
+    /// more remain but is going round in a circle; following it would read
+    /// the same pages again until the page bound and hand back the
+    /// duplicates as a list. Refused instead, naming the token.
     StuckContinuation { token: String },
 }
 
@@ -169,6 +171,9 @@ where
 {
     let mut items = Vec::new();
     let mut token: Option<String> = None;
+    // Every token followed so far, not only the last: a server can circle
+    // through several before repeating one.
+    let mut followed: HashSet<String> = HashSet::new();
     let mut pages_read = 0usize;
     loop {
         let mut params = base.clone().limit(APP_LIST_PAGE);
@@ -183,12 +188,12 @@ where
             })??;
         pages_read += 1;
         let next = page.metadata.continue_.filter(|t| !t.is_empty());
-        // A token that did not advance is a server that will serve this page
-        // forever; the items it carried are not appended, since they would be
-        // the same rows a second time.
-        if next.is_some() && next == token {
+        // A token seen before is a server that will serve these pages
+        // forever; the items this page carried are not appended, since they
+        // are the start of a second lap.
+        if let Some(repeat) = next.as_deref().filter(|t| !followed.insert(t.to_string())) {
             return Err(ListCappedError::StuckContinuation {
-                token: next.unwrap_or_default(),
+                token: repeat.to_string(),
             });
         }
         items.extend(page.items);
@@ -457,6 +462,38 @@ mod tests {
             }
             other => panic!("expected a handler error, got {other:?}"),
         }
+    }
+
+    /// A server whose tokens go round in a circle — `p2`, `p3`, `p2` — never
+    /// repeats one immediately, so a check against the last token alone
+    /// follows the loop, appending every page a second time until the page
+    /// bound, and hands the duplicates back as a list. Every token the walk
+    /// has followed counts: the first one to come round again is refused.
+    #[tokio::test]
+    async fn a_continue_token_that_comes_round_again_is_an_error() {
+        let (client, uris) = mock_event_pages(vec![
+            event_list(vec![event("a")], Some("p2")),
+            event_list(vec![event("b")], Some("p3")),
+            event_list(vec![event("c")], Some("p2")),
+            // Where a walk that followed the circle would land: a clean end
+            // of collection, which would turn the second lap into an `Ok`.
+            event_list(vec![event("d")], None),
+        ]);
+        let api: Api<Event> = Api::all(client);
+
+        let error = list_capped(&api, ListParams::default())
+            .await
+            .expect_err("a continue token seen earlier in the walk must not be followed");
+
+        assert!(
+            matches!(&error, ListCappedError::StuckContinuation { token } if token == "p2"),
+            "got {error:?}"
+        );
+        assert_eq!(
+            uris.lock().unwrap().len(),
+            3,
+            "refused the moment the token comes round, not a page later"
+        );
     }
 
     /// A page that overruns the per-request budget fails the walk, and says it

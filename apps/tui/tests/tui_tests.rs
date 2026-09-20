@@ -6337,27 +6337,48 @@ mod tests {
             .draw(|f| render_node_inspector_view(f, f.area(), &state))
             .expect("draw");
         let buf = terminal.backend().buffer();
-        let (mut ip_cell, mut age_cell) = (None, None);
-        for y in 0..buf.area.height {
-            let line: String = (0..buf.area.width)
-                .map(|x| buf[(x, y)].symbol().to_string())
-                .collect();
-            if !line.contains("10.244.1.5") {
-                continue;
-            }
-            let col = |needle: &str| {
-                let at = line.find(needle).unwrap();
-                line[..at].chars().count() as u16
-            };
-            ip_cell = Some(buf[(col("10.244.1.5"), y)].fg);
-            age_cell = Some(buf[(col("3d"), y)].fg);
-        }
+        let row_of = |needle: &str| -> (String, u16) {
+            (0..buf.area.height)
+                .find_map(|y| {
+                    let line: String = (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect();
+                    line.contains(needle).then_some((line, y))
+                })
+                .unwrap_or_else(|| panic!("no row contains {needle:?}"))
+        };
+        let col = |line: &str, needle: &str| {
+            let at = line.find(needle).unwrap();
+            line[..at].chars().count() as u16
+        };
+        // The header and each row are padded to the same column widths, so
+        // a label's offset in the header is where that cell starts in the
+        // row beneath it — the way to find a cell whose text ("0", "-") is
+        // not unique on the line.
+        let (header, _) = row_of("GPU REQ");
+        let (row, y) = row_of("10.244.1.5");
         let solarized_dim = ratatui::style::Color::Rgb(112, 131, 135);
-        assert_eq!(ip_cell, Some(solarized_dim), "the pod IP is secondary text");
+        let cell = |x: u16| (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg);
+
         assert_eq!(
-            age_cell,
-            Some(solarized_dim),
+            buf[(col(&row, "10.244.1.5"), y)].fg,
+            solarized_dim,
+            "the pod IP is secondary text"
+        );
+        assert_eq!(
+            buf[(col(&row, "3d"), y)].fg,
+            solarized_dim,
             "the pod age is secondary text"
+        );
+        assert_eq!(
+            cell(col(&header, "REST")),
+            ("0".to_string(), solarized_dim),
+            "a zero restart count is secondary text"
+        );
+        assert_eq!(
+            cell(col(&header, "GPU REQ")),
+            ("-".to_string(), solarized_dim),
+            "the no-GPU placeholder is secondary text"
         );
     }
 
