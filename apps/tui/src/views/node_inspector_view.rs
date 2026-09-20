@@ -1080,7 +1080,10 @@ fn render_pods_table(
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            ("-".to_string(), Style::default().fg(Theme::DIM).bg(row_bg))
+            (
+                "-".to_string(),
+                Style::default().fg(Theme::dim()).bg(row_bg),
+            )
         };
 
         let ns_clean = super::sanitize_span_text(&pod.namespace);

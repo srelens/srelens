@@ -6293,6 +6293,17 @@ mod tests {
             render_node_inspector_view, NodeInspectorState,
         };
 
+        // Restored on every exit, a panic included: the theme is process
+        // global, and a failed assertion here must not leave the other tests
+        // in this binary rendering solarized-dark.
+        struct RestoreTheme(usize);
+        impl Drop for RestoreTheme {
+            fn drop(&mut self) {
+                Theme::set_theme_by_index(self.0);
+            }
+        }
+        let _restore = RestoreTheme(Theme::active_index());
+
         assert!(Theme::set_theme_by_name("solarized-dark").is_some());
         assert_ne!(
             Theme::dim(),
@@ -6341,13 +6352,13 @@ mod tests {
             ip_cell = Some(buf[(col("10.244.1.5"), y)].fg);
             age_cell = Some(buf[(col("3d"), y)].fg);
         }
-        // Reset before asserting so a failure does not leave the theme changed
-        // for the other tests that share this process.
-        assert!(Theme::set_theme_by_name("catppuccin-mocha").is_some());
-
         let solarized_dim = ratatui::style::Color::Rgb(112, 131, 135);
         assert_eq!(ip_cell, Some(solarized_dim), "the pod IP is secondary text");
-        assert_eq!(age_cell, Some(solarized_dim), "the pod age is secondary text");
+        assert_eq!(
+            age_cell,
+            Some(solarized_dim),
+            "the pod age is secondary text"
+        );
     }
 
     #[tokio::test]

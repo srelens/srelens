@@ -48,6 +48,11 @@ pub enum ListCappedError {
     /// actually applied — not whatever the process-wide setting reads when the
     /// message is rendered, which may differ from it.
     Timeout { pages_read: usize, budget: Duration },
+    /// A page answered with the same continue token it was asked for. The
+    /// server says more remain but has not moved; following it would read the
+    /// same page again until the page bound and hand back the duplicates as a
+    /// list. Refused instead, naming the token.
+    StuckContinuation { token: String },
 }
 
 /// `5s`, or `100ms` for a budget under a second — the way a reader would say it.
@@ -79,6 +84,10 @@ impl std::fmt::Display for ListCappedError {
                 "Kubernetes list request timed out after {} ({pages_read} page(s) already read)",
                 describe_budget(*budget)
             ),
+            Self::StuckContinuation { token } => write!(
+                f,
+                "Kubernetes list pagination did not advance: the server repeated continue token {token:?}"
+            ),
         }
     }
 }
@@ -96,6 +105,9 @@ impl ListCappedError {
             timeout @ Self::Timeout { .. } => {
                 CapabilityError::Handler(format!("{what} timed out: {timeout}"))
             }
+            stuck @ Self::StuckContinuation { .. } => {
+                CapabilityError::Handler(format!("{what} failed: {stuck}"))
+            }
         }
     }
 }
@@ -104,7 +116,7 @@ impl std::error::Error for ListCappedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Api(error) => Some(error),
-            Self::Timeout { .. } => None,
+            Self::Timeout { .. } | Self::StuckContinuation { .. } => None,
         }
     }
 }
@@ -170,8 +182,17 @@ where
                 budget: per_page,
             })??;
         pages_read += 1;
+        let next = page.metadata.continue_.filter(|t| !t.is_empty());
+        // A token that did not advance is a server that will serve this page
+        // forever; the items it carried are not appended, since they would be
+        // the same rows a second time.
+        if next.is_some() && next == token {
+            return Err(ListCappedError::StuckContinuation {
+                token: next.unwrap_or_default(),
+            });
+        }
         items.extend(page.items);
-        token = page.metadata.continue_.filter(|t| !t.is_empty());
+        token = next;
         if items.len() >= APP_LIST_CAP {
             let truncated = items.len() > APP_LIST_CAP || token.is_some();
             items.truncate(APP_LIST_CAP);
@@ -198,8 +219,82 @@ pub fn apply_cap<T>(mut items: Vec<T>, more_remain: bool) -> (Vec<T>, bool) {
     (items, truncated)
 }
 
+/// Shared by this module's tests and the capability-level tests in `crds`
+/// and `events`, which drive the handlers end to end against the same fake
+/// API server.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use kube::Client;
+    use serde_json::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::time::Duration;
+
+    /// A server that answers each request with the next of `pages` (the last
+    /// one repeated), after holding it for `per_page`, and records each URI.
+    pub(crate) fn mock_slow_pages(
+        pages: Vec<Value>,
+        per_page: Duration,
+    ) -> (Client, Arc<Mutex<Vec<String>>>) {
+        let pages = Arc::new(pages);
+        let served = Arc::new(AtomicUsize::new(0));
+        let uris = Arc::new(Mutex::new(vec![]));
+        let captured = uris.clone();
+        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
+            let captured = captured.clone();
+            let pages = pages.clone();
+            let served = served.clone();
+            async move {
+                captured.lock().unwrap().push(request.uri().to_string());
+                let page = served.fetch_add(1, Ordering::SeqCst);
+                if !per_page.is_zero() {
+                    tokio::time::sleep(per_page).await;
+                }
+                let body = pages[page.min(pages.len() - 1)].clone();
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(body.to_string().into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        (Client::new(service, "default"), uris)
+    }
+
+    static TIMEOUT_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Holds the process-wide request timeout at `secs` for the guard's
+    /// lifetime and puts the previous value back on drop, a panic included.
+    /// Tests that need the real setting take this so they run one at a time.
+    pub(crate) struct RequestTimeoutGuard {
+        previous: u64,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    pub(crate) fn hold_request_timeout(secs: u64) -> RequestTimeoutGuard {
+        let lock = TIMEOUT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = crate::connect::request_timeout_secs();
+        crate::connect::set_request_timeout_secs(secs);
+        RequestTimeoutGuard {
+            previous,
+            _lock: lock,
+        }
+    }
+
+    impl Drop for RequestTimeoutGuard {
+        fn drop(&mut self) {
+            crate::connect::set_request_timeout_secs(self.previous);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::mock_slow_pages;
     use super::*;
     use k8s_openapi::api::core::v1::Event;
     use kube::Client;
@@ -332,29 +427,36 @@ mod tests {
         pages: Vec<Value>,
         per_page: std::time::Duration,
     ) -> (Client, Arc<Mutex<Vec<String>>>) {
-        let pages = Arc::new(pages);
-        let served = Arc::new(AtomicUsize::new(0));
-        let uris = Arc::new(Mutex::new(vec![]));
-        let captured = uris.clone();
-        let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
-            let captured = captured.clone();
-            let pages = pages.clone();
-            let served = served.clone();
-            async move {
-                captured.lock().unwrap().push(request.uri().to_string());
-                let page = served.fetch_add(1, Ordering::SeqCst);
-                tokio::time::sleep(per_page).await;
-                let body = pages[page.min(pages.len() - 1)].clone();
-                Ok::<_, std::convert::Infallible>(
-                    http::Response::builder()
-                        .status(200)
-                        .header("content-type", "application/json")
-                        .body(kube::client::Body::from(body.to_string().into_bytes()))
-                        .unwrap(),
-                )
+        mock_slow_pages(pages, per_page)
+    }
+
+    /// A server that keeps answering with the continue token it was asked
+    /// for never advances; following it would return the same rows again and
+    /// again. The walk refuses at the first repeat, before handing back data.
+    #[tokio::test]
+    async fn a_continue_token_that_does_not_advance_is_an_error() {
+        let (client, uris) = mock_event_pages(vec![
+            event_list(vec![event("a")], Some("p2")),
+            event_list(vec![event("a")], Some("p2")),
+        ]);
+        let api: Api<Event> = Api::all(client);
+
+        let error = list_capped(&api, ListParams::default())
+            .await
+            .expect_err("a repeated continue token must not be followed");
+
+        assert!(
+            matches!(&error, ListCappedError::StuckContinuation { token } if token == "p2"),
+            "got {error:?}"
+        );
+        assert!(error.to_string().contains("did not advance"), "{error}");
+        assert_eq!(uris.lock().unwrap().len(), 2, "one repeat is enough to know");
+        match error.into_capability_error("list events") {
+            CapabilityError::Handler(message) => {
+                assert!(message.starts_with("list events failed: "), "{message}")
             }
-        });
-        (Client::new(service, "default"), uris)
+            other => panic!("expected a handler error, got {other:?}"),
+        }
     }
 
     /// A page that overruns the per-request budget fails the walk, and says it

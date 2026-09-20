@@ -199,6 +199,47 @@ mod tests {
         assert_eq!(value["source"], "source-controller");
     }
 
+    /// The whole-walk timeout this PR removed, re-created at the capability
+    /// level: three pages that each answer inside the per-request budget but
+    /// together outlast it. `k8s.listEvents` completes; a handler that wrapped
+    /// the walk in one `request_timeout()` would have cut it off.
+    #[tokio::test]
+    async fn list_events_walks_pages_that_together_outlast_one_request_budget() {
+        let _budget = crate::list_cap::test_support::hold_request_timeout(1);
+        let per_page = std::time::Duration::from_millis(450);
+        let event = |name: &str| serde_json::json!({"metadata":{"name":name,"namespace":"default"},"involvedObject":{}});
+        let page = |items: Vec<serde_json::Value>, next: Option<&str>| {
+            serde_json::json!({"apiVersion":"v1","kind":"EventList",
+                "metadata":{"continue":next},"items":items})
+        };
+        let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+            vec![
+                page(vec![event("a")], Some("p2")),
+                page(vec![event("b")], Some("p3")),
+                page(vec![event("c")], None),
+            ],
+            per_page,
+        );
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache.preload("fake", client).await;
+        let capability = list_events_capability(cache);
+
+        let started = std::time::Instant::now();
+        let out =
+            (capability.handler)(serde_json::json!({"context": "fake", "namespace": "default"}))
+                .await
+                .expect("every page answered inside the per-request budget");
+
+        assert!(
+            started.elapsed() > crate::connect::request_timeout(),
+            "the walk must have outlasted one request's budget to prove anything"
+        );
+        // A false `truncated` is omitted on the wire (`skip_serializing_if`).
+        assert_ne!(out["truncated"], true, "{out}");
+        assert_eq!(out["events"].as_array().map(Vec::len), Some(3), "{out}");
+        assert_eq!(uris.lock().unwrap().len(), 3);
+    }
+
     #[test]
     fn capability_has_expected_id() {
         let cap = list_events_capability(ClientCache::new(PathBuf::from("/x")));

@@ -955,6 +955,52 @@ mod tests {
         assert_eq!(resolve_json_path(&whole, ".spec.version"), "4.1.2");
     }
 
+    /// The whole-walk timeout this PR removed, re-created at the capability
+    /// level: three pages that each answer inside the per-request budget but
+    /// together outlast it. `k8s.listCustomResource` completes; a handler that
+    /// wrapped the walk in one `request_timeout()` would have cut it off.
+    #[tokio::test]
+    async fn list_custom_resource_walks_pages_that_together_outlast_one_request_budget() {
+        let _budget = crate::list_cap::test_support::hold_request_timeout(1);
+        let per_page = std::time::Duration::from_millis(450);
+        let widget = |name: &str| {
+            serde_json::json!({"apiVersion":"example.io/v1","kind":"Widget",
+                "metadata":{"name":name,"namespace":"default"}})
+        };
+        let page = |items: Vec<serde_json::Value>, next: Option<&str>| {
+            serde_json::json!({"apiVersion":"example.io/v1","kind":"WidgetList",
+                "metadata":{"continue":next},"items":items})
+        };
+        let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+            vec![
+                page(vec![widget("w1")], Some("p2")),
+                page(vec![widget("w2")], Some("p3")),
+                page(vec![widget("w3")], None),
+            ],
+            per_page,
+        );
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache.preload("fake", client).await;
+        let capability = list_custom_resource_capability(cache);
+
+        let started = std::time::Instant::now();
+        let out = (capability.handler)(serde_json::json!({
+            "context": "fake", "group": "example.io", "version": "v1",
+            "plural": "widgets", "kind": "Widget", "namespaced": false
+        }))
+        .await
+        .expect("every page answered inside the per-request budget");
+
+        assert!(
+            started.elapsed() > crate::connect::request_timeout(),
+            "the walk must have outlasted one request's budget to prove anything"
+        );
+        // A false `truncated` is omitted on the wire (`skip_serializing_if`).
+        assert_ne!(out["truncated"], true, "{out}");
+        assert_eq!(out["items"].as_array().map(Vec::len), Some(3), "{out}");
+        assert_eq!(uris.lock().unwrap().len(), 3);
+    }
+
     #[test]
     fn builds_namespaced_api_version() {
         let ar = custom_api_resource("gateway.networking.k8s.io", "v1", "Gateway", "gateways");
