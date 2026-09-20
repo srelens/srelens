@@ -270,6 +270,64 @@ impl BgpViewState {
     }
 }
 
+/// What a peer row's Describe/YAML should open: the object that configured
+/// the session, its kind, its namespace, and the `apiVersion` the row pinned.
+///
+/// The `apiVersion` matters because a kind name is not an identity: MetalLB
+/// and Calico both ship a `BGPPeer`, and resolving by name alone always lands
+/// on one of them — for a MetalLB peer, on the wrong group and without its
+/// namespace. `None` means the row pinned nothing and name-only resolution is
+/// right for that kind.
+pub fn peer_drilldown_target(
+    peer: &BgpNeighbor,
+    engine: Option<&BgpEngineType>,
+) -> (String, String, Option<String>, Option<String>) {
+    let pinned = (!peer.policy_api_version.is_empty()).then(|| peer.policy_api_version.clone());
+
+    if !peer.policy_name.is_empty()
+        && !peer.policy_kind.is_empty()
+        && peer.policy_name != "cilium-node-status"
+    {
+        return (
+            peer.policy_name.clone(),
+            peer.policy_kind.clone(),
+            peer.namespace.clone(),
+            pinned,
+        );
+    }
+
+    if !peer.policy_name.is_empty()
+        && peer.policy_name != "cilium-node-status"
+        && peer.policy_name != "cilium-bgp-node-config"
+        && peer.policy_name != "cilium-bgp-peering-policy"
+    {
+        // The row named no kind, so the engine is all there is to go on.
+        let fallback_kind = match engine {
+            Some(BgpEngineType::CiliumV2) => "CiliumBGPClusterConfig",
+            Some(BgpEngineType::CiliumV2Alpha1) => "CiliumBGPPeeringPolicy",
+            Some(BgpEngineType::MetalLB) | Some(BgpEngineType::Calico) => "BGPPeer",
+            _ => "CiliumBGPClusterConfig",
+        };
+        return (
+            peer.policy_name.clone(),
+            fallback_kind.to_string(),
+            peer.namespace.clone(),
+            pinned,
+        );
+    }
+
+    if !peer.node_name.is_empty() {
+        return (peer.node_name.clone(), "Node".to_string(), None, None);
+    }
+
+    (
+        peer.policy_name.clone(),
+        "CiliumBGPClusterConfig".to_string(),
+        peer.namespace.clone(),
+        pinned,
+    )
+}
+
 pub fn render_bgp_view(f: &mut Frame, area: Rect, state: &BgpViewState) {
     if area.width < 10 || area.height < 5 {
         return;

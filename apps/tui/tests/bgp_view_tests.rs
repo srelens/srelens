@@ -52,6 +52,7 @@ fn sample_bgp_summary() -> BgpClusterSummary {
                 session_state: BgpSessionState::Established,
                 policy_name: "tor-spine-a".to_string(),
                 policy_kind: "CiliumBGPClusterConfig".to_string(),
+                policy_api_version: String::new(),
                 namespace: None,
                 export_pod_cidr: true,
                 hold_time_seconds: Some(90),
@@ -75,6 +76,7 @@ fn sample_bgp_summary() -> BgpClusterSummary {
                 session_state: BgpSessionState::Established,
                 policy_name: "tor-spine-b".to_string(),
                 policy_kind: "CiliumBGPClusterConfig".to_string(),
+                policy_api_version: String::new(),
                 namespace: None,
                 export_pod_cidr: true,
                 hold_time_seconds: Some(90),
@@ -95,6 +97,7 @@ fn sample_bgp_summary() -> BgpClusterSummary {
                 session_state: BgpSessionState::Active,
                 policy_name: "tor-backup".to_string(),
                 policy_kind: "CiliumBGPClusterConfig".to_string(),
+                policy_api_version: String::new(),
                 namespace: None,
                 export_pod_cidr: false,
                 hold_time_seconds: Some(180),
@@ -491,6 +494,57 @@ fn bgp_view_warns_when_a_found_engine_was_read_only_in_part() {
 }
 
 #[test]
+fn bgp_peer_drilldown_carries_the_crd_the_row_came_from() {
+    use srelens_tui::views::bgp_view::peer_drilldown_target;
+
+    let mut metallb_peer = sample_bgp_summary().peers.remove(0);
+    metallb_peer.policy_name = "metallb-peer-1".to_string();
+    metallb_peer.policy_kind = "BGPPeer".to_string();
+    metallb_peer.policy_api_version = "metallb.io/v1beta2".to_string();
+    metallb_peer.namespace = Some("metallb-system".to_string());
+
+    let (name, kind, ns, api_version) =
+        peer_drilldown_target(&metallb_peer, Some(&BgpEngineType::MetalLB));
+    assert_eq!(name, "metallb-peer-1");
+    assert_eq!(kind, "BGPPeer");
+    assert_eq!(ns.as_deref(), Some("metallb-system"));
+    assert_eq!(
+        api_version.as_deref(),
+        Some("metallb.io/v1beta2"),
+        "the kind alone would resolve to Calico's cluster-scoped BGPPeer"
+    );
+
+    let mut calico_peer = metallb_peer.clone();
+    calico_peer.policy_name = "calico-peer-1".to_string();
+    calico_peer.policy_api_version = "crd.projectcalico.org/v1".to_string();
+    calico_peer.namespace = None;
+    let (_, kind, ns, api_version) =
+        peer_drilldown_target(&calico_peer, Some(&BgpEngineType::Calico));
+    assert_eq!(kind, "BGPPeer");
+    assert_eq!(ns, None);
+    assert_eq!(api_version.as_deref(), Some("crd.projectcalico.org/v1"));
+
+    // A Cilium row pins nothing: the name-only resolver is right for it.
+    let cilium_peer = sample_bgp_summary().peers.remove(0);
+    let (name, kind, _, api_version) =
+        peer_drilldown_target(&cilium_peer, Some(&BgpEngineType::CiliumV2));
+    assert_eq!(name, "tor-spine-a");
+    assert_eq!(kind, "CiliumBGPClusterConfig");
+    assert_eq!(api_version, None);
+
+    // A row naming no policy falls back to its node.
+    let mut bare = sample_bgp_summary().peers.remove(0);
+    bare.policy_name = String::new();
+    bare.policy_kind = String::new();
+    let (name, kind, ns, api_version) =
+        peer_drilldown_target(&bare, Some(&BgpEngineType::CiliumV2));
+    assert_eq!(name, "node-worker-01");
+    assert_eq!(kind, "Node");
+    assert_eq!(ns, None);
+    assert_eq!(api_version, None);
+}
+
+#[test]
 fn bgp_view_footer_inspector_with_missing_optional_fields() {
     let mut state = BgpViewState::new();
     let mut summary = sample_bgp_summary();
@@ -581,6 +635,7 @@ fn bgp_view_groups_neighbors_by_node_and_suppresses_duplicate_node_name() {
             session_state: BgpSessionState::Established,
             policy_name: "tor-spine-a".to_string(),
             policy_kind: "CiliumBGPClusterConfig".to_string(),
+            policy_api_version: String::new(),
             namespace: None,
             export_pod_cidr: true,
             hold_time_seconds: Some(90),
@@ -601,6 +656,7 @@ fn bgp_view_groups_neighbors_by_node_and_suppresses_duplicate_node_name() {
             session_state: BgpSessionState::Established,
             policy_name: "tor-spine-b".to_string(),
             policy_kind: "CiliumBGPClusterConfig".to_string(),
+            policy_api_version: String::new(),
             namespace: None,
             export_pod_cidr: true,
             hold_time_seconds: Some(90),
@@ -621,6 +677,7 @@ fn bgp_view_groups_neighbors_by_node_and_suppresses_duplicate_node_name() {
             session_state: BgpSessionState::Established,
             policy_name: "tor-spine-a".to_string(),
             policy_kind: "CiliumBGPClusterConfig".to_string(),
+            policy_api_version: String::new(),
             namespace: None,
             export_pod_cidr: true,
             hold_time_seconds: Some(90),

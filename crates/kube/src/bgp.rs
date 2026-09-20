@@ -90,6 +90,14 @@ pub struct BgpNeighbor {
     pub policy_name: String,
     #[serde(default)]
     pub policy_kind: String,
+    /// The `apiVersion` (`group/version`) of the object named by
+    /// `policy_name`, when discovery pinned one. Two operators may ship the
+    /// same kind — MetalLB and Calico both have a `BGPPeer` — and resolving a
+    /// drill-down by kind name alone lands on whichever the static table
+    /// happens to list. Empty means discovery did not pin a version and the
+    /// name-only resolution is correct for this kind.
+    #[serde(default)]
+    pub policy_api_version: String,
     #[serde(default)]
     pub namespace: Option<String>,
     pub export_pod_cidr: bool,
@@ -885,6 +893,9 @@ pub(crate) fn build_cilium_bgp_summary(
                                 session_state: BgpSessionState::Configured,
                                 policy_name: pol_name.clone(),
                                 policy_kind: "CiliumBGPClusterConfig".to_string(),
+                                // Listed under v2 or v2alpha1; the name-only resolver
+                                // already probes both for a Cilium kind.
+                                policy_api_version: String::new(),
                                 namespace: None,
                                 export_pod_cidr: export_pod_cidr_default,
                                 hold_time_seconds: peer_cfg.hold_time,
@@ -1001,6 +1012,9 @@ pub(crate) fn build_cilium_bgp_summary(
                                     session_state: BgpSessionState::Configured,
                                     policy_name: pol_name.clone(),
                                     policy_kind: "CiliumBGPPeeringPolicy".to_string(),
+                                    policy_api_version: cilium_bgp_peering_policy_resource()
+                                        .api_version
+                                        .clone(),
                                     namespace: None,
                                     export_pod_cidr,
                                     hold_time_seconds: hold_time,
@@ -1169,6 +1183,7 @@ fn update_or_insert_neighbor(
                 default_policy.to_string()
             },
             policy_kind: default_policy_kind.to_string(),
+            policy_api_version: String::new(),
             namespace: None,
             export_pod_cidr,
             hold_time_seconds: None,
@@ -1391,6 +1406,9 @@ pub(crate) fn build_metallb_bgp_summary(
                 session_state: BgpSessionState::Configured,
                 policy_name: p_name.clone(),
                 policy_kind: "BGPPeer".to_string(),
+                // Calico ships a `BGPPeer` too, so the kind alone does not
+                // identify this row's CRD.
+                policy_api_version: metallb_bgp_peer_resource().api_version.clone(),
                 namespace: p_ns.clone(),
                 export_pod_cidr: false,
                 hold_time_seconds: hold_time,
@@ -1533,6 +1551,9 @@ pub(crate) fn build_calico_bgp_summary(
                 session_state: BgpSessionState::Configured,
                 policy_name: p_name.clone(),
                 policy_kind: "BGPPeer".to_string(),
+                // MetalLB ships a `BGPPeer` too, so the kind alone does not
+                // identify this row's CRD.
+                policy_api_version: calico_bgp_peer_resource().api_version.clone(),
                 namespace: None,
                 export_pod_cidr: true,
                 hold_time_seconds: None,
@@ -2166,6 +2187,7 @@ mod tests {
             session_state: BgpSessionState::Configured,
             policy_name: "policy-a".to_string(),
             policy_kind: "CiliumBGPClusterConfig".to_string(),
+            policy_api_version: String::new(),
             namespace: None,
             export_pod_cidr: true,
             hold_time_seconds: Some(90),
@@ -2294,6 +2316,7 @@ mod tests {
             session_state: BgpSessionState::Configured,
             policy_name: "p".to_string(),
             policy_kind: "k".to_string(),
+            policy_api_version: String::new(),
             namespace: None,
             export_pod_cidr: false,
             hold_time_seconds: None,
@@ -2810,6 +2833,63 @@ mod tests {
         let calico_summary = build_calico_bgp_summary(vec![empty_calico], &node_labels);
         assert_eq!(calico_summary.engine, BgpEngineType::Calico);
         assert_eq!(calico_summary.peers.len(), 0);
+    }
+
+    #[test]
+    fn a_bgppeer_row_carries_the_crd_it_came_from() {
+        // `BGPPeer` is shipped by both MetalLB and Calico, so the kind alone
+        // cannot tell a drill-down which CRD to fetch.
+        let mut node_labels = HashMap::new();
+        node_labels.insert("node-1".to_string(), BTreeMap::new());
+
+        let mut metallb_peer = DynamicObject::new("metallb-peer", &metallb_bgp_peer_resource());
+        metallb_peer.metadata.namespace = Some("metallb-system".to_string());
+        metallb_peer.data = json!({"spec": {"peerAddress": "10.0.0.1", "peerASN": 64512}});
+        let metallb = build_metallb_bgp_summary(vec![metallb_peer], vec![], &node_labels, &[]);
+        assert_eq!(metallb.peers[0].policy_kind, "BGPPeer");
+        assert_eq!(metallb.peers[0].policy_api_version, "metallb.io/v1beta2");
+        assert_eq!(
+            metallb.peers[0].namespace.as_deref(),
+            Some("metallb-system")
+        );
+
+        let mut calico_peer = DynamicObject::new("calico-peer", &calico_bgp_peer_resource());
+        calico_peer.data = json!({"spec": {"peerIP": "10.0.0.2", "asNumber": 64512}});
+        let calico = build_calico_bgp_summary(vec![calico_peer], &node_labels);
+        assert_eq!(calico.peers[0].policy_kind, "BGPPeer");
+        assert_eq!(
+            calico.peers[0].policy_api_version,
+            "crd.projectcalico.org/v1"
+        );
+        assert_ne!(
+            calico.peers[0].policy_api_version,
+            metallb.peers[0].policy_api_version
+        );
+
+        // The legacy Cilium policy is pinned to v2alpha1.
+        let mut pol = DynamicObject::new("legacy-pol", &cilium_bgp_peering_policy_resource());
+        pol.data = json!({
+            "spec": {"virtualRouters": [{
+                "localASN": 64512,
+                "neighbors": [{"peerAddress": "10.1.1.1", "peerASN": 64513}]
+            }]}
+        });
+        let legacy = build_cilium_bgp_summary(
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![pol],
+            vec![],
+            &node_labels,
+            &HashMap::new(),
+            &[],
+        );
+        assert_eq!(
+            legacy.peers[0].policy_api_version, "cilium.io/v2alpha1",
+            "the legacy policy only exists under v2alpha1"
+        );
     }
 
     #[test]

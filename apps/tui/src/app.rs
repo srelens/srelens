@@ -6906,44 +6906,19 @@ impl App {
                 KeyCode::Char('d') => match bgp.active_tab {
                     bgp_view::BgpTab::Peers => {
                         if let Some(peer) = bgp.selected_peer() {
-                            let (target_name, target_kind) = if !peer.policy_name.is_empty()
-                                && !peer.policy_kind.is_empty()
-                                && peer.policy_name != "cilium-node-status"
-                            {
-                                (peer.policy_name.clone(), peer.policy_kind.clone())
-                            } else if !peer.policy_name.is_empty()
-                                && peer.policy_name != "cilium-node-status"
-                                && peer.policy_name != "cilium-bgp-node-config"
-                                && peer.policy_name != "cilium-bgp-peering-policy"
-                            {
-                                let fallback_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
-                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => {
-                                        "CiliumBGPClusterConfig".to_string()
-                                    }
-                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => {
-                                        "CiliumBGPPeeringPolicy".to_string()
-                                    }
-                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
-                                        "BGPPeer".to_string()
-                                    }
-                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => {
-                                        "BGPPeer".to_string()
-                                    }
-                                    _ => "CiliumBGPClusterConfig".to_string(),
-                                };
-                                (peer.policy_name.clone(), fallback_kind)
-                            } else if !peer.node_name.is_empty() {
-                                (peer.node_name.clone(), "Node".to_string())
-                            } else {
-                                (
-                                    peer.policy_name.clone(),
-                                    "CiliumBGPClusterConfig".to_string(),
-                                )
-                            };
-                            let target_ns = peer.namespace.clone();
+                            let (target_name, target_kind, target_ns, target_api_version) =
+                                bgp_view::peer_drilldown_target(
+                                    peer,
+                                    bgp.summary.as_ref().map(|s| &s.engine),
+                                );
 
-                            self.open_describe_view(target_name, target_kind, target_ns)
-                                .await;
+                            self.open_describe_view_in_group(
+                                target_name,
+                                target_kind,
+                                target_ns,
+                                target_api_version,
+                            )
+                            .await;
                         }
                     }
                     bgp_view::BgpTab::Services => {
@@ -6974,44 +6949,19 @@ impl App {
                 KeyCode::Char('y') => match bgp.active_tab {
                     bgp_view::BgpTab::Peers => {
                         if let Some(peer) = bgp.selected_peer() {
-                            let (target_name, target_kind) = if !peer.policy_name.is_empty()
-                                && !peer.policy_kind.is_empty()
-                                && peer.policy_name != "cilium-node-status"
-                            {
-                                (peer.policy_name.clone(), peer.policy_kind.clone())
-                            } else if !peer.policy_name.is_empty()
-                                && peer.policy_name != "cilium-node-status"
-                                && peer.policy_name != "cilium-bgp-node-config"
-                                && peer.policy_name != "cilium-bgp-peering-policy"
-                            {
-                                let fallback_kind = match bgp.summary.as_ref().map(|s| &s.engine) {
-                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2) => {
-                                        "CiliumBGPClusterConfig".to_string()
-                                    }
-                                    Some(srelens_kube::bgp::BgpEngineType::CiliumV2Alpha1) => {
-                                        "CiliumBGPPeeringPolicy".to_string()
-                                    }
-                                    Some(srelens_kube::bgp::BgpEngineType::MetalLB) => {
-                                        "BGPPeer".to_string()
-                                    }
-                                    Some(srelens_kube::bgp::BgpEngineType::Calico) => {
-                                        "BGPPeer".to_string()
-                                    }
-                                    _ => "CiliumBGPClusterConfig".to_string(),
-                                };
-                                (peer.policy_name.clone(), fallback_kind)
-                            } else if !peer.node_name.is_empty() {
-                                (peer.node_name.clone(), "Node".to_string())
-                            } else {
-                                (
-                                    peer.policy_name.clone(),
-                                    "CiliumBGPClusterConfig".to_string(),
-                                )
-                            };
-                            let target_ns = peer.namespace.clone();
+                            let (target_name, target_kind, target_ns, target_api_version) =
+                                bgp_view::peer_drilldown_target(
+                                    peer,
+                                    bgp.summary.as_ref().map(|s| &s.engine),
+                                );
 
-                            self.open_yaml_view(target_name, target_kind, target_ns)
-                                .await;
+                            self.open_yaml_view_in_group(
+                                target_name,
+                                target_kind,
+                                target_ns,
+                                target_api_version,
+                            )
+                            .await;
                         }
                     }
                     bgp_view::BgpTab::Services => {
@@ -9674,18 +9624,43 @@ impl App {
     }
 
     pub async fn open_yaml_view(&mut self, name: String, kind: String, namespace: Option<String>) {
+        self.open_yaml_view_in_group(name, kind, namespace, None)
+            .await;
+    }
+
+    /// As `open_yaml_view`, for a caller that already knows which CRD the row
+    /// came from. A kind name is not an identity — MetalLB and Calico both
+    /// ship a `BGPPeer` — so when `api_version` is given it decides the group,
+    /// the version and the scope, rather than the name-only table picking one.
+    pub async fn open_yaml_view_in_group(
+        &mut self,
+        name: String,
+        kind: String,
+        namespace: Option<String>,
+        api_version: Option<String>,
+    ) {
         let ctx = self.active_context.clone();
         let cache = self.client_cache.clone();
         let k = kind.clone();
         let n = name.clone();
         let kubeconfig_paths = self.kubeconfig_paths.clone();
-        let crd_opt = self
-            .crds
-            .iter()
-            .find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k))
-            .cloned();
+        let pinned = api_version
+            .as_deref()
+            .and_then(|v| srelens_kube::manifest::api_resource_for_api_version(v, &k));
+        let crd_opt = if pinned.is_some() {
+            None
+        } else {
+            self.crds
+                .iter()
+                .find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k))
+                .cloned()
+        };
 
-        let is_cluster_scoped = if namespace.is_some() {
+        // A pinned CRD carries its own scope: the row knows whether its object
+        // lives in a namespace.
+        let is_cluster_scoped = if pinned.is_some() {
+            !namespace.as_deref().is_some_and(|ns| !ns.is_empty())
+        } else if namespace.is_some() {
             match srelens_kube::manifest::gvk_for(&k) {
                 Some((gvk, false))
                     if gvk.group.is_empty()
@@ -9719,9 +9694,31 @@ impl App {
         };
         let ns_task = ns.clone();
 
+        // kubectl resolves a bare kind by name too, so the fallback command
+        // names the group as well: `bgppeers.metallb.io`.
+        let kubectl_kind = match pinned {
+            Some(ref ar) if !ar.group.is_empty() => format!("{}.{}", ar.plural, ar.group),
+            _ => k.clone(),
+        };
+
         let yaml_text = tokio::task::spawn(async move {
             let ns = ns_task;
             if let Ok(client) = cache.get(&ctx).await {
+                if let Some(ar) = pinned.clone() {
+                    let api: kube::Api<kube::core::DynamicObject> = match ns.as_deref() {
+                        Some(ns) if !ns.is_empty() => {
+                            kube::Api::namespaced_with(client.clone(), ns, &ar)
+                        }
+                        _ => kube::Api::all_with(client.clone(), &ar),
+                    };
+                    if let Ok(mut obj) = api.get(&n).await {
+                        obj.metadata.managed_fields = None;
+                        if let Ok(y) = serde_yaml::to_string(&obj) {
+                            return y;
+                        }
+                    }
+                }
+
                 if let Some(crd) = crd_opt {
                     let api_version = if crd.group.is_empty() {
                         crd.version.clone()
@@ -9752,7 +9749,11 @@ impl App {
                     }
                 }
 
-                if let Some((gvk, namespaced)) = srelens_kube::manifest::gvk_for(&k) {
+                // Only when the caller did not pin a CRD: resolving this kind
+                // by name is what would reach the wrong group.
+                if let Some((gvk, namespaced)) =
+                    srelens_kube::manifest::gvk_for(&k).filter(|_| pinned.is_none())
+                {
                     let ar = kube::core::ApiResource::from_gvk(&gvk);
                     let api: kube::Api<kube::core::DynamicObject> = if namespaced {
                         kube::Api::namespaced_with(
@@ -9821,7 +9822,7 @@ impl App {
             // Fallback: try kubectl get <kind> <name> -o yaml
             let mut cmd = tokio::process::Command::new("kubectl");
             cmd.arg("get");
-            cmd.arg(&k);
+            cmd.arg(&kubectl_kind);
             cmd.arg(&n);
             if let Some(ref ns_val) = ns {
                 if !ns_val.is_empty() {
@@ -9876,18 +9877,39 @@ impl App {
         kind: String,
         namespace: Option<String>,
     ) {
+        self.open_describe_view_in_group(name, kind, namespace, None)
+            .await;
+    }
+
+    /// As `open_describe_view`, for a caller that already knows which CRD the
+    /// row came from. See `open_yaml_view_in_group`.
+    pub async fn open_describe_view_in_group(
+        &mut self,
+        name: String,
+        kind: String,
+        namespace: Option<String>,
+        api_version: Option<String>,
+    ) {
         let ctx = self.active_context.clone();
         let cache = self.client_cache.clone();
         let k = kind.clone();
         let n = name.clone();
         let kubeconfig_paths = self.kubeconfig_paths.clone();
-        let crd_opt = self
-            .crds
-            .iter()
-            .find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k))
-            .cloned();
+        let pinned = api_version
+            .as_deref()
+            .and_then(|v| srelens_kube::manifest::api_resource_for_api_version(v, &k));
+        let crd_opt = if pinned.is_some() {
+            None
+        } else {
+            self.crds
+                .iter()
+                .find(|c| c.kind.eq_ignore_ascii_case(&k) || c.plural.eq_ignore_ascii_case(&k))
+                .cloned()
+        };
 
-        let is_cluster_scoped = if namespace.is_some() {
+        let is_cluster_scoped = if pinned.is_some() {
+            !namespace.as_deref().is_some_and(|ns| !ns.is_empty())
+        } else if namespace.is_some() {
             match srelens_kube::manifest::gvk_for(&k) {
                 Some((gvk, false))
                     if gvk.group.is_empty()
@@ -9921,12 +9943,19 @@ impl App {
         };
         let ns_task = ns.clone();
 
+        // kubectl resolves a bare kind by name too, so the command names the
+        // group as well: `bgppeers.metallb.io`.
+        let kubectl_kind = match pinned {
+            Some(ref ar) if !ar.group.is_empty() => format!("{}.{}", ar.plural, ar.group),
+            _ => k.clone(),
+        };
+
         let desc_text = tokio::task::spawn(async move {
             let ns = ns_task;
             // 1. Try kubectl describe for exact 100% fidelity
             let mut cmd = tokio::process::Command::new("kubectl");
             cmd.arg("describe");
-            cmd.arg(&k);
+            cmd.arg(&kubectl_kind);
             cmd.arg(&n);
             if let Some(ref ns_val) = ns {
                 if !ns_val.is_empty() {
@@ -9956,7 +9985,10 @@ impl App {
 
             // 2. Pure Rust native describe fallback
             if let Ok(client) = cache.get(&ctx).await {
-                let maybe_ar = if let Some(ref crd) = crd_opt {
+                let maybe_ar = if let Some(ar) = pinned.clone() {
+                    let namespaced = ns.as_deref().is_some_and(|ns| !ns.is_empty());
+                    Some((ar, namespaced))
+                } else if let Some(ref crd) = crd_opt {
                     let api_version = if crd.group.is_empty() {
                         crd.version.clone()
                     } else {
