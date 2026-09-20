@@ -590,6 +590,31 @@ fn bgp_view_points_at_the_vip_tab_rather_than_claiming_nothing_is_advertised() {
     );
 }
 
+/// The Cilium path spells a Service's peers as `address:asn`, the MetalLB
+/// path as the bare address. The footer must count under both, or a Cilium
+/// session that carries VIPs reads "Not enumerated".
+#[test]
+fn bgp_view_counts_vips_whose_peers_are_spelled_with_the_asn() {
+    let mut state = BgpViewState::new();
+    let mut summary = sample_bgp_summary();
+    summary.peers[0].advertised_prefixes.clear();
+    summary.peers[0].routes_count = 4;
+    // node-worker-01 peers with 10.0.0.254 as AS 65000.
+    for svc in &mut summary.advertised_services {
+        svc.peers = svc.peers.iter().map(|p| format!("{p}:65000")).collect();
+    }
+    state.set_summary(summary);
+
+    let lines = render_lines(180, 24, |f| {
+        render_bgp_view(f, f.area(), &state);
+    });
+    let text = lines.join("\n");
+    assert!(
+        text.contains("2 LoadBalancer VIPs — see the Advertised VIPs tab"),
+        "{text}"
+    );
+}
+
 #[test]
 fn bgp_view_does_not_call_routes_it_cannot_enumerate_vips() {
     // A route count can be the agent's own figure for the live session,
