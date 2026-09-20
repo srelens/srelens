@@ -14,8 +14,8 @@ use srelens_kube::client_cache::ClientCache;
 mod catalog;
 mod durable;
 pub use catalog::{catalog_of, CatalogEntry};
-mod settings;
 mod extensions;
+mod settings;
 /// The extension readers' fuzz entry points, for the targets in `fuzz/`. Not an API.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
@@ -48,6 +48,19 @@ pub use srelens_kube::connect::{default_kubeconfig_dir, managed_kubeconfig_files
 /// folding volatile content in here means a file deleted at runtime is
 /// reintroduced on every later call and never goes away. Callers that want the
 /// managed folder as well should use [`all_kubeconfig_paths`], which resolves
+pub fn kubeconfig_paths_in_home(home: &std::path::Path) -> Vec<PathBuf> {
+    let dot_kube = home.join(".kube");
+    let mut paths = vec![dot_kube.join("config")];
+    if dot_kube.is_dir() {
+        for file in srelens_kube::connect::discover_kubeconfig_files_in(&dot_kube) {
+            if !paths.contains(&file) {
+                paths.push(file);
+            }
+        }
+    }
+    paths
+}
+
 /// it at call time.
 pub fn default_kubeconfig_paths() -> Vec<PathBuf> {
     if let Some(value) = std::env::var_os("KUBECONFIG") {
@@ -73,7 +86,7 @@ pub fn default_kubeconfig_paths() -> Vec<PathBuf> {
         .map(PathBuf::from)
         .or_else(dirs::home_dir)
         .unwrap_or_default();
-    vec![home.join(".kube").join("config")]
+    kubeconfig_paths_in_home(&home)
 }
 
 /// Every kubeconfig source as of RIGHT NOW: the static ones plus whatever is
@@ -104,7 +117,9 @@ pub fn default_kubeconfig_path() -> PathBuf {
 /// `spawn_blocking` (the install capabilities), so blocking here is fine. A
 /// non-2xx or transport error maps to the retryable `Download` variant.
 fn http_get(url: &str) -> Result<Vec<u8>, srelens_kube::toolbox_install::InstallError> {
-    use srelens_kube::toolbox_install::{ambient_github_token, github_api_wants_auth, InstallError};
+    use srelens_kube::toolbox_install::{
+        ambient_github_token, github_api_wants_auth, InstallError,
+    };
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("srelens/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -123,7 +138,10 @@ fn http_get(url: &str) -> Result<Vec<u8>, srelens_kube::toolbox_install::Install
         .send()
         .map_err(|e| InstallError::Download(e.to_string()))?;
     if !resp.status().is_success() {
-        return Err(InstallError::Download(format!("{} for {url}", resp.status())));
+        return Err(InstallError::Download(format!(
+            "{} for {url}",
+            resp.status()
+        )));
     }
     resp.bytes()
         .map(|b| b.to_vec())
@@ -148,7 +166,9 @@ pub fn run_tool(
     if output.status.success() {
         Ok(())
     } else {
-        Err(InstallError::Download(String::from_utf8_lossy(&output.stderr).into_owned()))
+        Err(InstallError::Download(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
     }
 }
 
@@ -158,7 +178,11 @@ pub fn run_tool(
 fn run_krew(args: &[&str]) -> Result<String, srelens_kube::toolbox_install::InstallError> {
     use srelens_kube::toolbox_install::InstallError;
     let shim = srelens_kube::toolbox::krew_bin_dir().join("kubectl-krew");
-    let bin = if shim.is_file() { shim } else { std::path::PathBuf::from("kubectl-krew") };
+    let bin = if shim.is_file() {
+        shim
+    } else {
+        std::path::PathBuf::from("kubectl-krew")
+    };
     let output = std::process::Command::new(bin)
         .args(args)
         .output()
@@ -166,7 +190,9 @@ fn run_krew(args: &[&str]) -> Result<String, srelens_kube::toolbox_install::Inst
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
-        Err(InstallError::Download(String::from_utf8_lossy(&output.stderr).into_owned()))
+        Err(InstallError::Download(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
     }
 }
 
@@ -280,7 +306,9 @@ pub fn build_registry_with_paths_and_settings(
         cache.clone(),
     ));
     reg.register(srelens_kube::logs::pod_logs_capability(cache.clone()));
-    reg.register(srelens_kube::endpoint_query::query_pod_endpoint_capability(cache.clone()));
+    reg.register(srelens_kube::endpoint_query::query_pod_endpoint_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::deployments::list_deployments_capability(
         cache.clone(),
     ));
@@ -355,7 +383,9 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::actions::cordon_node_capability(cache.clone()));
     reg.register(srelens_kube::actions::drain_node_capability(cache.clone()));
     reg.register(srelens_kube::debug::debug_pod_capability(cache.clone()));
-    reg.register(srelens_kube::debug::node_debug_pod_capability(cache.clone()));
+    reg.register(srelens_kube::debug::node_debug_pod_capability(
+        cache.clone(),
+    ));
     reg.register(srelens_kube::events::list_events_capability(cache.clone()));
     reg.register(srelens_kube::metrics::node_metrics_capability(
         cache.clone(),
@@ -450,14 +480,21 @@ pub fn build_registry_with_paths_and_settings(
     reg.register(srelens_kube::helm_cli::helm_search_repo_capability(
         cache.clone(),
     ));
-    reg.register(srelens_kube::manifest::list_resource_capability(cache.clone()));
+    reg.register(srelens_kube::manifest::list_resource_capability(
+        cache.clone(),
+    ));
 
     if let Some(path) = settings_path {
         let mut core = reg.clone();
         // Broker-only: kept out of `reg`, so neither the catalog nor MCP offers it.
         core.register(extensions::crd::check_capability(cache.clone()));
         let core = Arc::new(core);
-        extensions::register(&mut reg, path.with_extension("extensions.json"), core, cache);
+        extensions::register(
+            &mut reg,
+            path.with_extension("extensions.json"),
+            core,
+            cache,
+        );
         settings::register(&mut reg, path);
     }
 
@@ -489,7 +526,11 @@ pub fn kind_resolver() -> std::sync::Arc<dyn srelens_mcp::resources::KindResolve
                 return None;
             }
             srelens_kube::manifest::gvk_for(kind).map(|(_, namespaced)| {
-                if namespaced { KindScope::Namespaced } else { KindScope::ClusterScoped }
+                if namespaced {
+                    KindScope::Namespaced
+                } else {
+                    KindScope::ClusterScoped
+                }
             })
         }
     }
@@ -555,13 +596,15 @@ mod tests {
             return;
         }
         let paths = default_kubeconfig_paths();
-        assert_eq!(paths.len(), 1, "{paths:?}");
-        assert!(
-            paths[0].is_absolute(),
-            "the default kubeconfig path must not depend on the working directory: {:?}",
-            paths[0]
-        );
-        assert!(paths[0].ends_with("config"), "{:?}", paths[0]);
+        assert!(!paths.is_empty(), "{paths:?}");
+        for p in &paths {
+            assert!(
+                p.is_absolute(),
+                "the default kubeconfig path must not depend on the working directory: {:?}",
+                p
+            );
+        }
+        assert!(paths.iter().any(|p| p.ends_with("config")), "{:?}", paths);
     }
 
     #[test]
@@ -586,7 +629,16 @@ mod tests {
         let reg = build_registry_with_paths(cache, vec![]);
         assert!(!reg.ids().contains(&"settings.get"));
         assert!(!reg.ids().contains(&"settings.set"));
-        for id in ["extensions.catalog", "extensions.catalogManifest", "extensions.list", "extensions.configure", "extensions.validate", "extensions.read"] { assert!(reg.get(id).is_none()); }
+        for id in [
+            "extensions.catalog",
+            "extensions.catalogManifest",
+            "extensions.list",
+            "extensions.configure",
+            "extensions.validate",
+            "extensions.read",
+        ] {
+            assert!(reg.get(id).is_none());
+        }
     }
 
     #[test]
@@ -614,7 +666,10 @@ mod tests {
         // equal the live registry; regenerate with `UPDATE_CATALOG=1 cargo test`.
         // Lives with the service layer it describes (@srelens/core), which is
         // what the frontend palette audit reads.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages/core/src/lib/capability-catalog.json");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/core/src/lib/capability-catalog.json"
+        );
         let want = serde_json::to_string_pretty(&capability_catalog()).unwrap() + "\n";
         if std::env::var("UPDATE_CATALOG").is_ok() {
             std::fs::write(path, &want).unwrap();
@@ -671,7 +726,10 @@ mod tests {
                 "docs/MCP.md names `{token}`, which is not a registered capability"
             );
         }
-        assert!(checked >= 5, "expected the examples to name several real tools, saw {checked}");
+        assert!(
+            checked >= 5,
+            "expected the examples to name several real tools, saw {checked}"
+        );
     }
 
     /// Flags the docs mention *in order to say they do not exist*. Keeping this
@@ -697,7 +755,9 @@ mod tests {
     /// has to be looked for across the workspace rather than in one file.
     fn workspace_rust_sources() -> String {
         fn walk(dir: &std::path::Path, out: &mut String) {
-            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
@@ -752,7 +812,13 @@ mod tests {
 
         // Every file that names a flag, not just the new ones — a stale flag is
         // just as broken in INSTALL.md as in MCP.md.
-        for name in ["MCP.md", "mcp-catalog.md", "USAGE.md", "INSTALL.md", "DEVELOPMENT.md"] {
+        for name in [
+            "MCP.md",
+            "mcp-catalog.md",
+            "USAGE.md",
+            "INSTALL.md",
+            "DEVELOPMENT.md",
+        ] {
             let md = doc(name);
 
             // Any flag the docs show being passed to the binary — `srelens
@@ -765,7 +831,11 @@ mod tests {
             for occurrence in md.split("srelens --").skip(1) {
                 let flag: String = std::iter::once('-')
                     .chain(std::iter::once('-'))
-                    .chain(occurrence.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-'))
+                    .chain(
+                        occurrence
+                            .chars()
+                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-'),
+                    )
                     .collect();
                 if DOCUMENTED_AS_ABSENT.contains(&flag.as_str()) {
                     assert!(
@@ -837,5 +907,23 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn default_kubeconfig_paths_discovers_all_files_in_dot_kube_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let dot_kube = temp.path().join(".kube");
+        std::fs::create_dir_all(&dot_kube).unwrap();
+        let valid_yaml = "apiVersion: v1\nkind: Config\nclusters: [{name: c, cluster: {server: 'https://127.0.0.1:1'}}]\ncontexts: [{name: test, context: {cluster: c, user: u}}]\nusers: [{name: u, user: {}}]\n";
+        std::fs::write(dot_kube.join("config"), valid_yaml).unwrap();
+        std::fs::write(dot_kube.join("cluster-a.yaml"), valid_yaml).unwrap();
+        std::fs::write(dot_kube.join("cluster-b"), valid_yaml).unwrap();
+        std::fs::write(dot_kube.join(".hidden"), valid_yaml).unwrap();
+
+        let paths = kubeconfig_paths_in_home(temp.path());
+        assert!(paths.contains(&dot_kube.join("config")));
+        assert!(paths.contains(&dot_kube.join("cluster-a.yaml")));
+        assert!(paths.contains(&dot_kube.join("cluster-b")));
+        assert!(!paths.contains(&dot_kube.join(".hidden")));
     }
 }

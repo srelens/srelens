@@ -547,7 +547,7 @@ fn the_context_picker_lists_every_context_with_badges_and_marks_the_active_one()
     );
     assert!(text.contains("  [remote] staging ns:[web]"), "{text}");
     assert!(
-        text.contains("Showing 3/3 contexts  •  Enter: Switch  Esc: Cancel"),
+        text.contains("Showing 3/3 contexts  •  Enter: Switch  Ctrl+i: Import  Esc: Cancel"),
         "{text}"
     );
 }
@@ -2584,8 +2584,10 @@ fn feature_banner_modal_renders_all_highlighted_features_and_toggle_state() {
     assert!(text_enabled.contains(":banner"), "shows banner command");
     assert!(text_enabled.contains(":nodes"), "shows nodes command");
     assert!(text_enabled.contains(":bgp"), "shows bgp command");
+    assert!(text_enabled.contains(":import"), "shows import command");
     assert!(text_enabled.contains(":update"), "shows update command");
     assert!(text_enabled.contains("[b]"), "shows bgp shortcut key");
+    assert!(text_enabled.contains("[i]"), "shows import shortcut key");
     assert!(text_enabled.contains("[u]"), "shows update shortcut key");
     assert!(text_enabled.contains("[0]"), "shows jump key 0");
     assert!(text_enabled.contains("[9]"), "shows jump key 9");
