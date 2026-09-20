@@ -532,7 +532,7 @@ fn render_tab_content(f: &mut Frame, area: Rect, state: &BgpViewState) {
     let nothing_found = state
         .summary
         .as_ref()
-        .map_or(true, |s| s.engine == BgpEngineType::None);
+        .is_none_or(|s| s.engine == BgpEngineType::None);
     if let Some(err) = state.discovery_error().filter(|_| nothing_found) {
         let p = Paragraph::new(vec![
             Line::from(""),

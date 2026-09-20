@@ -2205,7 +2205,7 @@ mod tests {
         node_pod_cidrs.insert("node-1".to_string(), vec!["10.244.0.0/24".to_string()]);
         node_pod_cidrs.insert("node-2".to_string(), vec!["10.244.1.0/24".to_string()]);
 
-        let lb_services = vec![lb("web-svc", "default", "1.2.3.4", Some("public-pool"))];
+        let lb_services = [lb("web-svc", "default", "1.2.3.4", Some("public-pool"))];
 
         // 1. Update existing neighbor (matched by node_name + peer_address)
         let live_update = LiveBgpPeerInfo {
