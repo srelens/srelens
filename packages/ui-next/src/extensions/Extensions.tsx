@@ -1,8 +1,10 @@
 import { ExtensionDetails } from "./ExtensionDetails";
+import { ExtensionBindings, ReviewManifest } from "./ExtensionBindings";
+import { plainText } from "./displayText";
 import { ExtensionRequirements } from "./ExtensionRequirements";
 import { refreshContextIds, useContextLookup } from "./contextIds";
 import { ExtensionLogo } from "./ExtensionLogo";
-import { useContext, useState } from "react";
+import { useContext, useRef, useState } from "react";
 import {
   configureExtensions,
   contributionKind,
@@ -41,6 +43,12 @@ export function ExtensionManager() {
     signature?: number[];
     name: string;
     permissions: string[];
+    /** The parsed manifest, whose bindings the review summarizes; undefined when it is not JSON. */
+    manifest?: unknown;
+    /** The manifest as the review shows it in full. */
+    text: string;
+    /** Numbers reviews, so a new one opens with its manifest collapsed. */
+    id: number;
     /** Undefined while the host is still checking the manifest. */
     errors?: ExtensionValidationError[];
     /** Why the check itself failed, as opposed to the problems it found. */
@@ -51,6 +59,7 @@ export function ExtensionManager() {
      */
     request: object;
   } | null>(null);
+  const reviews = useRef(0);
   const [settings, setSettings] = useState<{ id: string; text: string } | null>(
     null,
   );
@@ -73,8 +82,13 @@ export function ExtensionManager() {
   /** Opens the permission review, and offers to install only once the host finds no problems. */
   async function reviewManifest(manifest: string, signature?: number[]) {
     let parsed: { name?: unknown; permissions?: unknown } = {};
+    let value: unknown;
+    // Shown indented, as Details shows an installed app: the same values the host checks,
+    // readable whether the manifest came from the Catalog or was pasted on one line.
+    let text = manifest;
     try {
-      const value: unknown = JSON.parse(manifest);
+      value = JSON.parse(manifest);
+      text = JSON.stringify(value, null, 2);
       if (value && typeof value === "object") parsed = value as typeof parsed;
     } catch {
       // The host reports invalid JSON with a code and path, like any other problem.
@@ -86,7 +100,16 @@ export function ExtensionManager() {
     const name = typeof parsed.name === "string" ? parsed.name : "This manifest";
     const request = {};
     setError("");
-    setReview({ request, source: manifest, signature, name, permissions });
+    setReview({
+      request,
+      id: ++reviews.current,
+      source: manifest,
+      signature,
+      name,
+      permissions,
+      manifest: value,
+      text,
+    });
     try {
       const { errors } = await validateExtension(manifest, permissions, signature);
       setReview((current) => (current?.request === request ? { ...current, errors } : current));
@@ -139,8 +162,8 @@ export function ExtensionManager() {
                   then either. */}
               {review.errors?.length === 0 ? (
                 <>
-                  <strong>{review.name}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) requests:{" "}
-                  {review.permissions.join(", ") || "no permissions"}. Installing an existing ID
+                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) requests:{" "}
+                  {review.permissions.map(plainText).join(", ") || "no permissions"}. Installing an existing ID
                   replaces its manifest and refreshes its open pages.
                 </>
               ) : (
@@ -150,6 +173,13 @@ export function ExtensionManager() {
                 </>
               )}
             </p>
+            {/* What each permission covers, under the same rule as the name: drawn only once
+                the host has accepted the manifest. The full text can be read at any time,
+                with its invisible characters escaped. */}
+            {review.errors?.length === 0 && (
+              <ExtensionBindings manifest={review.manifest} permissions={review.permissions} />
+            )}
+            <ReviewManifest key={review.id} text={review.text} />
             {review.checkError ? (
               <ErrorNotice
                 title="Could not check the manifest"

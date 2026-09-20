@@ -21,6 +21,9 @@
 }
 .extension-install {
   display: grid;
+  /* One track that never grows past the pane: a grid column is as wide as its widest
+     line by default, and a manifest's long lines would widen the whole review with it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   padding: 12px;
   border-bottom: 1px solid var(--rule, var(--fl-color-border));
@@ -295,8 +298,46 @@
   color: inherit;
   font-family: var(--font-mono);
 }
+/* The install review's summary of what each permission is bound to. */
+.extension-bindings { display: grid; gap: 6px; min-width: 0; }
+.extension-bindings p { margin: 0; }
+.extension-bindings code { font-family: var(--font-mono); }
+.extension-binding-list,
+.extension-binding-readers {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.extension-binding-list > li { display: grid; gap: 4px; min-width: 0; }
+.extension-binding-readers { gap: 4px; }
+/* Machine text: the table keeps each value on one line and scrolls sideways instead. */
+.extension-binding-table { max-width: 100%; overflow-x: auto; }
+.extension-binding-table table { border-collapse: collapse; }
+.extension-binding-table th,
+.extension-binding-table td {
+  padding: 3px 16px 3px 0;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-binding-table thead th {
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  font-weight: 500;
+}
+.extension-binding-table tbody th { font-weight: 400; }
+.extension-binding-table summary { cursor: pointer; }
+.extension-binding-table summary:focus-visible {
+  outline: 2px solid var(--accent, var(--fl-color-primary));
+  outline-offset: 1px;
+}
+.extension-binding-table details table { margin: 4px 0 2px; }
+.extension-binding-table details tr:last-child td { border-bottom: 0; }
 .extension-details {
   display: grid;
+  grid-template-columns: minmax(0, 1fr); /* As .extension-install: the manifest scrolls, not the pane. */
   gap: 8px;
   padding: 10px 12px 14px;
   border-top: 1px solid var(--rule, var(--fl-color-border));
