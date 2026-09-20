@@ -37,6 +37,130 @@ pub struct DiagnosticReport {
     pub signals: Vec<DiagnosticSignal>,
 }
 
+fn parse_scheduling_failure(raw: &str) -> (String, Vec<DiagnosticSignal>) {
+    let mut signals = Vec::new();
+
+    // 1. Separate main node availability from preemption suffix
+    let parts: Vec<&str> = raw.split(", preemption:").collect();
+    let main_part = parts[0].trim();
+    let preemption_part = parts.get(1).map(|s| s.trim());
+
+    // Look for "0/N nodes are available:" or "0/N node(s) were available:"
+    let (node_prefix, reasons_str) = if let Some(idx) = main_part.find("nodes are available:") {
+        let prefix = main_part[..idx + "nodes are available:".len()].trim();
+        let rest = main_part[idx + "nodes are available:".len()..].trim();
+        (prefix, rest)
+    } else if let Some(idx) = main_part.find("node(s) were available:") {
+        let prefix = main_part[..idx + "node(s) were available:".len()].trim();
+        let rest = main_part[idx + "node(s) were available:".len()..].trim();
+        (prefix, rest)
+    } else {
+        ("Scheduling failed:", main_part)
+    };
+
+    // Parse reasons (separated by comma)
+    let raw_reasons: Vec<&str> = reasons_str
+        .split(',')
+        .map(|r| r.trim().trim_end_matches('.'))
+        .filter(|r| !r.is_empty())
+        .collect();
+
+    let mut gist_reasons = Vec::new();
+
+    for reason in &raw_reasons {
+        let lower = reason.to_lowercase();
+        if lower.contains("insufficient") {
+            let res_name = reason
+                .split_whitespace()
+                .filter(|w| {
+                    !w.chars().all(|c| c.is_numeric()) && !w.eq_ignore_ascii_case("insufficient")
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let clean_res = if !res_name.is_empty() {
+                res_name
+            } else {
+                "resources".to_string()
+            };
+            gist_reasons.push(format!("Insufficient {}", clean_res));
+
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Error,
+                title: format!("Insufficient Node Resources ({})", clean_res),
+                detail: Some(reason.to_string()),
+            });
+        } else if lower.contains("too many pods") {
+            gist_reasons.push("Pod limit reached".to_string());
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Error,
+                title: "Node Pod Capacity Reached".to_string(),
+                detail: Some(reason.to_string()),
+            });
+        } else if lower.contains("taint") || lower.contains("tolerat") {
+            gist_reasons.push("Untolerated taint".to_string());
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Warning,
+                title: "Untolerated Node Taint".to_string(),
+                detail: Some(reason.to_string()),
+            });
+        } else if lower.contains("affinity")
+            || lower.contains("selector")
+            || lower.contains("match")
+        {
+            gist_reasons.push("Node affinity mismatch".to_string());
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Warning,
+                title: "Node Affinity / Selector Mismatch".to_string(),
+                detail: Some(reason.to_string()),
+            });
+        } else {
+            gist_reasons.push(reason.to_string());
+            signals.push(DiagnosticSignal {
+                severity: SignalSeverity::Warning,
+                title: "Scheduling Constraint".to_string(),
+                detail: Some(reason.to_string()),
+            });
+        }
+    }
+
+    if let Some(prem) = preemption_part {
+        signals.push(DiagnosticSignal {
+            severity: SignalSeverity::Info,
+            title: "Preemption Check".to_string(),
+            detail: Some(format!("Preemption: {}", prem)),
+        });
+    }
+
+    if signals.is_empty() {
+        signals.push(DiagnosticSignal {
+            severity: SignalSeverity::Warning,
+            title: "Pod is Unschedulable".to_string(),
+            detail: Some(raw.to_string()),
+        });
+    }
+
+    // Build concise 1-line gist
+    let prefix_short = if let Some(n) = node_prefix.strip_suffix(" are available:") {
+        format!("{} nodes available", n.trim_end_matches(" nodes"))
+    } else {
+        node_prefix.trim_end_matches(':').to_string()
+    };
+
+    let summary = if !gist_reasons.is_empty() {
+        let reasons_joined = gist_reasons.join(", ");
+        if prefix_short.len() + reasons_joined.len() + 3 <= 75 {
+            format!("{} ({})", prefix_short, reasons_joined)
+        } else {
+            let first_reasons = gist_reasons[..gist_reasons.len().min(2)].join(", ");
+            format!("{} ({})", prefix_short, first_reasons)
+        }
+    } else {
+        format!("{}: pod unschedulable", prefix_short)
+    };
+
+    (summary, signals)
+}
+
 pub fn analyze_pod_health(
     pod: &Value,
     events: &[Value],
@@ -238,19 +362,58 @@ pub fn analyze_pod_health(
         || (phase.eq_ignore_ascii_case("Failed")
             && status_message.to_lowercase().contains("ephemeral-storage"))
     {
+        let cause = if status_message.to_lowercase().contains("ephemeral-storage") {
+            "node ephemeral-storage exhaustion"
+        } else if status_message.to_lowercase().contains("memory") {
+            "node memory pressure"
+        } else if status_message.to_lowercase().contains("disk") {
+            "node disk pressure"
+        } else if status_message.to_lowercase().contains("pid") {
+            "node PID pressure"
+        } else {
+            "node resource pressure"
+        };
+
         signals.push(DiagnosticSignal {
             severity: SignalSeverity::Error,
-            title: "Pod Evicted by kubelet".to_string(),
+            title: format!("Kubelet Eviction ({})", cause),
             detail: if !status_message.is_empty() {
                 Some(status_message.to_string())
             } else {
-                None
+                Some(format!("Pod was evicted by kubelet due to {}", cause))
             },
         });
 
-        let remediation = if status_message.to_lowercase().contains("ephemeral-storage") {
+        // Check if container was terminated with exit code during eviction
+        if let Some(statuses) = container_statuses {
+            for cs in statuses {
+                let c_name = cs
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("container");
+                let exit_code = cs
+                    .pointer("/lastState/terminated/exitCode")
+                    .or_else(|| cs.pointer("/state/terminated/exitCode"))
+                    .and_then(|v| v.as_i64());
+                if let Some(code) = exit_code {
+                    let desc = if code == 143 {
+                        "Terminated with SIGTERM (exit code 143) by kubelet during eviction"
+                            .to_string()
+                    } else {
+                        format!("Container '{}' exited with code {}", c_name, code)
+                    };
+                    signals.push(DiagnosticSignal {
+                        severity: SignalSeverity::Info,
+                        title: format!("Container '{}' Termination", c_name),
+                        detail: Some(desc),
+                    });
+                }
+            }
+        }
+
+        let remediation = if cause.contains("ephemeral-storage") {
             "Pod evicted due to node ephemeral-storage exhaustion. Increase ephemeral-storage limits or clean up disk.".to_string()
-        } else if status_message.to_lowercase().contains("memory") {
+        } else if cause.contains("memory") {
             "Pod evicted due to node memory pressure. Check node allocatable memory and pod memory limits.".to_string()
         } else {
             "Pod was evicted due to node resource pressure. Adjust resource limits or clean up node.".to_string()
@@ -258,11 +421,7 @@ pub fn analyze_pod_health(
 
         return DiagnosticReport {
             verdict: DiagnosticVerdict::Evicted,
-            summary: if !status_message.is_empty() {
-                format!("Pod Evicted: {}", status_message)
-            } else {
-                format!("Pod '{}' was Evicted by kubelet", pod_name)
-            },
+            summary: format!("Evicted: {}", cause),
             remediation,
             signals,
         };
@@ -383,14 +542,11 @@ pub fn analyze_pod_health(
             .get("message")
             .and_then(|v| v.as_str())
             .unwrap_or("Pod is unschedulable");
-        signals.push(DiagnosticSignal {
-            severity: SignalSeverity::Warning,
-            title: "Pod is Unschedulable".into(),
-            detail: Some(msg.to_string()),
-        });
+        let (summary, sched_signals) = parse_scheduling_failure(msg);
+        signals.extend(sched_signals);
         return DiagnosticReport {
             verdict: DiagnosticVerdict::SchedulingFailed,
-            summary: format!("Scheduling failed: {}", msg),
+            summary,
             remediation: "Check node capacity or adjust resource requests / tolerations.".into(),
             signals,
         };
@@ -399,14 +555,11 @@ pub fn analyze_pod_health(
             .get("message")
             .and_then(|v| v.as_str())
             .unwrap_or("FailedScheduling event recorded");
-        signals.push(DiagnosticSignal {
-            severity: SignalSeverity::Warning,
-            title: "FailedScheduling event".into(),
-            detail: Some(msg.to_string()),
-        });
+        let (summary, sched_signals) = parse_scheduling_failure(msg);
+        signals.extend(sched_signals);
         return DiagnosticReport {
             verdict: DiagnosticVerdict::SchedulingFailed,
-            summary: format!("Scheduling failed: {}", msg),
+            summary,
             remediation: "Check node capacity or adjust resource requests / tolerations.".into(),
             signals,
         };
@@ -818,5 +971,77 @@ mod tests {
 
         let report = analyze_pod_health(&pod, &[], None);
         assert_eq!(report.verdict, DiagnosticVerdict::NodeLost);
+    }
+
+    #[test]
+    fn test_diagnose_scheduling_gist_and_breakdown() {
+        let pod = json!({
+            "metadata": { "name": "virt-launcher-testvm-xb72f", "namespace": "kubevirt" },
+            "status": {
+                "phase": "Pending",
+                "conditions": [{
+                    "type": "PodScheduled",
+                    "status": "False",
+                    "reason": "Unschedulable",
+                    "message": "0/1 nodes are available: 1 Insufficient devices.kubevirt.io/kvm, 1 Too many pods. no new claims to deallocate, preemption: 0/1 nodes are available: 1 Preemption is not helpful for scheduling."
+                }]
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_eq!(report.verdict, DiagnosticVerdict::SchedulingFailed);
+        assert!(report.summary.len() < 80);
+        assert!(report.summary.contains("0/1 nodes"));
+        assert!(report.signals.len() >= 2);
+        assert!(report
+            .signals
+            .iter()
+            .any(|s| s.title.contains("Insufficient")
+                || s.detail
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("devices.kubevirt.io/kvm")));
+        assert!(report
+            .signals
+            .iter()
+            .any(|s| s.title.contains("Pod Capacity")
+                || s.detail.as_deref().unwrap_or("").contains("Too many pods")));
+    }
+
+    #[test]
+    fn test_diagnose_eviction_gist_and_breakdown() {
+        let pod = json!({
+            "metadata": { "name": "matchbox-app-preview-1014-6596698bd6-4tv8p", "namespace": "matching" },
+            "status": {
+                "phase": "Failed",
+                "reason": "Evicted",
+                "message": "The node was low on resource: ephemeral-storage. Container matchbox was using 524288000B.",
+                "containerStatuses": [{
+                    "name": "matchbox",
+                    "ready": false,
+                    "lastState": {
+                        "terminated": {
+                            "exitCode": 143,
+                            "reason": "ContainerCannotRun"
+                        }
+                    }
+                }]
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_eq!(report.verdict, DiagnosticVerdict::Evicted);
+        assert!(report.summary.len() < 80);
+        assert_eq!(report.summary, "Evicted: node ephemeral-storage exhaustion");
+        assert!(report.signals.iter().any(|s| s
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("524288000B")));
+        assert!(report
+            .signals
+            .iter()
+            .any(|s| s.title.contains("Termination")
+                || s.detail.as_deref().unwrap_or("").contains("143")));
     }
 }
