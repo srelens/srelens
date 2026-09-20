@@ -357,6 +357,9 @@ describe("Rail draws a symbol mark", () => {
     };
     const contexts = [colliding];
     setState(defaultState(contexts));
+    // The shared mock returns undefined unless a test says otherwise, and the
+    // rail attaches a rejection handler to what it gets back.
+    coreMock.invokeCommand.mockResolvedValueOnce(undefined);
 
     try {
       render(<Rail contexts={contexts} onConnect={vi.fn()} />);
