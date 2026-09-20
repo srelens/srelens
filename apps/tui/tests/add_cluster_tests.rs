@@ -294,3 +294,285 @@ fn test_render_add_cluster_modal_with_error() {
     assert!(rendered.contains("Import Cluster / Kubeconfig"));
     assert!(rendered.contains("Invalid YAML: missing closing bracket"));
 }
+
+#[test]
+fn test_resolve_import_command_and_aliases() {
+    let cases = [
+        ":import",
+        "import",
+        ":add-cluster",
+        "add-cluster",
+        ":import-kubeconfig",
+        "import-kubeconfig",
+        ":add-ctx",
+        "add-ctx",
+        ":kubeconfig-add",
+        "kubeconfig-add",
+    ];
+
+    for cmd in cases {
+        assert_eq!(
+            srelens_tui::commands::resolve_command(cmd),
+            Some(srelens_tui::commands::CommandTarget::AddCluster),
+            "command '{}' must resolve to CommandTarget::AddCluster",
+            cmd
+        );
+    }
+}
+
+#[test]
+fn test_import_deep_link_parse_and_to_url() {
+    use srelens_tui::commands::CommandTarget;
+    use srelens_tui::deep_link::DeepLink;
+
+    // 1. Parsing standard view deep link
+    let parsed = DeepLink::parse("srelens://view/_/_/import").unwrap();
+    assert_eq!(
+        parsed,
+        DeepLink::View {
+            context: None,
+            namespace: None,
+            target: CommandTarget::AddCluster,
+        }
+    );
+
+    // 2. Canonical serialization via to_url
+    assert_eq!(parsed.to_url(), "srelens://view/_/_/import");
+
+    // 3. Parsing with context & namespace
+    let parsed_ctx_ns = DeepLink::parse("srelens://view/prod/kube-system/add-cluster").unwrap();
+    assert_eq!(
+        parsed_ctx_ns,
+        DeepLink::View {
+            context: Some("prod".to_string()),
+            namespace: Some("kube-system".to_string()),
+            target: CommandTarget::AddCluster,
+        }
+    );
+
+    // 4. Parsing all aliases via deep link
+    for alias in &[
+        "add-cluster",
+        "import-kubeconfig",
+        "add-ctx",
+        "kubeconfig-add",
+    ] {
+        let link = format!("srelens://view/_/_/{}", alias);
+        let res = DeepLink::parse(&link).unwrap();
+        assert_eq!(
+            res,
+            DeepLink::View {
+                context: None,
+                namespace: None,
+                target: CommandTarget::AddCluster,
+            },
+            "deep link '{}' must resolve to AddCluster",
+            link
+        );
+    }
+
+    // 5. Direct view shorthand parse
+    let direct = DeepLink::parse("import").unwrap();
+    assert_eq!(
+        direct,
+        DeepLink::View {
+            context: None,
+            namespace: None,
+            target: CommandTarget::AddCluster,
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_execute_colon_command_import_and_aliases() {
+    let (mut app, _rx) = common::app().await;
+
+    // Execute :import
+    app.execute_colon_command("import").await;
+    assert!(
+        matches!(app.modal, Some(Modal::AddCluster { .. })),
+        "execute_colon_command('import') must open Modal::AddCluster"
+    );
+
+    // Close modal
+    app.modal = None;
+
+    // Execute :add-cluster with leading colon
+    app.execute_colon_command(":add-cluster").await;
+    assert!(
+        matches!(app.modal, Some(Modal::AddCluster { .. })),
+        "execute_colon_command(':add-cluster') must open Modal::AddCluster"
+    );
+
+    // Close modal
+    app.modal = None;
+
+    // Execute :add-ctx
+    app.execute_colon_command("add-ctx").await;
+    assert!(
+        matches!(app.modal, Some(Modal::AddCluster { .. })),
+        "execute_colon_command('add-ctx') must open Modal::AddCluster"
+    );
+}
+
+#[tokio::test]
+async fn test_context_picker_shortcuts_open_add_cluster_modal() {
+    let (mut app, _rx) = common::app().await;
+
+    // Open context picker
+    app.open_context_picker();
+    assert!(matches!(app.modal, Some(Modal::ContextPicker { .. })));
+
+    // Press Ctrl+i -> should open AddCluster modal
+    app.handle_key_event(common::ctrl('i')).await;
+    assert!(
+        matches!(app.modal, Some(Modal::AddCluster { .. })),
+        "Ctrl+i in ContextPicker must open Modal::AddCluster"
+    );
+
+    // Reset back to context picker
+    app.open_context_picker();
+    assert!(matches!(app.modal, Some(Modal::ContextPicker { .. })));
+
+    // Press Ctrl+a -> should also open AddCluster modal
+    app.handle_key_event(common::ctrl('a')).await;
+    assert!(
+        matches!(app.modal, Some(Modal::AddCluster { .. })),
+        "Ctrl+a in ContextPicker must open Modal::AddCluster"
+    );
+}
+
+#[tokio::test]
+async fn test_add_cluster_modal_key_editing_and_navigation() {
+    let (mut app, _rx) = common::app().await;
+
+    // Open modal directly
+    app.open_add_cluster_modal();
+    assert!(matches!(app.modal, Some(Modal::AddCluster { .. })));
+
+    // Type "apiVersion: v1"
+    common::type_str(&mut app, "apiVersion: v1").await;
+    if let Some(Modal::AddCluster {
+        input, cursor_pos, ..
+    }) = &app.modal
+    {
+        assert_eq!(input, "apiVersion: v1");
+        assert_eq!(*cursor_pos, 14);
+    } else {
+        panic!("expected Modal::AddCluster");
+    }
+
+    // Left arrow moves cursor
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Left))
+        .await;
+    if let Some(Modal::AddCluster { cursor_pos, .. }) = &app.modal {
+        assert_eq!(*cursor_pos, 13);
+    }
+
+    // Home moves cursor to 0
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Home))
+        .await;
+    if let Some(Modal::AddCluster { cursor_pos, .. }) = &app.modal {
+        assert_eq!(*cursor_pos, 0);
+    }
+
+    // End moves cursor to end
+    app.handle_key_event(common::key(crossterm::event::KeyCode::End))
+        .await;
+    if let Some(Modal::AddCluster { cursor_pos, .. }) = &app.modal {
+        assert_eq!(*cursor_pos, 14);
+    }
+
+    // Backspace removes last character
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Backspace))
+        .await;
+    if let Some(Modal::AddCluster {
+        input, cursor_pos, ..
+    }) = &app.modal
+    {
+        assert_eq!(input, "apiVersion: v");
+        assert_eq!(*cursor_pos, 13);
+    }
+
+    // Ctrl+u clears input
+    app.handle_key_event(common::ctrl('u')).await;
+    if let Some(Modal::AddCluster {
+        input,
+        cursor_pos,
+        preview_contexts,
+        ..
+    }) = &app.modal
+    {
+        assert_eq!(input, "");
+        assert_eq!(*cursor_pos, 0);
+        assert!(preview_contexts.is_empty());
+    }
+
+    // Esc closes modal
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Esc))
+        .await;
+    assert!(app.modal.is_none(), "Esc must close Modal::AddCluster");
+}
+
+#[tokio::test]
+async fn test_add_cluster_modal_submit_flow() {
+    let _lock = ENV_LOCK.lock().await;
+    let (tx, _rx) = unbounded_channel::<AppEvent>();
+    let temp = tempfile::tempdir().unwrap();
+    let managed_dir = temp.path().join("managed_configs");
+    std::fs::create_dir_all(&managed_dir).unwrap();
+    let _guard = EnvVarGuard::set("SRELENS_KUBECONFIG_DIR", &managed_dir);
+
+    let initial_config = temp.path().join("config");
+    std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
+
+    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+        .await
+        .unwrap();
+
+    // 1. Submit invalid input -> sets error_message
+    app.open_add_cluster_modal();
+    common::type_str(&mut app, "not valid yaml content").await;
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter))
+        .await;
+    if let Some(Modal::AddCluster { error_message, .. }) = &app.modal {
+        assert!(
+            error_message.is_some(),
+            "submitting invalid input should produce error"
+        );
+    } else {
+        panic!("expected modal to stay open with error");
+    }
+
+    // 2. Submit valid YAML -> closes modal and switches context
+    let valid_yaml = r#"
+apiVersion: v1
+kind: Config
+current-context: submit-test-ctx
+clusters:
+- name: submit-test-cluster
+  cluster:
+    server: https://10.99.0.1:6443
+    insecure-skip-tls-verify: true
+contexts:
+- name: submit-test-ctx
+  context:
+    cluster: submit-test-cluster
+    user: submit-user
+users:
+- name: submit-user
+  user:
+    token: tok-999
+"#;
+    app.modal = Some(Modal::AddCluster {
+        input: valid_yaml.to_string(),
+        cursor_pos: valid_yaml.len(),
+        error_message: None,
+        preview_contexts: vec!["submit-test-ctx".to_string()],
+    });
+
+    app.handle_key_event(common::key(crossterm::event::KeyCode::Enter))
+        .await;
+    assert!(app.modal.is_none(), "successful import must close modal");
+    assert_eq!(app.active_context, "submit-test-ctx");
+}
