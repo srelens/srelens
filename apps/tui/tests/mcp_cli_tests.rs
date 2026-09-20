@@ -476,10 +476,42 @@ fn cli_parses_mcp_subcommand_and_flags() {
     assert!(cli.command.is_none());
 }
 
+/// An empty kubeconfig and an empty managed folder, so a startup test sees no
+/// contexts whoever runs it.
+///
+/// Both MCP entry points resolve `all_kubeconfig_paths()` before they build
+/// the server, which reads `KUBECONFIG`, then the developer's `~/.kube`, then
+/// the app's own kubeconfig folder. Left ambient, these tests asked the
+/// machine's real clusters about themselves: they passed or failed on whose
+/// laptop they ran, and a context that needed an exec credential could make
+/// startup wait on a login. The directory is returned so it outlives the
+/// child.
+fn isolated_kubeconfig() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("a temp dir for the isolated kubeconfig");
+    let config = dir.path().join("kubeconfig");
+    std::fs::write(
+        &config,
+        "apiVersion: v1\nkind: Config\nclusters: []\ncontexts: []\nusers: []\n",
+    )
+    .expect("write the empty kubeconfig");
+    let managed = dir.path().join("managed");
+    std::fs::create_dir_all(&managed).expect("an empty managed kubeconfig folder");
+    (dir, config)
+}
+
 async fn run_binary_mcp_init(args: &[&str]) -> serde_json::Value {
     let binary_path = env!("CARGO_BIN_EXE_srelens-tui");
+    let (kubeconfig_dir, kubeconfig) = isolated_kubeconfig();
     let mut child = tokio::process::Command::new(binary_path)
         .args(args)
+        // See `isolated_kubeconfig`: KUBECONFIG short-circuits the home-directory
+        // search, and SRELENS_KUBECONFIG_DIR the app's own folder. Without both,
+        // one of the two sources is still the developer's.
+        .env("KUBECONFIG", &kubeconfig)
+        .env(
+            "SRELENS_KUBECONFIG_DIR",
+            kubeconfig_dir.path().join("managed"),
+        )
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
