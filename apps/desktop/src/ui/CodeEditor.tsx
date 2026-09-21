@@ -33,7 +33,7 @@ import { extractApiVersionKind, pathAtCursor, fieldCompletions, valueCompletions
 // import, not the kit's barrel: this component is lazy-loaded into a classic
 // boot, and reaching through `@srelens/ui-kit` would pull the whole component
 // library into that chunk (the wall `design.ts` describes). (#656)
-import { registerSelectAllTarget } from "@srelens/ui-kit/selectAll";
+import { registerSelectAllTarget } from "@srelens/ui-kit/select-all";
 import { Button } from "./Button";
 
 /**
