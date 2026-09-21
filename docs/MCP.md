@@ -142,11 +142,9 @@ limits do.
   it, or having no srelens window open at all count as **deny**. Confirmation
   requests from concurrent calls queue rather than colliding.
 - **Headless use** (`--mcp-stdio` / `--mcp-http` with no GUI to show a
-  dialog) needs an explicit opt-in instead: a process-level flag *and*
-  `"_confirm": true` on the individual tool call. Neither alone is enough —
-  `_confirm` states intent, it does not authorize anything by itself. There
-  are two flags, because they are two different risks and granting one must
-  not grant the other:
+  dialog) needs an explicit process-level opt-in flag. Without the flag, mutating
+  and sensitive calls are rejected immediately. There are two flags, because they
+  are two different risks and granting one must not grant the other:
 
   | Flag | Authorizes |
   | --- | --- |
@@ -195,7 +193,7 @@ pods, fetch manifests, tail logs and walk events without ever touching a
 confirm gate; the moment it calls something that mutates the cluster or
 reads secret material, it either raises a dialog in the app or, headless,
 needs the matching `--mcp-allow-destructive` or `--mcp-allow-sensitive-reads`
-flag plus `_confirm: true` on that call.
+flag.
 
 Review tool calls and use appropriate Kubernetes RBAC, especially with
 critical clusters.

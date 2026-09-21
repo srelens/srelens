@@ -315,7 +315,7 @@ async fn mcp_stdio_sensitive_reads_policy_denies_without_flag() {
 }
 
 #[tokio::test]
-async fn mcp_stdio_sensitive_reads_policy_denies_without_confirm() {
+async fn mcp_stdio_sensitive_reads_policy_allows_with_flag() {
     init_crypto_provider();
     // allow_sensitive_reads = true
     let server = build_stdio_mcp_server(vec![], false, true);
@@ -329,14 +329,14 @@ async fn mcp_stdio_sensitive_reads_policy_denies_without_confirm() {
 
     let mut lines = tokio::io::BufReader::new(client_read);
 
-    // Call k8s.getSecret with flag enabled but without _confirm: true
+    // Call k8s.getSecret with flag enabled and without _confirm
     let call_req = json!({
         "jsonrpc": "2.0",
         "id": 41,
         "method": "tools/call",
         "params": {
             "name": "k8s.getSecret",
-            "arguments": { "context": "ctx", "namespace": "default", "name": "my-secret" }
+            "arguments": { "context": "nonexistent-context", "namespace": "default", "name": "my-secret" }
         }
     });
     client_write
@@ -358,62 +358,9 @@ async fn mcp_stdio_sensitive_reads_policy_denies_without_confirm() {
         .and_then(Value::as_str)
         .unwrap_or("");
     assert!(
-        text.contains("consent denied") || text.contains("confirm"),
-        "expected consent denial when _confirm is absent, got: {text}"
-    );
-
-    drop(client_write);
-    let _ = server_task.await;
-}
-
-#[tokio::test]
-async fn mcp_stdio_sensitive_reads_policy_allows_with_flag_and_confirm() {
-    init_crypto_provider();
-    // allow_sensitive_reads = true
-    let server = build_stdio_mcp_server(vec![], false, true);
-
-    let (client_read, server_write) = tokio::io::duplex(64 * 1024);
-    let (server_read, mut client_write) = tokio::io::duplex(64 * 1024);
-
-    let server_task = tokio::spawn(async move {
-        let _ = run_mcp_stdio(server, server_read, server_write).await;
-    });
-
-    let mut lines = tokio::io::BufReader::new(client_read);
-
-    // Call k8s.getSecret with flag enabled and _confirm: true
-    let call_req = json!({
-        "jsonrpc": "2.0",
-        "id": 42,
-        "method": "tools/call",
-        "params": {
-            "name": "k8s.getSecret",
-            "arguments": { "context": "nonexistent-context", "namespace": "default", "name": "my-secret", "_confirm": true }
-        }
-    });
-    client_write
-        .write_all(format!("{}\n", call_req).as_bytes())
-        .await
-        .unwrap();
-
-    use tokio::io::AsyncBufReadExt;
-    let mut resp_line = String::new();
-    lines.read_line(&mut resp_line).await.unwrap();
-    let resp: Value = serde_json::from_str(&resp_line).expect("valid json response");
-    assert_eq!(resp.get("id").and_then(Value::as_i64), Some(42));
-    let text = resp
-        .get("result")
-        .and_then(|r| r.get("content"))
-        .and_then(Value::as_array)
-        .and_then(|arr| arr.first())
-        .and_then(|item| item.get("text"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    assert!(
         !text.contains("consent denied"),
-        "expected call to pass consent gate, got: {text}"
+        "expected call to pass consent gate with flag, got: {text}"
     );
-    // Prove the handler was reached by checking for downstream handler error
     assert!(
         text.contains("context")
             || text.contains("Unknown")
