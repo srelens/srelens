@@ -1,10 +1,38 @@
 // Typed wrappers for the MCP consent/token/audit commands.
 import { invoke } from "@tauri-apps/api/core";
+import type { CapabilityImpact } from "./capabilities";
 
 export interface ConfirmRequest {
   id: string;
   tool: string;
   args: Record<string, unknown>;
+  /**
+   * The host's own sentence for this call, already rendered — what the prompt
+   * asks, in place of the tool id and a JSON blob.
+   *
+   * Written in the backend beside the handler it describes and rendered there
+   * from a template compiled into the binary, through a closed placeholder
+   * vocabulary (see {@link renderConfirmTemplate}). Nothing a caller sends
+   * reaches this string except as the value of one of those six named fields,
+   * and `{resource}` is derived rather than read — so a caller cannot name the
+   * thing it is about to change, let alone write the question.
+   *
+   * Absent when the capability carries no template, or when the template names
+   * something this call has no value for. The prompt then shows the tool and
+   * its arguments as it always did; it does not draw half a sentence. That
+   * fallback is deliberate: "Drain ?" over an Approve button is worse than
+   * saying nothing.
+   */
+  prompt?: string | null;
+  /**
+   * `low`, `medium` or `high` — how much this call disturbs if it runs. Shown
+   * beside the question, because "an agent wants to run a cluster action" is
+   * the same sentence for an Argo CD status refresh and a node drain.
+   *
+   * Optional only because the payload crosses a process boundary and this
+   * narrows rather than casts; the backend always sends it.
+   */
+  impact?: CapabilityImpact;
 }
 
 export interface AuditEntry {

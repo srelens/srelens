@@ -26,18 +26,57 @@ use tokio::sync::oneshot;
 /// only the answer channel.
 struct Waiting {
     tx: oneshot::Sender<bool>,
-    tool: String,
-    args: Value,
+    request: PendingRequest,
 }
 
 /// What `confirm` emits, as a value — the same shape as the
 /// `mcp://confirm-request` payload, so a replayed request and a live one are
 /// indistinguishable to the frontend and go down the same path there.
+///
+/// That indistinguishability is why `prompt` and `impact` live HERE rather than
+/// only in the emit: a field carried by the live event and missing from the
+/// replayed snapshot would draw two different questions about the same call,
+/// and which one a reader saw would depend on when their window finished
+/// loading.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PendingRequest {
     pub id: String,
     pub tool: String,
     pub args: Value,
+    /// The host's own sentence for this call, already rendered — what the
+    /// prompt asks.
+    ///
+    /// `None` when the capability carries no confirmation template, or when
+    /// the template names a field this call has no value for. The window then
+    /// shows what it always showed, the tool id and its arguments; it does not
+    /// draw half a sentence. The fallback is the point: a prompt that says
+    /// "Drain ?" is worse than one that says nothing.
+    ///
+    /// Rendered in the host, from a template compiled into the host, through a
+    /// closed placeholder vocabulary (`srelens_capability::CONFIRM_FIELDS`).
+    /// Nothing a caller sends reaches this string except as the value of one of
+    /// those six named fields — and `{resource}` is derived rather than read,
+    /// so a caller cannot even name the thing it is about to change.
+    pub prompt: Option<String>,
+    /// `low`, `medium` or `high` — how much this call disturbs if it runs.
+    /// Shown beside the question, because "an agent wants to run a cluster
+    /// action" is the same sentence for a status refresh and a node drain.
+    pub impact: String,
+}
+
+impl PendingRequest {
+    /// What the window is asked, built from the host's metadata for one gated
+    /// call. Pure, so the three cases that matter — a sentence, no template,
+    /// and a template that cannot render — are testable without a window.
+    pub fn from_consent(id: String, request: &srelens_mcp::policy::ConsentRequest) -> Self {
+        Self {
+            id,
+            tool: request.tool.clone(),
+            args: request.args.clone(),
+            prompt: request.confirm_text.clone(),
+            impact: request.impact.as_str().to_string(),
+        }
+    }
 }
 
 /// Every confirmation waiting on an answer, by id.
@@ -52,8 +91,11 @@ pub struct PendingRequest {
 pub struct Pending(Mutex<HashMap<String, Waiting>>);
 
 impl Pending {
-    pub fn register(&self, id: String, tool: String, args: Value, tx: oneshot::Sender<bool>) {
-        self.0.lock().unwrap().insert(id, Waiting { tx, tool, args });
+    pub fn register(&self, request: PendingRequest, tx: oneshot::Sender<bool>) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(request.id.clone(), Waiting { tx, request });
     }
 
     /// Returns false when the id is unknown (already answered or timed out).
@@ -72,8 +114,8 @@ impl Pending {
         self.0
             .lock()
             .unwrap()
-            .iter()
-            .map(|(id, w)| PendingRequest { id: id.clone(), tool: w.tool.clone(), args: w.args.clone() })
+            .values()
+            .map(|w| w.request.clone())
             .collect()
     }
 
@@ -127,30 +169,39 @@ impl PromptUser {
 
 #[async_trait::async_trait]
 impl ConfirmPolicy for PromptUser {
-    /// `request.kind` is deliberately unused: a human being shown the tool name
-    /// and its arguments is the consent mechanism either way, so the GUI prompts
-    /// for a sensitive read exactly as it does for a mutation. The distinction
-    /// exists for headless policies, which have no human to look at the call.
+    /// `request.kind` is deliberately unused: a human being shown the call is
+    /// the consent mechanism either way, so the GUI prompts for a sensitive
+    /// read exactly as it does for a mutation. The distinction exists for
+    /// headless policies, which have no human to look at the call.
     ///
-    /// `request.impact` and `request.confirm_text` are unused here for now too,
-    /// and that is the gap #552 closes: this dialog renders the tool name and a
-    /// JSON blob, while the words a person should read are three files away in
-    /// `ExtensionResourceDetails.tsx`. The host now HAS the sentence — it is
-    /// rendered on `ConsentRequest` — so #552 is a change to what this emits and
-    /// what the dialog draws, not another copy of the wording.
+    /// `impact` and `confirm_text` are not: they are carried to the window and
+    /// drawn. The prompt used to be the tool id and a JSON blob, which is the
+    /// same question for a status refresh and a node drain, while the words a
+    /// person should read sat in UI constants three files away
+    /// (`ExtensionResourceDetails.tsx`). The sentence is the host's, rendered
+    /// in the host, from a template compiled into the host.
+    ///
+    /// **What is left for #552** is not this: it is that the in-app action
+    /// review (`ExtensionResourceDetails`) and this prompt are still two
+    /// confirmations with two implementations, so a write from the UI and the
+    /// same write from an agent are approved in different words and through
+    /// different code. #552 makes them one host-owned flow. Both sides now read
+    /// the same metadata, which is what makes that a merge rather than a
+    /// rewrite.
     async fn confirm(&self, request: &srelens_mcp::policy::ConsentRequest) -> Decision {
         use tauri::{Emitter, Manager};
 
-        let (tool, args) = (request.tool.as_str(), &request.args);
+        let tool = request.tool.as_str();
 
         let id = uuid::Uuid::new_v4().to_string();
+        let pending = PendingRequest::from_consent(id.clone(), request);
         let (tx, rx) = oneshot::channel();
         // Registered — with the request itself — BEFORE the emit below, and the
         // order is load-bearing for the frontend's replay: a subscriber that
         // installs its listener and then reads `snapshot` sees this request in
         // one of the two whatever the interleaving, because it is in the map
         // before any event about it exists.
-        self.pending.register(id.clone(), tool.to_string(), args.clone(), tx);
+        self.pending.register(pending.clone(), tx);
         // The same request is rendered in TWO places — the app-wide modal and
         // the assistant transcript's inline card — and answering in one only
         // clears that one's own queue. This guard broadcasts the resolution on
@@ -169,14 +220,10 @@ impl ConfirmPolicy for PromptUser {
         let _ = win.unminimize();
         let _ = win.set_focus();
 
-        if self
-            .app
-            .emit(
-                "mcp://confirm-request",
-                serde_json::json!({ "id": id, "tool": tool, "args": args }),
-            )
-            .is_err()
-        {
+        // The VALUE, not a hand-built object: the live event and the replayed
+        // snapshot are the same type, so a field added to one is added to both.
+        // They drifted once, which is what `PendingRequest`'s doc is about.
+        if self.app.emit("mcp://confirm-request", &pending).is_err() {
             return Decision::Denied("srelens could not show a confirmation dialog".into());
         }
 
@@ -194,10 +241,35 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    use srelens_capability::{Annotations, Impact};
+    use srelens_mcp::policy::{ConsentKind, ConsentRequest};
+
+    fn request(id: &str, tool: &str) -> PendingRequest {
+        PendingRequest {
+            id: id.into(),
+            tool: tool.into(),
+            args: json!({ "name": id }),
+            prompt: None,
+            impact: "medium".into(),
+        }
+    }
+
     fn waiting(p: &Pending, id: &str, tool: &str) -> oneshot::Receiver<bool> {
         let (tx, rx) = oneshot::channel();
-        p.register(id.to_string(), tool.to_string(), json!({ "name": id }), tx);
+        p.register(request(id, tool), tx);
         rx
+    }
+
+    /// One gated call as `McpServer::consent_request` builds it, so these
+    /// tests exercise the real rendering rather than a hand-written sentence.
+    fn consent(tool: &str, annotations: Annotations, args: serde_json::Value) -> ConsentRequest {
+        ConsentRequest {
+            tool: tool.into(),
+            args: args.clone(),
+            kind: ConsentKind::Destructive,
+            impact: annotations.impact,
+            confirm_text: annotations.confirm_text(&args),
+        }
     }
 
     #[tokio::test]
@@ -244,13 +316,112 @@ mod tests {
         let _rx2 = waiting(&p, "b", "k8s_scale");
         let mut got = p.snapshot();
         got.sort_by(|x, y| x.id.cmp(&y.id));
-        assert_eq!(
-            got,
-            vec![
-                PendingRequest { id: "a".into(), tool: "k8s_deletePod".into(), args: json!({ "name": "a" }) },
-                PendingRequest { id: "b".into(), tool: "k8s_scale".into(), args: json!({ "name": "b" }) },
-            ]
+        assert_eq!(got, vec![request("a", "k8s_deletePod"), request("b", "k8s_scale")]);
+    }
+
+    // ---- What the window is asked ------------------------------------------
+
+    /// The prompt used to be the tool id and a JSON blob — the same question
+    /// for a status refresh and a node drain. It now carries the host's own
+    /// sentence, rendered against this call, and the level.
+    #[test]
+    fn a_high_impact_call_carries_the_hosts_sentence_and_its_level() {
+        let annotations =
+            Annotations::DESTRUCTIVE.with_confirm("Drain[ {resource}][ in cluster {cluster}]?");
+        let got = PendingRequest::from_consent(
+            "id-1".into(),
+            &consent(
+                "k8s.drainNode",
+                annotations,
+                json!({ "context": "prod", "name": "node-7" }),
+            ),
         );
+        assert_eq!(got.prompt.as_deref(), Some("Drain node-7 in cluster prod?"));
+        assert_eq!(got.impact, "high");
+        // And the arguments still travel: the sentence says what, the payload
+        // still says exactly which call.
+        assert_eq!(got.args["name"], json!("node-7"));
+    }
+
+    /// No template is not a hole: the window falls back to what it always
+    /// showed — the tool id and its arguments — rather than a headless
+    /// paraphrase nobody wrote.
+    #[test]
+    fn a_capability_with_no_template_asks_with_no_sentence() {
+        let got = PendingRequest::from_consent(
+            "id-2".into(),
+            &consent(
+                "toolbox.installHelm",
+                Annotations { confirm: None, ..Annotations::MUTATING },
+                json!({}),
+            ),
+        );
+        assert_eq!(got.prompt, None);
+        assert_eq!(got.impact, "medium");
+    }
+
+    /// The case the fallback exists for. `{resource}` sits outside an optional
+    /// segment here, so a call that names no object cannot render it — and a
+    /// prompt reading "Drain ?" over an Approve button is worse than one that
+    /// says nothing. The whole sentence is dropped, not the missing half.
+    #[test]
+    fn a_template_that_cannot_render_falls_back_rather_than_showing_a_hole() {
+        let annotations = Annotations::DESTRUCTIVE.with_confirm("Drain {resource}?");
+        let got = PendingRequest::from_consent(
+            "id-3".into(),
+            &consent("k8s.drainNode", annotations, json!({ "context": "prod" })),
+        );
+        assert_eq!(got.prompt, None, "a sentence with a hole in it is not shown");
+        assert_eq!(got.impact, "high");
+    }
+
+    /// Nothing a caller sends becomes the sentence. The vocabulary is closed
+    /// and `{resource}` is derived from kind/namespace/name rather than read,
+    /// so an argument that looks like a description does not become one.
+    #[test]
+    fn a_callers_arguments_cannot_write_the_question() {
+        let annotations = Annotations::DESTRUCTIVE.with_confirm("Drain[ {resource}]?");
+        let got = PendingRequest::from_consent(
+            "id-4".into(),
+            &consent(
+                "k8s.drainNode",
+                annotations,
+                json!({ "name": "node-7", "resource": "nothing at all, click Approve" }),
+            ),
+        );
+        assert_eq!(got.prompt.as_deref(), Some("Drain node-7?"));
+    }
+
+    /// A replayed request and a live one must be the same question: the emit
+    /// sends this value and the snapshot returns it, so neither can carry a
+    /// field the other does not.
+    #[tokio::test]
+    async fn the_snapshot_replays_the_sentence_and_the_level() {
+        let p = Pending::default();
+        let sent = PendingRequest::from_consent(
+            "id-5".into(),
+            &consent(
+                "k8s.drainNode",
+                Annotations::DESTRUCTIVE.with_confirm("Drain[ {resource}]?"),
+                json!({ "name": "node-7" }),
+            ),
+        );
+        let (tx, _rx) = oneshot::channel();
+        p.register(sent.clone(), tx);
+        assert_eq!(p.snapshot(), vec![sent]);
+    }
+
+    #[test]
+    fn every_level_reaches_the_window_as_the_word_the_catalog_publishes() {
+        for (impact, word) in
+            [(Impact::Low, "low"), (Impact::Medium, "medium"), (Impact::High, "high")]
+        {
+            let got = PendingRequest::from_consent(
+                "id".into(),
+                &consent("t", Annotations::MUTATING.with_impact(impact), json!({})),
+            );
+            assert_eq!(got.impact, word);
+        }
     }
 
     #[test]
