@@ -19,7 +19,8 @@ import {
   foldGutter,
   foldKeymap,
 } from "@codemirror/language";
-import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
+import { codeSearchPanel, searchPanelStyles } from "@srelens/ui-kit/search-panel";
 import { yaml } from "@codemirror/lang-yaml";
 import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { autocompletion, completionKeymap, type CompletionContext, type CompletionResult } from "@codemirror/autocomplete";
@@ -198,8 +199,102 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean) {
       backgroundColor: "rgba(0, 167, 160, 0.22)",
       outline: "1px solid var(--fl-color-accent)",
     },
-    ".cm-panels": { backgroundColor: "var(--fl-color-surface)", color: "var(--fl-color-text)" },
-    ".cm-searchMatch": { backgroundColor: "rgba(210, 153, 34, 0.3)" },
+    // --- find & replace -------------------------------------------------
+    // The panel itself is the kit's (see `packages/ui-kit/src/searchPanel.ts`);
+    // these are the colours the classic design gives it, and the container
+    // CodeMirror wraps around it. Go-to-line (Mod-Alt-g) is still CodeMirror's
+    // dialog, built from `.cm-textfield` and `.cm-button`, so those keep a
+    // dressing of their own below. (#652)
+    ...searchPanelStyles({
+      surface: "var(--fl-color-surface)",
+      fieldBg: "var(--fl-color-bg)",
+      ink: "var(--fl-color-text)",
+      inkMuted: "var(--fl-color-text-muted)",
+      rule: "var(--fl-color-border)",
+      hover: "var(--fl-nav-hover)",
+      accent: "var(--fl-color-accent)",
+      accentWash: "color-mix(in srgb, var(--fl-color-accent) 18%, transparent)",
+      danger: "var(--fl-color-danger)",
+      font: "var(--fl-font)",
+      shadow: "0 8px 24px rgba(0, 0, 0, 0.35)",
+      radius: "var(--fl-radius-lg)",
+    }),
+    ".cm-panels": {
+      backgroundColor: "var(--fl-color-surface)",
+      color: "var(--fl-color-text)",
+      fontFamily: "var(--fl-font)",
+    },
+    ".cm-textfield": {
+      boxSizing: "border-box",
+      backgroundColor: "var(--fl-color-bg)",
+      color: "var(--fl-color-text)",
+      border: "1px solid var(--fl-color-border)",
+      borderRadius: "var(--fl-radius-md)",
+      fontFamily: "var(--fl-font)",
+      fontSize: "12px",
+      padding: "3px 7px",
+      "&::placeholder": { color: "var(--fl-color-text-muted)" },
+      "&:focus": {
+        outline: "none",
+        borderColor: "var(--fl-color-accent)",
+        boxShadow: "0 0 0 2px color-mix(in srgb, var(--fl-color-accent) 30%, transparent)",
+      },
+    },
+    ".cm-button": {
+      backgroundImage: "none",
+      backgroundColor: "var(--fl-color-surface-alt)",
+      color: "var(--fl-color-text)",
+      border: "1px solid var(--fl-color-border)",
+      borderRadius: "var(--fl-radius-md)",
+      fontFamily: "var(--fl-font)",
+      fontSize: "12px",
+      fontWeight: "500",
+      padding: "3px 9px",
+      cursor: "pointer",
+      transition: "background-color 120ms ease, border-color 120ms ease, color 120ms ease",
+      "&:hover": {
+        backgroundImage: "none",
+        backgroundColor: "var(--fl-nav-hover)",
+        borderColor: "var(--fl-color-accent)",
+        color: "var(--fl-color-heading)",
+      },
+      "&:focus-visible": { outline: "2px solid var(--fl-color-accent)", outlineOffset: "1px" },
+    },
+    ".cm-dialog": {
+      display: "flex",
+      alignItems: "center",
+      gap: "6px",
+      padding: "7px 32px 7px 8px",
+      fontFamily: "var(--fl-font)",
+      fontSize: "12px",
+      "& label": {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "6px",
+        fontSize: "12px",
+        color: "var(--fl-color-text-muted)",
+      },
+    },
+    ".cm-dialog-close": {
+      top: "5px",
+      right: "6px",
+      width: "20px",
+      height: "20px",
+      borderRadius: "var(--fl-radius-md)",
+      backgroundColor: "transparent",
+      color: "var(--fl-color-text-muted)",
+      lineHeight: "1",
+      cursor: "pointer",
+      "&:hover": { backgroundColor: "var(--fl-nav-hover)", color: "var(--fl-color-heading)" },
+    },
+    ".cm-searchMatch": { backgroundColor: "rgba(210, 153, 34, 0.3)", borderRadius: "2px" },
+    // The match the cursor is on. The base theme leaves this a hardcoded
+    // orange (magenta on dark); against the amber tint of the rest it has to
+    // be a different hue, not a different strength of the same one.
+    ".cm-searchMatch-selected": {
+      backgroundColor: "color-mix(in srgb, var(--fl-color-accent) 42%, transparent)",
+      outline: "1px solid var(--fl-color-accent)",
+    },
     ".cm-tooltip": { maxWidth: "480px" },
     ".cm-tooltip.cm-tooltip-lint": {
       backgroundColor: "var(--fl-color-surface)",
@@ -318,6 +413,10 @@ export function CodeEditor({
       indentOnInput(),
       bracketMatching(),
       highlightSelectionMatches(),
+      // The kit's find widget rather than CodeMirror's panel. Imported by
+      // subpath, not from the kit barrel: a classic boot must not download
+      // the whole design system to get a find box. (#652)
+      search({ top: true, createPanel: codeSearchPanel }),
       keymap.of([...completionKeymap, ...defaultKeymap, ...historyKeymap, ...searchKeymap, ...foldKeymap, indentWithTab]),
       editorTheme(minHeight, maxHeight, fill),
       syntaxHighlighting(highlightStyle),
