@@ -541,7 +541,12 @@ pub fn analyze_pod_health(
             .unwrap_or(0);
         let restart_count = cs.get("restartCount").and_then(|v| v.as_i64()).unwrap_or(0);
 
-        if is_waiting_crashloop || (last_exit_code != 0 && restart_count > 0) {
+        let is_running_now = cs.pointer("/state/running").is_some();
+        let is_ready = cs.get("ready").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        if is_waiting_crashloop
+            || (last_exit_code != 0 && restart_count > 0 && !(is_running_now && is_ready))
+        {
             let mut panic_detail = None;
             if let Some(logs) = previous_logs {
                 // Look for panic or fatal lines in the logs
@@ -1039,10 +1044,7 @@ pub fn analyze_pod_health(
             if code == 143 {
                 "Failed: terminated with SIGTERM (exit code 143)".to_string()
             } else {
-                format!(
-                    "Failed: container exited with code {} (exit code {})",
-                    code, code
-                )
+                format!("Failed: container exited with code {}", code)
             }
         } else {
             make_one_line_gist(
@@ -1712,5 +1714,35 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("OCI runtime create failed")));
+    }
+
+    #[test]
+    fn test_diagnose_recovered_pod_not_crashloop() {
+        let pod = json!({
+            "metadata": { "name": "recovered-web", "namespace": "prod" },
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [{
+                    "name": "web",
+                    "ready": true,
+                    "restartCount": 2,
+                    "state": {
+                        "running": {
+                            "startedAt": "2026-09-21T08:00:00Z"
+                        }
+                    },
+                    "lastState": {
+                        "terminated": {
+                            "exitCode": 1,
+                            "reason": "Error"
+                        }
+                    }
+                }]
+            }
+        });
+
+        let report = analyze_pod_health(&pod, &[], None);
+        assert_ne!(report.verdict, DiagnosticVerdict::CrashLoopBackOff);
+        assert_eq!(report.verdict, DiagnosticVerdict::Healthy);
     }
 }

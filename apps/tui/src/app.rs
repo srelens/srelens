@@ -10458,54 +10458,136 @@ impl App {
             }
         }
 
-        // 3. Optional: fetch live pod, live events, and previous logs if connected
+        // 3. Optional: fetch live pod, live events, and previous logs with bounded timeouts
         let mut prev_logs: Option<String> = None;
-        if let Ok(client) = self.client_cache.get(&self.active_context).await {
-            let api: kube::Api<k8s_openapi::api::core::v1::Pod> =
-                kube::Api::namespaced(client.clone(), &effective_ns);
+        let mut events_error: Option<String> = None;
+        let mut logs_error: Option<String> = None;
+        let mut cluster_error: Option<String> = None;
 
-            // Fetch live pod object for full containerStatuses & condition details
-            if let Ok(full_pod) = api.get(&pod_name).await {
-                if let Ok(v) = serde_json::to_value(&full_pod) {
-                    pod_value = v;
+        let connect_res = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.client_cache.get(&self.active_context),
+        )
+        .await;
+
+        match connect_res {
+            Ok(Ok(client)) => {
+                let api: kube::Api<k8s_openapi::api::core::v1::Pod> =
+                    kube::Api::namespaced(client.clone(), &effective_ns);
+
+                // Fetch live pod object for full containerStatuses & condition details
+                let pod_res =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), api.get(&pod_name))
+                        .await;
+                if let Ok(Ok(full_pod)) = pod_res {
+                    if let Ok(v) = serde_json::to_value(&full_pod) {
+                        pod_value = v;
+                    }
                 }
-            }
 
-            // Fetch live events for this pod
-            let events_api: kube::Api<k8s_openapi::api::core::v1::Event> =
-                kube::Api::namespaced(client.clone(), &effective_ns);
-            let lp = kube::api::ListParams::default()
-                .fields(&format!("involvedObject.name={}", pod_name));
-            if let Ok(evt_list) = events_api.list(&lp).await {
-                for e in evt_list {
-                    if let Ok(v) = serde_json::to_value(&e) {
-                        let uid = v.pointer("/metadata/uid");
-                        if !pod_events
-                            .iter()
-                            .any(|existing| existing.pointer("/metadata/uid") == uid)
-                        {
-                            pod_events.push(v);
+                // Fetch live events for this pod
+                let events_api: kube::Api<k8s_openapi::api::core::v1::Event> =
+                    kube::Api::namespaced(client.clone(), &effective_ns);
+                let lp = kube::api::ListParams::default()
+                    .fields(&format!("involvedObject.name={}", pod_name));
+                let events_res =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), events_api.list(&lp))
+                        .await;
+                match events_res {
+                    Ok(Ok(evt_list)) => {
+                        for e in evt_list {
+                            if let Ok(v) = serde_json::to_value(&e) {
+                                let uid = v.pointer("/metadata/uid");
+                                if !pod_events
+                                    .iter()
+                                    .any(|existing| existing.pointer("/metadata/uid") == uid)
+                                {
+                                    pod_events.push(v);
+                                }
+                            }
                         }
+                    }
+                    Ok(Err(e)) => {
+                        events_error = Some(format!("Failed to list live events: {}", e));
+                    }
+                    Err(_) => {
+                        events_error = Some("Live events request timed out (2s)".to_string());
+                    }
+                }
+
+                // Fetch previous logs if container terminated / restarted
+                let log_params =
+                    srelens_kube::logs::build_log_params(None, false, Some(50), None, false, true);
+                let logs_res = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    api.logs(&pod_name, &log_params),
+                )
+                .await;
+                match logs_res {
+                    Ok(Ok(logs)) => {
+                        if !logs.trim().is_empty() {
+                            prev_logs = Some(logs);
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        let err_str = e.to_string();
+                        // 404 or container not restarted is expected when no previous container exists
+                        if !err_str.contains("previous terminated container")
+                            && !err_str.contains("not found")
+                            && !err_str.contains("404")
+                        {
+                            logs_error =
+                                Some(format!("Failed to fetch previous logs: {}", err_str));
+                        }
+                    }
+                    Err(_) => {
+                        logs_error = Some("Previous logs request timed out (2s)".to_string());
                     }
                 }
             }
-
-            // Fetch previous logs if container terminated / restarted
-            let log_params =
-                srelens_kube::logs::build_log_params(None, false, Some(50), None, false, true);
-            if let Ok(logs) = api.logs(&pod_name, &log_params).await {
-                if !logs.trim().is_empty() {
-                    prev_logs = Some(logs);
-                }
+            Ok(Err(e)) => {
+                cluster_error = Some(format!("Could not connect to cluster: {}", e));
+            }
+            Err(_) => {
+                cluster_error = Some("Cluster connection timed out (2s)".to_string());
             }
         }
 
         // 4. Run diagnostic engine
-        let report = srelens_kube::diagnose::analyze_pod_health(
+        let mut report = srelens_kube::diagnose::analyze_pod_health(
             &pod_value,
             &pod_events,
             prev_logs.as_deref(),
         );
+
+        // Record any failed cluster/API calls so they are never masked as absence of events
+        if let Some(err) = cluster_error {
+            report
+                .signals
+                .push(srelens_kube::diagnose::DiagnosticSignal {
+                    severity: srelens_kube::diagnose::SignalSeverity::Warning,
+                    title: "Live Cluster Query Unavailable".to_string(),
+                    detail: Some(err),
+                });
+        }
+        if let Some(err) = events_error {
+            report
+                .signals
+                .push(srelens_kube::diagnose::DiagnosticSignal {
+                    severity: srelens_kube::diagnose::SignalSeverity::Warning,
+                    title: "Live Events Unavailable".to_string(),
+                    detail: Some(err),
+                });
+        }
+        if let Some(err) = logs_error {
+            report
+                .signals
+                .push(srelens_kube::diagnose::DiagnosticSignal {
+                    severity: srelens_kube::diagnose::SignalSeverity::Warning,
+                    title: "Previous Logs Unavailable".to_string(),
+                    detail: Some(err),
+                });
+        }
 
         self.modal = Some(Modal::Diagnosis {
             resource_kind: kind,
