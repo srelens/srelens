@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
-use srelens_mcp::policy::{ConfirmPolicy, ConsentKind, Decision};
+use srelens_mcp::policy::{ConfirmPolicy, Decision};
 use tauri::Runtime;
 use tokio::sync::oneshot;
 
@@ -127,12 +127,21 @@ impl PromptUser {
 
 #[async_trait::async_trait]
 impl ConfirmPolicy for PromptUser {
-    /// `kind` is deliberately unused: a human being shown the tool name and its
-    /// arguments is the consent mechanism either way, so the GUI prompts for a
-    /// sensitive read exactly as it does for a mutation. The distinction exists
-    /// for headless policies, which have no human to look at the call.
-    async fn confirm(&self, tool: &str, args: &Value, _kind: ConsentKind) -> Decision {
+    /// `request.kind` is deliberately unused: a human being shown the tool name
+    /// and its arguments is the consent mechanism either way, so the GUI prompts
+    /// for a sensitive read exactly as it does for a mutation. The distinction
+    /// exists for headless policies, which have no human to look at the call.
+    ///
+    /// `request.impact` and `request.confirm_text` are unused here for now too,
+    /// and that is the gap #552 closes: this dialog renders the tool name and a
+    /// JSON blob, while the words a person should read are three files away in
+    /// `ExtensionResourceDetails.tsx`. The host now HAS the sentence — it is
+    /// rendered on `ConsentRequest` — so #552 is a change to what this emits and
+    /// what the dialog draws, not another copy of the wording.
+    async fn confirm(&self, request: &srelens_mcp::policy::ConsentRequest) -> Decision {
         use tauri::{Emitter, Manager};
+
+        let (tool, args) = (request.tool.as_str(), &request.args);
 
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();

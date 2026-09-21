@@ -278,12 +278,8 @@ pub async fn run_helm_local(args: &[String]) -> Result<String, String> {
     classify_output(&run)
 }
 
-const CONFIRM: Annotations = Annotations {
-    read_only: false,
-    destructive: false,
-    requires_confirm: true,
-    sensitive: false,
-};
+const CONFIRM: Annotations = Annotations::MUTATING
+    .with_confirm("Allow this Helm operation[ on {resource}][ in cluster {cluster}]?");
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

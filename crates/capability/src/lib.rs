@@ -3,7 +3,10 @@
 mod annotations;
 mod error;
 
-pub use annotations::Annotations;
+pub use annotations::{
+    check_confirm_template, confirm_fields, render_confirm, Annotations, ConfirmFields, Impact,
+    CONFIRM_FIELDS,
+};
 pub use error::CapabilityError;
 
 use std::collections::BTreeMap;

@@ -47,6 +47,143 @@ pub fn assert_mutating_capabilities_are_gated(reg: &srelens_capability::Registry
     );
 }
 
+/// The level and the gate must agree, or the catalog says two things at once.
+///
+/// Three rules, each one a way the metadata could lie about a call:
+///
+/// - anything `destructive` is `High` — that is what the word means;
+/// - anything confirm-gated is at least `Medium`, because a call worth stopping
+///   a human for is not a call that "changes nothing a reader would notice";
+/// - an ungated read is `Low`, so `Medium` on a read stays meaningful (it is
+///   how `k8s.getSecret` says the secret leaves the host).
+///
+/// Registering a row that breaks one must fail the build. An impact level is
+/// only worth showing if it cannot disagree with the flag beside it.
+pub fn assert_impact_matches_the_gate(reg: &srelens_capability::Registry) {
+    use srelens_capability::Impact;
+    let wrong: Vec<String> = reg
+        .ids()
+        .into_iter()
+        .filter_map(|id| reg.get(id))
+        .filter_map(|c| {
+            let a = c.annotations;
+            let complaint = if a.destructive && a.impact != Impact::High {
+                "destructive but not high impact"
+            } else if a.requires_confirm && a.impact < Impact::Medium {
+                "confirm-gated but low impact"
+            } else if a.read_only && !a.requires_confirm && a.impact != Impact::Low {
+                "an ungated read above low impact"
+            } else {
+                return None;
+            };
+            Some(format!("{} ({complaint})", c.id))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "impact disagrees with the gate: {wrong:?}");
+}
+
+/// Every host confirmation template must be well-formed and must render with
+/// no fields resolved at all.
+///
+/// The second half is the one that bites: a template is rendered against a
+/// call's arguments, and a capability whose input happens not to carry a
+/// namespace would silently fall back to the summary forever. Requiring the
+/// bare render means every template reads as a sentence on its own and every
+/// field it names is inside an optional segment.
+pub fn assert_confirm_templates_are_renderable(reg: &srelens_capability::Registry) {
+    let bad: Vec<String> = reg
+        .ids()
+        .into_iter()
+        .filter_map(|id| reg.get(id))
+        .filter_map(|c| {
+            let template = c.annotations.confirm?;
+            if let Err(why) = srelens_capability::check_confirm_template(template) {
+                return Some(format!("{}: {why}", c.id));
+            }
+            if srelens_capability::render_confirm(template, &Default::default()).is_none() {
+                return Some(format!(
+                    "{}: names a field outside an optional segment, so a call \
+                     without that field would show no confirmation at all",
+                    c.id
+                ));
+            }
+            None
+        })
+        .collect();
+    assert!(bad.is_empty(), "unusable confirmation templates: {bad:?}");
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    use serde_json::json;
+    use srelens_capability::{Annotations, Capability, Impact, Registry};
+
+    fn with_annotations(id: &str, annotations: Annotations) -> Registry {
+        let mut reg = Registry::new();
+        let mut cap = Capability::read_only(id, "does a thing", |_| async { Ok(json!({})) });
+        cap.annotations = annotations;
+        reg.register(cap);
+        reg
+    }
+
+    fn panics(reg: Registry, f: fn(&Registry)) -> bool {
+        let reg = std::panic::AssertUnwindSafe(reg);
+        std::panic::catch_unwind(|| f(&reg)).is_err()
+    }
+
+    #[test]
+    fn every_preset_agrees_with_its_own_gate() {
+        for a in [
+            Annotations::READ_ONLY,
+            Annotations::MUTATING,
+            Annotations::SENSITIVE_READ,
+            Annotations::DESTRUCTIVE,
+        ] {
+            assert_impact_matches_the_gate(&with_annotations("t.x", a));
+        }
+    }
+
+    #[test]
+    fn flags_a_destructive_capability_below_high() {
+        let reg = with_annotations("t.x", Annotations::DESTRUCTIVE.with_impact(Impact::Medium));
+        assert!(panics(reg, assert_impact_matches_the_gate));
+    }
+
+    #[test]
+    fn flags_a_gated_capability_at_low() {
+        let reg = with_annotations("t.x", Annotations::MUTATING.with_impact(Impact::Low));
+        assert!(panics(reg, assert_impact_matches_the_gate));
+    }
+
+    #[test]
+    fn flags_an_ungated_read_above_low() {
+        let reg = with_annotations("t.x", Annotations::READ_ONLY.with_impact(Impact::High));
+        assert!(panics(reg, assert_impact_matches_the_gate));
+    }
+
+    #[test]
+    fn accepts_every_preset_template() {
+        for a in [Annotations::MUTATING, Annotations::SENSITIVE_READ, Annotations::DESTRUCTIVE] {
+            assert_confirm_templates_are_renderable(&with_annotations("t.x", a));
+        }
+    }
+
+    #[test]
+    fn flags_a_template_naming_a_field_outside_the_vocabulary() {
+        let reg = with_annotations("t.x", Annotations::MUTATING.with_confirm("Paste {token}?"));
+        assert!(panics(reg, assert_confirm_templates_are_renderable));
+    }
+
+    /// The trap this check exists for: a template that reads perfectly when
+    /// every field resolves and vanishes entirely when one does not.
+    #[test]
+    fn flags_a_template_that_cannot_render_without_its_fields() {
+        let reg = with_annotations("t.x", Annotations::MUTATING.with_confirm("Scale {name}?"));
+        assert!(panics(reg, assert_confirm_templates_are_renderable));
+    }
+}
+
 #[cfg(test)]
 mod gate_tests {
     use super::*;
@@ -96,12 +233,7 @@ mod gate_tests {
         let mut cap = Capability::read_only("oops-destroy", "destroys without asking", |_| {
             async { Ok(json!({})) }
         });
-        cap.annotations = Annotations {
-            read_only: false,
-            destructive: true,
-            requires_confirm: false,
-            sensitive: false,
-        };
+        cap.annotations = Annotations { requires_confirm: false, ..Annotations::DESTRUCTIVE };
         reg.register(cap);
         let reg = std::panic::AssertUnwindSafe(reg);
         let caught = std::panic::catch_unwind(|| assert_mutating_capabilities_are_gated(&reg));

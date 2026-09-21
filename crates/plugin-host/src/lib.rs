@@ -11,7 +11,7 @@ pub use manifest::*;
 pub use validation::*;
 
 use serde_json::{Map, Value};
-use srelens_capability::{Capability, CapabilityError, Registry};
+use srelens_capability::{Annotations, Capability, CapabilityError, Registry};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -172,11 +172,14 @@ impl PluginHost {
             let binding = binding.clone();
             let handler = target.handler.clone();
             let enabled = active.clone();
-            let mut annotations = target.annotations;
-            // Fail closed even if a host annotation accidentally omitted the gate.
-            if !annotations.read_only || annotations.sensitive || annotations.destructive {
-                annotations.requires_confirm = true;
-            }
+            // Host metadata, raised by nothing a manifest says and lowered by
+            // nothing either — including `impact` and the confirmation wording,
+            // which a binding could otherwise soften into a shrug. A manifest
+            // declares no annotations today, so the binding brings `WEAKEST`;
+            // the rule lives in `for_binding` rather than in the absence of a
+            // field, so #549 cannot reopen the hole by adding one.
+            let annotations =
+                Annotations::for_binding(target.annotations, Annotations::WEAKEST);
             capabilities.push(Capability {
                 id, summary: format!("{}: {}", manifest.name, binding.title), annotations,
                 input_schema: schema, output_schema: target.output_schema.clone(),

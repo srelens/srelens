@@ -138,6 +138,60 @@ fn plugin_cannot_downgrade_core_consent_annotations() {
     }
 }
 
+/// The same rule over the metadata #548 adds. `plugin_cannot_downgrade_core_consent_annotations`
+/// above compares whole rows, so it would pass even if `impact` and `confirm`
+/// were dropped from both sides; this names them.
+///
+/// The level is the field an extension would most like to soften — it is the
+/// one a confirming surface renders as "how alarmed should you be" — and the
+/// wording is the one it would most like to own.
+#[test]
+fn a_binding_carries_the_hosts_level_and_the_hosts_words() {
+    use srelens_capability::Impact;
+    let mut reg = core();
+    let mut cap = reg.get("k8s.listCustomResource").unwrap().clone();
+    cap.annotations = Annotations::DESTRUCTIVE.with_confirm("Drain[ {resource}]?");
+    reg.register(cap);
+    let host = PluginHost::new(Arc::new(reg.clone()));
+    let _installed = host
+        .register(
+            &mut reg,
+            Manifest::parse(&manifest().to_string()).unwrap(),
+            &["k8s.listCustomResource".into()],
+        )
+        .unwrap();
+    let bound = reg.get("plugin/org.example.gitops/applications").unwrap();
+    assert_eq!(bound.annotations.impact, Impact::High);
+    assert_eq!(bound.annotations.confirm, Some("Drain[ {resource}]?"));
+}
+
+/// And the gate closes over a host row that forgot it: a capability that
+/// mutates but was registered ungated comes out of the broker gated AND at a
+/// level that matches, rather than gated at `low` — which would read to a
+/// confirming surface as "stop the user for something that changes nothing".
+#[test]
+fn a_binding_of_an_ungated_host_row_is_gated_and_levelled() {
+    use srelens_capability::Impact;
+    let mut reg = core();
+    let mut cap = reg.get("k8s.listCustomResource").unwrap().clone();
+    cap.annotations = Annotations {
+        read_only: false,
+        ..Annotations::READ_ONLY
+    };
+    reg.register(cap);
+    let host = PluginHost::new(Arc::new(reg.clone()));
+    let _installed = host
+        .register(
+            &mut reg,
+            Manifest::parse(&manifest().to_string()).unwrap(),
+            &["k8s.listCustomResource".into()],
+        )
+        .unwrap();
+    let bound = reg.get("plugin/org.example.gitops/applications").unwrap();
+    assert!(bound.annotations.requires_confirm);
+    assert_eq!(bound.annotations.impact, Impact::Medium);
+}
+
 #[tokio::test]
 async fn mcp_transport_requires_real_consent_before_dispatch() {
     use srelens_mcp::{policy::FlagGated, stdio::handle_request, Transport};

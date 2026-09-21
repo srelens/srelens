@@ -187,6 +187,25 @@ impl McpServer {
             crate::policy::ConsentKind::Destructive
         })
     }
+
+    /// The whole gated call, for a policy to decide on: the kind, the host's
+    /// impact level and the host's confirmation sentence rendered against
+    /// these arguments. `None` when the tool is not gated at all.
+    ///
+    /// Rendered here rather than in each policy so every surface — the GUI
+    /// prompt, the headless denial, the host confirmation (#552) — shows one
+    /// sentence, written once, in the host.
+    pub fn consent_request(&self, name: &str, args: &Value) -> Option<crate::policy::ConsentRequest> {
+        let kind = self.consent_kind(name)?;
+        let annotations = self.registry.get(name)?.annotations;
+        Some(crate::policy::ConsentRequest {
+            tool: name.to_string(),
+            args: args.clone(),
+            kind,
+            impact: annotations.impact,
+            confirm_text: annotations.confirm_text(args),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -319,12 +338,8 @@ mod tests {
         let mut cap = Capability::read_only("k8s.updateConfigData", "writes a Secret", |_| async {
             Ok(json!({}))
         });
-        cap.annotations = srelens_capability::Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: true,
-        };
+        cap.annotations =
+            srelens_capability::Annotations { sensitive: true, ..srelens_capability::Annotations::MUTATING };
         reg.register(cap);
         let server = McpServer::new(Arc::new(reg));
 
@@ -362,10 +377,8 @@ mod tests {
             Ok(json!({}))
         });
         cap.annotations = srelens_capability::Annotations {
-            read_only: true,
-            destructive: false,
-            requires_confirm: false,
             sensitive: true,
+            ..srelens_capability::Annotations::READ_ONLY
         };
         reg.register(cap);
         let server = McpServer::new(Arc::new(reg));

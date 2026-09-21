@@ -818,12 +818,9 @@ pub fn apply_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ApplyIn, ApplyOut, _, _>(
         "k8s.applyManifest",
         "server-side apply resource manifests (YAML, multi-doc); creates or updates",
-        Annotations {
-            read_only: false,
-            destructive: false,
-            requires_confirm: true,
-            sensitive: false,
-        },
+        Annotations::MUTATING.with_confirm(
+            "Apply these manifests[ in cluster {cluster}]? Existing objects are updated in place.",
+        ),
         move |input: ApplyIn| {
             let cache = cache.clone();
             async move {
@@ -1121,11 +1118,12 @@ pub fn diff_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<DiffIn, DiffOut, _, _>(
         "k8s.diffManifest",
         "diff a manifest against the cluster via server dry-run apply (per document)",
+        // Sensitive but deliberately ungated: a server dry-run changes nothing,
+        // so it stays `Low` and authors no confirmation text. `sensitive` here
+        // is a redaction flag for the audit log, not a safety class.
         Annotations {
-            read_only: true,
-            destructive: false,
-            requires_confirm: false,
             sensitive: true,
+            ..Annotations::READ_ONLY
         },
         move |input: DiffIn| {
             let cache = cache.clone();

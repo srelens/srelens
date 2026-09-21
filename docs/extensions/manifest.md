@@ -64,8 +64,10 @@ targets used.
 
 The author cannot supply a handler, JavaScript, a schema or safety annotations.
 Annotations come from the host: mutations, destructive operations and sensitive reads
-cannot lose their confirmation requirement. Fixed arguments are excluded from the
-public input schema.
+cannot lose their confirmation requirement, and neither the impact level nor the
+confirmation wording can be lowered or replaced — see
+[Host-defined capability metadata](capabilities.md#host-defined-capability-metadata).
+Fixed arguments are excluded from the public input schema.
 
 ## Contributions
 

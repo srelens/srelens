@@ -1,4 +1,5 @@
 import { invokeCapability } from "../transport/transport";
+import type { CapabilityImpact } from "./capabilities";
 // These mirror crates/plugin-host/src/manifest.rs and crates/registry/src/extensions.rs;
 // extensionTypes.test.ts fails when a field name or its optionality differs.
 interface ExtensionContributionBase {
@@ -225,6 +226,18 @@ export interface ExtensionResourceSelection {
 export interface ExtensionResourceDetail {
   resource: { apiVersion?: string; kind?: string; metadata: { name: string; namespace?: string; uid: string; resourceVersion: string; creationTimestamp?: string; labels?: Record<string,string>; annotations?: Record<string,string>; [key:string]: unknown }; spec?: Record<string, any>; status?: Record<string, any>; [key:string]: unknown };
   actions: string[];
+  /**
+   * The host's level and confirmation wording for each entry in `actions`.
+   *
+   * Per action, not per capability, because the actions behind
+   * `k8s.gitOpsAction` do not share a level: `refresh` makes Argo CD re-read a
+   * status, and `sync` applies the application's manifests and runs its hooks.
+   * The capability's own row is the ceiling of the two.
+   *
+   * `confirm` is a template in the scheme {@link renderConfirmTemplate}
+   * documents. Written in the host; an app never supplies it.
+   */
+  actionMeta?: Record<string, { impact: CapabilityImpact; confirm: string }>;
   /** Newest first. */
   events?: Array<{type?:string;reason?:string;message?:string;count?:number;time?:string|null}>;
   /** True when the host returned only the newest events. */

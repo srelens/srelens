@@ -294,18 +294,23 @@ pub fn render_tools(reg: &srelens_capability::Registry) -> String {
     out.push_str(&format!("## Tools ({})\n\n", reg.ids().len()));
     out.push_str(
         "Argument schemas are not reproduced here — call `tools/list` for those, \
-         which cannot go stale.\n\n",
+         which cannot go stale.\n\n\
+         **Impact** is how much a successful call disturbs — `low`, `medium` or \
+         `high` — and is a different question from the section heading, which is \
+         how the call is gated. A capability that accepts several named \
+         operations carries the highest level any of them reaches; the \
+         per-operation level travels with the resource.\n\n",
     );
 
     for a in Area::all() {
         for safety in SAFETY_ORDER {
-            let mut rows: Vec<(&str, &str)> = reg
+            let mut rows: Vec<(&str, &str, &str)> = reg
                 .ids()
                 .into_iter()
                 .filter(|id| area(id) == a)
                 .filter_map(|id| reg.get(id).map(|cap| (id, cap)))
                 .filter(|(_, cap)| classify(&cap.annotations) == safety)
-                .map(|(id, cap)| (id, cap.summary.as_str()))
+                .map(|(id, cap)| (id, cap.summary.as_str(), cap.annotations.impact.as_str()))
                 .collect();
             if rows.is_empty() {
                 continue;
@@ -314,16 +319,16 @@ pub fn render_tools(reg: &srelens_capability::Registry) -> String {
             // defensive: if the type ever changes to HashMap or if filtering scrambles order,
             // the sort becomes load-bearing. Without it, the published catalog would be
             // silently out of order.
-            rows.sort_unstable_by_key(|(id, _)| *id);
+            rows.sort_unstable_by_key(|(id, _, _)| *id);
 
             out.push_str(&format!(
-                "### {} — {} ({})\n\n| Tool | Summary |\n| --- | --- |\n",
+                "### {} — {} ({})\n\n| Tool | Impact | Summary |\n| --- | --- | --- |\n",
                 a.label(),
                 safety.label(),
                 rows.len()
             ));
-            for (id, summary) in rows {
-                out.push_str(&format!("| `{id}` | {summary} |\n"));
+            for (id, summary, impact) in rows {
+                out.push_str(&format!("| `{id}` | {impact} | {summary} |\n"));
             }
             out.push('\n');
         }

@@ -153,9 +153,9 @@ pub async fn handle_request(
             let sensitive = server.is_sensitive(name);
             let mut decision = "auto";
 
-            if let Some(kind) = server.consent_kind(name) {
+            if let Some(request) = server.consent_request(name, &raw_args) {
                 if let crate::policy::Decision::Denied(reason) =
-                    server.confirm_policy().confirm(name, &raw_args, kind).await
+                    server.confirm_policy().confirm(&request).await
                 {
                     let redacted_args = crate::audit::redact(&args, sensitive);
                     server.audit().record(crate::audit::AuditRecord {
@@ -1053,11 +1053,9 @@ mod tests {
         impl crate::policy::ConfirmPolicy for Yes {
             async fn confirm(
                 &self,
-                _t: &str,
-                a: &serde_json::Value,
-                _kind: crate::policy::ConsentKind,
+                request: &crate::policy::ConsentRequest,
             ) -> crate::policy::Decision {
-                *self.0.lock().unwrap() = Some(a.clone());
+                *self.0.lock().unwrap() = Some(request.args.clone());
                 crate::policy::Decision::Approved
             }
         }
@@ -1244,9 +1242,7 @@ mod tests {
         impl crate::policy::ConfirmPolicy for Approve {
             async fn confirm(
                 &self,
-                _t: &str,
-                _a: &serde_json::Value,
-                _kind: crate::policy::ConsentKind,
+                _request: &crate::policy::ConsentRequest,
             ) -> crate::policy::Decision {
                 crate::policy::Decision::Approved
             }
@@ -1323,9 +1319,7 @@ mod tests {
         impl crate::policy::ConfirmPolicy for AlwaysApprove {
             async fn confirm(
                 &self,
-                _tool: &str,
-                _args: &Value,
-                _kind: crate::policy::ConsentKind,
+                _request: &crate::policy::ConsentRequest,
             ) -> crate::policy::Decision {
                 crate::policy::Decision::Approved
             }

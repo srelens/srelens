@@ -104,7 +104,11 @@ pub(super) fn register(
             }
         },
     ));
-    reg.register(Capability::typed::<Action, Value, _, _>("extensions.action", "Request a host-owned GitOps action on an app resource; requires explicit confirmation", Annotations::MUTATING, move |input| {
+    // A thin wrapper over `k8s.gitOpsAction`, so it carries that capability's
+    // ceiling and not its own, gentler-looking one: this reaches every action
+    // that does, `sync` included. The honest per-action level is `actionMeta`
+    // on the resource the user is looking at.
+    reg.register(Capability::typed::<Action, Value, _, _>("extensions.action", "Request a host-owned GitOps action on an app resource; requires explicit confirmation", Annotations::MUTATING.with_impact(srelens_capability::Impact::High).with_confirm("Run the requested GitOps operation[ ({action})][ on {resource}][ in cluster {cluster}]?"), move |input| {
         let p = path.clone(); let c = core.clone(); let k = cache.clone(); async move {
             let resource = resolve(p,c.clone(),k,input.resource).await?;
             c.invoke("k8s.gitOpsAction", json!({"resource":resource,"action":input.action,"uid":input.uid,"resourceVersion":input.resource_version})).await
