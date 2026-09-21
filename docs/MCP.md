@@ -161,7 +161,7 @@ limits do.
   surface.
 - Every call is recorded to an **audit log** at
   `<app config dir>/mcp/audit.jsonl` (mode `0600`, rotated once to `.1` past
-  5 MB), viewable in Settings → MCP under recent agent activity.
+  5 MB), viewable in Settings → MCP under recent capability activity.
 
   **It is not only MCP's log.** A capability invoked from srelens's own
   windows is recorded in the same file, in the same format — an Argo CD sync

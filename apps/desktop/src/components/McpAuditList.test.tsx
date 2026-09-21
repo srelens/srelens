@@ -49,12 +49,12 @@ describe("McpAuditList", () => {
   it("shows an empty state rather than a blank panel", async () => {
     auditTail.mockResolvedValue([]);
     render(<McpAuditList />);
-    expect(await screen.findByText(/no agent activity/i)).toBeTruthy();
+    expect(await screen.findByText(/no capability activity/i)).toBeTruthy();
   });
 
   /**
    * `auditTail` used to swallow every refusal and resolve to `[]`, so this
-   * panel could only ever say "no agent activity yet" — including when the
+   * panel could only ever say it had no activity — including when the
    * trail could not be read at all. It rejects now, and a refusal must not
    * come out looking like a quiet cluster.
    */
@@ -63,7 +63,7 @@ describe("McpAuditList", () => {
     render(<McpAuditList />);
     const alert = await screen.findByRole("alert");
     expect(alert.textContent ?? "").toMatch(/could not be read/i);
-    expect(screen.queryByText(/no agent activity/i)).toBeNull();
+    expect(screen.queryByText(/no capability activity/i)).toBeNull();
   });
 
   it("retries the read after a refusal, rather than staying failed", async () => {
@@ -73,7 +73,7 @@ describe("McpAuditList", () => {
     auditTail.mockResolvedValue([
       { ts: 1780000002, transport: "http", tool: "k8s_scale", args: {}, decision: "approved", outcome: "ok", err: null },
     ]);
-    fireEvent.click(screen.getByLabelText(/refresh agent activity/i));
+    fireEvent.click(screen.getByLabelText(/refresh capability activity/i));
     expect(await screen.findByText(/k8s_scale/)).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -84,7 +84,7 @@ describe("McpAuditList", () => {
   it("re-reads the log when refreshed", async () => {
     auditTail.mockResolvedValue([]);
     render(<McpAuditList />);
-    expect(await screen.findByText(/no agent activity/i)).toBeTruthy();
+    expect(await screen.findByText(/no capability activity/i)).toBeTruthy();
     expect(auditTail).toHaveBeenCalledTimes(1);
 
     auditTail.mockResolvedValue([
@@ -98,7 +98,7 @@ describe("McpAuditList", () => {
         err: "user declined",
       },
     ]);
-    fireEvent.click(screen.getByLabelText(/refresh agent activity/i));
+    fireEvent.click(screen.getByLabelText(/refresh capability activity/i));
 
     expect(await screen.findByText(/k8s_drainNode/)).toBeTruthy();
     expect(auditTail).toHaveBeenCalledTimes(2);

@@ -228,12 +228,12 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
 
                 if sensitive || is_credential_key {
                     // Redact this value entirely
-                    out.insert(k.clone(), json!("<redacted>"));
+                    out.insert(k.clone(), json!(REDACTED));
                 } else if KEYED_PAYLOAD_FIELDS.contains(&lower.as_str()) {
                     // Keep the names, drop every value.
                     let redacted = match v {
                         Value::Object(_) => redact(v, true),
-                        _ => json!("<redacted>"),
+                        _ => json!(REDACTED),
                     };
                     out.insert(k.clone(), redacted);
                 } else {
@@ -275,6 +275,11 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
 /// denied call is scrubbed too, so this stays near-linear in the number of
 /// values: membership is a hash lookup, and each distinct hidden value is
 /// replaced once.
+///
+/// **Returns [`UNSCRUBBABLE`] rather than panicking or passing the message
+/// through** when the matcher cannot be built from those values — see the
+/// comment at the call. Failing closed here costs one sentence of an audit
+/// record; failing open would write the value the redaction just removed.
 pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
     use std::collections::HashSet;
 
@@ -317,14 +322,50 @@ pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
     patterns.sort_by_key(|s| std::cmp::Reverse(s.len()));
     patterns.dedup();
 
-    let ac = aho_corasick::AhoCorasick::builder()
+    // **A scrub that cannot be built drops the message, it does not panic.**
+    //
+    // `patterns` is built from the caller's own argument values, and this
+    // repository's rule is no `unwrap`/`expect` on caller data
+    // (`.coderabbit.yaml`). `AhoCorasick::build` returns `BuildError` when a
+    // pattern is longer than `SmallIndex::MAX`, or when the patterns together
+    // need more states or IDs than a 32-bit index holds — roughly two
+    // gigabytes of argument values in one call. MCP cannot reach that
+    // (`MAX_REQUEST_BYTES` caps a request at 4 MiB) but the desktop bridge
+    // takes whatever the WebView hands it, with no transport limit of its own.
+    //
+    // Two reasons this is a fallback rather than a panic, and the second is
+    // the stronger one:
+    //
+    // - the panic would unwind through `Registry::invoke_audited`, i.e. the
+    //   audit path would take down the capability call it was recording. The
+    //   log's whole posture is the opposite: "a lost log line must never break
+    //   a working cluster operation" (`JsonlAuditLog::record`, which swallows
+    //   every I/O error for exactly this reason);
+    // - there is nothing safe to fall back TO except silence. The reason this
+    //   function exists is that a capability which refuses an argument echoes
+    //   it, so writing the unscrubbed message would put the value the
+    //   redaction just hid straight back on disk. Failing closed means the
+    //   record keeps its redacted arguments and loses only the sentence that
+    //   could not be cleaned.
+    let Ok(ac) = aho_corasick::AhoCorasick::builder()
         .match_kind(aho_corasick::MatchKind::LeftmostFirst)
         .build(&patterns)
-        .expect("AhoCorasick failed to build");
+    else {
+        return UNSCRUBBABLE.to_string();
+    };
 
-    let replacements = vec!["<redacted>"; patterns.len()];
+    let replacements = vec![REDACTED; patterns.len()];
     ac.replace_all(error, &replacements)
 }
+
+/// What a value the redaction removed is replaced by, in arguments and in the
+/// error text alike.
+const REDACTED: &str = "<redacted>";
+
+/// The whole of an error message that could not be scrubbed. Not the original
+/// text: the values this function was asked to hide are, by construction, the
+/// ones an error is most likely to be echoing.
+const UNSCRUBBABLE: &str = "<redacted: the message could not be scrubbed>";
 
 /// The most recent `limit` entries, newest first.
 ///
@@ -1157,6 +1198,35 @@ mod tests {
         let (_, cluster, resource) = describe_target(&redact(&args, true));
         assert_eq!(cluster.as_deref(), Some("<redacted>"));
         assert_eq!(resource.as_deref(), Some("<redacted>/<redacted>"));
+    }
+
+    /// The two redactions have to speak one vocabulary: an operator reading a
+    /// row sees the arguments and the reason beside each other, and two
+    /// spellings of "gone" would read as two different things having happened.
+    ///
+    /// The sibling property — that a matcher which cannot be built returns
+    /// [`UNSCRUBBABLE`] instead of panicking or passing the message through —
+    /// has no test here, deliberately. `AhoCorasick::build` fails on a pattern
+    /// past `SmallIndex::MAX` or on state/pattern IDs past a 32-bit index,
+    /// which takes on the order of two gigabytes of argument values in one
+    /// call; allocating that is not a unit test, it is an OOM with an
+    /// assertion attached. `redact_error_stays_near_linear_in_the_number_of_
+    /// hidden_values` covers the large-but-buildable end, and the fallback
+    /// itself is a `let ... else` with one statement in it.
+    #[test]
+    fn the_arguments_and_the_error_are_redacted_in_the_same_words() {
+        let args = json!({ "name": "web", "apiToken": "hunter2" });
+        let redacted = redact(&args, false);
+
+        assert_eq!(redacted["apiToken"], json!(REDACTED));
+        assert_eq!(
+            redact_error("invalid token hunter2", &args, &redacted),
+            format!("invalid token {REDACTED}")
+        );
+        assert_ne!(
+            UNSCRUBBABLE, REDACTED,
+            "a whole message that could not be cleaned is not the same event as one hidden value"
+        );
     }
 
     /// The upgrade case, written as the old format actually wrote it. An
