@@ -555,7 +555,10 @@ export function CodeEditor({
   return (
     <div className="fl-editor-shell">
       <div ref={parentRef} className="fl-editor" />
-      {copy && <CopyDocumentButton text={value} />}
+      {/* The live document, read at the click: CodeMirror owns it and
+          `onChange` is optional, so `value` is only the text this component
+          was last TOLD about. (#656 review) */}
+      {copy && <CopyDocumentButton text={() => viewRef.current?.state.doc.toString() ?? value} />}
     </div>
   );
 }
@@ -585,7 +588,7 @@ const WORD = { idle: "Copy", copied: "Copied", failed: "Copy failed" } as const;
  * `title` either: classic's `Button` forwards none (verified in the running
  * app), and a tooltip is what a control with no word of its own needs.
  */
-function CopyDocumentButton({ text }: { text: string }) {
+function CopyDocumentButton({ text }: { text: () => string }) {
   // An object, not a bare state: a second click while the first outcome is
   // still up records the same value, React bails out of the identical update,
   // and the effect never re-runs — so the second confirmation would vanish
@@ -602,7 +605,7 @@ function CopyDocumentButton({ text }: { text: string }) {
 
   async function run() {
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(text());
       setResult({ state: "copied" });
     } catch {
       setResult({ state: "failed" });

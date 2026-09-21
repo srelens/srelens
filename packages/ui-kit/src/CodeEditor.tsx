@@ -644,7 +644,17 @@ export function CodeEditor({
   return (
     <div className="relative h-full w-full">
       <div ref={parentRef} className="h-full w-full [&_.cm-editor]:h-full [&_.cm-scroller]:overflow-auto" />
-      {copy && <CopyButton text={value} label={ariaLabel ? `Copy ${ariaLabel}` : "Copy"} className="code-copy" />}
+      {copy && (
+        <CopyButton
+          // The live document, read at the click. CodeMirror owns it and
+          // `onChange` is optional, so `value` is only the text this component
+          // was last TOLD about — which is not what the reader is looking at
+          // the moment they have typed. (#656 review)
+          text={() => viewRef.current?.state.doc.toString() ?? value}
+          label={ariaLabel ? `Copy ${ariaLabel}` : "Copy"}
+          className="code-copy"
+        />
+      )}
     </div>
   );
 }

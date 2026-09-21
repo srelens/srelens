@@ -98,6 +98,29 @@ describe("CodeEditor — taking the document away", () => {
     vi.unstubAllGlobals();
   });
 
+  it("copies what is in the editor NOW, not the text it was mounted with", async () => {
+    // `onChange` is optional, so an editable editor is free to hold a document
+    // the caller has never been told about — and a Copy that reads the `value`
+    // prop would hand over the text from mount while the reader looks at what
+    // they have typed. Read at the click instead. (#656 review)
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const { container, getByRole, findByText } = render(
+      <CodeEditor value="kind: Pod" copy ariaLabel="web manifest" />,
+    );
+
+    // Typed into, the way CodeMirror delivers it — not by replacing `value`,
+    // which is the path that already works.
+    const view = EditorView.findFromDOM(container.querySelector(".cm-editor")!)!;
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: "kind: Service" } });
+
+    getByRole("button", { name: /copy/i }).click();
+
+    await findByText("Copied");
+    expect(writeText).toHaveBeenCalledWith("kind: Service");
+    vi.unstubAllGlobals();
+  });
+
   it("says so when the clipboard refuses, rather than repainting nothing", async () => {
     // "Copied" over an empty clipboard is the outcome that actually misleads;
     // silence is the one that leaves the reader believing they have the text.

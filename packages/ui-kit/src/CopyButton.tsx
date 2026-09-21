@@ -3,8 +3,18 @@ import { cx } from "./cx";
 import { useCopied } from "./useCopied";
 
 export interface CopyButtonProps {
-  /** What lands on the clipboard. */
-  text: string;
+  /**
+   * What lands on the clipboard — or a function asked for it at the click.
+   *
+   * A string is right when React holds the thing being copied: a command, a
+   * transcript, an address. It is wrong when the thing lives somewhere React
+   * is not told about, and `CodeEditor` is exactly that — CodeMirror owns its
+   * document, `onChange` is optional, and a control reading a prop would hand
+   * over the text from mount while the reader looks at what they have typed.
+   * Hence the function form, evaluated when the button is pressed rather than
+   * when it is rendered. (#656 review)
+   */
+  text: string | (() => string);
   /**
    * What the control is FOR — "Copy the answer", "Copy the command".
    *
@@ -90,7 +100,7 @@ export function CopyButton({ text, label, iconOnly = false, className }: CopyBut
         // icon-only form, where there is no word to change.
         title={state === "failed" ? WORD.failed : undefined}
         className={cx(className)}
-        onClick={() => void run(() => navigator.clipboard.writeText(text))}
+        onClick={() => void run(() => navigator.clipboard.writeText(typeof text === "function" ? text() : text))}
       >
         {copied ? <CheckGlyph /> : <CopyGlyph />}
         {!iconOnly && WORD[state]}
