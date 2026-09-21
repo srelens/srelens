@@ -6,6 +6,8 @@ mod assistant_history;
 mod assistant_prompts;
 mod assistant_skills;
 mod bridge;
+pub mod bundle;
+mod bundle_cmd;
 pub mod capabilities;
 mod cluster_oidc;
 mod cluster_oidc_cmd;
@@ -34,6 +36,7 @@ mod window;
 
 use app_log::{app_log_path, read_app_log, reveal_app_log};
 use bridge::{invoke_capability, AppRegistry};
+use bundle_cmd::{bundle_export, bundle_import, bundle_pick_file, bundle_preview};
 use exec::{exec_close, exec_input, exec_resize, start_pod_exec};
 use external::open_external;
 use files::{pick_kubeconfig_files, save_pasted_kubeconfig, save_text_file};
@@ -484,6 +487,10 @@ pub fn run() {
             open_external,
             pick_kubeconfig_files,
             save_pasted_kubeconfig,
+            bundle_export,
+            bundle_pick_file,
+            bundle_preview,
+            bundle_import,
             start_tool_install,
             update_check,
             update_install,

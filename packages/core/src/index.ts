@@ -79,6 +79,7 @@ export * from "./lib/serviceAddress";
 export * from "./lib/session";
 export * from "./lib/settings";
 export * from "./lib/settingsStorage";
+export * from "./lib/setupBundle";
 export * from "./lib/shortcuts";
 export * from "./lib/skills";
 export * from "./lib/storage";
