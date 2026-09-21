@@ -58,6 +58,15 @@ beforeEach(() => {
 });
 
 describe("McpSettingsSection", () => {
+  // The trail carries this app's own changes as well as an agent's since
+  // #555, so a heading naming only agents would have a reader attribute
+  // their own Sync to something else.
+  it("names the activity section for capabilities, not for agents", async () => {
+    render(<McpSettingsSection />);
+    expect(await screen.findByRole("heading", { name: "Recent capability activity" })).toBeDefined();
+    expect(screen.queryByText("Recent agent activity")).toBeNull();
+  });
+
   it("starts the MCP HTTP server when toggled on and shows the URL", async () => {
     mcp.startMcpHttp.mockResolvedValue("http://127.0.0.1:8765/mcp");
     render(<McpSettingsSection />);

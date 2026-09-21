@@ -80,9 +80,9 @@ impl McpHttpManager {
     /// server this way, so all agents get identical tools, the same
     /// destructive-tool confirm dialog, and the same audit log — the native
     /// agent just calls `handle_request` directly instead of over the wire.
-    pub fn build_server(
+    pub fn build_server<R: tauri::Runtime>(
         &self,
-        app: &tauri::AppHandle,
+        app: &tauri::AppHandle<R>,
         pending: &Arc<crate::mcp_confirm::Pending>,
         audit_path: &std::path::Path,
         prompts_dir: &std::path::Path,
@@ -907,5 +907,88 @@ mod tests {
             .filter(|r| !r.handle.is_finished())
             .map(|r| url_for(r.addr));
         assert!(live.is_none());
+    }
+
+    #[derive(Default)]
+    struct Spy(Mutex<Vec<srelens_capability::audit::AuditRecord>>);
+
+    impl srelens_capability::audit::AuditSink for Spy {
+        fn record(&self, rec: srelens_capability::audit::AuditRecord) {
+            self.0.lock().unwrap().push(rec);
+        }
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("srelens-pr660-mcp-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// One `JsonlAuditLog` per process, and it is the one the UI bridge
+    /// writes to. `JsonlAuditLog` serializes rotate-then-append behind a
+    /// `Mutex` it OWNS, so a second instance over the same path does not
+    /// coordinate with the first at all — near the 5 MB cap one can hold an
+    /// open handle while the other renames the file out from under it. Both
+    /// in-process servers (the loopback transport and the native agent) come
+    /// through here, so this is the assertion that keeps them on one lock.
+    #[tokio::test]
+    async fn build_server_records_into_the_managed_sink() {
+        let dir = scratch("managed");
+        let app = tauri::test::mock_app();
+        let spy = Arc::new(Spy::default());
+        app.manage(crate::bridge::AppAudit(spy.clone()));
+        let manager = McpHttpManager::new(ClientCache::new_many(vec![]));
+        let pending = Arc::new(crate::mcp_confirm::Pending::default());
+
+        let server = manager.build_server(
+            app.handle(),
+            &pending,
+            &dir.join("audit.jsonl"),
+            &dir.join("prompts"),
+        );
+        // An unregistered tool: MCP records the attempt (that is what the
+        // trail is read for) and nothing touches a cluster to do it.
+        let _ = server
+            .call_tool_audited(
+                "k8s.nope",
+                serde_json::json!({}),
+                srelens_mcp::Transport::Http,
+                "auto",
+            )
+            .await;
+
+        let seen = spy.0.lock().unwrap();
+        assert_eq!(seen.len(), 1, "the managed sink must get the record");
+        assert_eq!(seen[0].tool, "k8s.nope");
+        assert!(
+            !dir.join("audit.jsonl").exists(),
+            "a second sink must not have been built over the same path"
+        );
+    }
+
+    /// The fallback is for a host that manages no sink — a test harness —
+    /// where a private log is better than a silently dropped trail.
+    #[tokio::test]
+    async fn build_server_writes_its_own_trail_when_no_sink_is_managed() {
+        let dir = scratch("unmanaged");
+        let path = dir.join("audit.jsonl");
+        let app = tauri::test::mock_app();
+        let manager = McpHttpManager::new(ClientCache::new_many(vec![]));
+        let pending = Arc::new(crate::mcp_confirm::Pending::default());
+
+        let server = manager.build_server(app.handle(), &pending, &path, &dir.join("prompts"));
+        let _ = server
+            .call_tool_audited(
+                "k8s.nope",
+                serde_json::json!({}),
+                srelens_mcp::Transport::Http,
+                "auto",
+            )
+            .await;
+
+        let body = std::fs::read_to_string(&path).expect("a trail, not silence");
+        assert!(body.contains("k8s.nope"), "unexpected line: {body}");
     }
 }
