@@ -21,6 +21,16 @@ export interface ConfirmRequest {
  * **It is local and it stays local.** These lines come from one `0600` file
  * under the app's config directory, read by the Settings pane on the same
  * machine. Nothing uploads it and nothing else reads it.
+ *
+ * **Older lines arrive in this shape too.** `audit.jsonl` predates #555, so an
+ * installed copy of srelens has records on disk with no `source` and an
+ * `outcome` of `"error"`. The backend upgrades them as it reads
+ * (`upgrade_record`, `crates/capability/src/audit.rs`) — missing `source`
+ * becomes `mcp`, because nothing else could have written them, and `error`
+ * becomes `rejected` or `failed` from the decision beside it — so this type
+ * describes every row a caller will see, not only the ones written since. A
+ * consumer must still treat `app`, `cluster` and `resource` as genuinely
+ * absent on an old row rather than as a fact about the call.
  */
 export interface AuditEntry {
   ts: number;

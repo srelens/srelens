@@ -20,7 +20,6 @@ futures-core = "0.3"
 # EKS names contexts with ARNs containing `/` and `:`, which would otherwise
 # reshape the path. Already in the workspace lockfile via reqwest/url.
 percent-encoding = "2"
-aho-corasick = "1.1.5"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "io-util", "time"] }

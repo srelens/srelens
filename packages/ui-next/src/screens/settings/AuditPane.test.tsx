@@ -48,6 +48,41 @@ const ALLOWED: AuditEntry = {
 };
 
 /**
+ * The two branches `DENIED` cannot reach. `verdictOf` returns on
+ * `decision === "denied"` before it ever reads `outcome`, so the denied row
+ * alone leaves `rejected` and `failed` untested — delete either branch and the
+ * suite stays green. These two are the calls that were NOT refused by consent:
+ * one srelens would not make, one the cluster would not finish.
+ */
+const REJECTED: AuditEntry = {
+  ts: 1_700_000_300,
+  source: "ui",
+  transport: "ui",
+  tool: "extensions.action",
+  args: { action: "sync" },
+  app: null,
+  cluster: "prod-eu",
+  resource: "checkout/web",
+  decision: "auto",
+  outcome: "rejected",
+  err: "a resourceVersion is required",
+};
+
+const FAILED: AuditEntry = {
+  ts: 1_700_000_400,
+  source: "mcp",
+  transport: "stdio",
+  tool: "k8s.deletePod",
+  args: { context: "prod-eu", namespace: "payments", name: "web-0" },
+  app: null,
+  cluster: "prod-eu",
+  resource: "payments/web-0",
+  decision: "approved",
+  outcome: "failed",
+  err: "the apiserver closed the connection",
+};
+
+/**
  * #555: a Flux reconcile clicked in srelens, through an installed app. Before
  * that issue this row could not exist — the UI path never reached the audit
  * sink at all, so the pane's answer to "did anyone reconcile this?" was silent
@@ -86,6 +121,37 @@ describe("AuditPane", () => {
     expect(screen.getByText(/denied · sensitive reads are off/i)).toBeTruthy();
     // An allowed row carries no reason, so the word stands alone.
     expect(screen.getByText("allowed")).toBeTruthy();
+  });
+
+  /**
+   * "srelens would not do this" and "the cluster would not" are different
+   * answers to "did my sync happen?" — in the word AND in the colour, since a
+   * reader scanning a table of fifty rows reads the colour first. Asserted on
+   * non-denied entries, because `decision: "denied"` short-circuits the
+   * verdict before `outcome` is looked at.
+   */
+  it("tells a call srelens refused from one that ran and broke", async () => {
+    core.auditTail.mockResolvedValue([FAILED, REJECTED]);
+    render(<AuditPane />);
+
+    // `startsWith` on the verdict cell rather than its whole text: the reason
+    // beside the word goes through `describeError`, and this case is about the
+    // verdict, not about that wrapper's phrasing.
+    const verdict = (word: string) =>
+      screen.getByText((_, el) => el?.textContent?.startsWith(`${word} · `) === true, {
+        selector: "span",
+      });
+
+    const rejected = await screen.findByText((_, el) =>
+      el?.textContent?.startsWith("rejected · ") === true, { selector: "span" });
+    const failed = verdict("failed");
+    expect(rejected.textContent).toContain("a resourceVersion is required");
+    expect(failed.textContent).toContain("the apiserver closed the connection");
+    // And not only in the word. A reader scanning fifty rows reads the colour
+    // first, so two different answers must not be one colour.
+    expect(rejected.style.color).toBeTruthy();
+    expect(failed.style.color).toBeTruthy();
+    expect(failed.style.color).not.toEqual(rejected.style.color);
   });
 
   /**

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use srelens_kube::client_cache::ClientCache;
-use tauri::State;
+use tauri::{Manager, State};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -87,6 +87,31 @@ impl McpHttpManager {
         audit_path: &std::path::Path,
         prompts_dir: &std::path::Path,
     ) -> srelens_mcp::McpServer {
+        // ONE sink per process, and it is the one the UI bridge writes to.
+        //
+        // `JsonlAuditLog` serializes rotate-then-append behind a `Mutex` it
+        // OWNS, so two instances over one path do not coordinate at all. Near
+        // the 5 MB cap that is a real race: one can be holding an open handle
+        // while the other renames `audit.jsonl` to `audit.jsonl.1`, and the
+        // line written through the stale handle lands in a file the next
+        // rotation replaces. Building a second sink here also meant the UI's
+        // records and MCP's were written by two locks that had never heard of
+        // each other.
+        //
+        // `AppAudit` (`bridge.rs`) is managed in `setup`, before any server is
+        // built, so in the app this always resolves. The fallback is for a
+        // host that manages none — a test harness — where a private sink is
+        // better than a silently dropped trail. A separate PROCESS (headless
+        // `--mcp-http` / `--mcp-stdio`) still has its own sink over the same
+        // path; that needs inter-process locking and is not this issue.
+        let audit: Arc<dyn srelens_capability::audit::AuditSink> =
+            match app.try_state::<crate::bridge::AppAudit>() {
+                Some(managed) => managed.0.clone(),
+                None => Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
+                    audit_path.to_path_buf(),
+                    5 * 1024 * 1024,
+                )),
+            };
         let registry = build_registry_with(self.cache.clone());
         srelens_mcp::McpServer::new(Arc::new(registry))
             .with_policy(Arc::new(crate::mcp_confirm::PromptUser::new(
@@ -94,10 +119,7 @@ impl McpHttpManager {
                 pending.clone(),
                 std::time::Duration::from_secs(60),
             )))
-            .with_audit(Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
-                audit_path.to_path_buf(),
-                5 * 1024 * 1024,
-            )))
+            .with_audit(audit)
             .with_prompts(srelens_mcp::prompts::PromptLibrary::new(Some(prompts_dir.to_path_buf())))
             .with_kind_resolver(srelens_registry::kind_resolver())
             .with_watcher(std::sync::Arc::new(crate::mcp_watch::CacheWatcher::new(self.cache.clone())))

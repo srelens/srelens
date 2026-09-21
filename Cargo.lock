@@ -6512,7 +6512,6 @@ dependencies = [
 name = "srelens-mcp"
 version = "0.15.0"
 dependencies = [
- "aho-corasick",
  "async-trait",
  "axum",
  "futures-core",

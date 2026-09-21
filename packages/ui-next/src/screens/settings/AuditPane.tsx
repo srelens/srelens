@@ -6,7 +6,9 @@ import { FailureAlert, FailureState } from "../../lib/errorCopy";
 /**
  * §23's `Audit` pane: every capability call an MCP-connected agent has made,
  * whether it was allowed or not, and every mutating or sensitive one made in
- * the app itself — the pane someone opens after an incident.
+ * the app itself — the pane someone opens after an incident. The title says
+ * both halves in those terms rather than claiming "every capability call",
+ * which is true of the agent side and not of this one.
  *
  * **Both surfaces, since #555.** The trail held MCP calls alone, because the
  * audit sink lived in the MCP crate: a capability invoked from the app went
@@ -98,9 +100,14 @@ function verdictOf(entry: AuditEntry): Verdict {
   // `rejected` and `failed` are two different answers to "did it happen?" —
   // srelens would not do it, or the cluster would not — and collapsing them
   // into one word is the mistake this project has a rule about. The backend
-  // tells them apart (`crates/capability/src/lib.rs`), so this does too.
+  // tells them apart (`crates/capability/src/lib.rs`), so this does too, and
+  // in colour as well as in the word: amber for a call that never ran and
+  // broke nothing, red for one that ran and did not finish. `denied` is red
+  // beside it on purpose — both are rows where what you asked for did not
+  // happen and something is worth looking at; `rejected` is the one that is
+  // usually just a malformed call.
   if (entry.outcome === "rejected") return { word: "rejected", tone: "warn" };
-  if (entry.outcome === "failed") return { word: "failed", tone: "warn" };
+  if (entry.outcome === "failed") return { word: "failed", tone: "sev" };
   return entry.decision === "approved" ? { word: "approved", tone: "ok" } : { word: "allowed", tone: "muted" };
 }
 
@@ -316,7 +323,12 @@ export function AuditPane() {
   }, [nonce]);
 
   return (
-    <Panel title="Audit · every capability call, allowed or not, from an agent or from here">
+    // The title says what the trail actually holds, not a tidier version of
+    // it. "every capability call" is true of the agent half and false of this
+    // app's, where plain reads are deliberately left out — and a title that
+    // overstates the coverage is exactly how a reader concludes an absent row
+    // means an absent action.
+    <Panel title="Audit · every call an agent made, and every change made here">
       {/* flex-wrap rather than a fixed row: the sentence is the long half and
           grows in translation, and a flex child with nothing to stop it
           shrinking is where `min-width: auto` has cost this migration eight

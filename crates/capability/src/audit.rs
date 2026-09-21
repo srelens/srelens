@@ -269,10 +269,12 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
 /// ordinary word costs a few characters of an error text, where the
 /// alternative is a credential on disk.
 ///
-/// The arguments are untrusted and can be large (up to
-/// [`crate::MAX_REQUEST_BYTES`] on either transport), and a denied call is scrubbed too, so this stays near-linear
-/// in the number of values: membership is a hash lookup, and each distinct
-/// hidden value is replaced once.
+/// The arguments are untrusted and can be large (up to `MAX_REQUEST_BYTES`,
+/// 4 MiB, on either MCP transport — the constant is `srelens_mcp`'s, which
+/// this crate cannot link to without depending on its own dependent), and a
+/// denied call is scrubbed too, so this stays near-linear in the number of
+/// values: membership is a hash lookup, and each distinct hidden value is
+/// replaced once.
 pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
     use std::collections::HashSet;
 
@@ -378,13 +380,67 @@ pub fn tail(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<Value>>
         lines.remove(0);
     }
     // Unparseable LINES are still skipped rather than raised: a torn final
-    // write is a known property of an append-only log, not a failed read.
+    // write is a known property of an append-only log, not a failed read. A
+    // line that IS valid JSON is kept whatever build wrote it — see
+    // `upgrade_record`.
     Ok(lines
         .iter()
         .rev()
         .filter_map(|l| serde_json::from_str(l).ok())
+        .map(upgrade_record)
         .take(limit)
         .collect())
+}
+
+/// Bring a line written by an older build up to the current record shape.
+///
+/// **The log is not new.** `audit.jsonl` shipped well before #555 split
+/// `source` out of `transport` and gave `outcome` a three-word vocabulary, so
+/// an installed copy of srelens has lines on disk reading `"outcome": "error"`
+/// with no `source`, `app`, `cluster` or `resource` at all. Those are real
+/// records of real calls and the pane has to keep showing them — and show them
+/// *right*: the pane's verdict falls through an outcome it does not recognise
+/// to "allowed", so last week's failed call would render as one that went
+/// through. That is the same class of wrong answer — a failure rendered as a
+/// fact — this pane exists to prevent, so the upgrade happens here, at the one
+/// place that reads the format, rather than in each reader.
+///
+/// - **`source`** — every pre-#555 record was an MCP call by construction: the
+///   UI path could not reach the sink at all. Missing means `mcp`.
+/// - **`outcome`** — `error` becomes `rejected` when consent was denied
+///   (nothing ran) and `failed` otherwise. The old format cannot tell a
+///   refused argument from a handler failure; calling a refusal a failure
+///   overstates what happened rather than understating it, which is the safer
+///   direction on this screen.
+/// - **`app` / `cluster` / `resource`** — filled with `null`, which is what
+///   they mean: this record does not say. The pane falls back to reading the
+///   arguments, as it did before these fields existed.
+///
+/// A record already in the current shape is returned untouched, and anything
+/// that is not a JSON object is left exactly as it was: this upgrades what it
+/// recognises and never invents a field it cannot justify.
+fn upgrade_record(mut line: Value) -> Value {
+    let Some(map) = line.as_object_mut() else {
+        return line;
+    };
+    if !map.contains_key("source") {
+        map.insert("source".into(), json!("mcp"));
+    }
+    if map.get("outcome") == Some(&json!("error")) {
+        let denied = map.get("decision") == Some(&json!("denied"));
+        map.insert(
+            "outcome".into(),
+            json!(if denied {
+                OUTCOME_REJECTED
+            } else {
+                OUTCOME_FAILED
+            }),
+        );
+    }
+    for absent in ["app", "cluster", "resource"] {
+        map.entry(absent).or_insert(Value::Null);
+    }
+    line
 }
 
 pub struct JsonlAuditLog {
@@ -1101,6 +1157,145 @@ mod tests {
         let (_, cluster, resource) = describe_target(&redact(&args, true));
         assert_eq!(cluster.as_deref(), Some("<redacted>"));
         assert_eq!(resource.as_deref(), Some("<redacted>/<redacted>"));
+    }
+
+    /// The upgrade case, written as the old format actually wrote it. An
+    /// installed srelens has these lines on disk — `audit.jsonl` predates
+    /// #555 — and the pane's verdict falls through an unrecognised outcome to
+    /// "allowed", so without this a failed call from before the upgrade would
+    /// render as one that went through.
+    #[test]
+    fn a_record_from_before_the_source_field_reads_as_a_failed_mcp_call() {
+        let dir = std::env::temp_dir().join(format!("srelens-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("legacy.jsonl");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            // Verbatim in the pre-#555 shape: no source, no app, no cluster,
+            // no resource, and the outcome vocabulary of the day.
+            "{\"ts\":1700000000,\"transport\":\"http\",\"tool\":\"k8s.deletePod\",\
+             \"args\":{\"context\":\"prod\",\"name\":\"web-0\"},\"decision\":\"approved\",\
+             \"outcome\":\"error\",\"err\":\"handler error: timed out\"}\n",
+        )
+        .unwrap();
+
+        let out = tail(&path, 10).expect("a readable log is not an error");
+
+        assert_eq!(out.len(), 1, "a legacy line is still a record: {out:?}");
+        assert_eq!(
+            out[0]["source"],
+            json!("mcp"),
+            "nothing else could have written it"
+        );
+        assert_eq!(
+            out[0]["transport"],
+            json!("http"),
+            "what it did say survives"
+        );
+        assert_eq!(
+            out[0]["outcome"],
+            json!(OUTCOME_FAILED),
+            "an approved call that errored ran and did not finish"
+        );
+        for absent in ["app", "cluster", "resource"] {
+            assert_eq!(
+                out[0][absent],
+                Value::Null,
+                "{absent} must say it does not know"
+            );
+        }
+        assert_eq!(
+            out[0]["args"]["name"],
+            json!("web-0"),
+            "the arguments are untouched"
+        );
+    }
+
+    /// The other half of the old `error`: a call the consent policy refused
+    /// never ran, so it is a rejection and not a failure.
+    #[test]
+    fn a_legacy_denied_record_reads_as_rejected_not_failed() {
+        let dir = std::env::temp_dir().join(format!("srelens-legacy2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("denied.jsonl");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(
+            &path,
+            "{\"ts\":1700000000,\"transport\":\"stdio\",\"tool\":\"k8s.getSecret\",\"args\":{},\
+             \"decision\":\"denied\",\"outcome\":\"error\",\"err\":\"the user declined\"}\n",
+        )
+        .unwrap();
+
+        let out = tail(&path, 10).expect("a readable log is not an error");
+
+        assert_eq!(out[0]["outcome"], json!(OUTCOME_REJECTED));
+        assert_eq!(
+            out[0]["decision"],
+            json!("denied"),
+            "the decision is left alone"
+        );
+    }
+
+    /// The upgrade must not rewrite a record that is already current — and a
+    /// current `failed` must not be confused with a legacy `error`.
+    #[test]
+    fn a_current_record_passes_through_the_upgrade_untouched() {
+        let dir = std::env::temp_dir().join(format!("srelens-legacy3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("current.jsonl");
+        let _ = std::fs::remove_file(&path);
+        JsonlAuditLog::new(path.clone(), u64::MAX).record(AuditRecord {
+            source: Source::Ui,
+            tool: "extensions.action".into(),
+            args: json!({}),
+            app: Some(AppRef {
+                id: "org.example.flux".into(),
+                revision: 2,
+            }),
+            cluster: Some("prod".into()),
+            resource: Some("team/web".into()),
+            decision: "auto",
+            outcome: OUTCOME_REJECTED,
+            error: Some("a resourceVersion is required".into()),
+        });
+
+        let out = tail(&path, 10).expect("a readable log is not an error");
+
+        assert_eq!(
+            out[0]["source"],
+            json!("ui"),
+            "a UI record is not relabelled mcp"
+        );
+        assert_eq!(out[0]["outcome"], json!(OUTCOME_REJECTED));
+        assert_eq!(out[0]["app"]["revision"], json!(2));
+        assert_eq!(out[0]["cluster"], json!("prod"));
+    }
+
+    /// A line that is not JSON at all is skipped, and skipping it does not
+    /// cost the reader the lines around it — an append-only log's last write
+    /// can be torn.
+    #[test]
+    fn one_unreadable_line_does_not_cost_the_rest_of_the_trail() {
+        let dir = std::env::temp_dir().join(format!("srelens-legacy4-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("torn.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let mut body = String::new();
+        body.push_str("{\"ts\":1,\"transport\":\"http\",\"tool\":\"a\",\"args\":{},\"decision\":\"auto\",\"outcome\":\"ok\"}\n");
+        // A half-written record: valid JSON never resumes on this line.
+        body.push_str("{\"ts\":2,\"transport\":\"http\",\"tool\":\"b\n");
+        body.push_str("{\"ts\":3,\"transport\":\"http\",\"tool\":\"c\",\"args\":{},\"decision\":\"auto\",\"outcome\":\"ok\"}\n");
+        std::fs::write(&path, body).unwrap();
+
+        let out = tail(&path, 10).expect("a torn line is not a failed read");
+
+        let tools: Vec<&str> = out.iter().filter_map(|e| e["tool"].as_str()).collect();
+        assert_eq!(
+            tools,
+            vec!["c", "a"],
+            "the readable records survive: {out:?}"
+        );
     }
 
     /// An app ID with no revision beside it is not an app reference: an update

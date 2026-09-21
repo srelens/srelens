@@ -23,6 +23,29 @@ describe("McpAuditList", () => {
     expect(screen.getByText(/approved/i)).toBeTruthy();
   });
 
+  /**
+   * The two outcomes #555 split `error` into, asserted on the badge and not
+   * only on the word. "srelens would not do this" and "the cluster would not"
+   * are different answers to "did it happen?", and a wrong variant mapping —
+   * a failure drawn in the same amber as a refused argument — would keep every
+   * other case in this file green.
+   */
+  it("colours a refused call and a broken one differently", async () => {
+    auditTail.mockResolvedValue([
+      { ts: 1780000010, transport: "stdio", tool: "k8s_deletePod", args: {}, decision: "approved", outcome: "failed", err: "the apiserver closed the connection" },
+      { ts: 1780000009, transport: "http", tool: "k8s_scale", args: {}, decision: "auto", outcome: "rejected", err: "a replica count is required" },
+    ]);
+    render(<McpAuditList />);
+
+    const failed = await screen.findByText("failed");
+    const rejected = screen.getByText("rejected");
+    // The variant reaches the DOM as the shadcn badge's own classes
+    // (`apps/desktop/src/components/ui/badge.tsx`): `destructive` for danger,
+    // amber for warning. Asserting the mapping, not the palette.
+    expect(failed.className).toContain("destructive");
+    expect(rejected.className).toContain("amber");
+  });
+
   it("shows an empty state rather than a blank panel", async () => {
     auditTail.mockResolvedValue([]);
     render(<McpAuditList />);

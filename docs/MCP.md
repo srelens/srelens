@@ -176,6 +176,13 @@ limits do.
   `rejected` (it never ran — consent refused, arguments refused, no such
   capability) or `failed` (it ran and did not finish).
 
+  **Records written by an older srelens are still readable.** Lines from
+  before these fields existed carry no `source` and an `outcome` of `error`;
+  they are upgraded as the log is read — `source` becomes `mcp`, since
+  nothing else could have written them, and `error` becomes `rejected` or
+  `failed` according to the decision beside it. `app`, `cluster` and
+  `resource` read as absent on those rows, which is what they are.
+
   **What is recorded differs by source, on purpose.** MCP records every call
   an agent makes, reads included, because that is the question the trail
   answers about a third party. From srelens itself only mutating and
