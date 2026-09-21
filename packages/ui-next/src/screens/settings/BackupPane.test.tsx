@@ -37,6 +37,7 @@ const EMPTY_REPORT: ImportReport = {
   settingsWritten: [],
   kubeconfigsAdded: [],
   kubeconfigsAlreadyPresent: [],
+  kubeconfigsRejected: [],
   skillsAdded: [],
   skillsKeptLocal: [],
   promptsAdded: [],
@@ -61,6 +62,8 @@ beforeEach(() => {
     success: notifications.success,
     error: notifications.error,
     info: notifications.info,
+    updateAvailable: () => {},
+    clusterSignIn: () => {},
   });
 });
 
@@ -217,6 +220,25 @@ describe("BackupPane", () => {
     expect(notifications.success).not.toHaveBeenCalled();
   });
 
+  it("does not leave the last import's report standing beside a new failure", async () => {
+    // Import once successfully, then again into a failure. The first report
+    // describes writes the second attempt did not make.
+    core.importSetupBundle.mockResolvedValueOnce({
+      ...EMPTY_REPORT,
+      kubeconfigsAdded: ["prod.yaml"],
+    });
+    render(<BackupPane />);
+    const user = await openTheBundle();
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+    expect(screen.getByRole("status").textContent).toMatch(/Added 1 kubeconfig/);
+
+    core.importSetupBundle.mockRejectedValueOnce(new Error("create /config: read-only"));
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+
+    expect(screen.getByText(/read-only/)).toBeDefined();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
   it("tells the reader apps are not imported, and where to get them", async () => {
     core.previewSetupBundle.mockResolvedValue({
       ...SUMMARY,
@@ -243,6 +265,7 @@ describe("reportLines", () => {
       ...EMPTY_REPORT,
       kubeconfigsAdded: ["prod.yaml"],
       kubeconfigsAlreadyPresent: ["config"],
+      kubeconfigsRejected: ["notes.yaml"],
       settingsWritten: ["srelens.defaultNamespace", "srelens.contextProfiles"],
       skillsKeptLocal: ["triage.md"],
       secretsWritten: ["anthropic", "MCP token"],
@@ -250,6 +273,10 @@ describe("reportLines", () => {
 
     expect(lines).toMatch(/Added 1 kubeconfig: prod\.yaml/);
     expect(lines).toMatch(/1 kubeconfig was already here: config/);
+    expect(lines).toMatch(/1 bundled file is not a kubeconfig and was not imported: notes\.yaml/);
+    // A rejected file is not "already here" — that would be a claim about this
+    // machine that nothing checked.
+    expect(lines).not.toMatch(/notes\.yaml.*already here/);
     expect(lines).toMatch(/Applied 2 preferences/);
     expect(lines).toMatch(/Kept your own version of 1 skill: triage\.md/);
     expect(lines).toMatch(/Stored anthropic, MCP token/);

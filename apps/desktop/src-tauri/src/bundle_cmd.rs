@@ -68,6 +68,29 @@ fn kubeconfig_paths(settings: &BTreeMap<String, Value>) -> Vec<PathBuf> {
     paths
 }
 
+/// The secrets an export should carry — or the refusal that stops it.
+///
+/// A locked vault is refused rather than exported empty. `Vault::load` answers
+/// `Secrets::default()` whenever the derived key is absent (`read_secrets` in
+/// `vault.rs`), and every locked state reaches that: so without this gate a
+/// reader who ticked "include the API keys" on a locked vault would have got a
+/// bundle with `secrets: None`, an export that reported success, and a preview
+/// on the new machine listing no API keys — with nothing anywhere saying the
+/// vault had been shut at the time. That is a failed read rendered as a fact
+/// about the reader's setup, which is the one thing this codebase does not do.
+fn secrets_for_export(vault: &Vault, include_secrets: bool) -> Result<Option<Secrets>, String> {
+    if !include_secrets {
+        return Ok(None);
+    }
+    if !vault.is_unlocked() {
+        return Err(format!(
+            "srelens's secrets vault is {} — unlock it and export again, or export without the API keys",
+            vault.key_source()
+        ));
+    }
+    Ok(Some(vault.load()))
+}
+
 fn check_passphrase(passphrase: &str) -> Result<(), String> {
     if passphrase.chars().count() < MIN_PASSPHRASE_LEN {
         return Err(format!("the passphrase must be at least {MIN_PASSPHRASE_LEN} characters"));
@@ -90,7 +113,7 @@ pub async fn bundle_export<R: Runtime>(
     let base = config_dir(&app)?;
     let settings = read_settings(&registry).await?;
     let paths = kubeconfig_paths(&settings);
-    let secrets = if include_secrets { Some(vault.load()) } else { None };
+    let secrets = secrets_for_export(&vault, include_secrets)?;
 
     let bundle = bundle::collect(ExportSources {
         base: &base,
@@ -153,7 +176,14 @@ pub async fn bundle_import<R: Runtime>(
     let raw = bundle::read_bundle_file(Path::new(&path))?;
     let opened = bundle::open(&passphrase, &raw)?;
 
-    let existing = kubeconfig_paths(&read_settings(&registry).await.unwrap_or_default());
+    // `?`, not `unwrap_or_default()`. An empty map here is not a harmless
+    // fallback: `kubeconfig_paths` would then return only the discovered paths
+    // and drop everything under `srelens.kubeconfigFiles`, those files would be
+    // missing from `existing`, and `apply_files` — which dedupes by comparing
+    // against exactly this list — would write a second copy of each one. The
+    // reader would get duplicated clusters and a report announcing them as
+    // added, with nothing saying the settings read had failed.
+    let existing = kubeconfig_paths(&read_settings(&registry).await?);
     let mut report = bundle::apply_files(&base, &opened, &groups, &existing)?;
 
     if groups.contains(&Group::Settings) {
@@ -261,6 +291,8 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+
+
     #[test]
     fn a_short_passphrase_is_refused_before_anything_is_written() {
         assert!(check_passphrase("short").is_err());
@@ -357,6 +389,60 @@ mod tests {
         assert_eq!(stored.llm_keys.get("anthropic").unwrap(), "sk-ant-mine");
         assert_eq!(stored.llm_keys.get("openai").unwrap(), "sk-openai-theirs");
         assert_eq!(stored.mcp_token.as_deref(), Some("mine"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_locked_vault_refuses_the_export_rather_than_writing_one_with_no_secrets() {
+        // `Vault::load` answers `Secrets::default()` while locked, so without
+        // the gate in `secrets_for_export` this export would SUCCEED, carry no
+        // API keys, and say nothing — and the preview on the new machine would
+        // show no secrets group at all, as though the reader had never had one.
+        let dir = temp_dir("secrets-locked");
+        let vault = vault_with(
+            &dir,
+            Secrets {
+                mcp_token: None,
+                llm_keys: BTreeMap::from([("anthropic".into(), "sk-ant-mine".into())]),
+            },
+        );
+        // Put the vault into password mode and shut it, the same three steps
+        // setup + lock take: re-key onto a password-derived key, write the
+        // meta whose existence IS password mode, then discard the key.
+        let (meta, key) = crate::vault::build_meta("a master password").unwrap();
+        vault.rekey_from_current(key, "password").unwrap();
+        crate::vault::write_meta(&dir, &meta).unwrap();
+        vault.discard_key().unwrap();
+
+        assert!(!vault.is_unlocked(), "fixture precondition: the vault is locked");
+        assert_eq!(
+            vault.load(),
+            Secrets::default(),
+            "a locked vault reads as empty — which is exactly what makes the silent export possible"
+        );
+
+        let error = secrets_for_export(&vault, true).unwrap_err();
+        assert!(error.contains("vault is"), "unexpected error: {error}");
+        assert!(error.contains("unlock it"), "unexpected error: {error}");
+
+        // An export that did not ask for secrets is untouched by this: it has
+        // nothing to be wrong about.
+        assert_eq!(secrets_for_export(&vault, false).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unlocked_vault_exports_the_secrets_it_actually_holds() {
+        let dir = temp_dir("secrets-unlocked");
+        let held = Secrets {
+            mcp_token: Some("tok".into()),
+            llm_keys: BTreeMap::from([("anthropic".into(), "sk-ant-mine".into())]),
+        };
+        let vault = vault_with(&dir, held.clone());
+        assert!(vault.is_unlocked());
+
+        assert_eq!(secrets_for_export(&vault, true).unwrap(), Some(held));
+        assert_eq!(secrets_for_export(&vault, false).unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

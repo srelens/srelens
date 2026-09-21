@@ -22,6 +22,7 @@ const EMPTY_REPORT: ImportReport = {
   settingsWritten: [],
   kubeconfigsAdded: [],
   kubeconfigsAlreadyPresent: [],
+  kubeconfigsRejected: [],
   skillsAdded: [],
   skillsKeptLocal: [],
   promptsAdded: [],

@@ -157,6 +157,12 @@ pub struct ImportReport {
     pub kubeconfigs_added: Vec<String>,
     /// Bundled configs whose bytes the app already reads from somewhere.
     pub kubeconfigs_already_present: Vec<String>,
+    /// Bundled configs that do not parse as a kubeconfig, so were not written.
+    /// Kept apart from `kubeconfigs_already_present` because they are opposite
+    /// facts: one says the cluster is here, the other that the file was not
+    /// usable. Reporting a rejection as "already here" is a claim about this
+    /// machine that nothing checked.
+    pub kubeconfigs_rejected: Vec<String>,
     pub skills_added: Vec<String>,
     /// Names already taken locally; the local file is left as it is.
     pub skills_kept_local: Vec<String>,
@@ -426,7 +432,7 @@ pub fn apply_files(
             // gate `save_pasted_kubeconfig` applies, so an import cannot leave
             // a file that breaks every later context listing.
             if srelens_kube::connect::validate_kubeconfig_yaml(&file.content).is_err() {
-                report.kubeconfigs_already_present.push(file.name.clone());
+                report.kubeconfigs_rejected.push(file.name.clone());
                 continue;
             }
             let name = free_name(&dir, &sanitize_name(&file.name));
@@ -960,6 +966,10 @@ current-context: other
         let report = apply_files(&base, &bundle, &[Group::Kubeconfigs], &[]).unwrap();
 
         assert!(report.kubeconfigs_added.is_empty());
+        assert_eq!(report.kubeconfigs_rejected, vec!["notes.yaml".to_string()]);
+        // Not "already here": that would be a claim about this machine, and
+        // nothing checked it. The two facts are opposite.
+        assert!(report.kubeconfigs_already_present.is_empty());
         assert!(!kubeconfigs_dir(&base).join("notes.yaml").exists());
         let _ = fs::remove_dir_all(&base);
     }

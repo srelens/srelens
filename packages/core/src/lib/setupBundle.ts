@@ -24,6 +24,8 @@ export interface ImportReport {
   settingsWritten: string[];
   kubeconfigsAdded: string[];
   kubeconfigsAlreadyPresent: string[];
+  /** Bundled files that do not parse as a kubeconfig, so were not written. */
+  kubeconfigsRejected: string[];
   skillsAdded: string[];
   skillsKeptLocal: string[];
   promptsAdded: string[];

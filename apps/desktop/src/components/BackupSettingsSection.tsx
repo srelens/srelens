@@ -76,6 +76,11 @@ export function reportLines(report: ImportReport): string[] {
     report.kubeconfigsAlreadyPresent,
     (n, list) => `${n} ${plural(n, "kubeconfig")} ${n === 1 ? "was" : "were"} already here: ${list}.`,
   );
+  say(
+    report.kubeconfigsRejected,
+    (n, list) =>
+      `${n} bundled ${plural(n, "file")} ${n === 1 ? "is" : "are"} not a kubeconfig and ${n === 1 ? "was" : "were"} not imported: ${list}.`,
+  );
   say(report.settingsWritten, (n) => `Applied ${n} ${plural(n, "preference")}.`);
   say(report.skillsAdded, (n, list) => `Added ${n} ${plural(n, "skill")}: ${list}.`);
   say(
@@ -176,6 +181,11 @@ export function BackupSettingsSection() {
   async function runImport() {
     setImporting(true);
     setError("");
+    // The previous attempt's report goes with the error. Left standing, a
+    // second import that fails would leave the first one's "Added 2
+    // kubeconfigs" beside the failure alert, describing writes this attempt
+    // did not make.
+    setReport(null);
     try {
       const result = await importSetupBundle({ path, passphrase: importPassphrase, groups: selected });
       setReport(result);
