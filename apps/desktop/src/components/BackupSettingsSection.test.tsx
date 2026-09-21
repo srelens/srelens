@@ -355,6 +355,69 @@ describe("BackupSettingsSection", () => {
     expect(previewSetupBundleMock).toHaveBeenLastCalledWith("/tmp/other.srelens", "pw");
   });
 
+  it("does not make a bundle-wide claim after a partial import", async () => {
+    // Only the ticked groups were imported, so "everything in that bundle"
+    // says something about groups this import never looked at.
+    importSetupBundleMock.mockResolvedValue(EMPTY_REPORT);
+    const user = userEvent.setup();
+    render(<BackupSettingsSection />);
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+    await user.type(screen.getByLabelText("Bundle passphrase"), "pw");
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(screen.getByRole("checkbox", { name: /^Clusters/ }));
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toMatch(/Nothing was imported\./);
+    expect(status).not.toMatch(/already has everything/);
+  });
+
+  it("stays usable when the file picker is cancelled mid-decrypt", async () => {
+    // `choose` used to invalidate the pending open BEFORE knowing whether a
+    // file was picked, and the cancel path returned before clearing
+    // `opening` — so cancelling the picker stranded the Open button.
+    let releaseFirst: (summary: BundleSummary) => void = () => {};
+    previewSetupBundleMock.mockImplementationOnce(
+      () => new Promise<BundleSummary>((resolve) => (releaseFirst = resolve)),
+    );
+    const user = userEvent.setup();
+    render(<BackupSettingsSection />);
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+    await user.type(screen.getByLabelText("Bundle passphrase"), "pw");
+    await user.click(screen.getByRole("button", { name: "Open" }));
+
+    pickSetupBundleMock.mockResolvedValue(null); // cancelled
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+
+    releaseFirst(SUMMARY);
+    await Promise.resolve();
+    expect(await screen.findByRole("button", { name: /import selected/i })).toBeDefined();
+  });
+
+  it("will not let a second file be chosen while an import is running", async () => {
+    // The token suppresses a stale UI update; it does not cancel
+    // `bundle_import`. A second import over a backend that writes files,
+    // settings and secrets in separate steps has no lock to protect it.
+    let releaseImport: (report: ImportReport) => void = () => {};
+    importSetupBundleMock.mockImplementationOnce(
+      () => new Promise<ImportReport>((resolve) => (releaseImport = resolve)),
+    );
+    const user = userEvent.setup();
+    render(<BackupSettingsSection />);
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+    await user.type(screen.getByLabelText("Bundle passphrase"), "pw");
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+
+    expect(screen.getByRole("button", { name: /choose file/i })).toHaveProperty("disabled", true);
+
+    releaseImport(EMPTY_REPORT);
+    await Promise.resolve();
+    expect(await screen.findByRole("status")).toBeDefined();
+    expect(screen.getByRole("button", { name: /choose file/i })).toHaveProperty("disabled", false);
+    expect(importSetupBundleMock).toHaveBeenCalledTimes(1);
+  });
+
   it("tells the reader that apps are not imported, and where to get them", async () => {
     previewSetupBundleMock.mockResolvedValue({
       ...SUMMARY,

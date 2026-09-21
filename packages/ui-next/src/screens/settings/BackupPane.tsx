@@ -143,8 +143,13 @@ const FAILURE_TITLES: Record<Failure["stage"], string> = {
  * it is exactly the failed-read-rendered-as-a-fact this codebase forbids. The
  * rejection lines above already say what happened; the verdict stays neutral.
  */
-export function noChangeVerdict(report: ImportReport): string {
-  return report.kubeconfigsRejected.length > 0
+export function noChangeVerdict(report: ImportReport, wholeBundle: boolean): string {
+  // "everything in that bundle" is also a claim about the BUNDLE, and an
+  // import only covers the groups that were ticked. A reader who unticks the
+  // clusters and imports the settings alone has been told nothing about the
+  // clusters, so the bundle-wide sentence is only available when every group
+  // the bundle offered was selected.
+  return report.kubeconfigsRejected.length > 0 || !wholeBundle
     ? "Nothing was imported."
     : "Nothing to import — this machine already has everything in that bundle.";
 }
@@ -233,24 +238,37 @@ export function BackupPane() {
   }
 
   async function choose() {
-    const token = begin();
+    // No `begin()` yet. Invalidating the pending operation BEFORE knowing
+    // whether a file was actually picked meant a cancelled picker left an
+    // in-flight `openBundle` unable to clear `opening` from its own guarded
+    // `finally` — and nothing here cleared it either, because the cancel path
+    // returns first. The token advances only once the selection really changes.
+    let picked: string | null;
     try {
-      const picked = await pickSetupBundle();
-      if (!current(token)) return;
-      if (picked === null) return;
-      setPath(picked);
-      setOpened(null);
-      setReport(null);
-      setFailure(null);
-      // The superseded operation's `finally` is guarded by its own token, so
-      // it will NOT reset these — picking a second file mid-decrypt otherwise
-      // left `opening` true for good and disabled the Open button on the file
-      // the reader had just chosen.
-      setOpening(false);
-      setImporting(false);
+      picked = await pickSetupBundle();
     } catch (error) {
-      if (current(token)) setFailure({ stage: "choose", error });
+      setFailure({ stage: "choose", error });
+      return;
     }
+    if (picked === null) return;
+
+    begin();
+    setPath(picked);
+    setOpened(null);
+    setReport(null);
+    setFailure(null);
+    // The superseded `openBundle`'s `finally` is guarded by its own token, so
+    // it will NOT reset this — picking a second file mid-decrypt otherwise
+    // left `opening` true for good and disabled the Open button on the file
+    // the reader had just chosen.
+    //
+    // `importing` is deliberately NOT cleared here: this button is disabled
+    // while an import is in flight (see the render). Clearing it would only
+    // hide a `bundle_import` that is still running — the token suppresses the
+    // stale UI update, it does not cancel the command — and would let a second
+    // import start over a backend that applies files, settings and secrets in
+    // separate steps with no import-wide lock.
+    setOpening(false);
   }
 
   async function openBundle() {
@@ -304,6 +322,8 @@ export function BackupPane() {
 
   const summary = opened?.summary ?? null;
   const offered = summary === null ? [] : GROUPS.filter((g) => g.present(summary));
+  /** Whether the import that produced `report` covered every group offered. */
+  const wholeBundle = offered.length > 0 && offered.every((g) => selected.includes(g.id));
 
   return (
     <div className="flex flex-col gap-4">
@@ -359,7 +379,7 @@ export function BackupPane() {
         </p>
         <div className="mt-3 flex max-w-sm flex-col gap-2">
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="secondary" onClick={() => void choose()}>
+            <Button variant="secondary" disabled={importing} onClick={() => void choose()}>
               Choose file…
             </Button>
             {path !== "" && (
@@ -458,7 +478,7 @@ export function BackupPane() {
             {importWroteSomething(report) ? (
               <p className="text-muted">Reload srelens to pick up the imported settings.</p>
             ) : (
-              <p>{noChangeVerdict(report)}</p>
+              <p>{noChangeVerdict(report, wholeBundle)}</p>
             )}
           </div>
         )}

@@ -88,8 +88,13 @@ function presentGroups(summary: BundleSummary): BundleGroup[] {
  * it is exactly the failed-read-rendered-as-a-fact this codebase forbids. The
  * rejection lines above already say what happened; the verdict stays neutral.
  */
-export function noChangeVerdict(report: ImportReport): string {
-  return report.kubeconfigsRejected.length > 0
+export function noChangeVerdict(report: ImportReport, wholeBundle: boolean): string {
+  // "everything in that bundle" is also a claim about the BUNDLE, and an
+  // import only covers the groups that were ticked. A reader who unticks the
+  // clusters and imports the settings alone has been told nothing about the
+  // clusters, so the bundle-wide sentence is only available when every group
+  // the bundle offered was selected.
+  return report.kubeconfigsRejected.length > 0 || !wholeBundle
     ? "Nothing was imported."
     : "Nothing to import — this machine already has everything in that bundle.";
 }
@@ -167,6 +172,9 @@ export function BackupSettingsSection() {
   const current = (token: number) => attempt.current === token;
 
   const summary = opened?.summary ?? null;
+  const offered = summary === null ? [] : presentGroups(summary);
+  /** Whether the import that produced `report` covered every group offered. */
+  const wholeBundle = offered.length > 0 && offered.every((id) => selected.includes(id));
 
   const tooShort = passphrase.length > 0 && passphrase.length < BUNDLE_MIN_PASSPHRASE;
   const mismatch = confirm.length > 0 && confirm !== passphrase;
@@ -191,23 +199,37 @@ export function BackupSettingsSection() {
   }
 
   async function choose() {
-    const token = begin();
+    // No `begin()` yet. Invalidating the pending operation BEFORE knowing
+    // whether a file was actually picked meant a cancelled picker left an
+    // in-flight `openBundle` unable to clear `opening` from its own guarded
+    // `finally` — and nothing here cleared it either, because the cancel path
+    // returns first. The token advances only once the selection really changes.
+    let picked: string | null;
     try {
-      const picked = await pickSetupBundle();
-      if (!current(token) || picked === null) return;
-      setPath(picked);
-      setOpened(null);
-      setReport(null);
-      setError("");
-      // The superseded operation's `finally` is guarded by its own token, so
-      // it will NOT reset these — picking a second file mid-decrypt otherwise
-      // left `opening` true for good and disabled the Open button on the file
-      // the reader had just chosen.
-      setOpening(false);
-      setImporting(false);
+      picked = await pickSetupBundle();
     } catch (e) {
       notify.error(String(e));
+      return;
     }
+    if (picked === null) return;
+
+    begin();
+    setPath(picked);
+    setOpened(null);
+    setReport(null);
+    setError("");
+    // The superseded `openBundle`'s `finally` is guarded by its own token, so
+    // it will NOT reset this — picking a second file mid-decrypt otherwise
+    // left `opening` true for good and disabled the Open button on the file
+    // the reader had just chosen.
+    //
+    // `importing` is deliberately NOT cleared here: this button is disabled
+    // while an import is in flight (see the render). Clearing it would only
+    // hide a `bundle_import` that is still running — the token suppresses the
+    // stale UI update, it does not cancel the command — and would let a second
+    // import start over a backend that applies files, settings and secrets in
+    // separate steps with no import-wide lock.
+    setOpening(false);
   }
 
   async function openBundle() {
@@ -259,7 +281,7 @@ export function BackupSettingsSection() {
       if (importWroteSomething(result)) {
         notify.success("Setup imported. Reload srelens to see the imported settings.");
       } else {
-        notify.info(noChangeVerdict(result));
+        notify.info(noChangeVerdict(result, wholeBundle));
       }
     } catch (e) {
       if (current(token)) setError(String(e));
@@ -341,7 +363,9 @@ export function BackupSettingsSection() {
         </p>
         <div className="flex max-w-md flex-col gap-2">
           <div className="flex items-center gap-2">
-            <Button onClick={() => void choose()}>Choose file…</Button>
+            <Button disabled={importing} onClick={() => void choose()}>
+              Choose file…
+            </Button>
             {path && (
               <span className="truncate text-sm text-muted-foreground" title={path}>
                 {path}
@@ -382,7 +406,7 @@ export function BackupSettingsSection() {
               {summary.appVersion && ` by srelens ${summary.appVersion}`}. Choose what to bring
               over:
             </p>
-            {GROUPS.filter((group) => presentGroups(summary).includes(group.id)).map((group) => (
+            {GROUPS.filter((group) => offered.includes(group.id)).map((group) => (
               <label key={group.id} className="flex items-start gap-2 text-sm">
                 <input
                   type="checkbox"
@@ -432,7 +456,7 @@ export function BackupSettingsSection() {
                 Reload srelens (or restart it) to pick up the imported settings.
               </p>
             ) : (
-              <p>{noChangeVerdict(report)}</p>
+              <p>{noChangeVerdict(report, wholeBundle)}</p>
             )}
           </div>
         )}
