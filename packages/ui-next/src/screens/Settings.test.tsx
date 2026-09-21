@@ -70,6 +70,7 @@ const PORTED = ["Aardvark ledger", "Basalt tally", "Cinnabar dial"];
 const DESKTOP_SECTIONS = [
   "Agent & MCP",
   "Security",
+  "Backup",
   "Appearance",
   "Accessibility",
   "Shortcuts",
@@ -82,7 +83,9 @@ const DESKTOP_SECTIONS = [
 ];
 
 /** The same nav where no vault command can answer. */
-const WEB_SECTIONS = DESKTOP_SECTIONS.filter((s) => s !== "Security" && s !== "Updates" && s !== "Apps");
+const WEB_SECTIONS = DESKTOP_SECTIONS.filter(
+  (s) => s !== "Security" && s !== "Backup" && s !== "Updates" && s !== "Apps",
+);
 
 function paint(props: { onLocked?: () => void } = {}) {
   const onSwitchToClassic = vi.fn();
