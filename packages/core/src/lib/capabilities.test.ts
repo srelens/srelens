@@ -153,6 +153,10 @@ describe("capability metadata v2", () => {
    * is a template the host confirmation cannot use.
    */
   it("renders every committed template, with fields and without", () => {
+    // Guarded, because the loop below says nothing about a catalog that
+    // carries no templates at all — which is exactly the catalog this change
+    // replaced, and exactly the state a botched regeneration would restore.
+    expect(rows.filter((c) => c.confirm).length).toBeGreaterThan(0);
     for (const c of rows) {
       if (!c.confirm) continue;
       expect(renderConfirmTemplate(c.confirm, {})).toBeTruthy();
@@ -170,11 +174,11 @@ describe("capability metadata v2", () => {
   });
 
   it("names only fields the host's vocabulary contains", () => {
-    for (const c of rows) {
-      for (const [, field] of (c.confirm ?? "").matchAll(/\{([a-z]+)\}/g)) {
-        expect(CONFIRM_TEMPLATE_FIELDS).toContain(field);
-      }
-    }
+    const named = rows.flatMap((c) => [...(c.confirm ?? "").matchAll(/\{([a-z]+)\}/g)]);
+    // Same guard, same reason: "no template names a field outside the
+    // vocabulary" is true of a catalog with no templates in it.
+    expect(named.length).toBeGreaterThan(0);
+    for (const [, field] of named) expect(CONFIRM_TEMPLATE_FIELDS).toContain(field);
   });
 });
 

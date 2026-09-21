@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 /**
@@ -1046,6 +1046,10 @@ describe("the host's own words", () => {
     const dialog = await screen.findByRole("dialog");
     expect(dialog.textContent).not.toMatch(/undefined|null/);
     expect(dialog.textContent).toContain("k8s.drainNode");
+    // A dropped sentence is not a dropped prompt: the level the host did send
+    // is still named, so this case is distinguishable from the dialog that
+    // drew neither. Without it the assertions above hold on the old dialog too.
+    expect(within(dialog).getByText(/high impact/i)).toBeTruthy();
   });
 
   /** An impact the host does not define is ignored, not printed. */

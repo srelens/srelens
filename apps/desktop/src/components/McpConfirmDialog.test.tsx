@@ -148,6 +148,10 @@ describe("McpConfirmDialog", () => {
     emit({ id: "p2", tool: "toolbox.installHelm", args: { version: "3.16" }, impact: "medium" });
     const tool = await screen.findByText(/toolbox.installHelm/);
     expect(tool).toBeTruthy();
+    // The level is still named — it is the half of the metadata that does not
+    // depend on a template, and it is what distinguishes this prompt from the
+    // one the dialog drew before #548.
+    expect(screen.getByText(/medium impact/i)).toBeTruthy();
     expect(screen.getByText(/3.16/)).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/undefined|null/);
   });

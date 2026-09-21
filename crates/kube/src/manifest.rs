@@ -1618,22 +1618,41 @@ metadata:
         assert!(rendered.contains("token"), "key names survive: {rendered}");
     }
 
-    /// A ConfigMap is NOT routed through the Secret redactor, and must not be:
-    /// its annotations are ordinary content and blanking them would hide real
-    /// changes in the one panel a reader consults before applying.
+    /// Where the new rule stops. The SAME annotation is blanked on a Secret
+    /// and kept on a ConfigMap, asserted together because either half alone
+    /// says nothing: the ConfigMap side holds on the unredacted code this
+    /// replaced, and the Secret side would hold on a redactor that blanked
+    /// every kind's annotations and hid real changes in the one panel a
+    /// reader consults before applying.
     #[test]
-    fn diff_leaves_a_non_secret_kinds_annotations_alone() {
-        let mut value = serde_json::json!({
-            "kind": "ConfigMap",
-            "metadata": { "name": "app", "annotations": { "note": "keep me" } },
-            "data": { "key": "value" }
-        });
-        normalize_for_diff(&mut value, false);
+    fn diff_blanks_an_annotation_on_a_secret_and_leaves_other_kinds_alone() {
+        let annotated = |kind: &str| {
+            serde_json::json!({
+                "kind": kind,
+                "metadata": { "name": "app", "annotations": { "note": "hunter2" } },
+                "data": { "key": "value" }
+            })
+        };
+
+        let mut config_map = annotated("ConfigMap");
+        normalize_for_diff(&mut config_map, false);
         assert_eq!(
-            value["metadata"]["annotations"]["note"],
-            serde_json::json!("keep me")
+            config_map["metadata"]["annotations"]["note"],
+            serde_json::json!("hunter2")
         );
-        assert_eq!(value["data"]["key"], serde_json::json!("value"));
+        assert_eq!(config_map["data"]["key"], serde_json::json!("value"));
+
+        let mut secret = annotated("Secret");
+        normalize_for_diff(&mut secret, true);
+        assert_eq!(
+            secret["metadata"]["annotations"]["note"],
+            serde_json::json!(""),
+            "a Secret's annotation values are blanked, keys kept"
+        );
+        assert!(secret["metadata"]["annotations"]
+            .as_object()
+            .unwrap()
+            .contains_key("note"));
     }
 
     #[test]
