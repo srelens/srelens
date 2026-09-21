@@ -293,7 +293,10 @@ fn looks_like_a_url(s: &str) -> bool {
 /// - **credential-bearing query parameters** — a pre-signed URL puts the
 ///   whole credential in the query (`sig`, `X-Amz-Signature`, `access_key`).
 ///   The parameter's NAME is kept and only its value is blanked, so the
-///   record still says a signed URL was used.
+///   record still says a signed URL was used. The name is classified
+///   decoded, because `?to%6ben=` is a `token` parameter to every server
+///   that reads it;
+/// - the **fragment**, dropped whole — see below.
 ///
 /// `None` (the caller writes [`REDACTED`]) when the string does not parse as
 /// a URL **with a host**, which is the fail-closed direction: a string that
@@ -318,17 +321,18 @@ fn redact_url(raw: &str) -> Option<String> {
     // value it kept. Splitting the raw query leaves the parameters a reader
     // needs exactly as they were sent and writes the sentinel plainly.
     let query = url.query().map(scrub_query);
-    let fragment = url.fragment().map(str::to_string);
     url.set_query(None);
+    // The fragment goes whole: it is the one part of a URL a client never
+    // sends, so it says nothing about which repository was contacted, and it
+    // has no defined shape — `#access_token=hunter2` looks like a query, but
+    // `#hunter2` is just as legal, and no `name=value` rule can classify
+    // that. Scrubbing what cannot be parsed is guessing; dropping it costs
+    // the record nothing it was keeping.
     url.set_fragment(None);
     let mut out = url.to_string();
     if let Some(q) = query {
         out.push('?');
         out.push_str(&q);
-    }
-    if let Some(f) = fragment {
-        out.push('#');
-        out.push_str(&f);
     }
     Some(out)
 }
@@ -363,7 +367,18 @@ fn scrub_query(query: &str) -> String {
                 // A bare flag has no value to hide.
                 return pair.to_string();
             };
-            let lower = name.to_ascii_lowercase();
+            // Classified as the server will read the name, not as it was
+            // spelled: `to%6ben` is `token`, and `%53ECRET` is `secret` once
+            // the decode runs before the case fold. Matching the raw bytes
+            // let either write its value to disk. `form_urlencoded` is the
+            // decoder the server uses — percent escapes and `+` for space,
+            // both — and lossy UTF-8 keeps a malformed escape matchable
+            // rather than dropping the parameter out of the check.
+            let decoded = url::form_urlencoded::parse(name.as_bytes())
+                .next()
+                .map(|(decoded, _)| decoded.into_owned())
+                .unwrap_or_default();
+            let lower = decoded.to_ascii_lowercase();
             if QUERY_NEEDLES.iter().any(|n| lower.contains(n)) {
                 format!("{name}={REDACTED}")
             } else {
@@ -738,6 +753,42 @@ mod tests {
                  &sig=<redacted>&api_key=<redacted>"
             )
         );
+    }
+
+    /// A parameter name is matched as the server will read it, not as it was
+    /// spelled: `to%6ben` is `token`, and a check against the raw bytes hands
+    /// the value to `audit.jsonl` intact.
+    #[test]
+    fn a_percent_encoded_credential_parameter_name_is_still_recognised() {
+        let args = json!({ "url": "https://charts.example.com/s?to%6ben=hunter2" });
+        let out = redact(&args, false);
+        assert_eq!(
+            out["url"],
+            json!("https://charts.example.com/s?to%6ben=<redacted>")
+        );
+    }
+
+    /// The same for a name that is both encoded and upper-cased — decoding
+    /// happens before the case fold, not instead of it.
+    #[test]
+    fn an_encoded_upper_case_credential_parameter_name_is_still_recognised() {
+        let args = json!({ "url": "https://charts.example.com/s?%53ECRET=pw&region=eu" });
+        let out = redact(&args, false);
+        assert_eq!(
+            out["url"],
+            json!("https://charts.example.com/s?%53ECRET=<redacted>&region=eu")
+        );
+    }
+
+    /// A fragment never reaches the server, so it says nothing about which
+    /// repository was contacted — and it has no `name=value` shape to hold a
+    /// credential rule, so `#hunter2` could not be classified even in
+    /// principle. It goes.
+    #[test]
+    fn a_urls_fragment_is_dropped() {
+        let args = json!({ "url": "https://charts.example.com/s#access_token=hunter2" });
+        let out = redact(&args, false);
+        assert_eq!(out["url"], json!("https://charts.example.com/s"));
     }
 
     /// A credential does not become safe by sitting under a key the redaction

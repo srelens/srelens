@@ -215,10 +215,13 @@ limits do.
     `k8s.helmRepoAdd` is audited because it mutates, so the userinfo and any
     credential-bearing query parameter (`token`, `sig`, `access_key`, …) are
     blanked while the scheme, host and path stay — the record still says
-    which repository was added. This follows the value, not the key name, so
-    an `oci://user:pass@registry/chart` passed as `chart` to `k8s.helmInstall`
-    is scrubbed too. A value under a field that promises a URL and does not
-    parse as one is dropped whole;
+    which repository was added. Parameter names are matched after decoding,
+    so `?to%6ben=` is caught as `token`, and the fragment is dropped whole:
+    it never reaches the server, so it names no repository, and `#hunter2`
+    has no `name=value` shape for a credential rule to read. This follows the
+    value, not the key name, so an `oci://user:pass@registry/chart` passed as
+    `chart` to `k8s.helmInstall` is scrubbed too. A value under a field that
+    promises a URL and does not parse as one is dropped whole;
   - a recorded error message is scrubbed of every value the rules above
     removed, because a capability that refuses an argument tends to echo it
     (`invalid type: string "…", expected a map`).
