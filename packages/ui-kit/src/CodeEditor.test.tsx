@@ -1,8 +1,18 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, waitFor } from "@testing-library/react";
 import { EditorView } from "@codemirror/view";
 import { openSearchPanel } from "@codemirror/search";
 import { CodeEditor } from "./CodeEditor";
+
+/**
+ * The clipboard stub, taken back whether or not the test that set it passed.
+ *
+ * Cleanup written at the end of a test body does not run when an assertion
+ * before it throws, and a stubbed `navigator` outlives the failure into every
+ * later test in the same worker — one red test reported as several. The hook
+ * is `CustomizeMark.test.tsx`'s shape. (#656 review)
+ */
+afterEach(() => vi.unstubAllGlobals());
 
 describe("CodeEditor", () => {
   it("mounts a CodeMirror editor showing the initial value", () => {
@@ -186,7 +196,6 @@ describe("CodeEditor — taking the document away", () => {
 
     await findByText("Copied");
     expect(writeText).toHaveBeenCalledWith(yaml);
-    vi.unstubAllGlobals();
   });
 
   it("copies what is in the editor NOW, not the text it was mounted with", async () => {
@@ -209,7 +218,6 @@ describe("CodeEditor — taking the document away", () => {
 
     await findByText("Copied");
     expect(writeText).toHaveBeenCalledWith("kind: Service");
-    vi.unstubAllGlobals();
   });
 });
 
