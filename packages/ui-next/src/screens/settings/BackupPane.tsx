@@ -133,6 +133,22 @@ const FAILURE_TITLES: Record<Failure["stage"], string> = {
   import: "The setup could not be imported",
 };
 
+/**
+ * The one-line verdict under the detail lines, when nothing was written.
+ *
+ * "this machine already has everything in that bundle" is a claim about the
+ * machine, and it is only true when every skip was a skip because the thing was
+ * already here. A bundled file that did not parse as a kubeconfig was not
+ * skipped for that reason — it was refused — so saying the machine already has
+ * it is exactly the failed-read-rendered-as-a-fact this codebase forbids. The
+ * rejection lines above already say what happened; the verdict stays neutral.
+ */
+export function noChangeVerdict(report: ImportReport): string {
+  return report.kubeconfigsRejected.length > 0
+    ? "Nothing was imported."
+    : "Nothing to import — this machine already has everything in that bundle.";
+}
+
 /** Every line of an import report that has something to say. */
 export function reportLines(report: ImportReport): string[] {
   const lines: string[] = [];
@@ -226,6 +242,12 @@ export function BackupPane() {
       setOpened(null);
       setReport(null);
       setFailure(null);
+      // The superseded operation's `finally` is guarded by its own token, so
+      // it will NOT reset these — picking a second file mid-decrypt otherwise
+      // left `opening` true for good and disabled the Open button on the file
+      // the reader had just chosen.
+      setOpening(false);
+      setImporting(false);
     } catch (error) {
       if (current(token)) setFailure({ stage: "choose", error });
     }
@@ -436,7 +458,7 @@ export function BackupPane() {
             {importWroteSomething(report) ? (
               <p className="text-muted">Reload srelens to pick up the imported settings.</p>
             ) : (
-              <p>Nothing to import — this machine already has everything in that bundle.</p>
+              <p>{noChangeVerdict(report)}</p>
             )}
           </div>
         )}

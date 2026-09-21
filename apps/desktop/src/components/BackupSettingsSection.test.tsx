@@ -306,6 +306,55 @@ describe("BackupSettingsSection", () => {
     expect(importSetupBundleMock).not.toHaveBeenCalled();
   });
 
+  it("does not claim the machine already has a file it actually refused", async () => {
+    // A rejected file was not skipped because it is already here — it was
+    // refused. "this machine already has everything in that bundle" is a claim
+    // about the machine, and nothing checked it.
+    importSetupBundleMock.mockResolvedValue({
+      ...EMPTY_REPORT,
+      kubeconfigsRejected: ["notes.yaml"],
+    });
+    const user = userEvent.setup();
+    render(<BackupSettingsSection />);
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+    await user.type(screen.getByLabelText("Bundle passphrase"), "pw");
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toMatch(/not a kubeconfig and was not imported: notes\.yaml/);
+    expect(status).toMatch(/Nothing was imported\./);
+    expect(status).not.toMatch(/already has everything/);
+    expect(notifyMock.info).toHaveBeenCalledWith("Nothing was imported.");
+  });
+
+  it("stays usable when a second file is chosen while the first is still opening", async () => {
+    // The superseded attempt's `finally` is guarded by its own token, so it
+    // never resets `opening` — without clearing it in `choose`, the Open
+    // button on the newly picked file was disabled for good.
+    let releaseFirst: (summary: BundleSummary) => void = () => {};
+    previewSetupBundleMock.mockImplementationOnce(
+      () => new Promise<BundleSummary>((resolve) => (releaseFirst = resolve)),
+    );
+    const user = userEvent.setup();
+    render(<BackupSettingsSection />);
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+    await user.type(screen.getByLabelText("Bundle passphrase"), "pw");
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    expect(screen.getByRole("button", { name: /opening/i })).toBeDefined();
+
+    pickSetupBundleMock.mockResolvedValue("/tmp/other.srelens");
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+    releaseFirst(SUMMARY);
+    await Promise.resolve();
+
+    const open = screen.getByRole("button", { name: "Open" });
+    expect(open).toHaveProperty("disabled", false);
+    await user.click(open);
+    expect(screen.getByRole("button", { name: /import selected/i })).toBeDefined();
+    expect(previewSetupBundleMock).toHaveBeenLastCalledWith("/tmp/other.srelens", "pw");
+  });
+
   it("tells the reader that apps are not imported, and where to get them", async () => {
     previewSetupBundleMock.mockResolvedValue({
       ...SUMMARY,
