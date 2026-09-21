@@ -43,6 +43,21 @@ describe("CodeEditor — taking the document away", () => {
     expect(container.querySelector(".cm-content")?.getAttribute("tabindex")).toBe("0");
   });
 
+  it("draws a focus indicator on the pane it made reachable", () => {
+    // A tab stop with no caret and no ring is a keyboard reader with no idea
+    // where they are. The stylesheet's own `:where(…, [tabindex])` ring does
+    // not reach here — `:where()` carries no specificity and CodeMirror's base
+    // theme sets `.cm-content { outline: none }` above it — so the editor
+    // declares its own. Read off the stylesheet CodeMirror actually injected:
+    // jsdom applies no CSS and resolves no `:focus-visible`, so the rule's
+    // presence is what is observable. (#656 review)
+    render(<CodeEditor value="kind: Pod" readOnly ariaLabel="web manifest" />);
+    const sheets = [...document.querySelectorAll("style")].map((s) => s.textContent ?? "").join("");
+    const at = sheets.indexOf(".cm-content[tabindex]:focus-visible");
+    expect(at, "no focus indicator for a focusable read-only pane").toBeGreaterThan(-1);
+    expect(sheets.slice(at, sheets.indexOf("}", at))).toContain("outline");
+  });
+
   it("answers ⌘A pressed on the page by selecting the manifest", () => {
     // The complaint in #656: ⌘A on the manifest view selected every label and
     // table row AROUND the YAML and left the YAML itself out, because that is
@@ -81,21 +96,22 @@ describe("CodeEditor — taking the document away", () => {
     vi.unstubAllGlobals();
   });
 
-  it("says nothing when the clipboard refuses", async () => {
-    // "Copied" over an empty clipboard is the one outcome here that actually
-    // misleads: `navigator.clipboard` is absent on a non-secure origin and can
-    // be refused outright.
+  it("says so when the clipboard refuses, rather than repainting nothing", async () => {
+    // "Copied" over an empty clipboard is the outcome that actually misleads;
+    // silence is the one that leaves the reader believing they have the text.
+    // `navigator.clipboard` is absent on a non-secure origin and can be
+    // refused outright, so this is a path readers reach. (#656 review)
     const writeText = vi.fn(async () => {
       throw new Error("denied");
     });
     vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
-    const { getByRole, queryByText } = render(
+    const { getByRole, findByText, queryByText } = render(
       <CodeEditor value="kind: Pod" readOnly copy ariaLabel="web manifest" />,
     );
 
     getByRole("button", { name: /copy/i }).click();
-    await vi.waitFor(() => expect(writeText).toHaveBeenCalled());
 
+    await findByText("Copy failed");
     expect(queryByText("Copied")).toBeNull();
     vi.unstubAllGlobals();
   });

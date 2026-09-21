@@ -198,6 +198,9 @@ it("summarizes a catalog app's bindings and opens its manifest before Install is
   const text = within(review).getByRole("textbox", { name: "Manifest under review" });
   await waitFor(() => expect(text.textContent).toContain('"plural": "kustomizations"'));
   expect(text.textContent).toContain('"group": "kustomize.toolkit.fluxcd.io"');
+  // Something a reader may well want out of the app before deciding, and the
+  // select-all chord alone is an affordance with nothing to see. (#656 review)
+  expect(within(review).getByRole("button", { name: "Copy" })).toBeTruthy();
   expect(configureExtensions).not.toHaveBeenCalled();
 
   fireEvent.click(screen.getByText("Install and grant permissions"));

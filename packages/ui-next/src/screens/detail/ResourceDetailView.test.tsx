@@ -1351,6 +1351,20 @@ describe("ResourceDetailView", () => {
       expect(seat?.className).toContain("min-h-0");
     });
 
+    it("offers a Copy control over the manifest", async () => {
+      // #656's own surface. The chord answers for a reader who knows it; this
+      // is the half of the answer there is something to see. Asserted HERE,
+      // not only in the kit, because the prop is the call site's and dropping
+      // it would leave every editor test green. (#656 review)
+      getObject.mockResolvedValue({ object: POD });
+      const { container, getByRole } = await openYaml("Pod", "web-1");
+      await waitFor(() => expect(container.querySelector(".cm-content")).not.toBeNull());
+
+      expect(codeEditorProps.at(-1)?.copy).toBe(true);
+      // Named for what it does, and distinct from the bar's "Copy as kubectl".
+      expect(getByRole("button", { name: "Copy" })).toBeDefined();
+    });
+
     it("keeps the Secret redaction notice from taking that height away", async () => {
       getObject.mockResolvedValue({ object: SECRET });
       getManifest.mockResolvedValue({ yaml: `kind: Secret\ndata:\n  token: ${FIXTURE_B64}\n` });

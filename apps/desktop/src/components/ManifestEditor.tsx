@@ -46,6 +46,7 @@ export function ManifestEditor({
   resetTo,
   headerExtras,
   headerLabel,
+  copy = false,
   onApplied,
 }: {
   context: string;
@@ -68,6 +69,19 @@ export function ManifestEditor({
   headerExtras?: React.ReactNode;
   /** Short header title (e.g. "New resource" / "Edit ConfigMap/web"). */
   headerLabel?: string;
+  /**
+   * Offer a Copy control over the editor, for the whole document in one click.
+   *
+   * The caller's to say, not this component's, because this component does not
+   * know what is in the document. Classic's drawer YAML view renders a
+   * Secret's values in the CLEAR — it reads `k8s.getManifest` directly and
+   * nothing redacts on the way in, unlike `loadEditableManifest` (which routes
+   * Secrets through the consent-gated `getSecret`) and unlike the new design's
+   * pane (which calls `redactSecretManifest`). A one-click copy of unredacted
+   * Secret material is not an affordance to add on top of that; see #656's
+   * review and the follow-up it raised. (#656)
+   */
+  copy?: boolean;
   /** Called with the applied object on success. */
   onApplied?: (result: { kind: string; name: string }) => void;
 }) {
@@ -275,7 +289,7 @@ export function ManifestEditor({
         language="yaml"
         ariaLabel={ariaLabel}
         fill={fill}
-        copy
+        copy={copy}
         minHeight={fill ? undefined : 320}
         maxHeight={fill ? undefined : 520}
         schemaValidate={(y) =>

@@ -152,6 +152,21 @@ describe("CodeEditor — taking the document away", () => {
     expect(container.querySelector(".cm-selectionBackground, .cm-selectionLayer")).not.toBeNull();
   });
 
+  it("draws a focus indicator on the read-only pane it made reachable", () => {
+    // `tabindex="0"` puts the pane in the tab order; `kit.css` clears the
+    // outline from every focused `div`, and this content is one — so without
+    // a rule of its own a keyboard reader arriving here is given nothing at
+    // all to say where they are. Read off the stylesheet CodeMirror actually
+    // injected rather than off the source: jsdom applies no CSS and resolves
+    // no `:focus-visible`, so the rule's presence is what is observable.
+    // (#656 review)
+    render(<CodeEditor value="kind: Pod" readOnly ariaLabel="web manifest" />);
+    const sheets = [...document.querySelectorAll("style")].map((s) => s.textContent ?? "").join("");
+    const at = sheets.indexOf(".cm-content[tabindex]:focus-visible");
+    expect(at, "no focus indicator for a focusable read-only pane").toBeGreaterThan(-1);
+    expect(sheets.slice(at, sheets.indexOf("}", at))).toContain("outline");
+  });
+
   it("renders no Copy control unless the caller asks for one", () => {
     const { queryByRole } = render(<CodeEditor value="kind: Pod" ariaLabel="web manifest" />);
     expect(queryByRole("button", { name: /copy/i })).toBeNull();

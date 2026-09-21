@@ -182,6 +182,18 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean, flush:
     // A focus ring is an edge too; a flush editor fills its region and has
     // nothing to ring, and the caret already says where typing goes.
     "&.cm-focused": flush ? { outline: "none" } : { outline: "none", borderColor: "var(--accent)" },
+    // Except when there is no caret. A read-only document carries
+    // `tabindex="0"` so the chord can focus it (see below), which makes it a
+    // tab stop — and `kit.css` clears the outline from every focused `div`,
+    // which this content is. So a keyboard reader arriving here had nothing at
+    // all to tell them where they were. The ring is drawn INSIDE the content
+    // (`-2px`) because the pane is flush to its region's hairline and an
+    // outset ring is clipped by the scroller. Costs no layout either way: an
+    // outline never does. (#656 review)
+    ".cm-content[tabindex]:focus-visible": {
+      outline: "2px solid var(--accent)",
+      outlineOffset: "-2px",
+    },
     ".cm-scroller": { fontFamily: "var(--font-mono)", lineHeight: "1.55", overflow: "auto" },
     ".cm-content": { minHeight: fill ? "0" : `${minHeight}px`, caretColor: "var(--accent)" },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },

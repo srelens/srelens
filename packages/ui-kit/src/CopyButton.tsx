@@ -1,8 +1,6 @@
-import { useEffect, useState } from "react";
 import { Button } from "./Button";
 import { cx } from "./cx";
-
-const COPIED_MS = 1400;
+import { useCopied } from "./useCopied";
 
 export interface CopyButtonProps {
   /** What lands on the clipboard. */
@@ -48,35 +46,32 @@ function CopyGlyph() {
   );
 }
 
+/** What the control says at each outcome. `idle` is the action, not a state. */
+const WORD = { idle: "Copy", copied: "Copied", failed: "Copy failed" } as const;
+
 /**
  * Put something on the clipboard, and say so briefly.
  *
  * Extracted from {@link CopyCommand}, which had this inline. A second copy of
- * the clipboard dance — the `copied` flag, the timer that clears it, and the
- * silence when there is no clipboard at all — is a second place to get the
- * last of those wrong.
+ * the clipboard dance — the outcome, the timer that clears it, and what a
+ * refusal is allowed to claim — is a second place to get the last of those
+ * wrong.
  *
- * **A failed copy says nothing.** `navigator.clipboard` is unavailable on a
- * non-secure origin and can be refused outright, and "Copied" over an empty
- * clipboard is the only outcome here that actually misleads.
+ * **A failed copy never says "Copied".** `navigator.clipboard` is unavailable
+ * on a non-secure origin and can be refused outright, and a confirmation over
+ * an empty clipboard is the outcome here that actually misleads.
+ *
+ * **It does not say nothing, either.** It used to: the first draft swallowed
+ * the refusal on the grounds that silence at least does not lie. It does not
+ * lie and it does not help — the reader walks away believing the manifest is
+ * on their clipboard, which is the "copy that reported into a void" that
+ * {@link useCopied} was extracted to stop happening again. So the word becomes
+ * "Copy failed" and comes back after the same 1.4s, and the state is
+ * `useCopied`'s rather than a second timer kept here. (#656 review)
  */
 export function CopyButton({ text, label, iconOnly = false, className }: CopyButtonProps) {
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    if (!copied) return;
-    const timer = setTimeout(() => setCopied(false), COPIED_MS);
-    return () => clearTimeout(timer);
-  }, [copied]);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-    } catch {
-      // Nothing to recover and nothing to say: see the note above.
-    }
-  }
+  const { state, run } = useCopied();
+  const copied = state === "copied";
 
   return (
     <>
@@ -91,11 +86,14 @@ export function CopyButton({ text, label, iconOnly = false, className }: CopyBut
         // to its own outcome mid-interaction is the other half of that same
         // defect.
         aria-label={iconOnly ? label : undefined}
+        // The only place a sighted reader can be told a copy failed on the
+        // icon-only form, where there is no word to change.
+        title={state === "failed" ? WORD.failed : undefined}
         className={cx(className)}
-        onClick={() => void copy()}
+        onClick={() => void run(() => navigator.clipboard.writeText(text))}
       >
         {copied ? <CheckGlyph /> : <CopyGlyph />}
-        {!iconOnly && (copied ? "Copied" : "Copy")}
+        {!iconOnly && WORD[state]}
       </Button>
       {/*
         The icon-only form has no visible word to change, and both glyphs are
@@ -110,7 +108,7 @@ export function CopyButton({ text, label, iconOnly = false, className }: CopyBut
       */}
       {iconOnly && (
         <span role="status" aria-live="polite" className="sr-only">
-          {copied ? "Copied" : ""}
+          {state === "idle" ? "" : WORD[state]}
         </span>
       )}
     </>

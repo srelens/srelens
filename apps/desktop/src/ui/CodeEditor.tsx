@@ -162,6 +162,18 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean) {
       ...(fill ? { height: "100%" } : { maxHeight: `${maxHeight}px` }),
     },
     "&.cm-focused": { outline: "none", borderColor: "var(--fl-color-accent)" },
+    // A read-only document carries `tabindex="0"` so the chord can focus it
+    // (see below), which makes it a tab stop with no caret to say so. The
+    // stylesheet's own `:where(…, [tabindex]):focus-visible` ring does not
+    // reach it: `:where()` contributes no specificity, and CodeMirror's base
+    // theme sets `.cm-content { outline: none }` at a higher one. So the ring
+    // is declared here, where it outranks that. Drawn INSIDE the content
+    // (`-2px`) because the pane runs to its region's edge and an outset ring
+    // is clipped by the scroller. (#656 review)
+    ".cm-content[tabindex]:focus-visible": {
+      outline: "2px solid var(--fl-color-accent)",
+      outlineOffset: "-2px",
+    },
     ".cm-scroller": { fontFamily: "var(--fl-font-mono)", lineHeight: "1.55", overflow: "auto" },
     ".cm-content": { minHeight: fill ? "0" : `${minHeight}px`, caretColor: "var(--fl-color-accent)" },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--fl-color-accent)" },
@@ -444,48 +456,64 @@ export function CodeEditor({
   return (
     <div className="fl-editor-shell">
       <div ref={parentRef} className="fl-editor" />
-      {copy && <CopyDocumentButton text={value} label={ariaLabel ? `Copy ${ariaLabel}` : "Copy"} />}
+      {copy && <CopyDocumentButton text={value} />}
     </div>
   );
 }
 
-/** How long the control stays flipped after a copy. */
+/** How long the control stays flipped after a copy, matching the kit's §12. */
 const COPIED_MS = 1400;
 
+/** What the control says at each outcome. `idle` is the action, not a state. */
+const WORD = { idle: "Copy", copied: "Copied", failed: "Copy failed" } as const;
+
 /**
- * Put the document on the clipboard, and say so briefly.
+ * Put the document on the clipboard, and say what happened.
  *
  * **A failed copy never says "Copied".** `navigator.clipboard` is absent on a
  * non-secure origin and can be refused outright, and a confirmation over an
- * empty clipboard is the one outcome here that actually misleads — so the
- * failure is silent rather than cheerful.
+ * empty clipboard is the outcome here that actually misleads.
  *
- * The button's own name stays the action. The visible word changes to
- * "Copied", which is what a screen reader hears too, so the outcome is
- * announced once rather than twice.
+ * **It does not say nothing, either.** A refusal that repaints nothing leaves
+ * the reader believing the manifest is on their clipboard — a copy reporting
+ * into a void, which is the failure the kit's `useCopied` was extracted to
+ * stop. So the word becomes "Copy failed" and comes back after the same 1.4s.
+ *
+ * **The visible word is the whole message, and the only one.** It is also the
+ * button's accessible name, so a screen reader hears the change without a
+ * live region beside it saying the same thing again — and no `aria-label` sits
+ * over the top of it, which would silence the change entirely. There is no
+ * `title` either: classic's `Button` forwards none (verified in the running
+ * app), and a tooltip is what a control with no word of its own needs.
  */
-function CopyDocumentButton({ text, label }: { text: string; label: string }) {
-  const [copied, setCopied] = useState(false);
+function CopyDocumentButton({ text }: { text: string }) {
+  // An object, not a bare state: a second click while the first outcome is
+  // still up records the same value, React bails out of the identical update,
+  // and the effect never re-runs — so the second confirmation would vanish
+  // early on the first one's timer. (The kit's `useCopied` carries the same
+  // note; classic cannot import it without pulling the kit into this lazy
+  // chunk.)
+  const [result, setResult] = useState<{ state: keyof typeof WORD }>({ state: "idle" });
 
   useEffect(() => {
-    if (!copied) return;
-    const timer = setTimeout(() => setCopied(false), COPIED_MS);
+    if (result.state === "idle") return;
+    const timer = setTimeout(() => setResult({ state: "idle" }), COPIED_MS);
     return () => clearTimeout(timer);
-  }, [copied]);
+  }, [result]);
 
   async function run() {
     try {
       await navigator.clipboard.writeText(text);
-      setCopied(true);
+      setResult({ state: "copied" });
     } catch {
-      // Nothing to recover and nothing to say: see above.
+      setResult({ state: "failed" });
     }
   }
 
   return (
-    <Button variant="secondary" size="xs" className="fl-editor-copy" title={label} onClick={() => void run()}>
-      {copied ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}
-      {copied ? "Copied" : "Copy"}
+    <Button variant="secondary" size="xs" className="fl-editor-copy" onClick={() => void run()}>
+      {result.state === "copied" ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}
+      {WORD[result.state]}
     </Button>
   );
 }

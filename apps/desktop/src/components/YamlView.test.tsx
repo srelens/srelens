@@ -13,16 +13,25 @@ vi.mock("@srelens/core/lib/manifest", async (importOriginal) => {
 // CodeMirror needs real layout (unavailable in jsdom); stand in a controlled
 // textarea that mirrors the editor's value/onChange/aria-label contract.
 vi.mock("../ui/CodeEditor", () => ({
+  // `copy` rides on a data attribute: the real control is the kit's, tested
+  // there, and what matters at a CALL site is that the pane asked for one.
   CodeEditor: ({
     value,
     onChange,
     ariaLabel,
+    copy,
   }: {
     value: string;
     onChange?: (v: string) => void;
     ariaLabel?: string;
+    copy?: boolean;
   }) => (
-    <textarea aria-label={ariaLabel} value={value} onChange={(e) => onChange?.(e.target.value)} />
+    <textarea
+      aria-label={ariaLabel}
+      value={value}
+      onChange={(e) => onChange?.(e.target.value)}
+      data-copy={String(!!copy)}
+    />
   ),
 }));
 // ManifestEditor gates Apply (fail-closed) on a preflight access check in edit
@@ -53,6 +62,24 @@ describe("YamlView", () => {
       ),
     );
     expect(getManifestMock).toHaveBeenCalledWith("kind-dev", "Pod", "default", "web-1", undefined, undefined);
+  });
+
+  it("offers to copy the manifest", async () => {
+    // The pane in #656: a manifest a reader opens in order to take it away.
+    getManifestMock.mockResolvedValue({ yaml: "kind: Pod" });
+    render(<YamlView context="kind-dev" kind="Pod" namespace="default" name="web-1" />);
+    expect((await screen.findByLabelText("Manifest YAML")).dataset.copy).toBe("true");
+  });
+
+  it("offers no copy over a Secret, whose values this view shows in the clear", async () => {
+    // This view loads through `getManifest`, which redacts nothing — unlike
+    // the new design's pane (`redactSecretManifest`) and unlike the Edit tab
+    // (`loadEditableManifest`, which routes Secrets through the consent-gated
+    // `getSecret`). A one-click copy of unredacted Secret material is not an
+    // affordance to add on top of that gap. (#656 review)
+    getManifestMock.mockResolvedValue({ yaml: "kind: Secret" });
+    render(<YamlView context="kind-dev" kind="Secret" namespace="default" name="api" />);
+    expect((await screen.findByLabelText("Manifest YAML")).dataset.copy).toBe("false");
   });
 
   it("shows a load error", async () => {
