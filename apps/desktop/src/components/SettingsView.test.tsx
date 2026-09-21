@@ -695,11 +695,67 @@ describe("SettingsView", () => {
     // The desktop-only nav entries are gone entirely (not just empty panes).
     expect(screen.queryByRole("button", { name: /Updates/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /^MCP/ })).toBeNull();
+    // Backup is desktop-only too: a bundle is built from the desktop config
+    // directory and local kubeconfig files, so on the web the entry would
+    // open a pane whose every button fails.
+    expect(screen.queryByRole("button", { name: /Backup/ })).toBeNull();
 
     // The request-timeout slider is a no-op on the web (set_request_timeout
     // isn't a web command), so it's hidden rather than shown-but-broken.
     fireEvent.click(screen.getByRole("button", { name: /Kubernetes/ }));
     expect(await screen.findByLabelText("Default namespace")).toBeDefined();
     expect(screen.queryByLabelText("Cluster request timeout in seconds")).toBeNull();
+  });
+
+  it("opens Backup from the nav, so the section is actually reachable", async () => {
+    // A section with no way into it renders nowhere. `BackupSettingsSection`
+    // has its own suite; what is only checkable here is that the nav entry
+    // exists and that clicking it lands on that pane rather than a blank one.
+    render(
+      <SettingsView
+        theme={{ name: "slate", mode: "dark" }}
+        onThemeNameChange={() => {}}
+        onThemeModeChange={() => {}}
+        defaultNamespace=""
+        onDefaultNamespaceChange={() => {}}
+        layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}}
+        contextProfiles={{}}
+        onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]}
+        onKubeconfigFilesChange={() => {}}
+        contextOrder={[]}
+        onContextOrderChange={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Backup/ }));
+    expect(await screen.findByRole("button", { name: /Export setup/i })).toBeDefined();
+    expect(screen.getByRole("button", { name: /Choose file/i })).toBeDefined();
+  });
+
+  it("can be deep-linked straight to Backup", async () => {
+    // `initialSection` is how the rest of the app opens a specific pane; a
+    // new section that is not a valid value for it is only half-wired.
+    render(
+      <SettingsView
+        initialSection="backup"
+        theme={{ name: "slate", mode: "dark" }}
+        onThemeNameChange={() => {}}
+        onThemeModeChange={() => {}}
+        defaultNamespace=""
+        onDefaultNamespaceChange={() => {}}
+        layout={DEFAULT_WORKSPACE_LAYOUT}
+        onLayoutChange={() => {}}
+        contextProfiles={{}}
+        onContextProfilesChange={() => {}}
+        kubeconfigFiles={[]}
+        onKubeconfigFilesChange={() => {}}
+        contextOrder={[]}
+        onContextOrderChange={() => {}}
+      />,
+    );
+
+    expect(await screen.findByRole("button", { name: /Export setup/i })).toBeDefined();
   });
 });

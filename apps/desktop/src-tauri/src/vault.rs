@@ -35,7 +35,7 @@ const SERVICE: &str = "srelens";
 const MASTER_KEY_ACCOUNT: &str = "master-key";
 const FORMAT_VERSION: u8 = 1;
 const NONCE_LEN: usize = 24;
-const KEY_LEN: usize = 32;
+pub(crate) const KEY_LEN: usize = 32;
 
 /// Everything the vault holds. New fields must be `#[serde(default)]` so a
 /// vault written by an older build still decodes.
@@ -766,7 +766,7 @@ fn write_sealed(key: &[u8; KEY_LEN], path: &Path, secrets: &Secrets) -> std::io:
 }
 
 /// Seal arbitrary bytes as `[version][nonce][ciphertext]` under `key`.
-fn seal_bytes(key: &[u8; KEY_LEN], plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
+pub(crate) fn seal_bytes(key: &[u8; KEY_LEN], plaintext: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut nonce = [0u8; NONCE_LEN];
     getrandom::getrandom(&mut nonce).map_err(|e| std::io::Error::other(e.to_string()))?;
     let cipher = XChaCha20Poly1305::new(key.into());
@@ -780,7 +780,7 @@ fn seal_bytes(key: &[u8; KEY_LEN], plaintext: &[u8]) -> std::io::Result<Vec<u8>>
     Ok(out)
 }
 
-fn open_bytes(key: &[u8; KEY_LEN], bytes: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn open_bytes(key: &[u8; KEY_LEN], bytes: &[u8]) -> Option<Vec<u8>> {
     // The Poly1305 tag alone is 16 bytes, so anything shorter is garbage.
     if bytes.len() < 1 + NONCE_LEN + 16 || bytes[0] != FORMAT_VERSION {
         return None;

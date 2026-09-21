@@ -30,6 +30,7 @@ actions are identified and ask for confirmation before they run.
 - [Application logs](#application-logs)
 - [MCP server for AI agents](#mcp-server-for-ai-agents)
 - [AI assistant](#ai-assistant)
+- [Moving to another machine](#moving-to-another-machine)
 - [Settings reference](#settings-reference)
 - [Updating](#updating)
 
@@ -444,9 +445,57 @@ shown inline in the drawer's own transcript as well as the usual modal. The
 agent process itself never receives your kube credentials — only a scoped
 bearer token good for this loopback MCP server and nothing else.
 
+## Moving to another machine
+
+**Settings → Backup** exports your whole setup as one file and imports it on
+another computer.
+
+**Export** asks for a passphrase and writes
+`srelens-setup-<date>.srelens`. The file is always encrypted
+(XChaCha20-Poly1305, with the passphrase stretched by argon2id) because it
+carries the credentials your clusters connect with — there is no unencrypted
+form, and **a lost passphrase means a lost file**. Its readable header holds
+only the key-derivation parameters: the list of what is inside is encrypted
+too, so a bundle sitting in a downloads folder does not enumerate your
+clusters.
+
+It contains:
+
+- every kubeconfig srelens reads, **by content** — not the paths, which mean
+  nothing on the next machine;
+- your preferences: theme, layout, default namespace, and each cluster's
+  display name, colour and position;
+- your assistant skills and any MCP prompts you wrote;
+- the names of the apps you have installed, so you know what to reinstall;
+- the assistant's API keys and the MCP token, **only** if you tick that box.
+
+It deliberately does not contain the vault master password, its keychain entry,
+biometric enrolment, the MCP audit log, window state, or cluster OIDC tokens —
+the new machine signs in again for those.
+
+**Import** asks you to pick the file, then for its passphrase, and then shows
+what it found, group by group, before writing anything. Importing only adds:
+
+- a cluster whose kubeconfig you already have is reported as already present,
+  never duplicated — so importing the same file twice changes nothing the
+  second time;
+- a skill or prompt whose name is taken here is left as you have it, and the
+  report says which;
+- an API key this machine already has is kept, and the bundle's copy ignored;
+- apps are listed but never installed — they are code with capability grants,
+  so you install them again from **Settings → Apps** and review the permissions
+  on this machine.
+
+Nothing is ever deleted. Reload srelens after an import to pick up the imported
+preferences.
+
+A wrong passphrase, a damaged file, or one that is not a bundle at all is
+refused before anything is written, and each is reported as itself rather than
+as the others.
+
 ## Settings reference
 
-**Settings** (gear icon in the hotbar) has seven sections:
+**Settings** (gear icon in the hotbar) has these sections:
 
 1. **Appearance** — display mode (Dark / Light / System) and theme palette.
 2. **Layout** — left navigation and right details panel widths, with a reset.
@@ -456,9 +505,11 @@ bearer token good for this loopback MCP server and nothing else.
    ([above](#context-identity-and-kubeconfig-sources)).
 5. **MCP** — the MCP server, CLI, and client configuration
    ([above](#mcp-server-for-ai-agents)).
-6. **Application logs** — srelens's own log file
+6. **Backup** — export and import this whole setup
+   ([above](#moving-to-another-machine)).
+7. **Application logs** — srelens's own log file
    ([above](#application-logs)).
-7. **Updates** — version, release channel, and the in-app updater
+8. **Updates** — version, release channel, and the in-app updater
    ([below](#updating)).
 
 Desktop preferences are stored in a schema-versioned `settings.json` under the

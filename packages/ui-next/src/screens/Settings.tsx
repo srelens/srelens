@@ -13,13 +13,14 @@ import { AppearancePane } from "./settings/AppearancePane";
 import { AuditPane } from "./settings/AuditPane";
 import { McpServer } from "./settings/McpServer";
 import { SecurityPane } from "./settings/SecurityPane";
+import { BackupPane } from "./settings/BackupPane";
 import { AccessibilityPane, ClustersPane, ShortcutsPane } from "./settings/SmallPanes";
 
 /** Settings use the new design's stores and shared core commands. */
 /** §23's rail width for this screen, and this screen's alone (§A.1's table). */
 const NAV_WIDTH = 196;
 
-type SectionId = "extensions" | "agent" | "security" | "appearance" | "accessibility" | "shortcuts" | "workspace" | "kubernetes" | "logs" | "updates" | "clusters";
+type SectionId = "extensions" | "agent" | "security" | "backup" | "appearance" | "accessibility" | "shortcuts" | "workspace" | "kubernetes" | "logs" | "updates" | "clusters";
 
 /**
  * §23's nav, in §23's order, minus `Deep links`.
@@ -40,6 +41,14 @@ type SectionId = "extensions" | "agent" | "security" | "appearance" | "accessibi
  * and Connections offers no file adding there for the same reason. A control
  * that cannot work is not drawn, and the reason is said once — in the rail,
  * where the missing entry would have been.
+ *
+ * **`Backup` is desktop-only for the same reason, one step further.**
+ * `bundle_export`, `bundle_pick_file`, `bundle_preview` and `bundle_import`
+ * are Tauri commands with no arm in `api_command.rs`, so on the web every
+ * control in the pane would reject — and even if they answered, a bundle is
+ * assembled from the desktop config directory and the kubeconfig files on that
+ * machine's disk, neither of which a browser has. There is nothing left over
+ * to draw, so the entry is not drawn.
  *
  * **`Agent & MCP` keeps its entry on the web, and loses two of its four
  * panes.** It is the section this screen OPENS ON, and `McpServer` and
@@ -73,6 +82,7 @@ type SectionId = "extensions" | "agent" | "security" | "appearance" | "accessibi
 const SECTIONS: ReadonlyArray<{ id: SectionId; label: string; desktopOnly?: true }> = [
   { id: "agent", label: "Agent & MCP" },
   { id: "security", label: "Security", desktopOnly: true },
+  { id: "backup", label: "Backup", desktopOnly: true },
   { id: "appearance", label: "Appearance" },
   { id: "accessibility", label: "Accessibility" },
   { id: "shortcuts", label: "Shortcuts" },
@@ -189,6 +199,8 @@ export function Settings({ ported, onSwitchToClassic, onLocked }: SettingsProps)
         );
       case "security":
         return <SecurityPane onLocked={onLocked} />;
+      case "backup":
+        return <BackupPane />;
       case "appearance":
         return <AppearancePane ported={ported} onSwitchToClassic={onSwitchToClassic} />;
       case "accessibility":
