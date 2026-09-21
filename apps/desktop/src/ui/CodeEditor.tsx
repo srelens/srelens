@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { Check, Copy } from "lucide-react";
 import { EditorState } from "@codemirror/state";
 import {
   EditorView,
@@ -27,6 +28,13 @@ import { parseAllDocuments } from "yaml";
 import { tags as t } from "@lezer/highlight";
 import type { SchemaBundle } from "@srelens/core";
 import { extractApiVersionKind, pathAtCursor, fieldCompletions, valueCompletions } from "@srelens/core";
+// The chord itself, shared with the new design's editor rather than written
+// twice — see that module for why the browser will not answer it. A leaf
+// import, not the kit's barrel: this component is lazy-loaded into a classic
+// boot, and reaching through `@srelens/ui-kit` would pull the whole component
+// library into that chunk (the wall `design.ts` describes). (#656)
+import { registerSelectAllTarget } from "@srelens/ui-kit/select-all";
+import { Button } from "./Button";
 
 /**
  * Parse YAML (one or more `---`-separated documents) and return syntax
@@ -155,6 +163,18 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean) {
       ...(fill ? { height: "100%" } : { maxHeight: `${maxHeight}px` }),
     },
     "&.cm-focused": { outline: "none", borderColor: "var(--fl-color-accent)" },
+    // A read-only document carries `tabindex="0"` so the chord can focus it
+    // (see below), which makes it a tab stop with no caret to say so. The
+    // stylesheet's own `:where(…, [tabindex]):focus-visible` ring does not
+    // reach it: `:where()` contributes no specificity, and CodeMirror's base
+    // theme sets `.cm-content { outline: none }` at a higher one. So the ring
+    // is declared here, where it outranks that. Drawn INSIDE the content
+    // (`-2px`) because the pane runs to its region's edge and an outset ring
+    // is clipped by the scroller. (#656 review)
+    ".cm-content[tabindex]:focus-visible": {
+      outline: "2px solid var(--fl-color-accent)",
+      outlineOffset: "-2px",
+    },
     ".cm-scroller": { fontFamily: "var(--fl-font-mono)", lineHeight: "1.55", overflow: "auto" },
     ".cm-content": { minHeight: fill ? "0" : `${minHeight}px`, caretColor: "var(--fl-color-accent)" },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--fl-color-accent)" },
@@ -326,6 +346,15 @@ export interface CodeEditorProps {
   /** Fill the parent's height (scroll internally) instead of growing to content. */
   fill?: boolean;
   /**
+   * A Copy control over the pane's top-right corner, putting the whole
+   * document on the clipboard in one click.
+   *
+   * Off by default — an editor that is a control inside a form wants no chrome
+   * — and on for the panes a reader opens in order to take the text away: a
+   * manifest, a release's values. (#656)
+   */
+  copy?: boolean;
+  /**
    * k8s-aware validation: given the YAML, resolve to server-side validation
    * error messages (empty = valid). Wired to `k8s.validateManifest`. When set,
    * the editor lints against the API server in addition to YAML syntax.
@@ -355,6 +384,7 @@ export function CodeEditor({
   fill = false,
   schemaValidate,
   schemaSource,
+  copy = false,
 }: CodeEditorProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -456,7 +486,17 @@ export function CodeEditor({
       };
       extensions.push(autocompletion({ override: [completionSource] }));
     }
-    if (ariaLabel) extensions.push(EditorView.contentAttributes.of({ "aria-label": ariaLabel }));
+    const contentAttrs: Record<string, string> = {};
+    if (ariaLabel) contentAttrs["aria-label"] = ariaLabel;
+    // A read-only document is `contenteditable="false"`, which the browser
+    // will not focus and will not put a caret in — so the pane could not be
+    // reached by keyboard at all, and a selection made in it was never the
+    // document's own selection, which is what ⌘C copies. A tab stop is what a
+    // non-editable text region needs either way. (#656)
+    if (readOnly) contentAttrs.tabindex = "0";
+    if (Object.keys(contentAttrs).length > 0) {
+      extensions.push(EditorView.contentAttributes.of(contentAttrs));
+    }
 
     const view = new EditorView({
       state: EditorState.create({ doc: value, extensions }),
@@ -471,6 +511,33 @@ export function CodeEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readOnly, language, ariaLabel, minHeight, maxHeight, fill]);
 
+  /**
+   * Answer ⌘A / Ctrl-A for a reader who has not clicked into the editor.
+   *
+   * Pressed on the body, the browser's own select-all takes the whole page
+   * AROUND a `contenteditable` and leaves its text out — so the manifest view
+   * put every label and table row beside the YAML on the clipboard, and no
+   * YAML. The closures are read at keypress because the view is created
+   * imperatively above, and replaced outright whenever a structural option
+   * rebuilds it. (#656)
+   */
+  useEffect(
+    () =>
+      registerSelectAllTarget({
+        dom: () => viewRef.current?.dom ?? null,
+        selectAll: () => {
+          const view = viewRef.current;
+          if (!view) return;
+          // Focus FIRST: CodeMirror writes the DOM selection only for a view
+          // that has focus (or already holds the selection), so without it the
+          // editor draws a range the clipboard knows nothing about.
+          view.focus();
+          view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+        },
+      }),
+    [],
+  );
+
   // Push external value changes into the editor (e.g. after Reset or reload).
   useEffect(() => {
     const view = viewRef.current;
@@ -481,5 +548,74 @@ export function CodeEditor({
     }
   }, [value]);
 
-  return <div ref={parentRef} className="fl-editor" />;
+  // The Copy control is positioned against a wrapper rather than dropped in
+  // beside the editor: CodeMirror owns `parentRef`'s children — it appends its
+  // own tree there — and React reconciling siblings into a node another
+  // library writes to is how a pane loses its editor on the next render.
+  return (
+    <div className="fl-editor-shell">
+      <div ref={parentRef} className="fl-editor" />
+      {/* The live document, read at the click: CodeMirror owns it and
+          `onChange` is optional, so `value` is only the text this component
+          was last TOLD about. (#656 review) */}
+      {copy && <CopyDocumentButton text={() => viewRef.current?.state.doc.toString() ?? value} />}
+    </div>
+  );
+}
+
+/** How long the control stays flipped after a copy, matching the kit's §12. */
+const COPIED_MS = 1400;
+
+/** What the control says at each outcome. `idle` is the action, not a state. */
+const WORD = { idle: "Copy", copied: "Copied", failed: "Copy failed" } as const;
+
+/**
+ * Put the document on the clipboard, and say what happened.
+ *
+ * **A failed copy never says "Copied".** `navigator.clipboard` is absent on a
+ * non-secure origin and can be refused outright, and a confirmation over an
+ * empty clipboard is the outcome here that actually misleads.
+ *
+ * **It does not say nothing, either.** A refusal that repaints nothing leaves
+ * the reader believing the manifest is on their clipboard — a copy reporting
+ * into a void, which is the failure the kit's `useCopied` was extracted to
+ * stop. So the word becomes "Copy failed" and comes back after the same 1.4s.
+ *
+ * **The visible word is the whole message, and the only one.** It is also the
+ * button's accessible name, so a screen reader hears the change without a
+ * live region beside it saying the same thing again — and no `aria-label` sits
+ * over the top of it, which would silence the change entirely. There is no
+ * `title` either: classic's `Button` forwards none (verified in the running
+ * app), and a tooltip is what a control with no word of its own needs.
+ */
+function CopyDocumentButton({ text }: { text: () => string }) {
+  // An object, not a bare state: a second click while the first outcome is
+  // still up records the same value, React bails out of the identical update,
+  // and the effect never re-runs — so the second confirmation would vanish
+  // early on the first one's timer. (The kit's `useCopied` carries the same
+  // note; classic cannot import it without pulling the kit into this lazy
+  // chunk.)
+  const [result, setResult] = useState<{ state: keyof typeof WORD }>({ state: "idle" });
+
+  useEffect(() => {
+    if (result.state === "idle") return;
+    const timer = setTimeout(() => setResult({ state: "idle" }), COPIED_MS);
+    return () => clearTimeout(timer);
+  }, [result]);
+
+  async function run() {
+    try {
+      await navigator.clipboard.writeText(text());
+      setResult({ state: "copied" });
+    } catch {
+      setResult({ state: "failed" });
+    }
+  }
+
+  return (
+    <Button variant="secondary" size="xs" className="fl-editor-copy" onClick={() => void run()}>
+      {result.state === "copied" ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}
+      {WORD[result.state]}
+    </Button>
+  );
 }

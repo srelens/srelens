@@ -83,8 +83,7 @@ export function CopyCommand({ command, className }: CopyCommandProps) {
     <div className={cx("copy-command", className)}>
       <code className="code copy-command-text">{command}</code>
       {/* The clipboard dance lives in `CopyButton` now — one place for the
-          `copied` flag, its timer, and the silence when there is no clipboard
-          at all. */}
+          outcome, its timer, and what a refusal is allowed to claim. */}
       <CopyButton text={command} label="Copy the command" />
     </div>
   );

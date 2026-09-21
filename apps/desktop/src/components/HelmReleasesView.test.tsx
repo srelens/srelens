@@ -23,8 +23,10 @@ vi.mock("@srelens/core/lib/useNamespaceOptions", () => ({
 }));
 // CodeMirror needs real layout; stand in a textarea.
 vi.mock("../ui/CodeEditor", () => ({
-  CodeEditor: ({ value, ariaLabel }: { value: string; ariaLabel?: string }) => (
-    <textarea aria-label={ariaLabel} value={value} readOnly />
+  // `copy` rides on a data attribute: the real control is the kit's, tested
+  // there, and what matters at a CALL site is that the pane asked for one.
+  CodeEditor: ({ value, ariaLabel, copy }: { value: string; ariaLabel?: string; copy?: boolean }) => (
+    <textarea aria-label={ariaLabel} value={value} readOnly data-copy={String(!!copy)} />
   ),
 }));
 
@@ -99,6 +101,20 @@ describe("HelmReleasesView", () => {
     // History tab.
     await userEvent.click(screen.getByRole("tab", { name: /History/ }));
     expect(await screen.findByText("Upgrade complete")).toBeDefined();
+  });
+
+  it("offers to copy the values and the manifest", async () => {
+    // Both panes are read-only text a reader opens in order to take it away,
+    // and neither had any way to do it but a chord the browser would not aim
+    // at a `contenteditable`. Asserted at the CALL site because that is what
+    // a later edit would silently drop. (#656 review)
+    render(<HelmReleasesView context="kind-dev" />);
+    await waitFor(() => expect(screen.getByText("redis")).toBeDefined());
+    fireEvent.click(screen.getByText("redis"));
+
+    expect((await screen.findByLabelText("Release values")).dataset.copy).toBe("true");
+    await userEvent.click(screen.getByRole("tab", { name: "Manifest" }));
+    expect((await screen.findByLabelText("Release manifest")).dataset.copy).toBe("true");
   });
 
   it("shows an empty state when no releases", async () => {

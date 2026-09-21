@@ -582,6 +582,7 @@ function HelmReleaseDetailPanel({ detail, error }: { detail: HelmReleaseDetail |
                 value={detail.valuesYaml || "# no user-supplied values\n"}
                 readOnly
                 fill
+                copy
                 ariaLabel="Release values"
               />
             </div>
@@ -594,6 +595,7 @@ function HelmReleaseDetailPanel({ detail, error }: { detail: HelmReleaseDetail |
                 value={detail.manifest || "# empty manifest\n"}
                 readOnly
                 fill
+                copy
                 ariaLabel="Release manifest"
               />
             </div>

@@ -131,6 +131,9 @@ export function NewResourceEditor({
       onYamlChange={(yaml) => onDraftChange({ ...current, yaml })}
       ariaLabel="New resource YAML"
       fill
+      // The reader's own draft, from a template or their typing: nothing the
+      // cluster handed over is in it.
+      copy
       headerLabel="New resource"
       applyLabel="Create"
       applyingLabel="Creating…"

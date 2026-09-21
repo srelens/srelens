@@ -8,8 +8,25 @@ vi.mock("@srelens/core/lib/manifest", async (importOriginal) => ({
   applyManifest: applyManifestMock,
 }));
 vi.mock("../ui/CodeEditor", () => ({
-  CodeEditor: ({ value, onChange, ariaLabel }: { value: string; onChange?: (v: string) => void; ariaLabel?: string }) => (
-    <textarea aria-label={ariaLabel} value={value} onChange={(e) => onChange?.(e.target.value)} />
+  // `copy` rides on a data attribute: the real control is the kit's, tested
+  // there, and what matters at a CALL site is that the pane asked for one.
+  CodeEditor: ({
+    value,
+    onChange,
+    ariaLabel,
+    copy,
+  }: {
+    value: string;
+    onChange?: (v: string) => void;
+    ariaLabel?: string;
+    copy?: boolean;
+  }) => (
+    <textarea
+      aria-label={ariaLabel}
+      value={value}
+      onChange={(e) => onChange?.(e.target.value)}
+      data-copy={String(!!copy)}
+    />
   ),
 }));
 
@@ -51,6 +68,13 @@ describe("NewResourceEditor", () => {
     expect(onCreated).toHaveBeenCalled();
     // Editor is still present (tab stays open to create more).
     expect(screen.getByLabelText("New resource YAML")).toBeDefined();
+  });
+
+  it("offers to copy the draft", () => {
+    // The reader's own draft, from a template or their typing: nothing the
+    // cluster handed over is in it. (#656 review)
+    render(<StatefulNewResourceEditor context="kind-dev" />);
+    expect(screen.getByLabelText("New resource YAML").dataset.copy).toBe("true");
   });
 
   it("surfaces an apply error", async () => {

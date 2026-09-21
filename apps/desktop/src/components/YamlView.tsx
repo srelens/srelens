@@ -52,6 +52,12 @@ export function YamlView({
     <ManifestEditor
       context={context}
       namespace={namespace ?? undefined}
+      // Every kind but one. This view loads through `getManifest`, which
+      // redacts nothing, so a Secret's values are on screen in the clear —
+      // a gap this design has had since before #656 and one that wants the
+      // redaction the new design's pane does, not a Copy button over the top
+      // of it. Withheld rather than shipped while that is outstanding.
+      copy={kind !== "Secret"}
       yaml={draft}
       onYamlChange={setDraft}
       confirm={{ kind, name }}

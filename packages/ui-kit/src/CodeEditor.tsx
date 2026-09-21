@@ -25,6 +25,8 @@ import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { autocompletion, completionKeymap, type CompletionSource } from "@codemirror/autocomplete";
 import { parseAllDocuments } from "yaml";
 import { tags as t } from "@lezer/highlight";
+import { CopyButton } from "./CopyButton";
+import { registerSelectAllTarget } from "./selectAll";
 
 /**
  * Parse YAML (one or more `---`-separated documents) and return syntax
@@ -181,6 +183,18 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean, flush:
     // A focus ring is an edge too; a flush editor fills its region and has
     // nothing to ring, and the caret already says where typing goes.
     "&.cm-focused": flush ? { outline: "none" } : { outline: "none", borderColor: "var(--accent)" },
+    // Except when there is no caret. A read-only document carries
+    // `tabindex="0"` so the chord can focus it (see below), which makes it a
+    // tab stop — and `kit.css` clears the outline from every focused `div`,
+    // which this content is. So a keyboard reader arriving here had nothing at
+    // all to tell them where they were. The ring is drawn INSIDE the content
+    // (`-2px`) because the pane is flush to its region's hairline and an
+    // outset ring is clipped by the scroller. Costs no layout either way: an
+    // outline never does. (#656 review)
+    ".cm-content[tabindex]:focus-visible": {
+      outline: "2px solid var(--accent)",
+      outlineOffset: "-2px",
+    },
     ".cm-scroller": { fontFamily: "var(--font-mono)", lineHeight: "1.55", overflow: "auto" },
     ".cm-content": { minHeight: fill ? "0" : `${minHeight}px`, caretColor: "var(--accent)" },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)" },
@@ -414,6 +428,16 @@ export interface CodeEditorProps {
    * knowing too.
    */
   onDiagnostics?: (diagnostics: EditorDiagnostic[]) => void;
+  /**
+   * A Copy control over the pane's top-right corner, putting the whole
+   * document on the clipboard in one click.
+   *
+   * Off by default, because this is chrome and an editor that is a control
+   * inside a form does not want any. On for the panes a reader opens in order
+   * to take the text away — a manifest, a release's values — where the
+   * select-all chord alone is an affordance with nothing to see. (#656)
+   */
+  copy?: boolean;
 }
 
 /**
@@ -435,6 +459,7 @@ export function CodeEditor({
   flush = false,
   onCursorChange,
   onDiagnostics,
+  copy = false,
 }: CodeEditorProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -537,7 +562,17 @@ export function CodeEditor({
         autocompletion({ override: [(ctx) => completionsRef.current?.(ctx) ?? null] }),
       );
     }
-    if (ariaLabel) extensions.push(EditorView.contentAttributes.of({ "aria-label": ariaLabel }));
+    const contentAttrs: Record<string, string> = {};
+    if (ariaLabel) contentAttrs["aria-label"] = ariaLabel;
+    // A read-only document is `contenteditable="false"`, which the browser
+    // will not focus and will not put a caret in — so the pane could not be
+    // reached by keyboard at all, and a selection made in it was never the
+    // document's own selection, which is what ⌘C copies. A tab stop is what a
+    // non-editable text region needs either way. (#656)
+    if (readOnly) contentAttrs.tabindex = "0";
+    if (Object.keys(contentAttrs).length > 0) {
+      extensions.push(EditorView.contentAttributes.of(contentAttrs));
+    }
 
     const view = new EditorView({
       state: EditorState.create({ doc: value, extensions }),
@@ -552,6 +587,33 @@ export function CodeEditor({
     // Re-create only when structural options change, not on every value/onChange.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readOnly, language, ariaLabel, minHeight, maxHeight, fill, flush]);
+
+  /**
+   * Answer ⌘A / Ctrl-A for a reader who has not clicked into the editor.
+   *
+   * `selectAll.ts` has the why: pressed on the body, the chord selects the
+   * whole page AROUND a `contenteditable` and leaves its text out of the
+   * selection entirely — every label and table row beside the manifest on the
+   * clipboard, and no manifest. The closures are read at keypress because the
+   * view is created imperatively above, and is replaced outright whenever a
+   * structural option rebuilds it. (#656)
+   */
+  useEffect(
+    () =>
+      registerSelectAllTarget({
+        dom: () => viewRef.current?.dom ?? null,
+        selectAll: () => {
+          const view = viewRef.current;
+          if (!view) return;
+          // Focus FIRST: CodeMirror writes the DOM selection only for a view
+          // that has focus (or already holds the selection), so without it the
+          // editor draws a range the clipboard knows nothing about.
+          view.focus();
+          view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+        },
+      }),
+    [],
+  );
 
   // A new validator has to be asked about the document already on screen.
   // Swapping it changes what is true — a different cluster, a different set of
@@ -575,5 +637,24 @@ export function CodeEditor({
     }
   }, [value]);
 
-  return <div ref={parentRef} className="h-full w-full [&_.cm-editor]:h-full [&_.cm-scroller]:overflow-auto" />;
+  // The Copy control is positioned against a wrapper rather than dropped in
+  // beside the editor: CodeMirror owns `parentRef`'s children — it appends its
+  // own tree there — and React reconciling siblings into a node another
+  // library writes to is how a pane loses its editor on the next render.
+  return (
+    <div className="relative h-full w-full">
+      <div ref={parentRef} className="h-full w-full [&_.cm-editor]:h-full [&_.cm-scroller]:overflow-auto" />
+      {copy && (
+        <CopyButton
+          // The live document, read at the click. CodeMirror owns it and
+          // `onChange` is optional, so `value` is only the text this component
+          // was last TOLD about — which is not what the reader is looking at
+          // the moment they have typed. (#656 review)
+          text={() => viewRef.current?.state.doc.toString() ?? value}
+          label={ariaLabel ? `Copy ${ariaLabel}` : "Copy"}
+          className="code-copy"
+        />
+      )}
+    </div>
+  );
 }

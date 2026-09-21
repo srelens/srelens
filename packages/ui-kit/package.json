@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./select-all": "./src/selectAll.ts",
     "./styles": "./src/styles/kit.css",
     "./gallery": "./src/gallery/Gallery.tsx",
     "./search-panel": "./src/searchPanel.ts"

@@ -1577,6 +1577,34 @@
     .copy-ok { transition: none; }
   }
 
+  /* --- Copy, over the corner of a code pane ----------------------
+
+     A read-only manifest is something a reader opens in order to take it
+     away, and until #656 the only route was a chord the browser refuses to
+     aim at a `contenteditable`. The chord works now; this is the half of the
+     answer that can be seen.
+
+     It sits OVER the document rather than in a strip above it. The pane fills
+     its region edge to edge (see "panes"), so a header added on top of it
+     costs a line of YAML on every surface that shows one — including the
+     drawer, where the manifest already has the least room to read in. The
+     corner it covers holds the right-hand end of `apiVersion: v1`, which is
+     nowhere near it.
+
+     Opaque, not faded back until hovered: a control that is invisible until
+     the pointer is already on it is not an affordance, and fading it would
+     take the contrast the theme guarantees away from the reader who most
+     needs it. */
+  .code-copy {
+    position: absolute;
+    top: 0.375rem;
+    right: 0.75rem;
+    z-index: 1;
+    background: var(--surface);
+    border-color: var(--rule);
+  }
+  .code-copy:hover { background: var(--field); border-color: var(--rule-strong); }
+
   .scroll { overflow: auto; scrollbar-gutter: stable; }
 }
 

@@ -300,6 +300,9 @@ it("shows a quarantined app by ID, not by a name this host no longer accepts", a
   expect(manifest.textContent).toContain(String.raw`\udb40\udc01`);
   expect(manifest.textContent).not.toContain(String.raw`\ue0001`);
   expect(document.body.textContent).not.toContain("‮");
+  // And it can be taken away in one click: a stored manifest is read-only
+  // text a reader opens in order to keep it. (#656 review)
+  expect(within(details).getByRole("button", { name: "Copy" })).toBeTruthy();
 });
 it("says the manifest check failed, offers a retry and does not offer to install", async () => {
   vi.mocked(validateExtension).mockRejectedValueOnce(new Error("bridge timed out"));

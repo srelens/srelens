@@ -69,15 +69,40 @@ describe("CopyButton", () => {
     expect(screen.queryByRole("status")).toBeNull();
   });
 
-  it("says nothing when the clipboard refuses", async () => {
+  it("says a refusal out loud, and never says Copied over it", async () => {
     const writeText = vi
       .fn<(text: string) => Promise<void>>()
       .mockRejectedValue(new Error("Document is not focused"));
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     render(<CopyButton text="x" label="Copy the whole conversation" iconOnly />);
     await userEvent.click(screen.getByRole("button", { name: "Copy the whole conversation" }));
-    // "Copied" over an empty clipboard is the one outcome here that actually
-    // misleads, so a refusal claims nothing.
-    expect(screen.getByRole("status").textContent).toBe("");
+
+    // "Copied" over an empty clipboard is the outcome that actually misleads.
+    // Silence is the one that used to be here, and it is not much better: the
+    // reader walks away believing they have the text. (#656 review)
+    await waitFor(() => {
+      expect(screen.getByRole("status").textContent).toBe("Copy failed");
+    });
+    expect(screen.queryByText("Copied")).toBeNull();
+    // The icon-only form has no word of its own, so the tooltip is where a
+    // sighted reader is told.
+    expect(screen.getByRole("button", { name: "Copy the whole conversation" }).title).toBe("Copy failed");
   });
+
+  it("says a refusal in its own word when it has one", async () => {
+    const writeText = vi
+      .fn<(text: string) => Promise<void>>()
+      .mockRejectedValue(new Error("Document is not focused"));
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(<CopyButton text="x" label="Copy" />);
+    await userEvent.click(screen.getByRole("button", { name: /copy/i }));
+
+    await screen.findByText("Copy failed");
+    // And no live region beside it: the visible word already changed, and the
+    // accessible name changed with it.
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  // That the word comes BACK after 1.4s — for a refusal as for a success — is
+  // `useCopied`'s window, and `useCopied.test.tsx` is where it is pinned.
 });

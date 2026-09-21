@@ -107,6 +107,7 @@ export function ExtensionDetails({
         value={escapeFormatCharacters(JSON.stringify(manifest, null, 2))}
         readOnly
         language="none"
+        copy
         ariaLabel={`${extensionLabel(plugin)} manifest`}
         minHeight={160}
         maxHeight={360}

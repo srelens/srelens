@@ -265,6 +265,7 @@ export function ReviewManifest({ text }: { text: string }) {
           value={escapeFormatCharacters(text)}
           readOnly
           language="none"
+          copy
           ariaLabel="Manifest under review"
           minHeight={160}
           maxHeight={360}

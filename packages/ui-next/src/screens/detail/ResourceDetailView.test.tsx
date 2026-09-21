@@ -1342,9 +1342,27 @@ describe("ResourceDetailView", () => {
       // this is the chain that carries it down to the editor.
       const host = container.querySelector('[data-slot="yaml-editor"]') as HTMLElement | null;
       expect(host?.className).toContain("h-full");
-      const seat = host?.querySelector(".cm-editor")?.parentElement?.parentElement;
+      // Found by walking DOWN from the pane rather than counting wrappers up
+      // from CodeMirror: the seat is the pane's own child that holds the
+      // editor, and how many elements the kit puts between the two is the
+      // kit's business — it gained one when the editor grew a Copy control.
+      const seat = [...(host?.children ?? [])].find((el) => el.querySelector(".cm-editor"));
       expect(seat?.className).toContain("flex-1");
       expect(seat?.className).toContain("min-h-0");
+    });
+
+    it("offers a Copy control over the manifest", async () => {
+      // #656's own surface. The chord answers for a reader who knows it; this
+      // is the half of the answer there is something to see. Asserted HERE,
+      // not only in the kit, because the prop is the call site's and dropping
+      // it would leave every editor test green. (#656 review)
+      getObject.mockResolvedValue({ object: POD });
+      const { container, getByRole } = await openYaml("Pod", "web-1");
+      await waitFor(() => expect(container.querySelector(".cm-content")).not.toBeNull());
+
+      expect(codeEditorProps.at(-1)?.copy).toBe(true);
+      // Named for what it does, and distinct from the bar's "Copy as kubectl".
+      expect(getByRole("button", { name: "Copy" })).toBeDefined();
     });
 
     it("keeps the Secret redaction notice from taking that height away", async () => {
@@ -1359,7 +1377,11 @@ describe("ResourceDetailView", () => {
       expect(codeEditorProps.at(-1)?.fill).toBe(true);
       const host = container.querySelector('[data-slot="yaml-editor"]') as HTMLElement | null;
       expect(host?.className).toContain("h-full");
-      const seat = host?.querySelector(".cm-editor")?.parentElement?.parentElement;
+      // Found by walking DOWN from the pane rather than counting wrappers up
+      // from CodeMirror: the seat is the pane's own child that holds the
+      // editor, and how many elements the kit puts between the two is the
+      // kit's business — it gained one when the editor grew a Copy control.
+      const seat = [...(host?.children ?? [])].find((el) => el.querySelector(".cm-editor"));
       expect(seat?.className).toContain("flex-1");
       expect(seat?.className).toContain("min-h-0");
     });

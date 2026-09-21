@@ -46,6 +46,8 @@ it("shows the manifest and events, offers Resume for a suspended resource, and r
   expect((screen.getByRole("button",{name:"Reconcile"}) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.click(screen.getByRole("tab",{name:"Manifest"}));expect(screen.getByRole("textbox",{name:"apps manifest"}).getAttribute("contenteditable")).toBe("false");
   expect(screen.getByRole("textbox",{name:"apps manifest"}).textContent).toContain("kind: Kustomization");
+  // A read-only manifest a reader opens in order to take it away. (#656 review)
+  expect(screen.getByRole("button",{name:"Copy"})).toBeTruthy();
   vi.mocked(actOnExtensionResource).mockResolvedValue({requested:false});
   fireEvent.click(screen.getByRole("button",{name:"Resume"}));fireEvent.click(screen.getByRole("button",{name:"Confirm Resume"}));
   expect(await screen.findByText(/not acknowledged/)).toBeTruthy();

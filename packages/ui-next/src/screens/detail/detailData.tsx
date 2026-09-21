@@ -586,7 +586,7 @@ function YamlPane({
         </Alert>
       )}
       <div className="min-h-0 flex-1">
-        <CodeEditor value={state.data} readOnly language="yaml" fill ariaLabel={`${name} manifest`} />
+        <CodeEditor value={state.data} readOnly language="yaml" fill copy ariaLabel={`${name} manifest`} />
       </div>
     </div>
   );
