@@ -23,12 +23,54 @@ use crate::connect::request_timeout;
 /// place, keeping the keys. `get_object` runs this so the generic
 /// structured-detail path never carries Secret material — values are only
 /// read through the dedicated, consent-gateable `k8s.getSecret`.
+///
+/// **And every value under `metadata.annotations`, keys kept.** Blanking `data`
+/// while leaving the annotations alone put the same values back two lines
+/// further down: on an `apply`-managed Secret,
+/// `kubectl.kubernetes.io/last-applied-configuration` holds the entire applied
+/// manifest, base64 `data` map included. Both ungated readers of this path —
+/// `k8s.getManifest` and `k8s.diffManifest` — returned it in the clear.
+///
+/// The scope rule is **every annotation on a Secret**, not "the one annotation
+/// kubectl writes", and the difference is the point: any controller can echo a
+/// Secret's material into an annotation of its own (a copy for a sidecar, a
+/// "previous value" left by a rotation, a checksum over the plaintext), and
+/// nothing here can tell those from a harmless one by looking at the key. A
+/// rule naming one well-known key would read as complete while covering one
+/// carrier out of many.
+///
+/// This is the same rule, for the same reason, that `redactSecretManifest`
+/// (`packages/core/src/lib/manifest.ts`) applies to the editor's YAML. The two
+/// were one finding apart: the frontend was fixed, the backend that serves
+/// every other caller — MCP clients included — was not.
+///
+/// Both sides of a diff run through this, so a *change* to a Secret's
+/// annotation reads as unchanged. That is the trade `data` already makes, and
+/// it is the right way round: a redactor that showed the change would show the
+/// value.
 pub(crate) fn redact_secret_data(object: &mut serde_json::Value) {
     for key in ["data", "stringData"] {
         if let Some(map) = object.get_mut(key).and_then(|d| d.as_object_mut()) {
             for value in map.values_mut() {
                 *value = serde_json::Value::String(String::new());
             }
+        }
+    }
+    if let Some(annotations) = object
+        .get_mut("metadata")
+        .and_then(|m| m.get_mut("annotations"))
+    {
+        match annotations.as_object_mut() {
+            Some(map) => {
+                for value in map.values_mut() {
+                    *value = serde_json::Value::String(String::new());
+                }
+            }
+            // Unreachable from either caller — both serialize a `DynamicObject`,
+            // whose annotations are a string map or absent. Blanked whole
+            // rather than passed through, because a redactor that hands back
+            // whatever it did not recognise is not a redactor.
+            None => *annotations = serde_json::Value::String(String::new()),
         }
     }
 }
@@ -205,6 +247,72 @@ mod tests {
         assert_eq!(string_data["password"], serde_json::json!(""));
         assert_eq!(string_data["username"], serde_json::json!(""));
         assert!(!object.to_string().contains("hunter2"));
+    }
+
+    /// The carrier that made blanking `data` alone useless: on an
+    /// `apply`-managed Secret, `last-applied-configuration` holds the whole
+    /// manifest, base64 `data` map included. Before this, `k8s.getManifest`
+    /// and `k8s.diffManifest` — both ungated reads — returned it in the clear.
+    #[test]
+    fn redaction_blanks_a_data_map_hidden_in_the_last_applied_annotation() {
+        let applied = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "web-tls", "namespace": "prod" },
+            "data": { "tls.key": "TU9SRQ==", "token": "U0VDUkVU" }
+        })
+        .to_string();
+        let mut object = serde_json::json!({
+            "kind": "Secret",
+            "metadata": {
+                "name": "web-tls",
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration": applied,
+                    "reloader.stakater.com/match": "true"
+                }
+            },
+            "data": { "tls.key": "TU9SRQ==", "token": "U0VDUkVU" }
+        });
+        redact_secret_data(&mut object);
+
+        let serialized = object.to_string();
+        assert!(
+            !serialized.contains("U0VDUkVU"),
+            "leaked through an annotation: {serialized}"
+        );
+        assert!(
+            !serialized.contains("TU9SRQ=="),
+            "leaked through an annotation: {serialized}"
+        );
+
+        // Keys survive, so a reader still sees which controllers touched the
+        // Secret — the whole point of an annotation key.
+        let annotations = object["metadata"]["annotations"].as_object().unwrap();
+        assert!(annotations.contains_key("kubectl.kubernetes.io/last-applied-configuration"));
+        assert!(annotations.contains_key("reloader.stakater.com/match"));
+        // Every value, not just the well-known key: the scope rule is "every
+        // annotation on a Secret", because any controller can be a carrier.
+        for value in annotations.values() {
+            assert_eq!(value, &serde_json::json!(""));
+        }
+    }
+
+    /// Nothing to blank is not an error, and a shape this does not understand
+    /// is blanked rather than passed through.
+    #[test]
+    fn redaction_fails_closed_on_annotations_it_does_not_understand() {
+        let mut none = serde_json::json!({"kind":"Secret","metadata":{"name":"s"}});
+        redact_secret_data(&mut none);
+        assert_eq!(none["metadata"]["annotations"], serde_json::Value::Null);
+
+        let mut wrong_shape =
+            serde_json::json!({"kind":"Secret","metadata":{"name":"s","annotations":"U0VDUkVU"}});
+        redact_secret_data(&mut wrong_shape);
+        assert_eq!(
+            wrong_shape["metadata"]["annotations"],
+            serde_json::json!("")
+        );
+        assert!(!wrong_shape.to_string().contains("U0VDUkVU"));
     }
 
     #[test]

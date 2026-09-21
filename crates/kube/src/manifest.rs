@@ -1554,6 +1554,88 @@ metadata:
         assert!(cap.annotations.sensitive);
     }
 
+    /// The finding on #661: blanking `data` left the same base64 map visible
+    /// in `kubectl.kubernetes.io/last-applied-configuration`, which an
+    /// `apply`-managed Secret carries in full. A server dry-run apply returns
+    /// the merged object, so the LIVE annotation comes back on the proposed
+    /// side too — both sides have to be clean.
+    ///
+    /// Asserted here as well as in `secrets.rs` because this is the reader the
+    /// finding was filed against: the redactor being right is one fact, and
+    /// the diff path running it over both documents is another.
+    #[test]
+    fn diff_never_renders_secret_values_hidden_in_an_annotation() {
+        let applied = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": { "name": "web-tls", "namespace": "prod" },
+            "data": { "token": "U0VDUkVU", "tls.key": "TU9SRQ==" }
+        })
+        .to_string();
+        let live = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": "web-tls",
+                "namespace": "prod",
+                "resourceVersion": "12",
+                "annotations": { "kubectl.kubernetes.io/last-applied-configuration": applied }
+            },
+            "data": { "token": "U0VDUkVU", "tls.key": "TU9SRQ==" }
+        });
+
+        let doc = diff_document(
+            "Secret".into(),
+            "web-tls".into(),
+            Some("prod".into()),
+            true,
+            Some("12".into()),
+            live.clone(),
+            live,
+            true,
+        )
+        .unwrap();
+
+        // Every rendered cell, both sides: the rows ARE what the panel draws.
+        let rendered: String = doc
+            .rows
+            .iter()
+            .flat_map(|r| [r.left.clone(), r.right.clone()])
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !rendered.contains("U0VDUkVU"),
+            "leaked a Secret value:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("TU9SRQ=="),
+            "leaked a Secret value:\n{rendered}"
+        );
+        // The key still names the controller that wrote it — the reader learns
+        // the Secret is apply-managed without learning what is in it.
+        assert!(rendered.contains("kubectl.kubernetes.io/last-applied-configuration"));
+        assert!(rendered.contains("token"), "key names survive: {rendered}");
+    }
+
+    /// A ConfigMap is NOT routed through the Secret redactor, and must not be:
+    /// its annotations are ordinary content and blanking them would hide real
+    /// changes in the one panel a reader consults before applying.
+    #[test]
+    fn diff_leaves_a_non_secret_kinds_annotations_alone() {
+        let mut value = serde_json::json!({
+            "kind": "ConfigMap",
+            "metadata": { "name": "app", "annotations": { "note": "keep me" } },
+            "data": { "key": "value" }
+        });
+        normalize_for_diff(&mut value, false);
+        assert_eq!(
+            value["metadata"]["annotations"]["note"],
+            serde_json::json!("keep me")
+        );
+        assert_eq!(value["data"]["key"], serde_json::json!("value"));
+    }
+
     #[test]
     fn parse_conflict_extracts_managers_and_fields() {
         let msg = "Apply failed with 2 conflicts: conflicts with \"kubectl\" using apps/v1:\n- .spec.replicas\n- .spec.template.spec.containers[0].image";

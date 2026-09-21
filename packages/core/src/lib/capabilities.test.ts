@@ -81,7 +81,9 @@ describe("gatedCapabilityIds", () => {
  * the point of the generated catalog is that nothing here is a second copy.
  */
 describe("capability metadata v2", () => {
-  const rows = catalog as Array<Entry & { impact: string; confirm: string | null }>;
+  const rows = catalog as Array<
+    Entry & { sensitive: boolean; impact: string; confirm: string | null }
+  >;
 
   it("gives every capability a level, and only the three the host defines", () => {
     expect(rows.length).toBeGreaterThan(0);
@@ -110,6 +112,28 @@ describe("capability metadata v2", () => {
     const action = rows.find((c) => c.id === "k8s.gitOpsAction");
     expect(action?.impact).toBe("high");
     expect(rows.find((c) => c.id === "extensions.action")?.impact).toBe("high");
+  });
+
+  /**
+   * `sensitive` is a redaction flag, not a gate — but "sensitive and ungated"
+   * is a claim the host has to earn, so the exceptions are named here rather
+   * than merely permitted. A new one has to be added to this list on purpose.
+   *
+   * `k8s.diffManifest` is the only member. It earns it by redaction rather
+   * than consent: `redact_secret_data` (`crates/kube/src/secrets.rs`) blanks a
+   * Secret's `data`, `stringData` AND every `metadata.annotations` value on
+   * both sides of the diff, so no cluster-side secret material reaches the
+   * response. `sensitive` stays true because the *request* carries the
+   * caller's own manifest, which the audit log must redact.
+   */
+  it("names every capability that is sensitive but not gated", () => {
+    const sensitiveUngated = rows.filter((c) => c.sensitive && !c.requiresConfirm).map((c) => c.id);
+    expect(sensitiveUngated).toEqual(["k8s.diffManifest"]);
+    // And it is a read at the lowest level, which is the only way an ungated
+    // capability can be spelled (see the coherence test above).
+    const diff = rows.find((c) => c.id === "k8s.diffManifest");
+    expect(diff?.readOnly).toBe(true);
+    expect(diff?.impact).toBe("low");
   });
 
   it("gives every gated capability the host's own confirmation wording", () => {

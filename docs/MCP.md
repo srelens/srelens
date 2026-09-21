@@ -231,7 +231,13 @@ has both combinations, on purpose:
 - `k8s.diffManifest` is sensitive (it can echo back manifest content, so its
   arguments are redacted in the audit log) but is **not** confirm-gated —
   it changes nothing on the cluster, so it's classed plain **read-only**.
-  You can call it headlessly with no flag at all.
+  You can call it headlessly with no flag at all. What keeps that safe is
+  redaction rather than consent: for a `Secret`, the host blanks `data`,
+  `stringData` **and every `metadata.annotations` value** on both sides
+  before rendering the diff, so the base64 map an `apply`-managed Secret
+  carries in `kubectl.kubernetes.io/last-applied-configuration` never
+  reaches the response. `k8s.getManifest` runs the same redactor for the
+  same reason.
 - `k8s.getSecret` is sensitive **and** confirm-gated, because unlike a diff
   it returns actual secret values. That combination is its own class,
   **sensitive read**, gated behind `--mcp-allow-sensitive-reads` rather than
