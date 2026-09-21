@@ -35,7 +35,7 @@ mod watch;
 mod window;
 
 use app_log::{app_log_path, read_app_log, reveal_app_log};
-use bridge::{invoke_capability, AppRegistry};
+use bridge::{invoke_capability, AppAudit, AppRegistry};
 use bundle_cmd::{bundle_export, bundle_import, bundle_pick_file, bundle_preview};
 use exec::{exec_close, exec_input, exec_resize, start_pod_exec};
 use external::open_external;
@@ -416,7 +416,19 @@ pub fn run() {
                         std::sync::Arc::new(vault::VaultTokenStore(vault.clone()));
                     app.manage(token_store);
                     app.manage(vault);
-                    app.manage(McpAuditPath(dir.join("audit.jsonl")));
+                    let audit_path = dir.join("audit.jsonl");
+                    app.manage(McpAuditPath(audit_path.clone()));
+                    // ONE sink, and the UI bridge writes to it too (#555).
+                    // Not a second log beside the MCP one: an operator asking
+                    // what happened to a cluster should not have to know
+                    // whether they clicked it or an agent called it, and two
+                    // files in two formats would make the Settings pane pick
+                    // one. Same 5 MB cap and single rotation as the MCP
+                    // server wires in `mcp.rs`; the trail never leaves this
+                    // machine.
+                    app.manage(AppAudit(std::sync::Arc::new(
+                        srelens_mcp::audit::JsonlAuditLog::new(audit_path, 5 * 1024 * 1024),
+                    )));
 
                     let prompts_dir = dir.join("prompts");
                     if let Err(e) = std::fs::create_dir_all(&prompts_dir) {
@@ -428,6 +440,15 @@ pub fn run() {
                     app.manage(McpPromptsDir(prompts_dir));
                 }
                 Err(e) => log::warn!("MCP config dir unavailable: {e}"),
+            }
+            // Fail open, not closed: with no config dir there is nowhere to
+            // write a trail, and refusing `invoke_capability` for want of one
+            // would take the whole app down with it. `manage` does not
+            // replace, so this only lands when the branch above did not.
+            if app.try_state::<AppAudit>().is_none() {
+                app.manage(AppAudit(std::sync::Arc::new(
+                    srelens_mcp::audit::NoopAudit,
+                )));
             }
             app.manage(std::sync::Arc::new(mcp_confirm::Pending::default()));
 

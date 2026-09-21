@@ -5,7 +5,29 @@ import { FailureAlert, FailureState } from "../../lib/errorCopy";
 
 /**
  * §23's `Audit` pane: every capability call an MCP-connected agent has made,
- * whether it was allowed or not — the pane someone opens after an incident.
+ * whether it was allowed or not, and every mutating or sensitive one made in
+ * the app itself — the pane someone opens after an incident.
+ *
+ * **Both surfaces, since #555.** The trail held MCP calls alone, because the
+ * audit sink lived in the MCP crate: a capability invoked from the app went
+ * straight to the registry through `invoke_capability`
+ * (`apps/desktop/src-tauri/src/bridge.rs`), so an Argo CD sync or a Flux
+ * reconcile clicked on this very screen's sibling left nothing behind, while
+ * the identical call from an agent was written down. The sink moved beside the
+ * registry — the one place both paths meet
+ * (`crates/capability/src/audit.rs`) — and `Source` below is how a reader
+ * tells "I did this" from "something else did".
+ *
+ * **The asymmetry in what is recorded is deliberate and it is visible here.**
+ * MCP records every call, reads included. The app records only what it
+ * changed, plus reads that return secret material: a resource screen fires
+ * dozens of list calls a minute and burying the writes under them would cost
+ * this pane its purpose. The sentence under the table says so, because a
+ * reader who assumes otherwise would read the absence of their own reads as
+ * evidence of something.
+ *
+ * **It never leaves the machine.** One `0600` JSONL file under the app's
+ * config directory, read from here and nowhere else. Nothing uploads it.
  *
  * **This is a window, not the whole trail.** `auditTail` (`packages/core/src/
  * lib/mcpSecurity.ts`) takes a `limit` and returns the newest that many
@@ -73,7 +95,12 @@ type Verdict = { word: string; tone: Tone };
  */
 function verdictOf(entry: AuditEntry): Verdict {
   if (entry.decision === "denied") return { word: "denied", tone: "sev" };
-  if (entry.outcome === "error") return { word: "failed", tone: "warn" };
+  // `rejected` and `failed` are two different answers to "did it happen?" —
+  // srelens would not do it, or the cluster would not — and collapsing them
+  // into one word is the mistake this project has a rule about. The backend
+  // tells them apart (`crates/capability/src/lib.rs`), so this does too.
+  if (entry.outcome === "rejected") return { word: "rejected", tone: "warn" };
+  if (entry.outcome === "failed") return { word: "failed", tone: "warn" };
   return entry.decision === "approved" ? { word: "approved", tone: "ok" } : { word: "allowed", tone: "muted" };
 }
 
@@ -90,16 +117,28 @@ function reasonOf(entry: AuditEntry): string | null {
 }
 
 /**
- * A capability's `args` carry whatever names its target, and this pane has
- * no per-capability schema to read them against — only the conventional keys
- * seen across the calls core already wraps (`context`, `namespace`, `name`;
- * `packages/core/src/lib/helm.ts`'s `getHelmRelease({ context, namespace,
- * name })` is one), plus `node` for the node-scoped capabilities (`node.
- * cordon`, `node.drain`) that have no namespace at all. Falls back to the raw
- * args rather than going blank, for a call this doesn't recognise the shape
- * of.
+ * What the call named, cluster first.
+ *
+ * The backend extracts `cluster` and `resource` when it writes the record
+ * (`describe_target`, `crates/capability/src/audit.rs`), because it is the
+ * half of this system that knows the argument shapes — including
+ * `extensions.action`, whose whole target sits nested under `resource` where
+ * the flat key sweep below would never have found it. So those two fields are
+ * read first.
+ *
+ * The sweep stays as the fallback for a record that carries neither: the
+ * conventional keys across the calls core already wraps (`context`,
+ * `namespace`, `name`; `packages/core/src/lib/helm.ts`'s `getHelmRelease({
+ * context, namespace, name })` is one), plus `node` for the node-scoped
+ * capabilities (`node.cordon`, `node.drain`) that have no namespace at all.
+ * Falls back to the raw args rather than going blank, for a call this doesn't
+ * recognise the shape of.
  */
 function targetOf(entry: AuditEntry): string {
+  const named = [entry.cluster, entry.resource].filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
+  if (named.length > 0) return named.join("/");
   const args = entry.args ?? {};
   const segments = ["context", "namespace", "node", "name"]
     .map((key) => args[key])
@@ -107,6 +146,16 @@ function targetOf(entry: AuditEntry): string {
   if (segments.length > 0) return segments.join("/");
   const rest = JSON.stringify(args);
   return rest && rest !== "{}" ? rest : "—";
+}
+
+/**
+ * The app a call went through, when it went through one — `id@revision`,
+ * because an update rolls the revision and leaves the ID alone, so the ID
+ * alone cannot say which manifest and which grants were in force
+ * (`crates/registry/src/extensions.rs`).
+ */
+function appOf(entry: AuditEntry): string | null {
+  return entry.app ? `${entry.app.id}@${entry.app.revision}` : null;
 }
 
 const columns: Column<AuditEntry>[] = [
@@ -133,23 +182,51 @@ const columns: Column<AuditEntry>[] = [
     getValue: (entry) => entry.ts,
   },
   {
-    key: "transport",
-    // Named for the value, which is `"stdio"` or `"http"`. §23's header is
-    // `Client` over rows of product names, and #369 says plainly that srelens
-    // does not track which client connected — so a `Client` header over a
-    // transport claims exactly what that issue says srelens cannot know. The
-    // MCP server pane declines to draw a clients list for the same reason.
-    header: "Transport",
-    render: (entry) => <span>{entry.transport}</span>,
+    key: "source",
+    // The first question this pane is opened with is "was that me or an
+    // agent?", so that is the column: `ui` or `mcp`, with the transport
+    // underneath it for the MCP rows because "which client do I go turn off"
+    // is the second question. It is not headed `Client`: §23 drew product
+    // names there and #369 says plainly that srelens does not track which
+    // client connected, so a `Client` header would claim exactly what that
+    // issue says srelens cannot know. The MCP server pane declines to draw a
+    // clients list for the same reason.
+    header: "Source",
+    render: (entry) => (
+      <span className="whitespace-nowrap" data-testid="audit-source">
+        {entry.source}
+        {entry.source === "mcp" ? <span className="text-muted"> · {entry.transport}</span> : null}
+      </span>
+    ),
+    getValue: (entry) => entry.source,
   },
   {
     key: "tool",
     header: "Capability",
-    render: (entry) => (
-      <code className="code" style={{ color: toneColor("accent") }}>
-        {entry.tool}
-      </code>
-    ),
+    render: (entry) => {
+      const app = appOf(entry);
+      return (
+        <div className="min-w-0">
+          <code className="code" style={{ color: toneColor("accent") }}>
+            {entry.tool}
+          </code>
+          {/* The app is under the capability rather than in a column of its
+              own: most rows have none, and an empty column across a whole
+              screen reads as a fact about the trail rather than about the
+              row. */}
+          {app ? (
+            <span
+              data-testid="audit-app"
+              className="block max-w-[220px] truncate text-[0.7rem] text-muted"
+              title={app}
+            >
+              via {app}
+            </span>
+          ) : null}
+        </div>
+      );
+    },
+    getValue: (entry) => entry.tool,
   },
   {
     key: "target",
@@ -239,7 +316,7 @@ export function AuditPane() {
   }, [nonce]);
 
   return (
-    <Panel title="Audit · every capability call, allowed or not">
+    <Panel title="Audit · every capability call, allowed or not, from an agent or from here">
       {/* flex-wrap rather than a fixed row: the sentence is the long half and
           grows in translation, and a flex child with nothing to stop it
           shrinking is where `min-width: auto` has cost this migration eight
@@ -247,6 +324,9 @@ export function AuditPane() {
       <div className="flex flex-wrap items-start justify-between gap-2">
         <p className="min-w-0 flex-1 text-[0.75rem] leading-relaxed text-muted">
           Showing the most recent {LIMIT} capability calls. Older calls exist only in the log file itself, not here.
+          Every call an agent made over MCP is recorded; from srelens itself, only the calls that changed something
+          or read secret material are — an app's own reads are not events. The log is a file on this machine and
+          is never sent anywhere.
         </p>
         <Button
           variant="secondary"
@@ -279,8 +359,12 @@ export function AuditPane() {
           />
         </Section>
       )}
-      {/* #371: no serialisation exists for this trail, and the web build has
-          no filesystem to write one to even if it did. */}
+      {/* #371: still no serialisation and still no filesystem on web, so
+          still no button. What #555 changed is the seam under it — a record
+          now carries `source`, `app`, `cluster` and `resource` as fields of
+          its own rather than leaving a reader to infer them from `args`, so
+          an export has rows to write without this pane having to reconstruct
+          them. */}
       <p className="mt-3 text-[0.75rem] leading-relaxed text-muted">
         There is no way to export this trail — no serialisation exists for it, and srelens running on web has no
         filesystem to save one to.

@@ -6418,6 +6418,7 @@ dependencies = [
 name = "srelens-capability"
 version = "0.15.0"
 dependencies = [
+ "aho-corasick",
  "schemars 0.8.22",
  "serde",
  "serde_json",

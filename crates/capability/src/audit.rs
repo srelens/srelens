@@ -1,0 +1,1115 @@
+//! Append-only record of what was done through the capability registry, by an
+//! agent over MCP **or** by a person clicking in the app. Values from sensitive
+//! capabilities are never written: names and shapes only.
+//!
+//! **This lives beside the registry, not beside a transport.** It used to sit
+//! in `srelens-mcp`, which made the MCP server the only thing that could write
+//! a record — so an Argo CD sync clicked in the desktop UI went straight from
+//! `invoke_capability` into [`crate::Registry::invoke`] and left no trace
+//! (#555). The registry is the one place both surfaces meet, so the sink, the
+//! redaction and the record's shape live here and
+//! [`crate::Registry::invoke_audited`] is the single writer for an invocation.
+//!
+//! **The trail never leaves the machine.** `JsonlAuditLog` appends to one
+//! `0600` file under the app's config directory and nothing reads it but the
+//! Settings pane on the same host. There is no upload, no telemetry and no
+//! second copy.
+
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use serde_json::{json, Value};
+
+use crate::Annotations;
+
+/// Which surface a capability call arrived on.
+///
+/// Two questions, one value: **who** called (`ui` or `mcp` — the `source`
+/// field) and **how** they reached the registry (`ui`, `stdio` or `http` — the
+/// `transport` field). An operator reading the trail after an incident asks
+/// the first; an operator wondering which client to go turn off asks the
+/// second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// Clicked in the desktop app, through the Tauri `invoke_capability`
+    /// bridge.
+    Ui,
+    /// An MCP client over stdio (a CLI agent the user spawned).
+    McpStdio,
+    /// An MCP client over the loopback HTTP transport, including the
+    /// in-process native agent, which calls `handle_request` directly.
+    McpHttp,
+}
+
+impl Source {
+    /// `ui` or `mcp`: who made the call.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Ui => "ui",
+            Source::McpStdio | Source::McpHttp => "mcp",
+        }
+    }
+
+    /// `ui`, `stdio` or `http`: how the call reached the registry.
+    pub fn transport(self) -> &'static str {
+        match self {
+            Source::Ui => "ui",
+            Source::McpStdio => "stdio",
+            Source::McpHttp => "http",
+        }
+    }
+}
+
+/// The app a call was made through, when it was made through one.
+///
+/// Both halves or neither: an app ID without the revision cannot answer "which
+/// manifest and which grants was this", because an update rolls the revision
+/// and leaves the ID alone (`crates/registry/src/extensions.rs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppRef {
+    pub id: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditRecord {
+    pub source: Source,
+    pub tool: String,
+    /// Already redacted — see [`redact`]. Never the caller's raw arguments.
+    pub args: Value,
+    /// The app this call was made through, when it was made through one.
+    pub app: Option<AppRef>,
+    /// The cluster context the call named, when it named one.
+    pub cluster: Option<String>,
+    /// The object the call named, as `namespace/name` or `name`.
+    pub resource: Option<String>,
+    /// "approved" | "denied" | "auto" (no consent needed) — never free text.
+    pub decision: &'static str,
+    /// [`OUTCOME_OK`], [`OUTCOME_REJECTED`] or [`OUTCOME_FAILED`] — never free
+    /// text.
+    pub outcome: &'static str,
+    pub error: Option<String>,
+}
+
+/// The call ran and the capability answered.
+pub const OUTCOME_OK: &str = "ok";
+/// The call never ran: consent was refused, the capability is not registered,
+/// or its arguments were refused before anything was touched.
+pub const OUTCOME_REJECTED: &str = "rejected";
+/// The call ran and the handler failed — a timeout, an RBAC refusal from the
+/// cluster, an API error.
+pub const OUTCOME_FAILED: &str = "failed";
+
+pub trait AuditSink: Send + Sync {
+    fn record(&self, rec: AuditRecord);
+}
+
+/// Default sink: records nothing. Used by tests and by hosts that opt out.
+pub struct NoopAudit;
+
+impl AuditSink for NoopAudit {
+    fn record(&self, _rec: AuditRecord) {}
+}
+
+/// Whether a call from the **UI** belongs in the trail.
+///
+/// MCP records every call it handles, allowed or not: an agent is a third
+/// party and the question the pane answers is "what did it do", including what
+/// it tried and was refused. The UI is the user acting directly, and recording
+/// every read there would bury the writes — a single resource screen fires
+/// dozens of list and get calls a minute, and the trail is capped at 5 MB.
+///
+/// So from the UI the line is the capability's own safety class, the same one
+/// the confirm gate reads: anything that is not a plain read, plus reads that
+/// return secret material. That is exactly the set #555 asks for ("every
+/// mutating or sensitive capability invocation") and it is read off the
+/// annotations rather than a second list that would drift from them.
+pub fn is_audited_from_ui(annotations: &Annotations) -> bool {
+    !annotations.read_only
+        || annotations.destructive
+        || annotations.requires_confirm
+        || annotations.sensitive
+}
+
+/// What a call names: the app it went through, the cluster, and the object.
+///
+/// Read off the arguments, because that is where a capability's target lives
+/// and there is no second place to put it that every capability would fill in.
+/// Two shapes are understood, and they are the two the registry actually has:
+///
+/// - flat — `context`, `namespace`, `name`/`node`, and `id` + `revision` for
+///   the `extensions.*` capabilities;
+/// - nested under `resource` — `extensions.action`, whose whole selection
+///   (app ID, revision, context, namespace, name) is one object
+///   (`crates/registry/src/extensions/resource.rs`).
+///
+/// Every field is optional and a missing one stays `None` rather than becoming
+/// an empty string: "this call named no namespace" and "this call named the
+/// empty namespace" are different facts, and the pane renders them apart.
+pub fn describe_target(args: &Value) -> (Option<AppRef>, Option<String>, Option<String>) {
+    fn text(v: &Value, key: &str) -> Option<String> {
+        v.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+    // The nested selection wins for the fields it carries: on
+    // `extensions.action` the top level holds only `action`, `uid` and
+    // `resourceVersion`, and everything that identifies the target is inside.
+    let scopes: Vec<&Value> = args
+        .get("resource")
+        .filter(|v| v.is_object())
+        .into_iter()
+        .chain(std::iter::once(args))
+        .collect();
+    let first = |key: &str| scopes.iter().find_map(|v| text(v, key));
+
+    let app = scopes.iter().find_map(|v| {
+        let id = text(v, "id")?;
+        let revision = v.get("revision").and_then(Value::as_u64)?;
+        Some(AppRef { id, revision })
+    });
+    let cluster = first("context").or_else(|| first("cluster"));
+    let name = first("name").or_else(|| first("node"));
+    let resource = match (first("namespace"), name) {
+        (Some(ns), Some(name)) => Some(format!("{ns}/{name}")),
+        (None, Some(name)) => Some(name),
+        // A namespace with no object named is still the target of a call:
+        // `k8s.listPods` in `prod` is a fact worth keeping.
+        (Some(ns), None) => Some(ns),
+        (None, None) => None,
+    };
+    (app, cluster, resource)
+}
+
+/// Redact argument VALUES while keeping keys, so an operator can see the shape
+/// of a call without its secrets. Sensitive-annotated tools redact everything;
+/// otherwise a value goes only if its key names a credential, holds a
+/// caller-supplied payload, or is a map of settings whose names are the shape
+/// and whose values are the secrets. Recursively walks nested objects and
+/// arrays to find and redact credentials at any depth.
+pub fn redact(args: &Value, sensitive: bool) -> Value {
+    /// Substring-matched: a key admitting it holds a credential, at any depth
+    /// and in any casing (`apiToken`, `tls.key`, `rootPassword`).
+    const NEEDLES: [&str; 4] = ["token", "secret", "password", "key"];
+    /// Whole fields whose value is a caller-supplied payload that can carry
+    /// secret material with no credential-shaped key inside it to catch:
+    /// `data`/`stringData` on a Secret write (`k8s.updateConfigData` — a
+    /// Secret's own keys are things like `username` and `ca.crt`), `yaml` on
+    /// `k8s.applyManifest` (one opaque string holding a whole manifest), and
+    /// `values` on the helm install/upgrade/template capabilities (user YAML
+    /// that routinely holds registry credentials and database passwords).
+    ///
+    /// Matched EXACTLY, not as substrings, so `metadata` stays readable — the
+    /// point is to keep the shape of a call auditable while dropping the part
+    /// that carries secrets.
+    const PAYLOAD_FIELDS: [&str; 4] = ["data", "stringdata", "yaml", "values"];
+    /// Fields holding a map of caller-chosen names to caller-chosen values,
+    /// where the NAMES are the auditable shape and every VALUE is treated as a
+    /// secret: `settings` on `extensions.configure` (#605). An app's settings
+    /// are free-form JSON and nothing marks one as sensitive, so a value under
+    /// `credential` or `certificate` — which no needle matches — would
+    /// otherwise be written verbatim, even for a denied call, and persist
+    /// through rotation. The map is redacted as a sensitive capability's
+    /// arguments are: keys kept, values blanked. Anything but a map is blanked
+    /// whole, since a denied call is audited before its arguments are checked
+    /// against the schema. Matched exactly, like `PAYLOAD_FIELDS`, and no other
+    /// capability takes a `settings` argument (`settings.set` takes `values`).
+    const KEYED_PAYLOAD_FIELDS: [&str; 1] = ["settings"];
+
+    match args {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                let lower = k.to_ascii_lowercase();
+                let is_credential_key = NEEDLES.iter().any(|n| lower.contains(n))
+                    || PAYLOAD_FIELDS.contains(&lower.as_str());
+
+                if sensitive || is_credential_key {
+                    // Redact this value entirely
+                    out.insert(k.clone(), json!("<redacted>"));
+                } else if KEYED_PAYLOAD_FIELDS.contains(&lower.as_str()) {
+                    // Keep the names, drop every value.
+                    let redacted = match v {
+                        Value::Object(_) => redact(v, true),
+                        _ => json!("<redacted>"),
+                    };
+                    out.insert(k.clone(), redacted);
+                } else {
+                    // Recurse into the value to find nested credentials
+                    out.insert(k.clone(), redact(v, false));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => {
+            // Recurse into array elements with the same sensitivity
+            Value::Array(arr.iter().map(|v| redact(v, sensitive)).collect())
+        }
+        // Scalars stay as-is (no redaction needed)
+        other => other.clone(),
+    }
+}
+
+/// Scrub from an error message every value that `redact` dropped from `args`.
+///
+/// A capability that refuses an argument tends to echo it — the registry maps
+/// serde's error to a string as-is, and for a scalar `settings` that reads
+/// `invalid type: string "hunter2", expected a map` — and `handle_request`
+/// records the message beside the redacted arguments, which would put the
+/// value straight back in the log. So every string or number that is in
+/// `args` and not in `redacted` is replaced wherever it appears, longest
+/// first so a value that contains another is not left half visible, and in
+/// the escaped form serde's `{:?}` prints as well as verbatim. Values the
+/// redaction kept are left alone, so a message naming the app or the
+/// namespace still says which one.
+///
+/// Over-scrubbing is the safe direction: a hidden value that happens to be an
+/// ordinary word costs a few characters of an error text, where the
+/// alternative is a credential on disk.
+///
+/// The arguments are untrusted and can be large (up to
+/// [`crate::MAX_REQUEST_BYTES`] on either transport), and a denied call is scrubbed too, so this stays near-linear
+/// in the number of values: membership is a hash lookup, and each distinct
+/// hidden value is replaced once.
+pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
+    use std::collections::HashSet;
+
+    fn leaves(v: &Value, out: &mut HashSet<String>) {
+        match v {
+            Value::String(s) => {
+                out.insert(s.clone());
+            }
+            Value::Number(n) => {
+                out.insert(n.to_string());
+            }
+            Value::Object(m) => m.values().for_each(|v| leaves(v, out)),
+            Value::Array(a) => a.iter().for_each(|v| leaves(v, out)),
+            Value::Bool(_) | Value::Null => {}
+        }
+    }
+    let mut kept = HashSet::new();
+    leaves(redacted, &mut kept);
+    let mut all = HashSet::new();
+    leaves(args, &mut all);
+    let hidden: Vec<String> = all
+        .into_iter()
+        .filter(|s| !s.is_empty() && !kept.contains(s))
+        .collect();
+
+    if hidden.is_empty() {
+        return error.to_string();
+    }
+
+    let mut patterns = Vec::new();
+    for value in hidden {
+        let escaped = format!("{value:?}");
+        let escaped = escaped[1..escaped.len() - 1].to_string();
+        if escaped != value {
+            patterns.push(escaped);
+        }
+        patterns.push(value);
+    }
+
+    patterns.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    patterns.dedup();
+
+    let ac = aho_corasick::AhoCorasick::builder()
+        .match_kind(aho_corasick::MatchKind::LeftmostFirst)
+        .build(&patterns)
+        .expect("AhoCorasick failed to build");
+
+    let replacements = vec!["<redacted>"; patterns.len()];
+    ac.replace_all(error, &replacements)
+}
+
+/// The most recent `limit` entries, newest first.
+///
+/// Reads at most a bounded window from the END of the log rather than the whole
+/// file: the log is capped at 5 MB and a caller only ever wants the last
+/// handful, so parsing every line to discard nearly all of them is wasted work
+/// on every Settings open. Unparseable lines are skipped — a torn final write,
+/// or the fragment of a line the window's start lands inside, is not an error.
+///
+/// Only the live log is read; entries rotated into `.jsonl.1` are not included.
+///
+/// **An absent log is an empty trail; an unreadable one is an error.** This
+/// used to return `Vec::new()` for three distinct failures — `File::open`,
+/// `seek` and `read_to_end` — so a log that exists and cannot be read was
+/// indistinguishable from a fresh install. The pane at the other end of the
+/// call says "A fresh install has made none — this is not an error." for an
+/// empty result, on the one screen whose purpose is answering what an agent did
+/// after an incident, so that collapse turned a permissions change or a
+/// filesystem fault into a clean bill of health. `NotFound` is the single
+/// outcome still swallowed, because a fresh install genuinely has no log: it is
+/// the one absence that is a fact rather than a gap in what srelens knows.
+pub fn tail(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<Value>> {
+    /// Generous next to a realistic `limit` (tens of entries at a few hundred
+    /// bytes each) while staying a small fraction of the 5 MB cap.
+    const WINDOW: u64 = 512 * 1024;
+
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        // The only silent case, and the only one that is really empty.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    // Propagated rather than falling back to 0: a metadata call that fails on
+    // an open handle is a real fault, and answering "the log starts here" from
+    // a length nobody could read is the same guess this function stopped
+    // making.
+    let len = f.metadata()?.len();
+    let start = len.saturating_sub(WINDOW);
+    if start > 0 {
+        f.seek(SeekFrom::Start(start))?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    // Lossy: a window start can land inside a multi-byte character, and a
+    // mangled leading fragment is discarded below regardless.
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if start > 0 && !lines.is_empty() {
+        // Seeking mid-file almost certainly lands inside a line; that fragment
+        // is not a record.
+        lines.remove(0);
+    }
+    // Unparseable LINES are still skipped rather than raised: a torn final
+    // write is a known property of an append-only log, not a failed read.
+    Ok(lines
+        .iter()
+        .rev()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .take(limit)
+        .collect())
+}
+
+pub struct JsonlAuditLog {
+    path: PathBuf,
+    cap_bytes: u64,
+    lock: Mutex<()>,
+}
+
+impl JsonlAuditLog {
+    pub fn new(path: PathBuf, cap_bytes: u64) -> Self {
+        Self { path, cap_bytes, lock: Mutex::new(()) }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+impl AuditSink for JsonlAuditLog {
+    fn record(&self, rec: AuditRecord) {
+        // Bookkeeping fails open: a lost log line must never break a working
+        // cluster operation, so every error here is swallowed after logging.
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        if let Ok(meta) = std::fs::metadata(&self.path) {
+            if meta.len() >= self.cap_bytes {
+                let _ = std::fs::rename(&self.path, self.path.with_extension("jsonl.1"));
+            }
+        }
+        let line = json!({
+            "ts": unix_now(),
+            // Both, and not one derived from the other at read time: `source`
+            // is the question the pane asks ("was this me or an agent?") and
+            // `transport` is the detail under it.
+            "source": rec.source.as_str(),
+            "transport": rec.source.transport(),
+            "tool": rec.tool,
+            "args": rec.args,
+            // Always present, `null` when the call named none, so a reader
+            // never has to tell "absent" from "unknown".
+            "app": rec.app.as_ref().map(|a| json!({ "id": a.id, "revision": a.revision })),
+            "cluster": rec.cluster,
+            "resource": rec.resource,
+            "decision": rec.decision,
+            "outcome": rec.outcome,
+            "err": rec.error,
+        });
+        // 0600: the log holds every tool call's arguments, so it is at least
+        // as sensitive as the token file beside it. `mode` applies only when
+        // the file is created, so an existing log is tightened after the write
+        // — a log an older build left 0644 must not stay readable forever.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let opened = opts.open(&self.path);
+        if let Ok(mut f) = opened {
+            let _ = writeln!(f, "{line}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+            }
+        } else {
+            eprintln!("srelens: could not write the capability audit log at {}", self.path.display());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_only_credential_keys_by_default() {
+        let args = json!({ "namespace": "prod", "apiToken": "abc", "name": "web" });
+        let out = redact(&args, false);
+        assert_eq!(out["namespace"], json!("prod"));
+        assert_eq!(out["name"], json!("web"));
+        assert_eq!(out["apiToken"], json!("<redacted>"));
+    }
+
+    #[test]
+    fn sensitive_capability_redacts_every_value_but_keeps_keys() {
+        let args = json!({ "namespace": "prod", "name": "db-creds" });
+        let out = redact(&args, true);
+        assert_eq!(out["namespace"], json!("<redacted>"));
+        assert_eq!(out["name"], json!("<redacted>"));
+        assert!(out.get("namespace").is_some(), "keys must survive redaction");
+    }
+
+    #[test]
+    fn writes_one_json_line_per_record() {
+        let dir = std::env::temp_dir().join(format!("srelens-audit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let log = JsonlAuditLog::new(path.clone(), 1024 * 1024);
+        log.record(AuditRecord {
+            source: Source::McpHttp,
+            app: None,
+            cluster: None,
+            resource: None,
+            tool: "k8s_deletePod".into(),
+            args: json!({ "name": "web" }),
+            decision: "approved",
+            outcome: "ok",
+            error: None,
+        });
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body.lines().count(), 1);
+        let parsed: Value = serde_json::from_str(body.lines().next().unwrap()).unwrap();
+        assert_eq!(parsed["tool"], json!("k8s_deletePod"));
+        assert_eq!(parsed["source"], json!("mcp"));
+        assert_eq!(parsed["transport"], json!("http"));
+        assert_eq!(parsed["decision"], json!("approved"));
+        assert!(parsed["ts"].as_u64().unwrap() > 0);
+    }
+
+    fn write_entries(path: &std::path::Path, count: usize, pad: usize) {
+        let log = JsonlAuditLog::new(path.to_path_buf(), u64::MAX); // never rotate
+        for i in 0..count {
+            log.record(AuditRecord {
+                source: Source::McpStdio,
+                app: None,
+                cluster: None,
+                resource: None,
+                tool: format!("tool{i}"),
+                args: json!({ "pad": "x".repeat(pad) }),
+                decision: "auto",
+                outcome: "ok",
+                error: None,
+            });
+        }
+    }
+
+    #[test]
+    fn tail_returns_the_newest_entries_first() {
+        let dir = std::env::temp_dir().join(format!("srelens-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let _ = std::fs::remove_file(&path);
+        write_entries(&path, 10, 0);
+
+        let out = tail(&path, 3).expect("a readable log is not an error");
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0]["tool"], json!("tool9"), "newest first");
+        assert_eq!(out[1]["tool"], json!("tool8"));
+        assert_eq!(out[2]["tool"], json!("tool7"));
+    }
+
+    /// A log that does not exist is an EMPTY trail, not a failure: a fresh
+    /// install has made no capability calls, and the file is written on the
+    /// first one. This is the only I/O outcome `tail` is entitled to swallow.
+    #[test]
+    fn tail_of_a_missing_log_is_an_empty_trail_and_not_an_error() {
+        let out = tail(std::path::Path::new("/nonexistent/srelens/audit.jsonl"), 50)
+            .expect("an absent log is a fresh install, not a failure");
+        assert!(out.is_empty(), "a log that was never written is not an error");
+    }
+
+    /// The finding: three distinct failures — `File::open`, `seek` and
+    /// `read_to_end` — all returned `Vec::new()`, so an audit file that exists
+    /// and cannot be READ was indistinguishable from a fresh install. The pane
+    /// on the other end of this call says "A fresh install has made none — this
+    /// is not an error." for an empty vector, on the one screen whose whole
+    /// purpose is answering what an agent did after an incident.
+    ///
+    /// A DIRECTORY at the log's path, rather than a `chmod 000` file: it is a
+    /// path that exists and cannot be read as a file on every platform and at
+    /// every euid, where a permission bit is simply ignored for root and the
+    /// test would then pass by reading the file it meant to be refused.
+    #[test]
+    fn tail_of_a_log_that_cannot_be_read_is_an_error_not_an_empty_trail() {
+        let dir = std::env::temp_dir().join(format!("srelens-tailunread-{}", std::process::id()));
+        let path = dir.join("as-a-directory.jsonl");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let out = tail(&path, 50);
+
+        let err = out.expect_err("a log that exists and cannot be read is not an empty trail");
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "the file is right there; only a genuinely absent log may read as empty"
+        );
+    }
+
+    /// The `File::open` half of the same property, on a refusal that is not
+    /// `NotFound`: the log's parent is a regular file, so opening it fails with
+    /// ENOTDIR. A fresh install's absent log and a log srelens cannot get at
+    /// are different answers and this is the one that must not be silent.
+    #[test]
+    fn tail_of_a_log_that_cannot_be_opened_is_an_error_not_an_empty_trail() {
+        let dir = std::env::temp_dir().join(format!("srelens-tailopen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let blocker = dir.join("not-a-directory");
+        std::fs::write(&blocker, "i am a file\n").unwrap();
+
+        let out = tail(&blocker.join("audit.jsonl"), 50);
+
+        let err = out.expect_err("a log that cannot be opened is not an empty trail");
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// The log is capped at 5 MB, so reading and parsing all of it to show 50
+    /// rows is wasted work on every Settings open. Reading a bounded window from
+    /// the end means the oldest entries are never touched — which is what this
+    /// asserts, by demanding an entry from the far past be absent even when the
+    /// caller asks for far more rows than exist.
+    #[test]
+    fn tail_reads_only_a_bounded_window_from_the_end() {
+        let dir = std::env::temp_dir().join(format!("srelens-tailwin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.jsonl");
+        let _ = std::fs::remove_file(&path);
+        // ~1 KB per entry x 2000 = ~2 MB, comfortably past any sane window.
+        write_entries(&path, 2000, 1000);
+        assert!(std::fs::metadata(&path).unwrap().len() > 1024 * 1024);
+
+        let out = tail(&path, 100_000).expect("a readable log is not an error");
+
+        assert!(!out.is_empty());
+        assert_eq!(out[0]["tool"], json!("tool1999"), "newest entry must be present");
+        assert!(
+            out.iter().all(|e| e["tool"] != json!("tool0")),
+            "the oldest entry must not be read at all"
+        );
+    }
+
+    /// Seeking to a byte offset lands mid-line. That fragment is not valid JSON
+    /// and must be dropped rather than surfacing as a missing row or an error.
+    #[test]
+    fn tail_discards_the_partial_line_at_the_window_boundary() {
+        let dir = std::env::temp_dir().join(format!("srelens-tailfrag-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("frag.jsonl");
+        let _ = std::fs::remove_file(&path);
+        write_entries(&path, 3000, 1000);
+
+        let out = tail(&path, 100_000).expect("a readable log is not an error");
+
+        assert!(
+            out.iter().all(|e| e.get("tool").is_some()),
+            "every returned row must be a fully parsed entry, not a fragment"
+        );
+    }
+
+    fn a_record() -> AuditRecord {
+        AuditRecord {
+            source: Source::McpHttp,
+            app: None,
+            cluster: None,
+            resource: None,
+            tool: "k8s.updateConfigData".into(),
+            args: json!({ "name": "db-creds" }),
+            decision: "approved",
+            outcome: "ok",
+            error: None,
+        }
+    }
+
+    /// The log records every tool call's arguments, so it is at least as
+    /// sensitive as the token file sitting beside it — which is explicitly
+    /// 0600 (see `auth::FileTokenStore::save`). `create(true).append(true)`
+    /// with no mode yields 0644 under a standard umask, i.e. readable by
+    /// every other account on the machine.
+    #[cfg(unix)]
+    #[test]
+    fn audit_log_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("srelens-audit-perm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("perm.jsonl");
+        let _ = std::fs::remove_file(&path);
+
+        JsonlAuditLog::new(path.clone(), 1024 * 1024).record(a_record());
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the audit log must not be group/world readable");
+    }
+
+    /// An upgrade case: a log already on disk from a build that created it
+    /// 0644 must be tightened, not left permanently readable because the file
+    /// happened to exist before.
+    #[cfg(unix)]
+    #[test]
+    fn audit_log_tightens_loose_permissions_on_an_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("srelens-audit-perm2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("loose.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        JsonlAuditLog::new(path.clone(), 1024 * 1024).record(a_record());
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "an existing loose log must be tightened");
+    }
+
+    #[test]
+    fn rotates_once_past_the_cap() {
+        let dir = std::env::temp_dir().join(format!("srelens-rot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("b.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(dir.join("b.jsonl.1"));
+        let log = JsonlAuditLog::new(path.clone(), 200); // tiny cap
+        for i in 0..40 {
+            log.record(AuditRecord {
+                source: Source::McpStdio,
+                app: None,
+                cluster: None,
+                resource: None,
+                tool: format!("tool{i}"),
+                args: json!({}),
+                decision: "auto",
+                outcome: "ok",
+                error: None,
+            });
+        }
+        assert!(dir.join("b.jsonl.1").exists(), "expected a rotated file");
+        let live = std::fs::metadata(&path).unwrap().len();
+        assert!(live <= 200 * 2, "live file should stay near the cap, was {live}");
+    }
+
+    /// `k8s.updateConfigData` takes `kind: "Secret"` and a `data` map of
+    /// *plaintext* values. None of a Secret's own key names need look like a
+    /// credential (`username`, `host`, `ca.crt`), so key-name matching alone
+    /// writes them verbatim. The field that holds a payload is the thing to
+    /// redact, not just the keys that admit to being secrets.
+    #[test]
+    fn redacts_the_data_payload_of_a_secret_write() {
+        let args = json!({
+            "kind": "Secret",
+            "namespace": "prod",
+            "name": "db-creds",
+            "data": { "username": "admin" }
+        });
+        let out = redact(&args, false);
+        // The shape an operator needs to audit the call must survive.
+        assert_eq!(out["kind"], json!("Secret"));
+        assert_eq!(out["namespace"], json!("prod"));
+        assert_eq!(out["name"], json!("db-creds"));
+        // The payload must not.
+        assert_eq!(out["data"], json!("<redacted>"));
+    }
+
+    /// `k8s.applyManifest`'s `yaml` is the entire manifest, so applying a
+    /// Secret puts its whole body in the log. `yaml` is one opaque string —
+    /// there are no nested keys for the needle list to catch.
+    #[test]
+    fn redacts_the_yaml_payload_of_an_apply() {
+        let args = json!({
+            "context": "prod",
+            "yaml": "apiVersion: v1\nkind: Secret\nstringData:\n  password: hunter2\n"
+        });
+        let out = redact(&args, false);
+        assert_eq!(out["context"], json!("prod"), "which cluster must stay visible");
+        assert_eq!(out["yaml"], json!("<redacted>"));
+    }
+
+    /// Helm values are user-supplied YAML and routinely carry registry
+    /// credentials and database passwords.
+    #[test]
+    fn redacts_helm_values() {
+        let args = json!({ "release": "web", "chart": "bitnami/nginx", "values": "auth:\n  rootPassword: hunter2\n" });
+        let out = redact(&args, false);
+        assert_eq!(out["release"], json!("web"));
+        assert_eq!(out["chart"], json!("bitnami/nginx"));
+        assert_eq!(out["values"], json!("<redacted>"));
+    }
+
+    /// Issue #605. An app's settings are free-form JSON and nothing marks a
+    /// value as secret, so a `settings` action on `extensions.configure` with
+    /// a value under `credential` or `certificate` — no needle matches either —
+    /// was written to the log verbatim, and stayed in `audit.jsonl.1` after
+    /// rotation. The setting NAMES are the auditable shape (which knobs an
+    /// agent turned); the values are the secret material and every one goes,
+    /// at any depth, alongside the action and app ID an operator needs.
+    #[test]
+    fn redacts_every_extension_setting_value_but_keeps_the_action_id_and_setting_keys() {
+        let args = json!({
+            "action": "settings",
+            "id": "org.example.argocd",
+            "settings": {
+                "credential": "hunter2",
+                "endpoint": "https://argo.example",
+                "tls": { "certificate": "-----BEGIN CERTIFICATE-----" }
+            }
+        });
+        let out = redact(&args, false);
+        assert_eq!(
+            out["action"],
+            json!("settings"),
+            "the action must stay visible"
+        );
+        assert_eq!(
+            out["id"],
+            json!("org.example.argocd"),
+            "the app ID must stay visible"
+        );
+        let settings = out["settings"]
+            .as_object()
+            .expect("setting keys must survive");
+        assert_eq!(
+            settings.len(),
+            3,
+            "every setting key must survive, got {settings:?}"
+        );
+        assert_eq!(settings["credential"], json!("<redacted>"));
+        assert_eq!(
+            settings["endpoint"],
+            json!("<redacted>"),
+            "no setting value is known safe"
+        );
+        assert_eq!(
+            settings["tls"],
+            json!("<redacted>"),
+            "a nested map goes whole"
+        );
+        let line = out.to_string();
+        assert!(!line.contains("hunter2"), "the credential leaked: {line}");
+        assert!(
+            !line.contains("BEGIN CERTIFICATE"),
+            "the certificate leaked: {line}"
+        );
+        assert!(
+            !line.contains("argo.example"),
+            "a setting value leaked: {line}"
+        );
+    }
+
+    /// A denied call is audited before its arguments are ever deserialized, so
+    /// `settings` need not be the object the capability's schema demands. A
+    /// scalar or array there is blanked whole rather than walked, where the
+    /// scalars would come through untouched.
+    #[test]
+    fn redacts_a_settings_payload_that_is_not_an_object_whole() {
+        for settings in [
+            json!("hunter2"),
+            json!(["hunter2"]),
+            json!([{ "v": "hunter2" }]),
+        ] {
+            let args =
+                json!({ "action": "settings", "id": "org.example.argocd", "settings": settings });
+            let out = redact(&args, false);
+            assert_eq!(out["settings"], json!("<redacted>"), "got {out}");
+            assert!(!out.to_string().contains("hunter2"), "leaked: {out}");
+        }
+    }
+
+    /// PR #625 review. A capability that refuses an argument tends to echo it:
+    /// the registry maps serde's error straight to a string, and for a scalar
+    /// `settings` that is `invalid type: string "hunter2", expected a map`.
+    /// `handle_request` records the error beside the redacted arguments, which
+    /// put the value straight back in the log. Every value redaction hid must
+    /// be scrubbed from the message; everything it kept is left alone.
+    #[test]
+    fn redact_error_scrubs_the_values_redaction_hid_and_nothing_else() {
+        let args =
+            json!({ "action": "settings", "id": "org.example.argocd", "settings": "hunter2" });
+        let redacted = redact(&args, false);
+        let error = "invalid input: invalid type: string \"hunter2\", expected a map";
+
+        let out = redact_error(error, &args, &redacted);
+
+        assert!(!out.contains("hunter2"), "the refused value leaked: {out}");
+        assert!(
+            out.contains("expected a map"),
+            "the rest of the message survives: {out}"
+        );
+
+        let visible = redact_error("no app org.example.argocd is installed", &args, &redacted);
+        assert_eq!(
+            visible, "no app org.example.argocd is installed",
+            "kept values are not scrubbed"
+        );
+    }
+
+    /// serde prints the value it echoes with `{:?}`, so a value holding a quote
+    /// or a newline appears escaped, not verbatim; a number appears bare.
+    #[test]
+    fn redact_error_scrubs_escaped_and_numeric_values_too() {
+        let args =
+            json!({ "action": "settings", "id": "org.example.argocd", "settings": "hun\"ter\n2" });
+        let redacted = redact(&args, false);
+        let error = "invalid input: invalid type: string \"hun\\\"ter\\n2\", expected a map";
+        let out = redact_error(error, &args, &redacted);
+        assert!(!out.contains("ter"), "the escaped value leaked: {out}");
+
+        let args = json!({ "action": "settings", "id": "org.example.argocd", "settings": { "pin": 4711 } });
+        let redacted = redact(&args, false);
+        let out = redact_error(
+            "handler error: pin 4711 is not four digits",
+            &args,
+            &redacted,
+        );
+        assert!(!out.contains("4711"), "the numeric value leaked: {out}");
+    }
+
+    /// PR #625 review. The arguments of a denied call are untrusted and, on
+    /// either transport, up to 4 MiB. A `settings` map of very many
+    /// short values gives `redact_error` one hidden value per setting and one
+    /// `<redacted>` kept leaf per setting, and a linear membership scan per
+    /// hidden value made the scrub quadratic in the number of settings — a
+    /// denial that took billions of comparisons to record. Ten-character values
+    /// match `<redacted>`'s length, so a scan compares bytes, not just lengths.
+    #[test]
+    fn redact_error_stays_near_linear_in_the_number_of_hidden_values() {
+        let settings: serde_json::Map<String, Value> = (0..100_000)
+            .map(|i| (format!("k{i}"), json!(format!("v{i:09}"))))
+            .collect();
+        let args =
+            json!({ "action": "settings", "id": "org.example.argocd", "settings": settings });
+        let redacted = redact(&args, false);
+        let error =
+            "`extensions.configure` mutates the cluster and no consent mechanism is configured";
+
+        let started = std::time::Instant::now();
+        let out = redact_error(error, &args, &redacted);
+        let took = started.elapsed();
+
+        assert_eq!(out, error, "nothing hidden appears in this message");
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "scrubbing 100k hidden values took {took:?}; the scan is not linear"
+        );
+    }
+
+    /// The other `extensions.configure` actions carry no settings, and their
+    /// audit shape is unchanged: an operator can still read which app was
+    /// installed with which grants, enabled, or limited to which clusters.
+    #[test]
+    fn other_configure_actions_keep_their_audit_shape() {
+        let install = redact(
+            &json!({ "action": "install", "manifest": "{\"id\":\"org.example.argocd\"}", "grants": ["k8s.listCustomResource"] }),
+            false,
+        );
+        assert_eq!(install["action"], json!("install"));
+        assert_eq!(
+            install["manifest"],
+            json!("{\"id\":\"org.example.argocd\"}")
+        );
+        assert_eq!(install["grants"], json!(["k8s.listCustomResource"]));
+
+        let enable = redact(
+            &json!({ "action": "enable", "id": "org.example.argocd", "enabled": false }),
+            false,
+        );
+        assert_eq!(enable["id"], json!("org.example.argocd"));
+        assert_eq!(enable["enabled"], json!(false));
+
+        let clusters = redact(
+            &json!({ "action": "clusters", "id": "org.example.argocd", "contexts": ["prod", "staging"] }),
+            false,
+        );
+        assert_eq!(clusters["contexts"], json!(["prod", "staging"]));
+    }
+
+    /// Deliberately nests under `spec`/`template` rather than `data`: those are
+    /// ordinary structural keys, so this keeps testing what it's named for —
+    /// that a credential key is found at *depth* — instead of being short-
+    /// circuited by `PAYLOAD_FIELDS` redacting the wrapper wholesale.
+    #[test]
+    fn redaction_recurses_into_nested_objects() {
+        let args = json!({
+            "spec": {
+                "template": {
+                    "password": "hunter2"
+                }
+            }
+        });
+        let out = redact(&args, false);
+        // Keys must survive at all levels
+        assert!(out["spec"].is_object());
+        assert!(out["spec"]["template"].is_object());
+        // But the credential value must be redacted
+        assert_eq!(out["spec"]["template"]["password"], json!("<redacted>"));
+    }
+
+    #[test]
+    fn redaction_recurses_into_array_elements() {
+        let args = json!({
+            "items": [
+                { "apiKey": "secret123" },
+                { "name": "safe" }
+            ]
+        });
+        let out = redact(&args, false);
+        // Array structure is preserved
+        assert!(out["items"].is_array());
+        // Credential in first element is redacted
+        assert_eq!(out["items"][0]["apiKey"], json!("<redacted>"));
+        // Non-credential in second element is preserved
+        assert_eq!(out["items"][1]["name"], json!("safe"));
+    }
+
+    #[test]
+    fn redaction_preserves_deep_non_credential_values() {
+        let args = json!({
+            "spec": {
+                "replicas": 3,
+                "image": "nginx:1.14"
+            }
+        });
+        let out = redact(&args, false);
+        // Non-credential scalar values must survive redaction
+        assert_eq!(out["spec"]["replicas"], json!(3));
+        assert_eq!(out["spec"]["image"], json!("nginx:1.14"));
+    }
+
+    /// The two questions the trail answers about where a call came from, and
+    /// the two fields that answer them. An operator asks "was that me or an
+    /// agent?" first — `ui` and `mcp` — and only then which client.
+    #[test]
+    fn a_source_says_who_called_and_how_they_reached_the_registry() {
+        assert_eq!(Source::Ui.as_str(), "ui");
+        assert_eq!(Source::Ui.transport(), "ui");
+        assert_eq!(Source::McpStdio.as_str(), "mcp");
+        assert_eq!(Source::McpStdio.transport(), "stdio");
+        assert_eq!(Source::McpHttp.as_str(), "mcp");
+        assert_eq!(Source::McpHttp.transport(), "http");
+    }
+
+    /// #555's line for the UI path, read off the annotations rather than a
+    /// second list of capability names that would drift from them.
+    #[test]
+    fn the_ui_records_mutations_and_sensitive_reads_and_nothing_else() {
+        assert!(!is_audited_from_ui(&Annotations::READ_ONLY));
+        assert!(is_audited_from_ui(&Annotations::MUTATING));
+        assert!(is_audited_from_ui(&Annotations::DESTRUCTIVE));
+        assert!(
+            is_audited_from_ui(&Annotations::SENSITIVE_READ),
+            "a read that returns secret material is an event even though it changes nothing"
+        );
+        assert!(
+            is_audited_from_ui(&Annotations {
+                read_only: true,
+                destructive: false,
+                requires_confirm: false,
+                sensitive: true,
+            }),
+            "`k8s.diffManifest` is read-only and sensitive; what it can echo back is why"
+        );
+    }
+
+    /// `extensions.action` carries its whole selection — app ID, revision,
+    /// cluster and object — nested under `resource`, and that is the exact
+    /// call #555 was opened about: an Argo CD sync clicked in the app.
+    #[test]
+    fn an_app_action_names_its_app_revision_cluster_and_object() {
+        let (app, cluster, resource) = describe_target(&json!({
+            "action": "sync",
+            "uid": "1234",
+            "resourceVersion": "9",
+            "resource": {
+                "id": "org.example.argocd", "revision": 4,
+                "capability": "applications",
+                "context": "prod", "namespace": "team", "name": "web"
+            }
+        }));
+        assert_eq!(
+            app,
+            Some(AppRef {
+                id: "org.example.argocd".into(),
+                revision: 4
+            })
+        );
+        assert_eq!(cluster.as_deref(), Some("prod"));
+        assert_eq!(resource.as_deref(), Some("team/web"));
+    }
+
+    /// The flat shape, and the node-scoped capabilities that have no namespace
+    /// at all (`node.cordon`, `node.drain`).
+    #[test]
+    fn a_flat_call_names_its_cluster_and_object_including_node_scoped_ones() {
+        let (app, cluster, resource) =
+            describe_target(&json!({ "context": "prod", "namespace": "team", "name": "web" }));
+        assert_eq!(app, None, "a call made outside an app names none");
+        assert_eq!(cluster.as_deref(), Some("prod"));
+        assert_eq!(resource.as_deref(), Some("team/web"));
+
+        let (_, _, node) = describe_target(&json!({ "context": "prod", "node": "ip-10-0-1-7" }));
+        assert_eq!(node.as_deref(), Some("ip-10-0-1-7"));
+
+        let (_, _, namespace_only) =
+            describe_target(&json!({ "context": "prod", "namespace": "team" }));
+        assert_eq!(
+            namespace_only.as_deref(),
+            Some("team"),
+            "a namespace is a target"
+        );
+
+        let (app, cluster, resource) = describe_target(&json!({}));
+        assert_eq!((app, cluster, resource), (None, None, None));
+    }
+
+    /// Read off the REDACTED arguments, never the caller's: a sensitive
+    /// capability blanks every value, and pulling the Secret's own name out of
+    /// the raw arguments into a top-level `resource` field would walk it
+    /// straight back into the log through a door the redaction does not watch.
+    #[test]
+    fn a_sensitive_calls_target_is_whatever_survived_redaction() {
+        let args = json!({ "context": "prod", "namespace": "team", "name": "db-creds" });
+        let (_, cluster, resource) = describe_target(&redact(&args, true));
+        assert_eq!(cluster.as_deref(), Some("<redacted>"));
+        assert_eq!(resource.as_deref(), Some("<redacted>/<redacted>"));
+    }
+
+    /// An app ID with no revision beside it is not an app reference: an update
+    /// rolls the revision and leaves the ID alone, so half of the pair cannot
+    /// say which manifest and which grants were in force.
+    #[test]
+    fn an_app_id_without_a_revision_is_not_an_app_reference() {
+        let (app, _, _) =
+            describe_target(&json!({ "action": "enable", "id": "org.example.argocd" }));
+        assert_eq!(app, None);
+    }
+}

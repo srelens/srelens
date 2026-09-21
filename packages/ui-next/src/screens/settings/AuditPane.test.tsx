@@ -21,19 +21,47 @@ import type { AuditEntry } from "@srelens/core";
  */
 const DENIED: AuditEntry = {
   ts: 1_700_000_100,
+  source: "mcp",
   transport: "http",
   tool: "secret.read",
   args: { context: "prod-eu", namespace: "checkout", name: "checkout-db" },
+  app: null,
+  cluster: "prod-eu",
+  resource: "checkout/checkout-db",
   decision: "denied",
-  outcome: "error",
+  outcome: "rejected",
   err: "sensitive reads are off for this session",
 };
 
 const ALLOWED: AuditEntry = {
   ts: 1_700_000_000,
+  source: "mcp",
   transport: "stdio",
   tool: "resource.list",
   args: { context: "prod-eu", namespace: "payments" },
+  app: null,
+  cluster: "prod-eu",
+  resource: "payments",
+  decision: "auto",
+  outcome: "ok",
+  err: null,
+};
+
+/**
+ * #555: a Flux reconcile clicked in srelens, through an installed app. Before
+ * that issue this row could not exist — the UI path never reached the audit
+ * sink at all, so the pane's answer to "did anyone reconcile this?" was silent
+ * about the operator's own clicks.
+ */
+const FROM_THE_UI: AuditEntry = {
+  ts: 1_700_000_200,
+  source: "ui",
+  transport: "ui",
+  tool: "extensions.action",
+  args: { action: "reconcile" },
+  app: { id: "org.example.flux", revision: 4 },
+  cluster: "prod-eu",
+  resource: "checkout/web",
   decision: "auto",
   outcome: "ok",
   err: null,
@@ -58,6 +86,38 @@ describe("AuditPane", () => {
     expect(screen.getByText(/denied · sensitive reads are off/i)).toBeTruthy();
     // An allowed row carries no reason, so the word stands alone.
     expect(screen.getByText("allowed")).toBeTruthy();
+  });
+
+  /**
+   * #555's point, on the screen: a mutating call made in srelens itself is in
+   * the trail, it says it came from the app rather than from an agent, and it
+   * names the app it went through. Until that issue the UI path never reached
+   * the audit sink, so this row did not exist and the pane quietly answered
+   * "no one reconciled anything" for a reconcile the reader had just clicked.
+   */
+  it("shows a call made in the app, marked as coming from it", async () => {
+    core.auditTail.mockResolvedValue([FROM_THE_UI, DENIED, ALLOWED]);
+    render(<AuditPane />);
+    expect(await screen.findByText("extensions.action")).toBeTruthy();
+    const sources = screen.getAllByTestId("audit-source").map((el) => el.textContent);
+    expect(sources).toContain("ui");
+    // The MCP rows still say which transport carried them.
+    expect(sources.some((s) => s?.includes("mcp") && s.includes("http"))).toBe(true);
+    // And the app it went through, revision included: an update rolls the
+    // revision and leaves the ID alone.
+    expect(screen.getByTestId("audit-app").textContent).toContain("org.example.flux@4");
+  });
+
+  /**
+   * The pane says what it does and does not record, because a reader who
+   * assumes symmetry with MCP would read the absence of their own reads as a
+   * fact about the cluster. And it says the trail stays on this machine.
+   */
+  it("says what it records from the app, and that the log goes nowhere", async () => {
+    render(<AuditPane />);
+    await screen.findByText("secret.read");
+    expect(screen.getByText(/changed something or read secret material/i)).toBeTruthy();
+    expect(screen.getByText(/never sent anywhere/i)).toBeTruthy();
   });
 
   it("caps and truncates the target, with the full value in a title", async () => {
@@ -184,15 +244,16 @@ describe("AuditPane", () => {
   });
 
   /**
-   * #369: srelens does not track which client connected, and `AuditEntry`
-   * carries the transport a call arrived on. A `Client` header over `stdio` /
-   * `http` claims exactly what the issue says srelens cannot know.
+   * #369: srelens does not track which client connected. The column holds
+   * where a call came from — `ui`, or `mcp` and the transport it arrived on —
+   * so a `Client` header over it would claim exactly what that issue says
+   * srelens cannot know.
    */
-  it("names the transport column for the value it holds", async () => {
+  it("names the source column for the value it holds", async () => {
     render(<AuditPane />);
     await screen.findByText("secret.read");
     const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
-    expect(headers).toContain("Transport");
+    expect(headers).toContain("Source");
     expect(headers).not.toContain("Client");
   });
   it("shows prompt file diagnostics and refreshes them independently of the audit result", async () => {

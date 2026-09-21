@@ -823,10 +823,10 @@ mod tests {
         // The audit log is how an operator attributes an action to a caller, so
         // a networked subscribe recorded as stdio is worse than not logging it.
         #[derive(Default)]
-        struct Spy(Mutex<Vec<(String, crate::Transport)>>);
+        struct Spy(Mutex<Vec<(String, crate::audit::Source)>>);
         impl crate::audit::AuditSink for Spy {
             fn record(&self, rec: crate::audit::AuditRecord) {
-                self.0.lock().unwrap().push((rec.tool, rec.transport));
+                self.0.lock().unwrap().push((rec.tool, rec.source));
             }
         }
         let spy = Arc::new(Spy::default());
@@ -842,8 +842,12 @@ mod tests {
         let subscribes: Vec<_> =
             seen.iter().filter(|(tool, _)| tool == "resources/subscribe").collect();
         assert!(!subscribes.is_empty(), "the subscribe must be audited: {seen:?}");
-        for (tool, transport) in subscribes {
-            assert_eq!(*transport, crate::Transport::Http, "{tool} attributed to the wrong transport");
+        for (tool, source) in subscribes {
+            assert_eq!(
+                *source,
+                crate::audit::Source::McpHttp,
+                "{tool} attributed to the wrong transport"
+            );
         }
     }
 

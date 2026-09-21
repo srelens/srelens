@@ -387,7 +387,11 @@ AI clients, using your locally authenticated cluster contexts. Open
 - **Connect a client** — pick your client (Claude Code, Claude Desktop, Cursor,
   Codex, and others) and transport to get a ready-to-paste configuration snippet.
 - **View the bearer token and audit log** — rotate or revoke the HTTP token,
-  and review recent agent activity, from the same panel.
+  and review recent activity, from the same panel. The trail holds every
+  capability call an agent made **and** every mutating or sensitive one you
+  made in srelens itself — a Sync or Reconcile you clicked is in there beside
+  an agent's, marked `ui` rather than `mcp`. It is a file on this machine and
+  is never sent anywhere.
 
 Both transports support **resource subscriptions** (`resources/subscribe` on
 `k8s://` object URIs): the server pushes a `notifications/resources/updated`

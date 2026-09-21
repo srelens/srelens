@@ -161,9 +161,36 @@ limits do.
   surface.
 - Every call is recorded to an **audit log** at
   `<app config dir>/mcp/audit.jsonl` (mode `0600`, rotated once to `.1` past
-  5 MB), viewable in Settings → MCP under recent agent activity. Argument
-  values are redacted before they're written, so the log records the shape
-  of a call without its contents:
+  5 MB), viewable in Settings → MCP under recent agent activity.
+
+  **It is not only MCP's log.** A capability invoked from srelens's own
+  windows is recorded in the same file, in the same format — an Argo CD sync
+  or a Flux reconcile you click leaves a record, not just the identical call
+  made by an agent. The sink sits beside the capability registry
+  (`crates/capability/src/audit.rs`), which is the one place the two callers
+  meet, so `Registry::invoke_audited` writes the record whichever side asked.
+  Each line carries the time, the `source` (`ui` or `mcp`) and the
+  `transport` under it (`ui`, `stdio`, `http`), the capability, the app `id`
+  and `revision` when the call went through an installed app, the `cluster`
+  and `resource` it named, the consent `decision`, and an `outcome` of `ok`,
+  `rejected` (it never ran — consent refused, arguments refused, no such
+  capability) or `failed` (it ran and did not finish).
+
+  **What is recorded differs by source, on purpose.** MCP records every call
+  an agent makes, reads included, because that is the question the trail
+  answers about a third party. From srelens itself only mutating and
+  sensitive capabilities are recorded — the safety classes below, minus plain
+  read-only — because a single screen makes dozens of reads a minute and
+  burying the writes under them would cost the log its use. Your own reads
+  are therefore absent from the trail; their absence is not evidence.
+
+  **The log never leaves your machine.** It is a file in your app config
+  directory, read by the Settings pane on the same host. Nothing uploads it,
+  and there is no export yet
+  ([#371](https://github.com/srelens/srelens/issues/371)).
+
+  Argument values are redacted before they're written, so the log records the
+  shape of a call without its contents:
   - sensitive capabilities redact every value;
   - keys that look like credentials (`token`, `secret`, `password`, `key`)
     are redacted at any nesting depth;

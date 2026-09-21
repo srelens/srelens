@@ -53,6 +53,17 @@ impl Transport {
     }
 }
 
+/// An MCP request is one of the two sources the audit trail knows about; the
+/// other is the desktop UI, which never reaches this crate.
+impl From<Transport> for crate::audit::Source {
+    fn from(t: Transport) -> Self {
+        match t {
+            Transport::Stdio => crate::audit::Source::McpStdio,
+            Transport::Http => crate::audit::Source::McpHttp,
+        }
+    }
+}
+
 pub struct McpServer {
     registry: Arc<Registry>,
     confirm_policy: Arc<dyn crate::policy::ConfirmPolicy>,
@@ -157,6 +168,25 @@ impl McpServer {
 
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value, CapabilityError> {
         self.registry.invoke(name, args).await
+    }
+
+    /// Call a tool and let the registry write the audit record for it.
+    ///
+    /// `handle_request` used to build the record itself, which is why the
+    /// desktop bridge had none: two call sites, one of them forgotten. The
+    /// registry is where both surfaces meet, so it does the recording and this
+    /// only supplies what MCP knows and it does not — which transport the call
+    /// came in on, and what the consent policy decided.
+    pub async fn call_tool_audited(
+        &self,
+        name: &str,
+        args: Value,
+        transport: Transport,
+        decision: &'static str,
+    ) -> Result<Value, CapabilityError> {
+        self.registry
+            .invoke_audited(name, args, self.audit.as_ref(), transport.into(), decision)
+            .await
     }
 
     /// Whether a tool should be consent-gated over remote transports: it

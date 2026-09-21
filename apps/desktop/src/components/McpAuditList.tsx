@@ -11,7 +11,11 @@ const DECISION_VARIANT: Record<AuditEntry["decision"], BadgeVariant> = {
 
 const OUTCOME_VARIANT: Record<AuditEntry["outcome"], BadgeVariant> = {
   ok: "success",
-  error: "danger",
+  // Two different answers to "did it happen?": srelens would not do it, or the
+  // cluster would not. The backend tells them apart (#555), so neither the
+  // word nor the colour collapses them back together.
+  rejected: "warning",
+  failed: "danger",
 };
 
 // Table rows need a stable key that survives sorting; the fetch-order index

@@ -71,7 +71,7 @@ describe("McpAuditList", () => {
         tool: "k8s_drainNode",
         args: { name: "node-1" },
         decision: "denied",
-        outcome: "error",
+        outcome: "rejected",
         err: "user declined",
       },
     ]);

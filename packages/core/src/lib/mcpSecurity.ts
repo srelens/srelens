@@ -7,13 +7,43 @@ export interface ConfirmRequest {
   args: Record<string, unknown>;
 }
 
+/**
+ * One line of the local audit trail, as `srelens_capability::audit`
+ * (`crates/capability/src/audit.rs`) writes it.
+ *
+ * **Both surfaces are in here** (#555). The trail used to hold MCP calls
+ * alone, because the sink lived in the MCP crate and a capability invoked from
+ * the app went straight to the registry — so an Argo CD sync clicked in
+ * srelens left no record while the identical call from an agent did. The sink
+ * moved beside the registry, where the two paths meet, and `source` is how a
+ * reader tells them apart.
+ *
+ * **It is local and it stays local.** These lines come from one `0600` file
+ * under the app's config directory, read by the Settings pane on the same
+ * machine. Nothing uploads it and nothing else reads it.
+ */
 export interface AuditEntry {
   ts: number;
-  transport: "stdio" | "http";
+  /** Who made the call: the app's own UI, or an MCP client. */
+  source: "ui" | "mcp";
+  /** How it reached the registry. `"ui"` is the Tauri bridge. */
+  transport: "ui" | "stdio" | "http";
   tool: string;
   args: Record<string, unknown>;
+  /** The app the call was made through, when it was made through one. */
+  app: { id: string; revision: number } | null;
+  /** The cluster context the call named, when it named one. */
+  cluster: string | null;
+  /** The object the call named, as `namespace/name` or `name`. */
+  resource: string | null;
   decision: "approved" | "denied" | "auto";
-  outcome: "ok" | "error";
+  /**
+   * `ok` — it ran and answered. `rejected` — it never ran: consent refused,
+   * arguments refused, no such capability. `failed` — it ran and did not
+   * finish. "srelens would not do this" and "the cluster would not" are
+   * different answers to "did my sync happen?".
+   */
+  outcome: "ok" | "rejected" | "failed";
   err: string | null;
 }
 
