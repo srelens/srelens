@@ -10446,12 +10446,22 @@ impl App {
 
         // 2. Correlate cached events for this pod
         let mut pod_events = Vec::new();
-        for ((_, _, k), items) in &self.resource_cache {
+        for ((_, ns, k), items) in &self.resource_cache {
             if k.eq_ignore_ascii_case("Events") || k.eq_ignore_ascii_case("event") {
                 for evt in items {
+                    let evt_ns = evt
+                        .pointer("/metadata/namespace")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(ns.as_str());
                     let involved_name =
                         evt.pointer("/involvedObject/name").and_then(|v| v.as_str());
-                    if involved_name == Some(&pod_name) {
+                    let involved_ns = evt
+                        .pointer("/involvedObject/namespace")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(evt_ns);
+                    if involved_name == Some(&pod_name)
+                        && (involved_ns == effective_ns || involved_ns.is_empty())
+                    {
                         pod_events.push(evt.clone());
                     }
                 }
@@ -10592,7 +10602,7 @@ impl App {
         self.modal = Some(Modal::Diagnosis {
             resource_kind: kind,
             resource_name: name,
-            namespace: target_ns,
+            namespace: Some(effective_ns),
             report,
             scroll_offset: 0,
         });

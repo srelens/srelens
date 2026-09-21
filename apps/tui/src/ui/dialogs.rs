@@ -1237,6 +1237,7 @@ pub fn render_diagnosis_modal(
         .split(inner);
 
     // 1. Verdict & Summary
+    let summary_clean = crate::views::sanitize_span_text(&report.summary);
     let verdict_spans = vec![
         Span::styled(
             verdict_badge,
@@ -1247,7 +1248,7 @@ pub fn render_diagnosis_modal(
         ),
         Span::raw(" "),
         Span::styled(
-            &report.summary,
+            summary_clean,
             Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
         ),
     ];
@@ -1262,11 +1263,12 @@ pub fn render_diagnosis_modal(
     );
 
     // 2. Recommended Remediation
-    let remediation_text = if report.remediation.is_empty() {
+    let remediation_raw = if report.remediation.is_empty() {
         "No immediate remediation required."
     } else {
         &report.remediation
     };
+    let remediation_text = crate::views::sanitize_span_text(remediation_raw);
     let rem_block = Block::default()
         .borders(Borders::ALL)
         .border_type(Theme::border_type())
@@ -1292,20 +1294,22 @@ pub fn render_diagnosis_modal(
                 SignalSeverity::Warning => ("▲ ", Theme::YELLOW),
                 SignalSeverity::Info => ("ℹ ", Theme::CYAN),
             };
+            let title_clean = crate::views::sanitize_span_text(&sig.title);
             signal_lines.push(Line::from(vec![
                 Span::styled(
                     icon,
                     Style::default().fg(icon_color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    &sig.title,
+                    title_clean,
                     Style::default().fg(Theme::FG).add_modifier(Modifier::BOLD),
                 ),
             ]));
             if let Some(ref detail) = sig.detail {
+                let detail_clean = crate::views::sanitize_span_text(detail);
                 signal_lines.push(Line::from(vec![
                     Span::raw("    "),
-                    Span::styled(detail, Style::default().fg(Theme::DIM)),
+                    Span::styled(detail_clean, Style::default().fg(Theme::DIM)),
                 ]));
             }
             signal_lines.push(Line::raw(""));
@@ -1320,8 +1324,9 @@ pub fn render_diagnosis_modal(
             " 🔍 Correlated Signals ({}) ",
             report.signals.len()
         ));
+    let clamped_scroll = scroll_offset.min(u16::MAX as usize) as u16;
     let signals_p = Paragraph::new(signal_lines)
-        .scroll((scroll_offset as u16, 0))
+        .scroll((clamped_scroll, 0))
         .wrap(Wrap { trim: false })
         .block(signals_block);
     f.render_widget(signals_p, chunks[2]);
