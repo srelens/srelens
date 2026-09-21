@@ -37,12 +37,174 @@ pub struct DiagnosticReport {
     pub signals: Vec<DiagnosticSignal>,
 }
 
+fn extract_quoted_string(s: &str) -> Option<&str> {
+    let start = s.find('"')?;
+    let end = s[start + 1..].find('"')?;
+    Some(&s[start + 1..start + 1 + end])
+}
+
 pub fn make_one_line_gist(category: &str, raw_detail: &str, max_len: usize) -> String {
     let raw = raw_detail.trim();
     if raw.is_empty() {
         return category.to_string();
     }
 
+    // 1. Semantic pattern extractors
+
+    // Pattern A: Device allocation failure (GPU, KVM, SRIOV, device plugin)
+    if (raw.contains("Allocate failed")
+        || raw.contains("cannot allocate")
+        || raw.contains("healthy devices"))
+        && (raw.contains('/') || raw.contains("device"))
+    {
+        let device = raw.split_whitespace().find_map(|w| {
+            let clean =
+                w.trim_matches(|c: char| !c.is_alphanumeric() && c != '/' && c != '.' && c != '-');
+            if clean.contains('/')
+                && (clean.ends_with("/gpu")
+                    || clean.contains(".io/")
+                    || clean.contains(".com/")
+                    || clean.contains(".org/"))
+            {
+                Some(clean)
+            } else {
+                None
+            }
+        });
+
+        if let Some(dev) = device {
+            if raw.contains("no healthy devices") || raw.contains("unhealthy") {
+                let s = format!("Allocate failed: No healthy {} devices", dev);
+                if s.chars().count() <= max_len {
+                    return s;
+                }
+            } else {
+                let s = format!("Allocate failed for {}", dev);
+                if s.chars().count() <= max_len {
+                    return s;
+                }
+            }
+        }
+    }
+
+    // Pattern B: Volume / PVC mount failure
+    if raw.contains("MountVolume") || raw.contains("failed to mount") || category == "FailedMount" {
+        let pvc = extract_quoted_string(raw);
+        if raw.contains("not found") {
+            if let Some(name) = pvc {
+                let s = format!("Mount failed: PVC \"{}\" not found", name);
+                if s.chars().count() <= max_len {
+                    return s;
+                }
+            } else {
+                return "Mount failed: Volume or PVC not found".to_string();
+            }
+        }
+    }
+
+    // Pattern C: Network / CNI / Sandbox setup failure
+    if (raw.contains("setup network")
+        || raw.contains("sandbox")
+        || category == "FailedCreatePodSandBox")
+        && (raw.contains("IP addresses") || raw.contains("network"))
+    {
+        if raw.contains("no IP addresses") || raw.contains("IPAM") {
+            let net_name = raw
+                .split("network:")
+                .nth(1)
+                .or_else(|| raw.split("network ").nth(1))
+                .map(|s| {
+                    s.trim()
+                        .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
+                });
+            if let Some(net) = net_name.filter(|s| !s.is_empty()) {
+                let s = format!("Network setup failed: No IP addresses in {}", net);
+                if s.chars().count() <= max_len {
+                    return s;
+                }
+            } else {
+                return "Network setup failed: No IP addresses available".to_string();
+            }
+        }
+    }
+
+    // Pattern D: Image pull failure
+    if (category == "ImagePullBackOff" || category == "ErrImagePull" || raw.contains("pull"))
+        && (raw.contains("not found")
+            || raw.contains("manifest unknown")
+            || raw.contains("unauthorized")
+            || raw.contains("denied"))
+    {
+        let image = extract_quoted_string(raw);
+        if raw.contains("unauthorized") || raw.contains("denied") {
+            if let Some(img) = image {
+                let s = format!("Image pull failed: Auth error for \"{}\"", img);
+                if s.chars().count() <= max_len {
+                    return s;
+                }
+            }
+        } else if let Some(img) = image {
+            let s = format!(
+                "{}: \"{}\" not found",
+                if !category.is_empty() {
+                    category
+                } else {
+                    "ImagePullFailed"
+                },
+                img
+            );
+            if s.chars().count() <= max_len {
+                return s;
+            }
+        }
+    }
+
+    // Pattern E: DeadlineExceeded
+    if category == "DeadlineExceeded" || raw.contains("deadline") {
+        if let Some(secs) = raw.split("deadline").nth(1).and_then(|s| {
+            s.split_whitespace()
+                .find(|w| w.chars().all(|c| c.is_ascii_digit()))
+        }) {
+            let s = format!("DeadlineExceeded: Active longer than {}s", secs);
+            if s.chars().count() <= max_len {
+                return s;
+            }
+        }
+    }
+
+    // Pattern F: Missing Secret / ConfigMap
+    if raw.contains("not found") && (raw.contains("secret") || raw.contains("configmap")) {
+        let name = extract_quoted_string(raw);
+        let kind = if raw.contains("secret") {
+            "Secret"
+        } else {
+            "ConfigMap"
+        };
+        if let Some(n) = name {
+            let s = if !category.is_empty() && category != "Failed" && category != "Error" {
+                format!("{}: {} \"{}\" not found", category, kind, n)
+            } else {
+                format!("{}: \"{}\" not found", kind, n)
+            };
+            if s.chars().count() <= max_len {
+                return s;
+            }
+        }
+    }
+
+    // Pattern G: Permission denied / OCI runtime error
+    if raw.contains("permission denied") {
+        let s = if !category.is_empty() && category != "Failed" && category != "Error" {
+            format!("{}: Permission denied", category)
+        } else {
+            "Permission denied starting container process".to_string()
+        };
+        if s.chars().count() <= max_len {
+            return s;
+        }
+    }
+
+    // General Fallback
     // 1. Strip redundant boilerplates
     let stripped = raw
         .strip_prefix("Pod was rejected: ")
@@ -65,13 +227,16 @@ pub fn make_one_line_gist(category: &str, raw_detail: &str, max_len: usize) -> S
     // 3. Extract the primary clause before delimiters (;, \n)
     let clause = content.split([';', '\n']).next().unwrap_or(content).trim();
 
-    // 4. Clean and format headline with category
-    let headline =
-        if !category.is_empty() && !clause.to_lowercase().starts_with(&category.to_lowercase()) {
-            format!("{}: {}", category, clause)
-        } else {
-            clause.to_string()
-        };
+    // 4. Format headline: prepend category if not already present
+    let headline = if !category.is_empty()
+        && category != "Failed"
+        && category != "Error"
+        && !clause.to_lowercase().starts_with(&category.to_lowercase())
+    {
+        format!("{}: {}", category, clause)
+    } else {
+        clause.to_string()
+    };
 
     // 5. Budget cap at max_len with whole-word ellipsis
     if headline.chars().count() <= max_len {
@@ -291,7 +456,7 @@ pub fn analyze_pod_health(
 
                 let summary = make_one_line_gist(
                     "OOMKilled",
-                    &format!("container '{}' exceeded memory limit (exit code 137)", name),
+                    &format!("OOMKilled: container '{}' exceeded memory limit", name),
                     65,
                 );
 
@@ -422,17 +587,18 @@ pub fn analyze_pod_health(
             };
 
             let summary = if let Some(ref p) = panic_detail {
+                let p_clean = p.split("stack backtrace").next().unwrap_or(p).trim();
                 make_one_line_gist(
                     "CrashLoopBackOff",
-                    &format!("container '{}': {}", name, p),
+                    &format!("CrashLoopBackOff: container '{}' - {}", name, p_clean),
                     65,
                 )
             } else {
                 make_one_line_gist(
                     "CrashLoopBackOff",
                     &format!(
-                        "container '{}' (restarts: {}, exit code: {})",
-                        name, restart_count, last_exit_code
+                        "CrashLoopBackOff: container '{}' (restarts: {})",
+                        name, restart_count
                     ),
                     65,
                 )
@@ -516,7 +682,7 @@ pub fn analyze_pod_health(
             verdict: DiagnosticVerdict::Failed,
             summary: make_one_line_gist(
                 "Terminating",
-                &format!("Pod '{}' terminating (waiting for finalizers)", pod_name),
+                &format!("Terminating: pod '{}' (waiting for finalizers)", pod_name),
                 65,
             ),
             remediation: "Check terminating containers, finalizers, or unmounting volumes."
@@ -643,11 +809,8 @@ pub fn analyze_pod_health(
                 title: format!("Container config error ({})", reason),
                 detail,
             });
-            let summary = make_one_line_gist(
-                reason,
-                event_msg.unwrap_or(&format!("pod '{}' failed with {}", name, reason)),
-                65,
-            );
+            let fallback = format!("{}: pod '{}' config error", reason, name);
+            let summary = make_one_line_gist(reason, event_msg.unwrap_or(&fallback), 65);
             return DiagnosticReport {
                 verdict: DiagnosticVerdict::ConfigError,
                 summary,
@@ -669,11 +832,8 @@ pub fn analyze_pod_health(
                 title: format!("Image pull failure ({})", reason),
                 detail,
             });
-            let summary = make_one_line_gist(
-                reason,
-                event_msg.unwrap_or(&format!("pod '{}' failed with {}", name, reason)),
-                65,
-            );
+            let fallback = format!("{}: pod '{}' image pull failed", reason, name);
+            let summary = make_one_line_gist(reason, event_msg.unwrap_or(&fallback), 65);
             return DiagnosticReport {
                 verdict: DiagnosticVerdict::ImagePullFailed,
                 summary,
@@ -688,11 +848,8 @@ pub fn analyze_pod_health(
                 title: format!("CrashLoopBackOff ({})", reason),
                 detail: event_msg.map(|s| s.to_string()),
             });
-            let summary = make_one_line_gist(
-                reason,
-                event_msg.unwrap_or(&format!("pod '{}' is in CrashLoopBackOff", name)),
-                65,
-            );
+            let fallback = format!("{}: pod '{}' crashing", reason, name);
+            let summary = make_one_line_gist(reason, event_msg.unwrap_or(&fallback), 65);
             return DiagnosticReport {
                 verdict: DiagnosticVerdict::CrashLoopBackOff,
                 summary,
@@ -1322,15 +1479,12 @@ mod tests {
 
         let report = analyze_pod_health(&pod, &[], None);
         assert_eq!(report.verdict, DiagnosticVerdict::Failed);
-        assert!(
-            report.summary.len() <= 75,
-            "Summary too long: {} chars",
-            report.summary.len()
+        assert_eq!(
+            report.summary,
+            "Allocate failed: No healthy nvidia.com/gpu devices"
         );
-        assert!(
-            report.summary.contains("Allocate failed")
-                || report.summary.contains("UnexpectedAdmissionError")
-        );
+        assert!(!report.summary.ends_with('…'));
+        assert!(!report.summary.ends_with("..."));
         // Full raw detail is preserved in signals
         assert_eq!(report.signals.len(), 1);
         assert!(report.signals[0]
@@ -1355,11 +1509,11 @@ mod tests {
         })];
 
         let report = analyze_pod_health(&pod, &events, None);
-        assert!(
-            report.summary.len() <= 75,
-            "Summary too long: {} chars",
-            report.summary.len()
+        assert_eq!(
+            report.summary,
+            "Network setup failed: No IP addresses in podnet"
         );
+        assert!(!report.summary.ends_with('…'));
         assert!(report.signals.iter().any(|s| s
             .detail
             .as_deref()
@@ -1383,11 +1537,8 @@ mod tests {
 
         let report = analyze_pod_health(&pod, &events, None);
         assert_eq!(report.verdict, DiagnosticVerdict::ConfigError);
-        assert!(
-            report.summary.len() <= 75,
-            "Summary too long: {} chars",
-            report.summary.len()
-        );
+        assert_eq!(report.summary, "Mount failed: PVC \"pvc-data\" not found");
+        assert!(!report.summary.ends_with('…'));
         assert!(report.signals.iter().any(|s| s
             .detail
             .as_deref()
