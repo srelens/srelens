@@ -210,6 +210,15 @@ limits do.
     every value. An app's settings are free-form and nothing marks one as
     secret, so a value under `credential` or `certificate` would otherwise be
     written verbatim — for a denied call too;
+  - a URL loses its credentials and keeps the rest. `helm repo add` documents
+    `https://user:token@host/charts` for a private repository, and
+    `k8s.helmRepoAdd` is audited because it mutates, so the userinfo and any
+    credential-bearing query parameter (`token`, `sig`, `access_key`, …) are
+    blanked while the scheme, host and path stay — the record still says
+    which repository was added. This follows the value, not the key name, so
+    an `oci://user:pass@registry/chart` passed as `chart` to `k8s.helmInstall`
+    is scrubbed too. A value under a field that promises a URL and does not
+    parse as one is dropped whole;
   - a recorded error message is scrubbed of every value the rules above
     removed, because a capability that refuses an argument tends to echo it
     (`invalid type: string "…", expected a map`).

@@ -12,6 +12,10 @@ thiserror = "1"
 # needles in one pass; a scan per value made recording a denied call quadratic
 # in the number of arguments (#625).
 aho-corasick = "1.1.5"
+# A repo URL in an audited argument carries its credentials in the userinfo
+# and in query parameters; keeping the rest of the URL readable means taking
+# it apart properly rather than with a regex.
+url = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

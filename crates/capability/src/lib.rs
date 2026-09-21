@@ -347,6 +347,50 @@ mod registry_tests {
         assert_eq!(seen[0].outcome, audit::OUTCOME_REJECTED);
     }
 
+    /// `k8s.helmRepoAdd` takes the repository URL as free text and is audited
+    /// because it mutates, so a private chart repo added with its credentials
+    /// in the URL — the form `helm repo add` documents — used to land on disk
+    /// verbatim, from either surface. The record has to keep saying WHICH repo
+    /// was added, so the host and the path stay and only the credentials go.
+    #[tokio::test]
+    async fn a_url_with_credentials_is_not_written_to_the_log() {
+        let mut reg = Registry::new();
+        let mut add = Capability::read_only("k8s.helmRepoAdd", "adds a repo", |_| async {
+            Ok(json!({ "output": "\"internal\" has been added" }))
+        });
+        add.annotations = Annotations::MUTATING;
+        reg.register(add);
+
+        let dir = std::env::temp_dir().join(format!("srelens-pr660-url-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audit.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let log = audit::JsonlAuditLog::new(path.clone(), 5 * 1024 * 1024);
+
+        reg.invoke_audited(
+            "k8s.helmRepoAdd",
+            json!({
+                "context": "prod",
+                "name": "internal",
+                "url": "https://deploy:s3cr3t-pass@charts.example.com/stable?access_key=AKIAHUNTER2",
+            }),
+            &log,
+            audit::Source::Ui,
+            "approved",
+        )
+        .await
+        .unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        for leaked in ["s3cr3t-pass", "deploy:", "AKIAHUNTER2"] {
+            assert!(!body.contains(leaked), "{leaked} reached the log: {body}");
+        }
+        assert!(
+            body.contains("charts.example.com/stable"),
+            "the repo the record is about has to survive: {body}"
+        );
+    }
+
     #[test]
     fn get_returns_capability_for_registered_id() {
         let mut reg = Registry::new();

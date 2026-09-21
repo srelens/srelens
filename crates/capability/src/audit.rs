@@ -217,6 +217,10 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// against the schema. Matched exactly, like `PAYLOAD_FIELDS`, and no other
     /// capability takes a `settings` argument (`settings.set` takes `values`).
     const KEYED_PAYLOAD_FIELDS: [&str; 1] = ["settings"];
+    /// Fields that promise a URL, so a value that is not one is a value the
+    /// parser cannot pick the password out of: blanked whole rather than
+    /// guessed at. Matched exactly, like the two sets above.
+    const URL_FIELDS: [&str; 5] = ["url", "uri", "endpoint", "repourl", "webhook"];
 
     match args {
         Value::Object(map) => {
@@ -229,6 +233,12 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
                 if sensitive || is_credential_key {
                     // Redact this value entirely
                     out.insert(k.clone(), json!(REDACTED));
+                } else if URL_FIELDS.contains(&lower.as_str()) {
+                    let cleaned = match v {
+                        Value::String(s) => json!(redact_url(s).unwrap_or(REDACTED.into())),
+                        other => redact(other, false),
+                    };
+                    out.insert(k.clone(), cleaned);
                 } else if KEYED_PAYLOAD_FIELDS.contains(&lower.as_str()) {
                     // Keep the names, drop every value.
                     let redacted = match v {
@@ -247,9 +257,121 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
             // Recurse into array elements with the same sensitivity
             Value::Array(arr.iter().map(|v| redact(v, sensitive)).collect())
         }
-        // Scalars stay as-is (no redaction needed)
+        // A string that IS a URL carries its credentials whatever key it sits
+        // under — `chart` on `k8s.helmInstall` takes `oci://…` — so the scrub
+        // follows the value, not the name. Everything else is a scalar and
+        // stays as it was.
+        Value::String(s) if looks_like_a_url(s) => {
+            json!(redact_url(s).unwrap_or(REDACTED.into()))
+        }
         other => other.clone(),
     }
+}
+
+/// Whether a string announces itself as a URL, i.e. is worth taking apart.
+///
+/// The test is the scheme separator and nothing cleverer: a value with no
+/// `://` in it is a chart name, a release, a namespace — things a reader of
+/// the trail needs to see, and things with nowhere for a credential to hide
+/// in the shape this function is looking for. `k8s.helmRepoAdd`'s own `url`
+/// argument does not go through here; a field that promises a URL is held to
+/// one (see `URL_FIELDS`).
+fn looks_like_a_url(s: &str) -> bool {
+    s.contains("://")
+}
+
+/// One URL with its credentials taken out, or `None` when it will not parse.
+///
+/// **What stays is what makes the record worth keeping**: the scheme, the
+/// host, the port and the path say which repository was added, which registry
+/// was pulled from. What goes is the two places a URL carries a secret:
+///
+/// - the **userinfo** — `https://deploy:s3cr3t@charts.example.com/stable` is
+///   the form `helm repo add` documents for a private repository, and #555
+///   made `k8s.helmRepoAdd` audited, so before this the token went to disk
+///   verbatim and stayed there until rotation;
+/// - **credential-bearing query parameters** — a pre-signed URL puts the
+///   whole credential in the query (`sig`, `X-Amz-Signature`, `access_key`).
+///   The parameter's NAME is kept and only its value is blanked, so the
+///   record still says a signed URL was used.
+///
+/// `None` (the caller writes [`REDACTED`]) when the string does not parse as
+/// a URL **with a host**, which is the fail-closed direction: a string that
+/// cannot be taken apart is one whose password cannot be located, and the
+/// values this function is given are exactly the ones an audit record must
+/// not leak. The host is part of the test because `Url::parse` happily reads
+/// `deploy:s3cr3t@charts.example.com` as the scheme `deploy` over an opaque
+/// path — a credential that would otherwise have passed straight through as
+/// a URL the parser "understood".
+fn redact_url(raw: &str) -> Option<String> {
+    let mut url = url::Url::parse(raw).ok()?;
+    if !url.has_host() {
+        return None;
+    }
+    // Both return Err for a scheme that cannot carry userinfo, which is also
+    // a scheme that has none to strip.
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+
+    // Rebuilt by hand rather than through `query_pairs_mut`, which would
+    // percent-encode the sentinel into `%3Credacted%3E` and re-encode every
+    // value it kept. Splitting the raw query leaves the parameters a reader
+    // needs exactly as they were sent and writes the sentinel plainly.
+    let query = url.query().map(scrub_query);
+    let fragment = url.fragment().map(str::to_string);
+    url.set_query(None);
+    url.set_fragment(None);
+    let mut out = url.to_string();
+    if let Some(q) = query {
+        out.push('?');
+        out.push_str(&q);
+    }
+    if let Some(f) = fragment {
+        out.push('#');
+        out.push_str(&f);
+    }
+    Some(out)
+}
+
+/// A URL's raw query with every credential-bearing parameter's value replaced
+/// and every other parameter left byte for byte as it arrived.
+///
+/// The parameter's NAME survives, so the record still says a signed URL was
+/// used — a pre-signed URL puts the whole credential in the query (`sig`,
+/// `X-Amz-Signature`, `access_key`) and "there was a signature here" is the
+/// part an operator reading the trail needs.
+fn scrub_query(query: &str) -> String {
+    /// Substring-matched against a lowercased parameter name, like `NEEDLES`.
+    /// Over-matching costs a reader the value of a parameter that was not a
+    /// credential; under-matching costs a credential on disk.
+    const QUERY_NEEDLES: [&str; 9] = [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "key",
+        "sig",
+        "credential",
+        "auth",
+        "session",
+    ];
+
+    query
+        .split('&')
+        .map(|pair| {
+            let Some((name, _)) = pair.split_once('=') else {
+                // A bare flag has no value to hide.
+                return pair.to_string();
+            };
+            let lower = name.to_ascii_lowercase();
+            if QUERY_NEEDLES.iter().any(|n| lower.contains(n)) {
+                format!("{name}={REDACTED}")
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 /// Scrub from an error message every value that `redact` dropped from `args`.
@@ -277,8 +399,8 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
 /// replaced once.
 ///
 /// **Returns [`UNSCRUBBABLE`] rather than panicking or passing the message
-/// through** when the matcher cannot be built from those values — see the
-/// comment at the call. Failing closed here costs one sentence of an audit
+/// through** when the matcher cannot be built from those values — see
+/// [`scrub_or_drop`]. Failing closed here costs one sentence of an audit
 /// record; failing open would write the value the redaction just removed.
 pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
     use std::collections::HashSet;
@@ -322,38 +444,55 @@ pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
     patterns.sort_by_key(|s| std::cmp::Reverse(s.len()));
     patterns.dedup();
 
-    // **A scrub that cannot be built drops the message, it does not panic.**
-    //
-    // `patterns` is built from the caller's own argument values, and this
-    // repository's rule is no `unwrap`/`expect` on caller data
-    // (`.coderabbit.yaml`). `AhoCorasick::build` returns `BuildError` when a
-    // pattern is longer than `SmallIndex::MAX`, or when the patterns together
-    // need more states or IDs than a 32-bit index holds — roughly two
-    // gigabytes of argument values in one call. MCP cannot reach that
-    // (`MAX_REQUEST_BYTES` caps a request at 4 MiB) but the desktop bridge
-    // takes whatever the WebView hands it, with no transport limit of its own.
-    //
-    // Two reasons this is a fallback rather than a panic, and the second is
-    // the stronger one:
-    //
-    // - the panic would unwind through `Registry::invoke_audited`, i.e. the
-    //   audit path would take down the capability call it was recording. The
-    //   log's whole posture is the opposite: "a lost log line must never break
-    //   a working cluster operation" (`JsonlAuditLog::record`, which swallows
-    //   every I/O error for exactly this reason);
-    // - there is nothing safe to fall back TO except silence. The reason this
-    //   function exists is that a capability which refuses an argument echoes
-    //   it, so writing the unscrubbed message would put the value the
-    //   redaction just hid straight back on disk. Failing closed means the
-    //   record keeps its redacted arguments and loses only the sentence that
-    //   could not be cleaned.
-    let Ok(ac) = aho_corasick::AhoCorasick::builder()
+    // A matcher that will not build drops the message rather than passing it
+    // through — see `scrub_or_drop`, which takes the `Result` so that policy
+    // has a test.
+    let built = aho_corasick::AhoCorasick::builder()
         .match_kind(aho_corasick::MatchKind::LeftmostFirst)
-        .build(&patterns)
-    else {
+        .build(&patterns);
+    scrub_or_drop(built, error, &patterns)
+}
+
+/// Replace every pattern in `error`, or drop the message if the matcher
+/// could not be built.
+///
+/// **A scrub that cannot be built drops the message, it does not panic.**
+///
+/// `patterns` is built from the caller's own argument values, and this
+/// repository's rule is no `unwrap`/`expect` on caller data
+/// (`.coderabbit.yaml`). `AhoCorasick::build` returns `BuildError` when a
+/// pattern is longer than `SmallIndex::MAX`, or when the patterns together
+/// need more states or IDs than a 32-bit index holds — roughly two gigabytes
+/// of argument values in one call. MCP cannot reach that (`MAX_REQUEST_BYTES`
+/// caps a request at 4 MiB) but the desktop bridge takes whatever the WebView
+/// hands it, with no transport limit of its own.
+///
+/// Two reasons this is a fallback rather than a panic, and the second is the
+/// stronger one:
+///
+/// - the panic would unwind through [`crate::Registry::invoke_audited`], i.e.
+///   the audit path would take down the capability call it was recording. The
+///   log's whole posture is the opposite: "a lost log line must never break a
+///   working cluster operation" ([`JsonlAuditLog::record`], which swallows
+///   every I/O error for exactly this reason);
+/// - there is nothing safe to fall back TO except silence. The reason
+///   [`redact_error`] exists is that a capability which refuses an argument
+///   echoes it, so writing the unscrubbed message would put the value the
+///   redaction just hid straight back on disk. Failing closed means the
+///   record keeps its redacted arguments and loses only the sentence that
+///   could not be cleaned.
+///
+/// **The build's `Result` is a parameter so the fallback can be tested.** It
+/// is generic in the error because the only cheap way to reach this branch is
+/// to hand it one; provoking a real `BuildError` means allocating gigabytes.
+fn scrub_or_drop<E>(
+    built: Result<aho_corasick::AhoCorasick, E>,
+    error: &str,
+    patterns: &[String],
+) -> String {
+    let Ok(ac) = built else {
         return UNSCRUBBABLE.to_string();
     };
-
     let replacements = vec![REDACTED; patterns.len()];
     ac.replace_all(error, &replacements)
 }
@@ -577,6 +716,60 @@ mod tests {
         assert_eq!(out["namespace"], json!("<redacted>"));
         assert_eq!(out["name"], json!("<redacted>"));
         assert!(out.get("namespace").is_some(), "keys must survive redaction");
+    }
+
+    #[test]
+    fn a_url_keeps_its_scheme_host_and_path_and_loses_its_userinfo() {
+        let args = json!({ "url": "https://deploy:s3cr3t@charts.example.com/stable" });
+        let out = redact(&args, false);
+        assert_eq!(out["url"], json!("https://charts.example.com/stable"));
+    }
+
+    #[test]
+    fn a_urls_credential_query_parameters_are_blanked_and_the_rest_are_kept() {
+        let args = json!({
+            "url": "https://charts.example.com/s?access_key=AKIA1&region=eu&sig=abc&api_key=k",
+        });
+        let out = redact(&args, false);
+        assert_eq!(
+            out["url"],
+            json!(
+                "https://charts.example.com/s?access_key=<redacted>&region=eu\
+                 &sig=<redacted>&api_key=<redacted>"
+            )
+        );
+    }
+
+    /// A credential does not become safe by sitting under a key the redaction
+    /// has no name for: `chart` on `k8s.helmInstall` takes `oci://…` and
+    /// `https://….tgz` as readily as `bitnami/nginx`.
+    #[test]
+    fn a_url_is_scrubbed_wherever_it_appears_not_only_under_a_url_named_key() {
+        let args = json!({ "chart": "oci://robot:pw@registry.example.com/charts/app" });
+        let out = redact(&args, false);
+        assert_eq!(out["chart"], json!("oci://registry.example.com/charts/app"));
+    }
+
+    #[test]
+    fn a_string_that_is_not_a_url_is_left_readable() {
+        let args = json!({ "chart": "bitnami/nginx", "name": "web@1" });
+        let out = redact(&args, false);
+        assert_eq!(out["chart"], json!("bitnami/nginx"));
+        assert_eq!(out["name"], json!("web@1"));
+    }
+
+    /// Fail closed: something that announces itself as a URL and will not
+    /// parse is exactly the case where the parser cannot say which part was
+    /// the password.
+    #[test]
+    fn an_unparseable_url_is_redacted_whole() {
+        let args = json!({
+            "url": "deploy:s3cr3t@charts.example.com",
+            "endpoint": "https://user:pw@[not-an-address",
+        });
+        let out = redact(&args, false);
+        assert_eq!(out["url"], json!("<redacted>"));
+        assert_eq!(out["endpoint"], json!("<redacted>"));
     }
 
     #[test]
@@ -1200,19 +1393,49 @@ mod tests {
         assert_eq!(resource.as_deref(), Some("<redacted>/<redacted>"));
     }
 
+    /// A matcher that could not be built drops the message rather than
+    /// passing it through, and rather than panicking through the capability
+    /// call it was only supposed to be recording.
+    ///
+    /// The build failure is injected instead of provoked: `AhoCorasick::build`
+    /// fails on a pattern past `SmallIndex::MAX` or on IDs past a 32-bit
+    /// index, which takes on the order of two gigabytes of argument values in
+    /// one call — allocating that is not a unit test, it is an OOM with an
+    /// assertion attached. [`scrub_or_drop`] takes the build's `Result`, so
+    /// the policy under test is reachable without the allocation that would
+    /// produce a real `BuildError`.
+    #[test]
+    fn a_matcher_that_cannot_be_built_drops_the_message_instead_of_passing_it_on() {
+        let patterns = vec!["hunter2".to_string()];
+        let failed: Result<aho_corasick::AhoCorasick, &str> = Err("pattern too long");
+
+        let out = scrub_or_drop(failed, "invalid token hunter2", &patterns);
+
+        assert_eq!(out, UNSCRUBBABLE);
+        assert!(
+            !out.contains("hunter2"),
+            "the value the redaction hid must not come back through the error"
+        );
+    }
+
+    /// The same seam on the path that works: a built matcher replaces every
+    /// pattern, so the fallback is the only thing the test above isolates.
+    #[test]
+    fn a_matcher_that_builds_replaces_every_hidden_value() {
+        let patterns = vec!["hunter2".to_string()];
+        let built = aho_corasick::AhoCorasick::builder()
+            .match_kind(aho_corasick::MatchKind::LeftmostFirst)
+            .build(&patterns);
+
+        assert_eq!(
+            scrub_or_drop(built, "invalid token hunter2", &patterns),
+            format!("invalid token {REDACTED}")
+        );
+    }
+
     /// The two redactions have to speak one vocabulary: an operator reading a
     /// row sees the arguments and the reason beside each other, and two
     /// spellings of "gone" would read as two different things having happened.
-    ///
-    /// The sibling property — that a matcher which cannot be built returns
-    /// [`UNSCRUBBABLE`] instead of panicking or passing the message through —
-    /// has no test here, deliberately. `AhoCorasick::build` fails on a pattern
-    /// past `SmallIndex::MAX` or on state/pattern IDs past a 32-bit index,
-    /// which takes on the order of two gigabytes of argument values in one
-    /// call; allocating that is not a unit test, it is an OOM with an
-    /// assertion attached. `redact_error_stays_near_linear_in_the_number_of_
-    /// hidden_values` covers the large-but-buildable end, and the fallback
-    /// itself is a `let ... else` with one statement in it.
     #[test]
     fn the_arguments_and_the_error_are_redacted_in_the_same_words() {
         let args = json!({ "name": "web", "apiToken": "hunter2" });
