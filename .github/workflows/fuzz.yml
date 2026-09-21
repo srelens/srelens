@@ -57,7 +57,7 @@ jobs:
       # Pinned by SHA, so `toolchain` has to be explicit, as in ci.yml. libFuzzer's
       # sanitizer flags are nightly-only, and rust-toolchain.toml pins the repository to
       # stable, so every cargo call below says `+nightly`.
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: nightly
       - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # v2
