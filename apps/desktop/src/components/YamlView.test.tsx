@@ -64,22 +64,33 @@ describe("YamlView", () => {
     expect(getManifestMock).toHaveBeenCalledWith("kind-dev", "Pod", "default", "web-1", undefined, undefined);
   });
 
-  it("offers to copy the manifest", async () => {
-    // The pane in #656: a manifest a reader opens in order to take it away.
+  it("offers to copy the manifest — except over a Secret, which this view shows in the clear", async () => {
+    // Two renders in ONE case, because what is being pinned is that the answer
+    // DEPENDS on the kind. Split in two, the Secret half passes against a
+    // version that never asks for a copy at all, and the Pod half against one
+    // that always does; neither alone says the view discriminates. Nor would a
+    // sentinel for an omitted prop help — `ManifestEditor` defaults `copy` to
+    // `false` before it forwards, so an omitted prop and a declined one reach
+    // the editor identically by construction. (#656 review)
+    //
+    // The rule itself: this view loads through `getManifest`, which redacts
+    // nothing — unlike the new design's pane (`redactSecretManifest`) and
+    // unlike the Edit tab (`loadEditableManifest`, which routes a Secret
+    // through the consent-gated `getSecret`). A one-click copy of unredacted
+    // Secret material is not an affordance to add on top of that gap; the gap
+    // itself is #659.
     getManifestMock.mockResolvedValue({ yaml: "kind: Pod" });
-    render(<YamlView context="kind-dev" kind="Pod" namespace="default" name="web-1" />);
-    expect((await screen.findByLabelText("Manifest YAML")).dataset.copy).toBe("true");
-  });
+    const pod = render(<YamlView context="kind-dev" kind="Pod" namespace="default" name="web-1" />);
+    const forPod = (await pod.findByLabelText("Manifest YAML")).dataset.copy;
+    pod.unmount();
 
-  it("offers no copy over a Secret, whose values this view shows in the clear", async () => {
-    // This view loads through `getManifest`, which redacts nothing — unlike
-    // the new design's pane (`redactSecretManifest`) and unlike the Edit tab
-    // (`loadEditableManifest`, which routes Secrets through the consent-gated
-    // `getSecret`). A one-click copy of unredacted Secret material is not an
-    // affordance to add on top of that gap. (#656 review)
     getManifestMock.mockResolvedValue({ yaml: "kind: Secret" });
-    render(<YamlView context="kind-dev" kind="Secret" namespace="default" name="api" />);
-    expect((await screen.findByLabelText("Manifest YAML")).dataset.copy).toBe("false");
+    const secret = render(<YamlView context="kind-dev" kind="Secret" namespace="default" name="api" />);
+    const forSecret = (await secret.findByLabelText("Manifest YAML")).dataset.copy;
+
+    expect(forPod).toBe("true");
+    expect(forSecret).toBe("false");
+    expect(forPod).not.toBe(forSecret);
   });
 
   it("shows a load error", async () => {
