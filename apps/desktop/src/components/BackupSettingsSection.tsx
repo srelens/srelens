@@ -99,6 +99,21 @@ export function noChangeVerdict(report: ImportReport, wholeBundle: boolean): str
     : "Nothing to import — this machine already has everything in that bundle.";
 }
 
+/**
+ * A finished import, with the coverage it ran under.
+ *
+ * The coverage is recorded HERE rather than recomputed from the live
+ * checkboxes at render time. The group boxes stay editable after an import
+ * finishes, so a verdict derived from them changed retroactively: after a
+ * no-op partial import said "Nothing was imported.", ticking the group that
+ * had been left out flipped the same status block to "this machine already has
+ * everything in that bundle" — a claim about an import that never ran.
+ */
+interface Outcome {
+  report: ImportReport;
+  wholeBundle: boolean;
+}
+
 /** Every line of an import report that has something to say. */
 export function reportLines(report: ImportReport): string[] {
   const lines: string[] = [];
@@ -156,7 +171,7 @@ export function BackupSettingsSection() {
   const [selected, setSelected] = useState<BundleGroup[]>([]);
   const [opening, setOpening] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [report, setReport] = useState<ImportReport | null>(null);
+  const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [error, setError] = useState("");
 
   /**
@@ -216,7 +231,7 @@ export function BackupSettingsSection() {
     begin();
     setPath(picked);
     setOpened(null);
-    setReport(null);
+    setOutcome(null);
     setError("");
     // The superseded `openBundle`'s `finally` is guarded by its own token, so
     // it will NOT reset this — picking a second file mid-decrypt otherwise
@@ -267,7 +282,7 @@ export function BackupSettingsSection() {
     // second import that fails would leave the first one's "Added 2
     // kubeconfigs" beside the failure alert, describing writes this attempt
     // did not make.
-    setReport(null);
+    setOutcome(null);
     try {
       // The selection that produced the manifest, not whatever is in the
       // fields now.
@@ -277,7 +292,7 @@ export function BackupSettingsSection() {
         groups: selected,
       });
       if (!current(token)) return;
-      setReport(result);
+      setOutcome({ report: result, wholeBundle });
       if (importWroteSomething(result)) {
         notify.success("Setup imported. Reload srelens to see the imported settings.");
       } else {
@@ -440,7 +455,7 @@ export function BackupSettingsSection() {
           </div>
         )}
 
-        {report && (
+        {outcome !== null && (
           <div className="flex flex-col gap-1 text-sm" role="status">
             {/* The detail lines and the verdict are separate questions.
                 `reportLines` includes the skips — "already here", "kept your
@@ -448,15 +463,15 @@ export function BackupSettingsSection() {
                 empty, but nothing was written. Keying the reload advice off
                 the line count told such a reader to restart srelens to pick up
                 changes that were never made. */}
-            {reportLines(report).map((line) => (
+            {reportLines(outcome.report).map((line) => (
               <p key={line}>{line}</p>
             ))}
-            {importWroteSomething(report) ? (
+            {importWroteSomething(outcome.report) ? (
               <p className="text-muted-foreground">
                 Reload srelens (or restart it) to pick up the imported settings.
               </p>
             ) : (
-              <p>{noChangeVerdict(report, wholeBundle)}</p>
+              <p>{noChangeVerdict(outcome.report, outcome.wholeBundle)}</p>
             )}
           </div>
         )}

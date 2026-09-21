@@ -418,6 +418,30 @@ describe("BackupSettingsSection", () => {
     expect(importSetupBundleMock).toHaveBeenCalledTimes(1);
   });
 
+
+  it("does not change an import's verdict when the checkboxes are touched afterwards", async () => {
+    // The group boxes stay editable after an import. A verdict recomputed from
+    // them changed retroactively: a no-op partial import said "Nothing was
+    // imported.", and ticking the group that had been left out flipped the
+    // same block to a claim about an import that never ran.
+    importSetupBundleMock.mockResolvedValue(EMPTY_REPORT);
+    const user = userEvent.setup();
+    render(<BackupSettingsSection />);
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+    await user.type(screen.getByLabelText("Bundle passphrase"), "pw");
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(screen.getByRole("checkbox", { name: /^Clusters/ }));
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+    expect(screen.getByRole("status").textContent ?? "").toMatch(/Nothing was imported./);
+
+    // Tick it back on WITHOUT importing again.
+    await user.click(screen.getByRole("checkbox", { name: /^Clusters/ }));
+
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toMatch(/Nothing was imported./);
+    expect(status).not.toMatch(/already has everything/);
+  });
+
   it("tells the reader that apps are not imported, and where to get them", async () => {
     previewSetupBundleMock.mockResolvedValue({
       ...SUMMARY,
