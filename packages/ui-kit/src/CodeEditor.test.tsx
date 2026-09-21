@@ -105,3 +105,70 @@ describe("CodeEditor — what it tells the caller", () => {
     await waitFor(() => expect(onDiagnostics).toHaveBeenCalledWith([]), { timeout: 3000 });
   });
 });
+
+describe("CodeEditor — taking the document away", () => {
+  /** ⌘A as the browser delivers it with focus on the page, not the editor. */
+  function pressSelectAll(): KeyboardEvent {
+    const event = new KeyboardEvent("keydown", {
+      key: "a",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.body.dispatchEvent(event);
+    return event;
+  }
+
+  it("makes a read-only document a tab stop", () => {
+    // A read-only view is `contenteditable="false"`, which the browser will
+    // not focus and will not put a caret in — so the pane was unreachable by
+    // keyboard, and any selection made in it was never the document's own
+    // selection, which is what ⌘C copies. (#656)
+    const { container } = render(<CodeEditor value="kind: Pod" readOnly ariaLabel="web manifest" />);
+    expect(container.querySelector(".cm-content")?.getAttribute("tabindex")).toBe("0");
+  });
+
+  it("leaves an editable document to CodeMirror's own tab stop", () => {
+    const { container } = render(<CodeEditor value="kind: Pod" />);
+    expect(container.querySelector(".cm-content")?.hasAttribute("tabindex")).toBe(false);
+  });
+
+  it("answers ⌘A pressed on the page by selecting the manifest", () => {
+    // The complaint in #656: ⌘A on the manifest view selected every label and
+    // table row AROUND the YAML and left the YAML itself out, because that is
+    // what the browser's select-all does to a `contenteditable`.
+    const { container } = render(
+      <CodeEditor value={"kind: Pod\nmetadata:\n  name: web\n"} readOnly ariaLabel="web manifest" />,
+    );
+    const content = container.querySelector(".cm-content");
+    expect(document.activeElement).not.toBe(content);
+
+    const event = pressSelectAll();
+
+    expect(event.defaultPrevented).toBe(true);
+    // Focus is the half that makes the selection the clipboard's: CodeMirror
+    // writes the DOM selection only for a view that has focus.
+    expect(document.activeElement).toBe(content);
+    expect(container.querySelector(".cm-selectionBackground, .cm-selectionLayer")).not.toBeNull();
+  });
+
+  it("renders no Copy control unless the caller asks for one", () => {
+    const { queryByRole } = render(<CodeEditor value="kind: Pod" ariaLabel="web manifest" />);
+    expect(queryByRole("button", { name: /copy/i })).toBeNull();
+  });
+
+  it("puts the whole document on the clipboard", async () => {
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const yaml = "kind: Pod\nmetadata:\n  name: web\n";
+    const { getByRole, findByText } = render(
+      <CodeEditor value={yaml} readOnly copy ariaLabel="web manifest" />,
+    );
+
+    getByRole("button", { name: /copy/i }).click();
+
+    await findByText("Copied");
+    expect(writeText).toHaveBeenCalledWith(yaml);
+    vi.unstubAllGlobals();
+  });
+});

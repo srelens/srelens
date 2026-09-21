@@ -708,6 +708,7 @@ function EditExisting({ context, parts }: { context: ClusterContext; parts: Edit
                 language="yaml"
                 fill
                 flush
+                copy
                 readOnly={!revealed}
                 ariaLabel={`${name} manifest`}
                 schemaValidate={validator(pinned)}
@@ -1006,6 +1007,7 @@ function NewResource({ context, cluster }: { context: ClusterContext; cluster?: 
               language="yaml"
               fill
               flush
+              copy
               ariaLabel="New resource manifest"
               schemaValidate={validator(pinned)}
               completions={analysis.completions}

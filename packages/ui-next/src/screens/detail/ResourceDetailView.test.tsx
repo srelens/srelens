@@ -1342,7 +1342,11 @@ describe("ResourceDetailView", () => {
       // this is the chain that carries it down to the editor.
       const host = container.querySelector('[data-slot="yaml-editor"]') as HTMLElement | null;
       expect(host?.className).toContain("h-full");
-      const seat = host?.querySelector(".cm-editor")?.parentElement?.parentElement;
+      // Found by walking DOWN from the pane rather than counting wrappers up
+      // from CodeMirror: the seat is the pane's own child that holds the
+      // editor, and how many elements the kit puts between the two is the
+      // kit's business — it gained one when the editor grew a Copy control.
+      const seat = [...(host?.children ?? [])].find((el) => el.querySelector(".cm-editor"));
       expect(seat?.className).toContain("flex-1");
       expect(seat?.className).toContain("min-h-0");
     });
@@ -1359,7 +1363,11 @@ describe("ResourceDetailView", () => {
       expect(codeEditorProps.at(-1)?.fill).toBe(true);
       const host = container.querySelector('[data-slot="yaml-editor"]') as HTMLElement | null;
       expect(host?.className).toContain("h-full");
-      const seat = host?.querySelector(".cm-editor")?.parentElement?.parentElement;
+      // Found by walking DOWN from the pane rather than counting wrappers up
+      // from CodeMirror: the seat is the pane's own child that holds the
+      // editor, and how many elements the kit puts between the two is the
+      // kit's business — it gained one when the editor grew a Copy control.
+      const seat = [...(host?.children ?? [])].find((el) => el.querySelector(".cm-editor"));
       expect(seat?.className).toContain("flex-1");
       expect(seat?.className).toContain("min-h-0");
     });

@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { Check, Copy } from "lucide-react";
 import { EditorState } from "@codemirror/state";
 import {
   EditorView,
@@ -26,6 +27,13 @@ import { parseAllDocuments } from "yaml";
 import { tags as t } from "@lezer/highlight";
 import type { SchemaBundle } from "@srelens/core";
 import { extractApiVersionKind, pathAtCursor, fieldCompletions, valueCompletions } from "@srelens/core";
+// The chord itself, shared with the new design's editor rather than written
+// twice — see that module for why the browser will not answer it. A leaf
+// import, not the kit's barrel: this component is lazy-loaded into a classic
+// boot, and reaching through `@srelens/ui-kit` would pull the whole component
+// library into that chunk (the wall `design.ts` describes). (#656)
+import { registerSelectAllTarget } from "@srelens/ui-kit/selectAll";
+import { Button } from "./Button";
 
 /**
  * Parse YAML (one or more `---`-separated documents) and return syntax
@@ -231,6 +239,15 @@ export interface CodeEditorProps {
   /** Fill the parent's height (scroll internally) instead of growing to content. */
   fill?: boolean;
   /**
+   * A Copy control over the pane's top-right corner, putting the whole
+   * document on the clipboard in one click.
+   *
+   * Off by default — an editor that is a control inside a form wants no chrome
+   * — and on for the panes a reader opens in order to take the text away: a
+   * manifest, a release's values. (#656)
+   */
+  copy?: boolean;
+  /**
    * k8s-aware validation: given the YAML, resolve to server-side validation
    * error messages (empty = valid). Wired to `k8s.validateManifest`. When set,
    * the editor lints against the API server in addition to YAML syntax.
@@ -260,6 +277,7 @@ export function CodeEditor({
   fill = false,
   schemaValidate,
   schemaSource,
+  copy = false,
 }: CodeEditorProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -357,7 +375,17 @@ export function CodeEditor({
       };
       extensions.push(autocompletion({ override: [completionSource] }));
     }
-    if (ariaLabel) extensions.push(EditorView.contentAttributes.of({ "aria-label": ariaLabel }));
+    const contentAttrs: Record<string, string> = {};
+    if (ariaLabel) contentAttrs["aria-label"] = ariaLabel;
+    // A read-only document is `contenteditable="false"`, which the browser
+    // will not focus and will not put a caret in — so the pane could not be
+    // reached by keyboard at all, and a selection made in it was never the
+    // document's own selection, which is what ⌘C copies. A tab stop is what a
+    // non-editable text region needs either way. (#656)
+    if (readOnly) contentAttrs.tabindex = "0";
+    if (Object.keys(contentAttrs).length > 0) {
+      extensions.push(EditorView.contentAttributes.of(contentAttrs));
+    }
 
     const view = new EditorView({
       state: EditorState.create({ doc: value, extensions }),
@@ -372,6 +400,33 @@ export function CodeEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readOnly, language, ariaLabel, minHeight, maxHeight, fill]);
 
+  /**
+   * Answer ⌘A / Ctrl-A for a reader who has not clicked into the editor.
+   *
+   * Pressed on the body, the browser's own select-all takes the whole page
+   * AROUND a `contenteditable` and leaves its text out — so the manifest view
+   * put every label and table row beside the YAML on the clipboard, and no
+   * YAML. The closures are read at keypress because the view is created
+   * imperatively above, and replaced outright whenever a structural option
+   * rebuilds it. (#656)
+   */
+  useEffect(
+    () =>
+      registerSelectAllTarget({
+        dom: () => viewRef.current?.dom ?? null,
+        selectAll: () => {
+          const view = viewRef.current;
+          if (!view) return;
+          // Focus FIRST: CodeMirror writes the DOM selection only for a view
+          // that has focus (or already holds the selection), so without it the
+          // editor draws a range the clipboard knows nothing about.
+          view.focus();
+          view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+        },
+      }),
+    [],
+  );
+
   // Push external value changes into the editor (e.g. after Reset or reload).
   useEffect(() => {
     const view = viewRef.current;
@@ -382,5 +437,55 @@ export function CodeEditor({
     }
   }, [value]);
 
-  return <div ref={parentRef} className="fl-editor" />;
+  // The Copy control is positioned against a wrapper rather than dropped in
+  // beside the editor: CodeMirror owns `parentRef`'s children — it appends its
+  // own tree there — and React reconciling siblings into a node another
+  // library writes to is how a pane loses its editor on the next render.
+  return (
+    <div className="fl-editor-shell">
+      <div ref={parentRef} className="fl-editor" />
+      {copy && <CopyDocumentButton text={value} label={ariaLabel ? `Copy ${ariaLabel}` : "Copy"} />}
+    </div>
+  );
+}
+
+/** How long the control stays flipped after a copy. */
+const COPIED_MS = 1400;
+
+/**
+ * Put the document on the clipboard, and say so briefly.
+ *
+ * **A failed copy never says "Copied".** `navigator.clipboard` is absent on a
+ * non-secure origin and can be refused outright, and a confirmation over an
+ * empty clipboard is the one outcome here that actually misleads — so the
+ * failure is silent rather than cheerful.
+ *
+ * The button's own name stays the action. The visible word changes to
+ * "Copied", which is what a screen reader hears too, so the outcome is
+ * announced once rather than twice.
+ */
+function CopyDocumentButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), COPIED_MS);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
+  async function run() {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+    } catch {
+      // Nothing to recover and nothing to say: see above.
+    }
+  }
+
+  return (
+    <Button variant="secondary" size="xs" className="fl-editor-copy" title={label} onClick={() => void run()}>
+      {copied ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}
+      {copied ? "Copied" : "Copy"}
+    </Button>
+  );
 }

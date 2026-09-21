@@ -275,6 +275,7 @@ export function ManifestEditor({
         language="yaml"
         ariaLabel={ariaLabel}
         fill={fill}
+        copy
         minHeight={fill ? undefined : 320}
         maxHeight={fill ? undefined : 520}
         schemaValidate={(y) =>
