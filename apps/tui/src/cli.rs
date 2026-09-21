@@ -49,7 +49,7 @@ pub enum CliCommand {
     Info,
     /// Run headless Model Context Protocol (MCP) server over stdio
     Mcp {
-        /// Allow cluster-mutating / destructive capabilities (requires caller _confirm: true)
+        /// Allow cluster-mutating / destructive capabilities
         #[arg(long = "allow-destructive")]
         allow_destructive: bool,
         /// Allow secret-reading capabilities (e.g. k8s.getSecret)

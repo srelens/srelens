@@ -2661,3 +2661,35 @@ fn custom_resource_table_colours_printer_status_columns() {
     assert_eq!(fg_of(&buf, y2 as u16, "False"), Theme::status_error().fg);
     assert_eq!(fg_of(&buf, y2 as u16, "Degraded"), Theme::status_error().fg);
 }
+
+#[test]
+fn render_diagnosis_modal_displays_verdict_and_remediation() {
+    use srelens_kube::diagnose::{
+        DiagnosticReport, DiagnosticSignal, DiagnosticVerdict, SignalSeverity,
+    };
+    use srelens_tui::ui::dialogs::render_diagnosis_modal;
+
+    let report = DiagnosticReport {
+        verdict: DiagnosticVerdict::OOMKilled,
+        summary: "Container 'api' was OOMKilled (exit code 137)".to_string(),
+        remediation: "Increase memory limit in pod spec".to_string(),
+        signals: vec![DiagnosticSignal {
+            severity: SignalSeverity::Error,
+            title: "Container 'api' exceeded memory limit".to_string(),
+            detail: Some("Limit 256Mi was exceeded".to_string()),
+        }],
+    };
+
+    let buf = render_buffer(120, 30, |f| {
+        render_diagnosis_modal(f, f.area(), "Pod", "api-pod-123", Some("prod"), &report, 0);
+    });
+
+    let rows: Vec<String> = (0..buf.area.height).map(|y| buffer_row(&buf, y)).collect();
+    let text = rows.join("\n");
+    assert!(text.contains("Root-Cause Diagnosis: Pod/api-pod-123 -n prod"), "{}", text);
+    assert!(text.contains("OOMKilled"), "{}", text);
+    assert!(text.contains("Increase memory limit in pod spec"), "{}", text);
+    assert!(text.contains("Container 'api' exceeded memory limit"), "{}", text);
+    assert!(text.contains("Limit 256Mi was exceeded"), "{}", text);
+    assert!(text.contains("[Esc/q] Close"), "{}", text);
+}

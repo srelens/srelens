@@ -3033,7 +3033,7 @@ async fn action_palette_opens_with_x_filters_navigates_and_runs_the_chosen_actio
 
     press(&mut app, ch('x')).await;
     let (count, _, _) = palette(&app);
-    assert_eq!(count, 12);
+    assert_eq!(count, 13);
     press(&mut app, key(KeyCode::Down)).await;
     assert_eq!(palette(&app).1, 1);
     press(&mut app, key(KeyCode::Up)).await;
@@ -6002,5 +6002,69 @@ async fn test_table_ctrl_d_bulk_delete_tagged_pods_opens_confirm_modal() {
     press(&mut app, ctrl('d')).await;
     assert!(app.modal.is_some());
     press(&mut app, key(KeyCode::Enter)).await;
+    assert!(app.modal.is_none());
+}
+
+#[tokio::test]
+async fn bang_key_opens_diagnosis_modal_for_selected_pod() {
+    let (tx, _rx) = unbounded_channel();
+    let mut app = App::new(None, None, true, None, vec![], tx)
+        .await
+        .expect("app");
+
+    let oom_pod = json!({
+        "metadata": {
+            "name": "payment-api-pod",
+            "namespace": "default",
+        },
+        "spec": {
+            "containers": [{
+                "name": "payment-api",
+                "resources": { "limits": { "memory": "256Mi" } }
+            }]
+        },
+        "status": {
+            "phase": "Running",
+            "containerStatuses": [{
+                "name": "payment-api",
+                "restartCount": 2,
+                "ready": false,
+                "lastState": {
+                    "terminated": {
+                        "exitCode": 137,
+                        "reason": "OOMKilled"
+                    }
+                }
+            }]
+        }
+    });
+
+    seed_table(&mut app, ResourceKind::Pods, vec![oom_pod]);
+
+    // Press '!' to trigger Instant RCA diagnosis
+    press(&mut app, ch('!')).await;
+
+    // Check modal is opened with Diagnosis variant
+    match &app.modal {
+        Some(Modal::Diagnosis {
+            resource_kind,
+            resource_name,
+            report,
+            ..
+        }) => {
+            assert_eq!(resource_kind, "Pod");
+            assert_eq!(resource_name, "payment-api-pod");
+            assert_eq!(
+                report.verdict,
+                srelens_kube::diagnose::DiagnosticVerdict::OOMKilled
+            );
+            assert!(report.summary.contains("OOMKilled"));
+            assert!(report.remediation.contains("memory limit"));
+        }
+        other => panic!("expected Modal::Diagnosis, got {:?}", other),
+    }
+
+    // Dismiss with 'q'
+    press(&mut app, ch('q')).await;
     assert!(app.modal.is_none());
 }

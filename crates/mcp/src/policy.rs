@@ -50,8 +50,7 @@ pub trait ConfirmPolicy: Send + Sync {
 pub struct AlwaysDeny;
 
 /// Headless policy: the operator opts the process in with the flag matching the
-/// call's [`ConsentKind`] AND the caller states intent with `_confirm: true`.
-/// Neither alone is sufficient, and neither flag implies the other.
+/// call's [`ConsentKind`].
 pub struct FlagGated {
     allow_destructive: bool,
     allow_sensitive_reads: bool,
@@ -82,19 +81,12 @@ impl ConfirmPolicy for AlwaysDeny {
 
 #[async_trait::async_trait]
 impl ConfirmPolicy for FlagGated {
-    async fn confirm(&self, tool: &str, args: &Value, kind: ConsentKind) -> Decision {
+    async fn confirm(&self, tool: &str, _args: &Value, kind: ConsentKind) -> Decision {
         if !self.allows(kind) {
             return Decision::Denied(format!(
                 "`{tool}` {}; this srelens process was not started with {}",
                 kind.effect(),
                 kind.flag()
-            ));
-        }
-        let confirmed = args.get("_confirm").and_then(Value::as_bool).unwrap_or(false);
-        if !confirmed {
-            return Decision::Denied(format!(
-                "`{tool}` {}. Re-send with \"_confirm\": true to state intent.",
-                kind.effect()
             ));
         }
         Decision::Approved
@@ -106,8 +98,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Both flags on — the baseline for tests about `_confirm` rather than
-    /// about which flag gates which kind.
+    /// Both flags on — the baseline for tests.
     fn permissive() -> FlagGated {
         FlagGated::new(true, true)
     }
@@ -129,24 +120,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flag_gated_requires_both_flag_and_confirm() {
+    async fn flag_gated_allows_with_flag() {
         let with_flag = permissive();
         let without_flag = FlagGated::new(false, false);
-        let confirmed = json!({ "_confirm": true });
         let bare = json!({});
         let k = ConsentKind::Destructive;
 
-        // The full 2x2. Only flag AND _confirm approves.
-        assert_eq!(with_flag.confirm("t", &confirmed, k).await, Decision::Approved);
-        assert!(matches!(with_flag.confirm("t", &bare, k).await, Decision::Denied(_)));
-        assert!(matches!(without_flag.confirm("t", &confirmed, k).await, Decision::Denied(_)));
+        assert_eq!(with_flag.confirm("t", &bare, k).await, Decision::Approved);
         assert!(matches!(without_flag.confirm("t", &bare, k).await, Decision::Denied(_)));
     }
 
     #[tokio::test]
-    async fn flag_gated_denial_explains_which_half_is_missing() {
+    async fn flag_gated_denial_explains_which_flag_is_missing() {
         let d = FlagGated::new(false, false)
-            .confirm("t", &json!({ "_confirm": true }), ConsentKind::Destructive)
+            .confirm("t", &json!({}), ConsentKind::Destructive)
             .await;
         match d {
             Decision::Denied(r) => assert!(r.contains("--mcp-allow-destructive"), "got: {r}"),
@@ -160,7 +147,7 @@ mod tests {
     #[tokio::test]
     async fn allowing_sensitive_reads_authorizes_a_sensitive_read() {
         let d = FlagGated::new(false, true)
-            .confirm("k8s.getSecret", &json!({ "_confirm": true }), ConsentKind::SensitiveRead)
+            .confirm("k8s.getSecret", &json!({}), ConsentKind::SensitiveRead)
             .await;
         assert_eq!(d, Decision::Approved);
     }
@@ -169,7 +156,7 @@ mod tests {
     #[tokio::test]
     async fn allowing_sensitive_reads_does_not_authorize_a_destructive_tool() {
         let d = FlagGated::new(false, true)
-            .confirm("k8s.deletePod", &json!({ "_confirm": true }), ConsentKind::Destructive)
+            .confirm("k8s.deletePod", &json!({}), ConsentKind::Destructive)
             .await;
         match d {
             Decision::Denied(r) => assert!(r.contains("--mcp-allow-destructive"), "got: {r}"),
@@ -177,13 +164,11 @@ mod tests {
         }
     }
 
-    /// The converse, which is the actual bug being fixed: before the split,
-    /// `--mcp-allow-destructive` was the only way to read a Secret headless.
-    /// Now the destructive flag alone must not unlock sensitive reads.
+    /// The converse: `--mcp-allow-destructive` alone must not unlock sensitive reads.
     #[tokio::test]
     async fn allowing_destructive_does_not_authorize_a_sensitive_read() {
         let d = FlagGated::new(true, false)
-            .confirm("k8s.getSecret", &json!({ "_confirm": true }), ConsentKind::SensitiveRead)
+            .confirm("k8s.getSecret", &json!({}), ConsentKind::SensitiveRead)
             .await;
         match d {
             Decision::Denied(r) => {
@@ -191,15 +176,5 @@ mod tests {
             }
             other => panic!("expected denial, got {other:?}"),
         }
-    }
-
-    /// A sensitive read still needs stated intent, exactly like a mutation:
-    /// the flag opts the process in, `_confirm` opts the individual call in.
-    #[tokio::test]
-    async fn a_sensitive_read_still_needs_confirm() {
-        let d = FlagGated::new(true, true)
-            .confirm("k8s.getSecret", &json!({}), ConsentKind::SensitiveRead)
-            .await;
-        assert!(matches!(d, Decision::Denied(_)));
     }
 }

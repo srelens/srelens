@@ -180,3 +180,4 @@ pub mod gpu_info;
 pub mod node_ssh;
 pub mod gitops;
 pub mod bgp;
+pub mod diagnose;
