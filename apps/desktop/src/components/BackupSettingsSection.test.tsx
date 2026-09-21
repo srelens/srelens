@@ -261,6 +261,51 @@ describe("BackupSettingsSection", () => {
     expect(notifyMock.success).not.toHaveBeenCalled();
   });
 
+  it("does not tell the reader to reload when the import wrote nothing", async () => {
+    // A report of nothing but skips is not empty, so keying the reload advice
+    // off the line count promised changes that were never made.
+    importSetupBundleMock.mockResolvedValue({
+      ...EMPTY_REPORT,
+      kubeconfigsAlreadyPresent: ["config"],
+      skillsKeptLocal: ["triage.md"],
+    });
+    const user = userEvent.setup();
+    render(<BackupSettingsSection />);
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+    await user.type(screen.getByLabelText("Bundle passphrase"), "pw");
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toMatch(/1 kubeconfig was already here: config/);
+    expect(status).toMatch(/already has everything/);
+    expect(status).not.toMatch(/Reload srelens/);
+  });
+
+  it("cannot import a manifest that belongs to a file the reader has left", async () => {
+    // argon2id is deliberately slow, so a second Choose file… can land while
+    // the first preview is still decrypting. The stale manifest must not
+    // become importable under the new file's name.
+    let releaseFirst: (summary: BundleSummary) => void = () => {};
+    previewSetupBundleMock.mockImplementationOnce(
+      () => new Promise<BundleSummary>((resolve) => (releaseFirst = resolve)),
+    );
+    const user = userEvent.setup();
+    render(<BackupSettingsSection />);
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+    await user.type(screen.getByLabelText("Bundle passphrase"), "pw");
+    await user.click(screen.getByRole("button", { name: "Open" }));
+
+    pickSetupBundleMock.mockResolvedValue("/tmp/other.srelens");
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+
+    releaseFirst(SUMMARY);
+    await Promise.resolve();
+
+    expect(screen.queryByRole("button", { name: /import selected/i })).toBeNull();
+    expect(importSetupBundleMock).not.toHaveBeenCalled();
+  });
+
   it("tells the reader that apps are not imported, and where to get them", async () => {
     previewSetupBundleMock.mockResolvedValue({
       ...SUMMARY,

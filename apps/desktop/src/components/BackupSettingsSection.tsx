@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button, TextInput } from "../ui";
 import { notify } from "@srelens/core";
 import {
@@ -51,6 +51,19 @@ const GROUPS: Array<{ id: BundleGroup; label: string; describe: (s: BundleSummar
 
 function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`;
+}
+
+/**
+ * A bundle that has been opened, together with the selection that opened it.
+ * The path and passphrase are captured here rather than read back off the form
+ * at import time: the fields stay editable while the preview is on screen, and
+ * importing with a passphrase the reader has since retyped would send the new
+ * one against the manifest the old one produced.
+ */
+interface Opened {
+  path: string;
+  passphrase: string;
+  summary: BundleSummary;
 }
 
 /** Groups a bundle actually carries — an empty group is not worth a checkbox. */
@@ -118,12 +131,26 @@ export function BackupSettingsSection() {
 
   const [path, setPath] = useState("");
   const [importPassphrase, setImportPassphrase] = useState("");
-  const [summary, setSummary] = useState<BundleSummary | null>(null);
+  const [opened, setOpened] = useState<Opened | null>(null);
   const [selected, setSelected] = useState<BundleGroup[]>([]);
   const [opening, setOpening] = useState(false);
   const [importing, setImporting] = useState(false);
   const [report, setReport] = useState<ImportReport | null>(null);
   const [error, setError] = useState("");
+
+  /**
+   * Which selection the import panel is working on. Every async step captures
+   * it and drops its own result if it has moved on — the reader can pick a
+   * second file while the first is still being decrypted (argon2id is
+   * deliberately slow), and without this the first file's manifest would land
+   * under the second file's name, and Import would send the NEW path with the
+   * OLD file's groups.
+   */
+  const attempt = useRef(0);
+  const begin = () => (attempt.current += 1);
+  const current = (token: number) => attempt.current === token;
+
+  const summary = opened?.summary ?? null;
 
   const tooShort = passphrase.length > 0 && passphrase.length < BUNDLE_MIN_PASSPHRASE;
   const mismatch = confirm.length > 0 && confirm !== passphrase;
@@ -148,11 +175,12 @@ export function BackupSettingsSection() {
   }
 
   async function choose() {
+    const token = begin();
     try {
       const picked = await pickSetupBundle();
-      if (picked === null) return;
+      if (!current(token) || picked === null) return;
       setPath(picked);
-      setSummary(null);
+      setOpened(null);
       setReport(null);
       setError("");
     } catch (e) {
@@ -161,24 +189,34 @@ export function BackupSettingsSection() {
   }
 
   async function openBundle() {
+    const token = begin();
+    const selection = { path, passphrase: importPassphrase };
     setOpening(true);
     setError("");
     try {
-      const opened = await previewSetupBundle(path, importPassphrase);
-      setSummary(opened);
-      setSelected(presentGroups(opened));
+      const summary = await previewSetupBundle(selection.path, selection.passphrase);
+      // Dropped if the reader has since picked another file: argon2id is
+      // deliberately slow, so the first file's manifest could otherwise land
+      // under the second file's name and be imported with its groups.
+      if (!current(token)) return;
+      setOpened({ ...selection, summary });
+
+      setSelected(presentGroups(summary));
     } catch (e) {
+      if (!current(token)) return;
       // The backend distinguishes a wrong passphrase from a file that is not
       // a bundle at all; both reach the reader verbatim, because the fixes
       // are different.
-      setSummary(null);
+      setOpened(null);
       setError(String(e));
     } finally {
-      setOpening(false);
+      if (current(token)) setOpening(false);
     }
   }
 
   async function runImport() {
+    if (opened === null) return;
+    const token = begin();
     setImporting(true);
     setError("");
     // The previous attempt's report goes with the error. Left standing, a
@@ -187,7 +225,14 @@ export function BackupSettingsSection() {
     // did not make.
     setReport(null);
     try {
-      const result = await importSetupBundle({ path, passphrase: importPassphrase, groups: selected });
+      // The selection that produced the manifest, not whatever is in the
+      // fields now.
+      const result = await importSetupBundle({
+        path: opened.path,
+        passphrase: opened.passphrase,
+        groups: selected,
+      });
+      if (!current(token)) return;
       setReport(result);
       if (importWroteSomething(result)) {
         notify.success("Setup imported. Reload srelens to see the imported settings.");
@@ -195,9 +240,9 @@ export function BackupSettingsSection() {
         notify.info("Nothing to import — this machine already has everything in that bundle.");
       }
     } catch (e) {
-      setError(String(e));
+      if (current(token)) setError(String(e));
     } finally {
-      setImporting(false);
+      if (current(token)) setImporting(false);
     }
   }
 
@@ -351,15 +396,19 @@ export function BackupSettingsSection() {
 
         {report && (
           <div className="flex flex-col gap-1 text-sm" role="status">
-            {reportLines(report).length > 0 ? (
-              <>
-                {reportLines(report).map((line) => (
-                  <p key={line}>{line}</p>
-                ))}
-                <p className="text-muted-foreground">
-                  Reload srelens (or restart it) to pick up the imported settings.
-                </p>
-              </>
+            {/* The detail lines and the verdict are separate questions.
+                `reportLines` includes the skips — "already here", "kept your
+                own version" — so a report made up entirely of them is not
+                empty, but nothing was written. Keying the reload advice off
+                the line count told such a reader to restart srelens to pick up
+                changes that were never made. */}
+            {reportLines(report).map((line) => (
+              <p key={line}>{line}</p>
+            ))}
+            {importWroteSomething(report) ? (
+              <p className="text-muted-foreground">
+                Reload srelens (or restart it) to pick up the imported settings.
+              </p>
             ) : (
               <p>Nothing to import — this machine already has everything in that bundle.</p>
             )}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   BUNDLE_MIN_PASSPHRASE,
   exportSetupBundle,
@@ -103,6 +103,36 @@ function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`;
 }
 
+/**
+ * A bundle that has been opened, together with the selection that opened it.
+ * The path and passphrase are captured here rather than read back off the form
+ * at import time: the fields stay editable while the preview is on screen, and
+ * importing with a passphrase the reader has since retyped would send the new
+ * one against the manifest the old one produced.
+ */
+interface Opened {
+  path: string;
+  passphrase: string;
+  summary: BundleSummary;
+}
+
+/**
+ * A failure, with the step that produced it. One `openError` rendered under a
+ * single title made an import that failed on a read-only config directory read
+ * as "That file could not be used" — blaming the bundle for something the
+ * bundle had nothing to do with.
+ */
+interface Failure {
+  stage: "choose" | "open" | "import";
+  error: unknown;
+}
+
+const FAILURE_TITLES: Record<Failure["stage"], string> = {
+  choose: "The file could not be selected",
+  open: "That bundle could not be opened",
+  import: "The setup could not be imported",
+};
+
 /** Every line of an import report that has something to say. */
 export function reportLines(report: ImportReport): string[] {
   const lines: string[] = [];
@@ -144,12 +174,24 @@ export function BackupPane() {
 
   const [path, setPath] = useState("");
   const [importPassphrase, setImportPassphrase] = useState("");
-  const [summary, setSummary] = useState<BundleSummary | null>(null);
+  const [opened, setOpened] = useState<Opened | null>(null);
   const [selected, setSelected] = useState<BundleGroup[]>([]);
   const [opening, setOpening] = useState(false);
   const [importing, setImporting] = useState(false);
   const [report, setReport] = useState<ImportReport | null>(null);
-  const [openError, setOpenError] = useState<unknown>(null);
+  const [failure, setFailure] = useState<Failure | null>(null);
+
+  /**
+   * Which selection the import panel is currently working on. Every async step
+   * captures it and drops its own result if it has moved on — the reader can
+   * pick a second file while the first is still being decrypted (argon2id is
+   * deliberately slow), and without this the first file's manifest would land
+   * under the second file's name, and `Import selected` would then send the
+   * NEW path with the OLD file's groups.
+   */
+  const attempt = useRef(0);
+  const begin = () => (attempt.current += 1);
+  const current = (token: number) => attempt.current === token;
 
   const tooShort = passphrase.length > 0 && passphrase.length < BUNDLE_MIN_PASSPHRASE;
   const mismatch = repeated.length > 0 && repeated !== passphrase;
@@ -175,58 +217,70 @@ export function BackupPane() {
   }
 
   async function choose() {
+    const token = begin();
     try {
       const picked = await pickSetupBundle();
+      if (!current(token)) return;
       if (picked === null) return;
       setPath(picked);
-      setSummary(null);
+      setOpened(null);
       setReport(null);
-      setOpenError(null);
+      setFailure(null);
     } catch (error) {
-      setOpenError(error);
+      if (current(token)) setFailure({ stage: "choose", error });
     }
   }
 
   async function openBundle() {
+    const token = begin();
+    const selection = { path, passphrase: importPassphrase };
     setOpening(true);
-    setOpenError(null);
+    setFailure(null);
     try {
-      const opened = await previewSetupBundle(path, importPassphrase);
-      setSummary(opened);
-      setSelected(GROUPS.filter((g) => g.present(opened)).map((g) => g.id));
+      const summary = await previewSetupBundle(selection.path, selection.passphrase);
+      if (!current(token)) return;
+      setOpened({ ...selection, summary });
+      setSelected(GROUPS.filter((g) => g.present(summary)).map((g) => g.id));
     } catch (error) {
-      setSummary(null);
-      setOpenError(error);
+      if (!current(token)) return;
+      setOpened(null);
+      setFailure({ stage: "open", error });
     } finally {
-      setOpening(false);
+      if (current(token)) setOpening(false);
     }
   }
 
   async function runImport() {
+    if (opened === null) return;
+    const token = begin();
     setImporting(true);
-    setOpenError(null);
+    setFailure(null);
     // The previous attempt's report goes with the error. Left standing, a
     // second import that fails would leave the first one's "Added 2
     // kubeconfigs" beside the failure alert, describing writes this attempt
     // did not make.
     setReport(null);
     try {
+      // The selection that produced the manifest, not whatever is in the
+      // fields now.
       const result = await importSetupBundle({
-        path,
-        passphrase: importPassphrase,
+        path: opened.path,
+        passphrase: opened.passphrase,
         groups: selected,
       });
+      if (!current(token)) return;
       setReport(result);
       if (importWroteSomething(result)) {
         notify.success("Setup imported. Reload srelens to see the imported settings.");
       }
     } catch (error) {
-      setOpenError(error);
+      if (current(token)) setFailure({ stage: "import", error });
     } finally {
-      setImporting(false);
+      if (current(token)) setImporting(false);
     }
   }
 
+  const summary = opened?.summary ?? null;
   const offered = summary === null ? [] : GROUPS.filter((g) => g.present(summary));
 
   return (
@@ -292,7 +346,7 @@ export function BackupPane() {
               </span>
             )}
           </div>
-          {path !== "" && summary === null && (
+          {path !== "" && opened === null && (
             <>
               <Field label="Bundle passphrase">
                 <TextInput
@@ -314,14 +368,16 @@ export function BackupPane() {
           )}
         </div>
 
-        {openError !== null && (
-          // Rendered verbatim: the backend already tells a wrong passphrase
-          // from a damaged file from one that is not a bundle at all, and the
-          // remedy differs for each.
+        {failure !== null && (
+          // The detail is rendered verbatim — the backend already tells a wrong
+          // passphrase from a damaged file from one that is not a bundle at
+          // all, and the remedy differs for each. The TITLE names the step,
+          // so an import that failed on a read-only config directory is not
+          // announced as a problem with the file.
           <FailureAlert
             tone="sev"
-            title="That file could not be used"
-            error={openError}
+            title={FAILURE_TITLES[failure.stage]}
+            error={failure.error}
             className="mt-3"
           />
         )}
@@ -368,15 +424,17 @@ export function BackupPane() {
 
         {report !== null && (
           <div className="mt-3 flex flex-col gap-1 text-[0.75rem] leading-relaxed" role="status">
-            {reportLines(report).length > 0 ? (
-              <>
-                {reportLines(report).map((line) => (
-                  <p key={line}>{line}</p>
-                ))}
-                <p className="text-muted">
-                  Reload srelens to pick up the imported settings.
-                </p>
-              </>
+            {/* The detail lines and the verdict are separate questions.
+                `reportLines` includes the skips — "already here", "kept your
+                own version" — so a report made up entirely of them is not
+                empty, but nothing was written. Keying the reload advice off
+                the line count told such a reader to restart srelens to pick up
+                changes that were never made. */}
+            {reportLines(report).map((line) => (
+              <p key={line}>{line}</p>
+            ))}
+            {importWroteSomething(report) ? (
+              <p className="text-muted">Reload srelens to pick up the imported settings.</p>
             ) : (
               <p>Nothing to import — this machine already has everything in that bundle.</p>
             )}

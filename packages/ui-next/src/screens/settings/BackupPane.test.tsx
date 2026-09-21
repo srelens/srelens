@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -50,6 +50,14 @@ const PASSPHRASE = "aaaa1111aaaa";
 
 const notifications = { success: vi.fn(), error: vi.fn(), info: vi.fn() };
 
+/**
+ * `setNotifier` replaces a module global. Without restoring it, these spies
+ * stay installed for every later suite sharing this worker, and a failure
+ * there would point at whatever ran next rather than here.
+ */
+let restoreNotifier: () => void = () => {};
+afterEach(() => restoreNotifier());
+
 beforeEach(() => {
   core.exportSetupBundle.mockReset().mockResolvedValue("/tmp/srelens-setup.srelens");
   core.pickSetupBundle.mockReset().mockResolvedValue("/tmp/srelens-setup.srelens");
@@ -58,7 +66,7 @@ beforeEach(() => {
   notifications.success.mockReset();
   notifications.error.mockReset();
   notifications.info.mockReset();
-  setNotifier({
+  restoreNotifier = setNotifier({
     success: notifications.success,
     error: notifications.error,
     info: notifications.info,
@@ -125,6 +133,87 @@ describe("BackupPane", () => {
     expect(core.exportSetupBundle).toHaveBeenLastCalledWith(
       expect.objectContaining({ includeSecrets: true }),
     );
+    // Not only that the command was called with the right payload: the pane
+    // has to tell the reader the file was written, and where.
+    expect(notifications.success.mock.calls.at(-1)?.[0]).toContain("/tmp/srelens-setup.srelens");
+  });
+
+  it("renders the report a successful import came back with", async () => {
+    // A pane that sends the right request and then shows nothing is a pane
+    // that looks broken, and a test asserting only the mock call passes it.
+    core.importSetupBundle.mockResolvedValue({
+      ...EMPTY_REPORT,
+      kubeconfigsAdded: ["prod.yaml"],
+      settingsWritten: ["srelens.defaultNamespace"],
+    });
+    render(<BackupPane />);
+    const user = await openTheBundle();
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toMatch(/Added 1 kubeconfig: prod\.yaml/);
+    expect(status).toMatch(/Applied 1 preference/);
+    expect(status).toMatch(/Reload srelens/);
+    expect(notifications.success).toHaveBeenCalled();
+  });
+
+  it("does not tell the reader to reload when the import wrote nothing", async () => {
+    // A report of nothing but skips is not empty, so keying the reload advice
+    // off the line count promised changes that were never made.
+    core.importSetupBundle.mockResolvedValue({
+      ...EMPTY_REPORT,
+      kubeconfigsAlreadyPresent: ["config"],
+      skillsKeptLocal: ["triage.md"],
+    });
+    render(<BackupPane />);
+    const user = await openTheBundle();
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+
+    const status = screen.getByRole("status").textContent ?? "";
+    expect(status).toMatch(/1 kubeconfig was already here: config/);
+    expect(status).toMatch(/Kept your own version of 1 skill/);
+    expect(status).toMatch(/already has everything/);
+    expect(status).not.toMatch(/Reload srelens/);
+    expect(notifications.success).not.toHaveBeenCalled();
+  });
+
+  it("names the step that failed, not the file, when an import is refused", async () => {
+    // One title over every failure blamed the bundle for a read-only config
+    // directory.
+    core.importSetupBundle.mockRejectedValue(new Error("create /config: read-only"));
+    render(<BackupPane />);
+    const user = await openTheBundle();
+    await user.click(screen.getByRole("button", { name: /import selected/i }));
+
+    expect(screen.getByText("The setup could not be imported")).toBeDefined();
+    expect(screen.queryByText("That bundle could not be opened")).toBeNull();
+    // The backend's own words survive the titling.
+    expect(screen.getByText(/read-only/)).toBeDefined();
+  });
+
+  it("cannot import a manifest that belongs to a file the reader has left", async () => {
+    // argon2id is deliberately slow, so a second Choose file… can land while
+    // the first preview is still decrypting. The stale manifest must not
+    // become importable under the new file's name.
+    let releaseFirst: (summary: BundleSummary) => void = () => {};
+    core.previewSetupBundle.mockImplementationOnce(
+      () => new Promise<BundleSummary>((resolve) => (releaseFirst = resolve)),
+    );
+    const user = userEvent.setup();
+    render(<BackupPane />);
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+    await user.type(screen.getByLabelText("Bundle passphrase"), PASSPHRASE);
+    await user.click(screen.getByRole("button", { name: "Open" }));
+
+    // The reader gives up and picks something else while that is in flight.
+    core.pickSetupBundle.mockResolvedValue("/tmp/other.srelens");
+    await user.click(screen.getByRole("button", { name: /choose file/i }));
+
+    releaseFirst(SUMMARY);
+    await Promise.resolve();
+
+    expect(screen.queryByRole("button", { name: /import selected/i })).toBeNull();
+    expect(core.importSetupBundle).not.toHaveBeenCalled();
   });
 
   it("does not announce a save the reader cancelled", async () => {
