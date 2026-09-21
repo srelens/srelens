@@ -18,7 +18,8 @@ import {
   foldGutter,
   foldKeymap,
 } from "@codemirror/language";
-import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import { highlightSelectionMatches, search, searchKeymap } from "@codemirror/search";
+import { codeSearchPanel, searchPanelStyles } from "./searchPanel";
 import { yaml } from "@codemirror/lang-yaml";
 import { linter, lintGutter, type Diagnostic } from "@codemirror/lint";
 import { autocompletion, completionKeymap, type CompletionSource } from "@codemirror/autocomplete";
@@ -204,8 +205,112 @@ function editorTheme(minHeight: number, maxHeight: number, fill: boolean, flush:
       backgroundColor: "color-mix(in srgb, var(--accent) 22%, transparent)",
       outline: "1px solid var(--accent)",
     },
-    ".cm-panels": { backgroundColor: "var(--surface-sunk)", color: "var(--ink)" },
-    ".cm-searchMatch": { backgroundColor: "color-mix(in srgb, var(--warn) 30%, transparent)" },
+    // --- find & replace -------------------------------------------------
+    // The panel itself is ours (see `searchPanel.ts`); these are the colours
+    // it asks for, and the container CodeMirror wraps around it. Go-to-line
+    // (Mod-Alt-g) is still CodeMirror's dialog, built from `.cm-textfield` and
+    // `.cm-button`, so those keep a dressing of their own below. (#652)
+    ...searchPanelStyles({
+      surface: "var(--surface-raised)",
+      fieldBg: "var(--surface-sunk)",
+      ink: "var(--ink)",
+      inkMuted: "var(--ink-muted)",
+      rule: "var(--rule-strong)",
+      hover: "var(--field)",
+      accent: "var(--accent)",
+      accentWash: "var(--accent-wash)",
+      danger: "var(--sev)",
+      font: "var(--font-sans)",
+      shadow: "0 8px 24px color-mix(in srgb, var(--canvas-deep) 55%, transparent)",
+      radius: "var(--radius-tile)",
+    }),
+    ".cm-panels": {
+      backgroundColor: "var(--surface-sunk)",
+      color: "var(--ink)",
+      fontFamily: "var(--font-sans)",
+    },
+    ".cm-textfield": {
+      boxSizing: "border-box",
+      backgroundColor: "var(--surface)",
+      color: "var(--ink)",
+      border: "1px solid var(--control-line)",
+      borderRadius: "6px",
+      fontFamily: "var(--font-sans)",
+      fontSize: "12px",
+      padding: "3px 7px",
+      "&::placeholder": { color: "var(--ink-faint)" },
+      "&:focus": {
+        outline: "none",
+        borderColor: "var(--accent)",
+        boxShadow: "0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent)",
+      },
+    },
+    // Matched to the kit's own `.btn` (see `kit.css`), so the dialog reads as
+    // part of the app rather than as CodeMirror's default chrome.
+    ".cm-button": {
+      backgroundImage: "none",
+      backgroundColor: "var(--surface)",
+      color: "var(--ink-soft)",
+      border: "1px solid var(--rule)",
+      borderRadius: "6px",
+      fontFamily: "var(--font-sans)",
+      fontSize: "12px",
+      fontWeight: "500",
+      padding: "3px 9px",
+      cursor: "pointer",
+      transition: "background-color 120ms ease, border-color 120ms ease, color 120ms ease",
+      "&:hover": {
+        backgroundImage: "none",
+        backgroundColor: "var(--field)",
+        borderColor: "var(--rule-strong)",
+        color: "var(--ink)",
+      },
+      "&:active": {
+        backgroundImage: "none",
+        backgroundColor: "var(--accent-wash)",
+        borderColor: "var(--accent-line)",
+        color: "var(--ink)",
+      },
+      "&:focus-visible": { outline: "2px solid var(--accent)", outlineOffset: "1px" },
+    },
+    ".cm-dialog": {
+      display: "flex",
+      alignItems: "center",
+      gap: "6px",
+      padding: "7px 32px 7px 8px",
+      fontFamily: "var(--font-sans)",
+      fontSize: "12px",
+      "& label": {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "6px",
+        fontSize: "12px",
+        color: "var(--ink-muted)",
+      },
+    },
+    ".cm-dialog-close": {
+      top: "5px",
+      right: "6px",
+      width: "20px",
+      height: "20px",
+      borderRadius: "5px",
+      backgroundColor: "transparent",
+      color: "var(--ink-muted)",
+      lineHeight: "1",
+      cursor: "pointer",
+      "&:hover": { backgroundColor: "var(--field)", color: "var(--ink)" },
+    },
+    ".cm-searchMatch": {
+      backgroundColor: "color-mix(in srgb, var(--warn) 30%, transparent)",
+      borderRadius: "2px",
+    },
+    // The match the cursor is on. The base theme leaves this a hardcoded
+    // orange (magenta on dark); against the warn tint of the rest it has to
+    // be a different hue, not a different strength of the same one.
+    ".cm-searchMatch-selected": {
+      backgroundColor: "color-mix(in srgb, var(--accent) 42%, transparent)",
+      outline: "1px solid var(--accent)",
+    },
     ".cm-tooltip": { maxWidth: "480px" },
     ".cm-tooltip.cm-tooltip-lint": {
       backgroundColor: "var(--surface-sunk)",
@@ -360,6 +465,11 @@ export function CodeEditor({
       indentOnInput(),
       bracketMatching(),
       highlightSelectionMatches(),
+      // Our own find widget rather than CodeMirror's panel — see
+      // `searchPanel.ts`. It has to be configured here: `openSearchPanel`
+      // installs the default configuration, default panel and all, when it
+      // finds the editor has none. (#652)
+      search({ top: true, createPanel: codeSearchPanel }),
       keymap.of([...completionKeymap, ...defaultKeymap, ...historyKeymap, ...searchKeymap, ...foldKeymap, indentWithTab]),
       editorTheme(minHeight, maxHeight, fill, flush),
       syntaxHighlighting(highlightStyle),
