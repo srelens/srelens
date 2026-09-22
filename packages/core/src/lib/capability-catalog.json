@@ -810,6 +810,24 @@
     "confirm": null
   },
   {
+    "id": "k8s.requestCordonNode",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": false,
+    "impact": "medium",
+    "confirm": "Change scheduling[ on {resource}][ in cluster {cluster}]? Running pods are not evicted."
+  },
+  {
+    "id": "k8s.requestRolloutRestart",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": false,
+    "impact": "high",
+    "confirm": "Request a rolling restart[ of {resource}][ in cluster {cluster}]? Running pods will be replaced."
+  },
+  {
     "id": "k8s.rolloutRestart",
     "readOnly": false,
     "destructive": false,
