@@ -1,5 +1,6 @@
+import { NativeComponent } from "../native-components/NativeComponent";
 import { ExtensionResourceNavigation } from "./resourceNavigation";
-import { useContext, useEffect, useId, useRef, useState } from "react";
+import { useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, renderConfirmTemplate, unmetPredicate, type ExtensionResourceDetail, type ExtensionResourceSelection } from "@srelens/core";
 import { Inspector, Button, CodeEditor, KV } from "@srelens/ui-kit";
 import { plainText } from "./displayText";
@@ -37,6 +38,15 @@ function Fields({value,depth=0}:{value:Record<string,unknown>;depth?:number}) {
     }
     return <KV key={key} k={label} v={<span className="extension-field-value">{typeof value === "boolean" ? value ? "Yes" : "No" : String(value ?? "—")}</span>}/>;
   })}</div>;
+}
+/** Only supported condition fields cross the host presentation boundary. */
+function Conditions({value,onRetry}:{value:unknown;onRetry:()=>void}) {
+  const payload=useMemo(()=>({version:1,type:"Conditions",data:{items:value===undefined?[]:
+    Array.isArray(value)&&value.length<=1000 ? value.map(item=>{
+      if(!item || typeof item!=="object" || Array.isArray(item))return item;
+      return Object.fromEntries(["type","status","reason","message","lastTransitionTime","observedGeneration"].filter(key=>Object.hasOwn(item,key)).map(key=>[key,item[key]]));
+    }):value}}),[value]);
+  return <NativeComponent label="Conditions" payload={payload} onRetry={onRetry}/>;
 }
 /** Says what the host read: an empty list is only "no events" when every page was read. */
 function Events({detail}:{detail?:ExtensionResourceDetail}) {
@@ -186,7 +196,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
       {tab==="manifest"?<div className="flex h-full min-h-0 flex-col"><div className="min-h-0 flex-1"><CodeEditor value={formatResourceManifest(resource)} readOnly language="yaml" fill copy ariaLabel={`${selection.name} manifest`}/></div></div>:<>
         <h4 className="extension-detail-heading">Overview</h4><Fields value={{Name:resource.metadata.name,Namespace:resource.metadata.namespace??"—",Kind:resource.kind,API:resource.apiVersion,Created:resource.metadata.creationTimestamp??"—",...(resource.spec??{})}}/>
         <h4 className="extension-detail-heading">Conditions</h4>
-        {Array.isArray(resource.status?.conditions)&&resource.status.conditions.length?<div className="extension-condition-list">{resource.status.conditions.map((c:any,i:number)=><article key={i}><strong>{c.type} · {c.status}</strong><div>{c.reason||"—"}</div><p>{c.message||"—"}</p></article>)}</div>:<p className="extension-message">No conditions reported.</p>}
+        <Conditions value={resource.status?.conditions} onRetry={reload}/>
         <h4 className="extension-detail-heading">Status</h4><Fields value={Object.fromEntries(Object.entries(resource.status??{}).filter(([key])=>key!=="conditions"))}/>
         <h4 className="extension-detail-heading">Events</h4>
         {data.data?.eventsError ? <ErrorNotice cluster message={data.data.eventsError} retry={data.reload}/> : <Events detail={data.data}/>}

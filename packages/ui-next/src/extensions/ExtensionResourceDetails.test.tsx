@@ -318,3 +318,19 @@ it("offers a newly declared action title and predicates without a host GitOps na
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(action.getAttribute("title")).toBe("Suspend before requesting review");
 });
+
+it("renders conditions through the bounded host catalog without losing transition times", async () => {
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail, resource:{...detail.resource,status:{conditions:Array.from({length:25},(_,i)=>({type:`Condition${i}`,status:"True",reason:"Available",message:`Detail ${i}`,lastTransitionTime:"2026-09-22T12:00:00Z"}))}}});
+  render(<ExtensionResourceDetails selection={selection}/>);
+  expect(await screen.findByText("Condition0")).toBeTruthy();
+  expect(screen.queryByText("Condition24")).toBeNull();
+  fireEvent.click(screen.getByRole("button",{name:/Show 5 more/}));
+  expect(screen.getByText("Condition24")).toBeTruthy();
+  expect(screen.getAllByText("2026-09-22T12:00:00Z").length).toBe(25);
+});
+it("reports malformed conditions instead of an empty or successful condition list", async () => {
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail, resource:{...detail.resource,status:{conditions:[{type:"Ready",status:"invalid"}]}}});
+  render(<ExtensionResourceDetails selection={selection}/>);
+  expect((await screen.findByRole("alert")).textContent).toContain("Could not display Conditions");
+  expect(screen.queryByText("No conditions reported.")).toBeNull();
+});

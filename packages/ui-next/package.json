@@ -9,7 +9,8 @@
     "./extensions": "./src/extensions/Extensions.tsx",
     "./confirm": "./src/confirm/index.ts",
     "./confirm/styles": "./src/confirm/hostConfirmation.css",
-    "./extensions/styles": "./src/extensions/extensions.css"
+    "./extensions/styles": "./src/extensions/extensions.css",
+    "./native-components": "./src/native-components/NativeComponent.tsx"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

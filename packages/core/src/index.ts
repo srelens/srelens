@@ -106,3 +106,6 @@ export type { ToolStatus } from "./lib/chat";
 export * from "./lib/contextAppearance";
 export * from "./lib/extensions";
 export * from "./lib/actionPredicates";
+
+export * from "./lib/nativeComponents";
+export * from "./lib/nativeComponentLink";
