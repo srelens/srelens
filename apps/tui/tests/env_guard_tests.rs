@@ -134,7 +134,7 @@ fn settings_readers_share_the_guard_with_environment_writers() {
     let functions =
         regex::Regex::new(r"(?m)^([ ]*)(?:async )?fn (\w+)\([^\n]*\).*\{").unwrap();
     let readers = regex::Regex::new(
-        r"App::new\(|\bapp\(\)\.await|app_with\(|AiSettings::load\(|TuiConfig::load\(",
+        r#"App::new\(|\bapp\(\)\.await|app_with\(|AiSettings::load\(|TuiConfig::load\(|std::env::var\("(?:OPENAI_API_KEY|OPENAI_COMPATIBLE_API_KEY)""#,
     )
     .unwrap();
     let guards =

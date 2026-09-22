@@ -1108,6 +1108,9 @@ fn settings_view_renders_the_active_provider_summary_and_every_provider_card() {
 
 #[test]
 fn settings_view_masks_stored_api_keys_and_flags_missing_ones() {
+    let mut env = common::env::lock();
+    env.remove("OPENAI_API_KEY");
+    env.remove("OPENAI_COMPATIBLE_API_KEY");
     let mut state = settings_state();
     state.settings.api_keys.insert(
         "anthropic".to_string(),
@@ -1136,17 +1139,12 @@ fn settings_view_masks_stored_api_keys_and_flags_missing_ones() {
         "{text}"
     );
     assert!(!text.contains("short"), "{text}");
-    // A blank stored key counts as unset. (Guarded: a developer's shell may
-    // export the key, which legitimately takes the env branch instead.)
-    if std::env::var("OPENAI_API_KEY").is_err() {
-        assert!(
-            text.contains("API Key: no key set (press 'e' to set or export OPENAI_API_KEY)"),
-            "{text}"
-        );
-    }
-    if std::env::var("OPENAI_COMPATIBLE_API_KEY").is_err() {
-        assert!(text.contains("API Key: optional (local Ollama)"), "{text}");
-    }
+    // A blank stored key counts as unset, regardless of the developer's shell.
+    assert!(
+        text.contains("API Key: no key set (press 'e' to set or export OPENAI_API_KEY)"),
+        "{text}"
+    );
+    assert!(text.contains("API Key: optional (local Ollama)"), "{text}");
 }
 
 #[test]
