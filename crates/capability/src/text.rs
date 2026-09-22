@@ -8,6 +8,8 @@
 //! others reached for it; keeping it here is what stops a fourth caller from
 //! writing a fifth version of the ranges.
 
+use std::fmt::Write as _;
+
 /// Unicode's format characters, general category Cf, as of Unicode 17.0: the soft hyphen,
 /// bidirectional marks, embeddings, overrides and isolates, zero-width spaces and joiners,
 /// invisible operators, the byte order mark, tags, and a few script-specific marks. Each
@@ -47,6 +49,27 @@ pub fn is_format_character(c: char) -> bool {
         .any(|&(first, last)| (first..=last).contains(&c))
 }
 
+/// Append `c` to `out`, written as a `\u{…}` escape if it is a control or
+/// format character, and return how many characters were appended.
+///
+/// The count is the point. One character in can be eight or ten out, so a
+/// caller that has to bound the *escaped* length would otherwise have to build
+/// the whole escaped string before it could measure it — which is the work a
+/// caller-controlled value of a few megabytes makes expensive. Escaping one
+/// character at a time lets the caller stop as soon as it has enough.
+pub fn push_escaped(out: &mut String, c: char) -> usize {
+    if c.is_control() || is_format_character(c) {
+        let before = out.len();
+        // Infallible: `String`'s `fmt::Write` never errors.
+        let _ = write!(out, "\\u{{{:x}}}", c as u32);
+        // The escape is ASCII, so its byte length is its character length.
+        out.len() - before
+    } else {
+        out.push(c);
+        1
+    }
+}
+
 /// `text` with control and format characters written as `\u{…}` escapes.
 ///
 /// For text that is *shown* rather than *identifying*: a problem message, a
@@ -55,15 +78,11 @@ pub fn is_format_character(c: char) -> bool {
 /// hide the host's own words around it. Identity — a manifest's name, a
 /// capability id — refuses these characters outright instead.
 pub fn escape_invisible(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c.is_control() || is_format_character(c) {
-                format!("\\u{{{:x}}}", c as u32)
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        push_escaped(&mut out, c);
+    }
+    out
 }
 
 #[cfg(test)]

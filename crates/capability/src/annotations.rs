@@ -96,15 +96,39 @@ pub const CONFIRM_FIELD_MAX_CHARS: usize = 80;
 /// escapes to eight characters, so bounding the input would let 80 characters
 /// render as 640.
 fn for_confirmation(value: &str) -> String {
-    let escaped = crate::text::escape_invisible(value);
-    if escaped.chars().count() <= CONFIRM_FIELD_MAX_CHARS {
-        return escaped;
+    bounded_escape(value.chars())
+}
+
+/// [`for_confirmation`] over an iterator, so a test can count how much of the
+/// input it reads.
+///
+/// It escapes one character at a time and stops as soon as the escaped text
+/// has passed the bound, because what arrives here is bounded only by the
+/// transport — 4 MiB over MCP (`srelens_mcp::MAX_REQUEST_BYTES`), and by
+/// nothing at all over the desktop bridge — while at most
+/// [`CONFIRM_FIELD_MAX_CHARS`] of it is ever kept. Escaping the whole value
+/// first would do that work, and hold that allocation, for a few megabytes to
+/// render eighty characters.
+///
+/// The result is the same string either way, boundary included: a value whose
+/// escaped form is exactly the bound is kept whole, and one character more
+/// than that is the first that cuts.
+fn bounded_escape(chars: impl Iterator<Item = char>) -> String {
+    // A hint, not a ceiling: the bound plus room for one more escape is all
+    // this ever holds, since reading stops on the character that passes it.
+    let mut out = String::with_capacity(CONFIRM_FIELD_MAX_CHARS + 10);
+    let mut taken = 0usize;
+    for c in chars {
+        taken += crate::text::push_escaped(&mut out, c);
+        if taken > CONFIRM_FIELD_MAX_CHARS {
+            return out
+                .chars()
+                .take(CONFIRM_FIELD_MAX_CHARS - 1)
+                .chain(['…'])
+                .collect();
+        }
     }
-    escaped
-        .chars()
-        .take(CONFIRM_FIELD_MAX_CHARS - 1)
-        .chain(['…'])
-        .collect()
+    out
 }
 
 /// Reject a template a host author got wrong, with the reason.
@@ -595,6 +619,60 @@ mod template_tests {
     fn the_bound_is_measured_on_the_escaped_text() {
         let fields = confirm_fields(&json!({"name": "\u{202E}".repeat(500)}));
         assert_eq!(fields["name"].chars().count(), CONFIRM_FIELD_MAX_CHARS);
+    }
+
+    /// PR #661 follow-up review. A caller-controlled field arrives here
+    /// bounded only by the transport — 4 MiB over MCP
+    /// (`srelens_mcp::MAX_REQUEST_BYTES`), and by nothing at all over the
+    /// desktop bridge — while at most 80 characters are kept. Escaping the
+    /// whole value first did the work and the allocation for all of it.
+    ///
+    /// Asserted as characters *read*, not as elapsed time: the bound is the
+    /// point, and a timing assertion would be a flake on a loaded machine.
+    #[test]
+    fn a_huge_value_is_read_only_as_far_as_the_bound() {
+        let read = std::cell::Cell::new(0usize);
+        let overrides = std::iter::repeat_n('\u{202E}', 1_000_000).inspect(|_| {
+            read.set(read.get() + 1);
+        });
+
+        let out = bounded_escape(overrides);
+
+        assert_eq!(out.chars().count(), CONFIRM_FIELD_MAX_CHARS);
+        assert!(out.ends_with('…'), "got {out:?}");
+        // Eight characters per escape: ten fill the bound and the eleventh
+        // passes it, which is where reading stops.
+        assert_eq!(
+            read.get(),
+            11,
+            "read {} characters to fill an {CONFIRM_FIELD_MAX_CHARS}-character bound",
+            read.get()
+        );
+    }
+
+    /// The same for a value that needs no escaping: one character past the
+    /// bound is enough to know it is over.
+    #[test]
+    fn a_huge_plain_value_is_read_only_one_character_past_the_bound() {
+        let read = std::cell::Cell::new(0usize);
+        let plain = std::iter::repeat_n('a', 1_000_000).inspect(|_| {
+            read.set(read.get() + 1);
+        });
+
+        let out = bounded_escape(plain);
+
+        assert_eq!(out.chars().count(), CONFIRM_FIELD_MAX_CHARS);
+        assert_eq!(read.get(), CONFIRM_FIELD_MAX_CHARS + 1);
+    }
+
+    /// A value that escapes to exactly the bound is not cut — the boundary
+    /// the incremental version must get the same way the whole-string one did.
+    #[test]
+    fn a_value_that_escapes_to_exactly_the_bound_keeps_every_character() {
+        let name = "a".repeat(CONFIRM_FIELD_MAX_CHARS);
+        let fields = confirm_fields(&json!({ "name": name }));
+        assert_eq!(fields["name"], name);
+        assert!(!fields["name"].contains('…'));
     }
 
     /// Ordinary values are untouched — the guard must not put an ellipsis or
