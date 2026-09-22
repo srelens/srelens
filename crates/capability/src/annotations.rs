@@ -67,6 +67,46 @@ pub const CONFIRM_FIELDS: &[&str] = &[
 /// A rendered set of [`CONFIRM_FIELDS`] values for one call.
 pub type ConfirmFields = BTreeMap<&'static str, String>;
 
+/// The longest one substituted value may be, in characters, in a sentence a
+/// person is asked to approve.
+///
+/// A Kubernetes name may legally run to 253 characters and a context name has
+/// no bound at all, so a value is cut rather than refused — but cut it must
+/// be, because the sentence is a question with the words that matter at both
+/// ends ("Allow this destructive action on … in cluster …?") and a value long
+/// enough to push the tail off the dialog is a spoof of the cheapest kind.
+/// The caller's whole value still reaches every surface in the request's
+/// arguments; only the sentence is bounded.
+pub const CONFIRM_FIELD_MAX_CHARS: usize = 80;
+
+/// One caller-supplied value as it may appear in a confirmation sentence:
+/// control and format characters escaped, then bounded to
+/// [`CONFIRM_FIELD_MAX_CHARS`] with an ellipsis marking the cut.
+///
+/// Escaped, not refused. The precedent is #616's, and it splits on what the
+/// text *is*: an identity (a manifest's name, an app id) refuses these
+/// characters, while text a person is merely *shown* escapes them —
+/// `ValidationError::new`'s path and message, `plainText` in the extensions
+/// UI. A confirmation field is the second kind. Refusing here would make
+/// [`render_confirm`] return `None` for the whole sentence, so a hostile name
+/// could delete the specific question and leave the surface showing the bare
+/// tool summary — a worse prompt than the escaped one, chosen by the attacker.
+///
+/// Escaping runs first and the bound is measured on its output: one override
+/// escapes to eight characters, so bounding the input would let 80 characters
+/// render as 640.
+fn for_confirmation(value: &str) -> String {
+    let escaped = crate::text::escape_invisible(value);
+    if escaped.chars().count() <= CONFIRM_FIELD_MAX_CHARS {
+        return escaped;
+    }
+    escaped
+        .chars()
+        .take(CONFIRM_FIELD_MAX_CHARS - 1)
+        .chain(['…'])
+        .collect()
+}
+
 /// Reject a template a host author got wrong, with the reason.
 ///
 /// Checked, not merely rendered: an unknown placeholder renders as an empty
@@ -177,7 +217,7 @@ pub fn confirm_fields(args: &Value) -> ConfirmFields {
             }
             if let Some(value) = scope.get(key).and_then(Value::as_str) {
                 if !value.is_empty() {
-                    out.insert(field, value.to_string());
+                    out.insert(field, for_confirmation(value));
                 }
             }
         }
@@ -198,7 +238,10 @@ pub fn confirm_fields(args: &Value) -> ConfirmFields {
             Some(kind) => format!("{kind} {object}"),
             None => object,
         };
-        out.insert("resource", resource);
+        // Composed from parts that are already escaped and bounded, so this
+        // only re-applies the bound: three fields at the ceiling would still
+        // add up to a sentence nobody can read to the end of.
+        out.insert("resource", for_confirmation(&resource));
     }
     out
 }
@@ -489,6 +532,80 @@ mod template_tests {
         let got = confirm_fields(&json!({"context":"","name":"api"}));
         assert!(!got.contains_key("cluster"));
         assert_eq!(got["resource"], "api");
+    }
+
+    /// PR #661 review (CodeRabbit, CWE-451). The values substituted into a
+    /// confirmation come from the caller. A right-to-left override in a name
+    /// reorders the rendered sentence, so the question a person approves is
+    /// not the question the host wrote. Escaped rather than refused, and for
+    /// the reason #616 settled: this is text a person is *shown*, like
+    /// `ValidationError::new`'s path and message, not an identity like a
+    /// manifest's name — and refusing would render the whole sentence `None`,
+    /// handing a hostile name the power to blank the specific question and
+    /// fall the surface back to the bare tool summary.
+    #[test]
+    fn a_bidi_override_in_a_value_is_escaped_rather_than_drawn() {
+        let text = Annotations::MUTATING
+            .confirm_text(&json!({"name": "api\u{202E}etceleD", "context": "prod"}))
+            .expect("renders");
+        assert!(
+            !text.contains('\u{202E}'),
+            "the override reached the sentence: {text:?}"
+        );
+        assert!(
+            text.contains("\\u{202e}"),
+            "the override must still be visible as an escape: {text:?}"
+        );
+        assert!(text.ends_with("in cluster prod?"), "got {text:?}");
+    }
+
+    /// Invisible characters are the same problem without the reordering: a
+    /// zero-width space hides a word boundary, so `api` and `apis` read alike.
+    #[test]
+    fn invisible_and_control_characters_are_escaped_too() {
+        let fields = confirm_fields(&json!({"name": "a\u{200B}pi\u{0}", "namespace": "team"}));
+        assert_eq!(fields["resource"], "team/a\\u{200b}pi\\u{0}");
+    }
+
+    /// The other half of the spoof: a name long enough to push the real
+    /// question off the end of the dialog. Every substituted value is bounded
+    /// and marked as cut; the caller's full argument still reaches the policy
+    /// and the surfaces in `args`.
+    #[test]
+    fn an_overlong_value_is_truncated_so_the_question_survives() {
+        let name = "a".repeat(500);
+        let text = Annotations::MUTATING
+            .confirm_text(&json!({"name": name, "context": "prod"}))
+            .expect("renders");
+        assert!(
+            text.ends_with("in cluster prod?"),
+            "the question must survive: {text:?}"
+        );
+        assert!(
+            text.chars().count() < 200,
+            "the sentence must stay readable, got {} chars: {text:?}",
+            text.chars().count()
+        );
+        assert!(text.contains('…'), "the cut must be visible: {text:?}");
+    }
+
+    /// Escaping expands one character into eight, so a value is bounded
+    /// *after* escaping — otherwise 80 overrides render as 640 characters.
+    #[test]
+    fn the_bound_is_measured_on_the_escaped_text() {
+        let fields = confirm_fields(&json!({"name": "\u{202E}".repeat(500)}));
+        assert_eq!(fields["name"].chars().count(), CONFIRM_FIELD_MAX_CHARS);
+    }
+
+    /// Ordinary values are untouched — the guard must not put an ellipsis or
+    /// a backslash into the sentence every normal call renders.
+    #[test]
+    fn an_ordinary_value_passes_through_unchanged() {
+        let fields = confirm_fields(&json!({
+            "kind": "HelmRelease", "namespace": "team", "name": "api", "context": "cluster/prod"
+        }));
+        assert_eq!(fields["resource"], "HelmRelease team/api");
+        assert_eq!(fields["cluster"], "cluster/prod");
     }
 
     #[test]

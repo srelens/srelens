@@ -3,12 +3,14 @@
 mod annotations;
 pub mod audit;
 mod error;
+mod text;
 
 pub use annotations::{
     check_confirm_template, confirm_fields, render_confirm, Annotations, ConfirmFields, Impact,
-    CONFIRM_FIELDS,
+    CONFIRM_FIELDS, CONFIRM_FIELD_MAX_CHARS,
 };
 pub use error::CapabilityError;
+pub use text::{escape_invisible, is_format_character};
 
 use std::collections::BTreeMap;
 use std::future::Future;

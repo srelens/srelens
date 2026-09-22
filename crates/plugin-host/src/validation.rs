@@ -115,17 +115,10 @@ impl ValidationError {
 }
 
 /// `text` with control and format characters written as `\u{…}` escapes.
-fn shown(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c.is_control() || crate::manifest::is_format_character(c) {
-                format!("\\u{{{:x}}}", c as u32)
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
-}
+///
+/// The rule lives in `srelens-capability` because a confirmation sentence
+/// escapes its substituted values the same way and for the same reason (#661).
+use srelens_capability::escape_invisible as shown;
 
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
