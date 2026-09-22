@@ -2566,6 +2566,9 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         json!({ "manifest": flux, "grants": declared_permissions(&flux) }),
         json!({ "manifest": argocd, "grants": declared_permissions(&argocd) }),
     ];
+    // The local examples declare writes, so permission grants also need the
+    // explicit unsigned-app policy. Read-only apps do not need this setting.
+    h.ok("extensions.configure", json!({"action":"unsignedApps","allowUnsignedApps":true})).await;
     for app in &apps {
         let out = h.ok("extensions.validate", app.clone()).await;
         assert_eq!(out["errors"], json!([]), "must validate: {out}");

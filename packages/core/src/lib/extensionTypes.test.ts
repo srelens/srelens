@@ -16,6 +16,7 @@ type Dashboard = NonNullable<Page["dashboard"]>;
 
 const tables: Record<string, Record<string, "required" | "optional">> = {
   Inventory: {
+    allowUnsignedApps: "optional",
     schemaVersion: "required",
     nextRevision: "required",
     plugins: "required",
@@ -23,6 +24,7 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
   Installed: {
     signatureProof: "optional",
     quarantined: "optional",
+    policyBlocked: "optional",
     manifest: "required",
     grants: "required",
     enabled: "required",

@@ -248,6 +248,13 @@
         "manifest": {
           "$ref": "#/definitions/Manifest"
         },
+        "policyBlocked": {
+          "description": "Recomputed policy denial, distinct from a failed publisher verification.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "quarantined": {
           "description": "Why this host refused to trust the stored entry when loading it. Recomputed on every read, reported to the UI, and never written to disk.",
           "type": [
@@ -549,6 +556,10 @@
     }
   },
   "properties": {
+    "allowUnsignedApps": {
+      "default": false,
+      "type": "boolean"
+    },
     "nextRevision": {
       "format": "uint64",
       "minimum": 0.0,

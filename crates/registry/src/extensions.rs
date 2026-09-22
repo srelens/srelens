@@ -4,6 +4,8 @@ pub(crate) mod crd;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 mod limits;
+#[cfg(test)]
+mod policy_tests;
 mod resource;
 mod signing;
 use schemars::JsonSchema;
@@ -32,6 +34,13 @@ pub struct Installed {
     /// on every read, reported to the UI, and never written to disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     quarantined: Option<String>,
+    /// Recomputed policy denial, distinct from a failed publisher verification.
+    #[serde(
+        default,
+        rename = "policyBlocked",
+        skip_serializing_if = "Option::is_none"
+    )]
+    policy_blocked: Option<String>,
     manifest: Manifest,
     grants: Vec<String>,
     enabled: bool,
@@ -148,6 +157,8 @@ pub struct Inventory {
     schema_version: u32,
     #[serde(rename = "nextRevision")]
     next_revision: u64,
+    #[serde(default, rename = "allowUnsignedApps")]
+    allow_unsigned_apps: bool,
     plugins: Vec<Installed>,
 }
 impl Default for Inventory {
@@ -155,6 +166,7 @@ impl Default for Inventory {
         Self {
             schema_version: 1,
             next_revision: 1,
+            allow_unsigned_apps: false,
             plugins: vec![],
         }
     }
@@ -162,6 +174,11 @@ impl Default for Inventory {
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", deny_unknown_fields)]
 enum Configure {
+    #[serde(rename = "unsignedApps")]
+    UnsignedApps {
+        #[serde(rename = "allowUnsignedApps")]
+        allow_unsigned_apps: bool,
+    },
     #[serde(rename = "install")]
     Install {
         /// An Ed25519 signature: exactly 64 bytes.
@@ -293,7 +310,38 @@ fn read(path: &Path) -> Result<Inventory, String> {
             plugin.enabled = false;
         }
     }
+    apply_unsigned_policy(&mut state);
     Ok(state)
+}
+
+const UNSIGNED_POLICY_REASON: &str = "Turn on \"Allow unsigned apps to modify clusters and run code\" in Settings → Apps to enable this app";
+
+/// This host accepts only declarative manifests. Keep the kind match exhaustive:
+/// any future executable kind must require verified signing or the policy even
+/// when it declares no write actions. Source labels and IDs grant no trust.
+fn needs_unsigned_policy(manifest: &Manifest) -> bool {
+    match manifest.kind {
+        srelens_plugin_host::ManifestKind::Declarative => !manifest.actions.is_empty(),
+    }
+}
+fn check_unsigned_policy(manifest: &Manifest, verified: bool, allow: bool) -> Result<(), String> {
+    if !allow && !verified && needs_unsigned_policy(manifest) {
+        return Err(UNSIGNED_POLICY_REASON.into());
+    }
+    Ok(())
+}
+fn apply_unsigned_policy(state: &mut Inventory) {
+    for plugin in &mut state.plugins {
+        plugin.policy_blocked = check_unsigned_policy(
+            &plugin.manifest,
+            plugin.signature_proof.is_some() && plugin.quarantined.is_none(),
+            state.allow_unsigned_apps,
+        )
+        .err();
+        if plugin.policy_blocked.is_some() {
+            plugin.enabled = false;
+        }
+    }
 }
 fn reverify(plugin: &Installed) -> Result<(), String> {
     // An entry stored before the namespace was reserved, or added by hand, gets no more
@@ -329,6 +377,7 @@ fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
     if let Some(plugins) = stored.get_mut("plugins").and_then(Value::as_array_mut) {
         for plugin in plugins.iter_mut().filter_map(Value::as_object_mut) {
             plugin.remove("quarantined");
+            plugin.remove("policyBlocked");
         }
     }
     serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())
@@ -697,12 +746,18 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
     let _lock = super::settings::write_lock(path)?;
     let mut state = read(path)?;
     match input {
+        Configure::UnsignedApps {
+            allow_unsigned_apps,
+        } => {
+            state.allow_unsigned_apps = allow_unsigned_apps;
+        }
         Configure::Install {
             manifest: source,
             grants,
             signature,
         } => {
             let manifest = check_install(&source, &grants, signature.as_deref(), core)?;
+            check_unsigned_policy(&manifest, signature.is_some(), state.allow_unsigned_apps)?;
             let checksum = format!(
                 "{:x}",
                 <sha2::Sha256 as sha2::Digest>::digest(source.as_bytes())
@@ -760,6 +815,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             state.plugins.push(Installed {
                 signature_proof,
                 quarantined: None,
+                policy_blocked: None,
                 manifest,
                 grants,
                 enabled: true,
@@ -814,6 +870,11 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 verify_proof(proof, &target.manifest)?;
             }
             validate_app(&target.manifest, &grants, core)?;
+            check_unsigned_policy(
+                &target.manifest,
+                target.signature_proof.is_some(),
+                state.allow_unsigned_apps,
+            )?;
             // Going back discards the versions after the restored one.
             app.history.drain(..=index);
             app.signature_proof = target.signature_proof;
@@ -859,6 +920,11 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                         "This app can't be enabled: {reason}. Remove it or reinstall it from the Catalog."
                     ));
                 }
+                check_unsigned_policy(
+                    &p.manifest,
+                    p.signature_proof.is_some(),
+                    state.allow_unsigned_apps,
+                )?;
                 validate_app(&p.manifest, &p.grants, core)?;
             }
             p.enabled = enabled;
@@ -880,6 +946,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 .settings = settings;
         }
     }
+    apply_unsigned_policy(&mut state);
     write(path, &state)?;
     Ok(state)
 }
@@ -943,18 +1010,24 @@ pub fn register(
         },
     ));
     let c = core.clone();
+    let p = path.clone();
     reg.register(Capability::typed::<ValidateIn, ValidationReport, _, _>(
         "extensions.validate",
         "Check a declarative extension manifest exactly as installing it would and return every problem; does not install it",
         Annotations::READ_ONLY,
         move |input: ValidateIn| {
             let c = c.clone();
+            let p = p.clone();
             async move {
-                let errors =
-                    check_install(&input.manifest, &input.grants, input.signature.as_deref(), c)
-                        .err()
-                        .unwrap_or_default()
-                        .0;
+                let state = tokio::task::spawn_blocking(move || read(&p))
+                    .await.map_err(|e| CapabilityError::Handler(e.to_string()))?
+                    .map_err(CapabilityError::Handler)?;
+                let errors = match check_install(&input.manifest, &input.grants, input.signature.as_deref(), c) {
+                    Err(problems) => problems.0,
+                    Ok(manifest) => check_unsigned_policy(&manifest, input.signature.is_some(), state.allow_unsigned_apps)
+                        .err().map(|reason| vec![ValidationError::new(Code::InvalidValue, "actions", reason)])
+                        .unwrap_or_default(),
+                };
                 Ok::<_, CapabilityError>(ValidationReport { errors })
             }
         },
@@ -991,6 +1064,14 @@ pub fn register(
                     .await
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)?;
+                if let Some(reason) = state
+                    .plugins
+                    .iter()
+                    .find(|p| p.manifest.id == input.id)
+                    .and_then(|p| p.policy_blocked.as_ref())
+                {
+                    return Err(CapabilityError::Handler(reason.clone()));
+                }
                 let plugin = state
                     .plugins
                     .iter()
@@ -1396,7 +1477,7 @@ mod tests {
             grants: vec!["k8s.listCustomResource".into()],
         }
     }
-    fn configure(path: &Path, input: Value) -> Result<Inventory, String> {
+    pub(super) fn configure(path: &Path, input: Value) -> Result<Inventory, String> {
         let input = serde_json::from_value::<Configure>(input).map_err(|e| e.to_string())?;
         mutate(path, fake_core(), input)
     }
