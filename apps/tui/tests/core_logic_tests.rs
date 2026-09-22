@@ -3,6 +3,8 @@
 //! bridge driven against an in-process fake OpenAI-compatible endpoint on
 //! loopback (no real provider, no agent subprocess).
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -824,6 +826,7 @@ fn bold(style: Style) -> bool {
 
 #[test]
 fn every_theme_style_uses_its_palette_colour() {
+    let _theme = common::theme::lock();
     assert_eq!(Theme::header().fg, Some(Theme::CYAN));
     assert!(bold(Theme::header()));
     assert_eq!(Theme::header_label().fg, Some(Theme::LABEL));
@@ -882,6 +885,7 @@ fn context_colour_reflects_the_environment_named_in_the_context() {
 
 #[test]
 fn status_style_maps_every_status_family_to_its_colour() {
+    let _theme = common::theme::lock();
     for s in [
         "CrashLoopBackOff",
         "Error",

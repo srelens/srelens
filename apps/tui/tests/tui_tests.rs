@@ -1,3 +1,5 @@
+mod common;
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -1337,12 +1339,12 @@ mod tests {
     #[tokio::test]
     async fn test_port_forward_lifecycle_and_view_sync() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::commands::ResourceKind;
         use srelens_tui::ui::Modal;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -1406,16 +1408,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_pod_port_forward_indication_and_close_key() {
+        let _theme = crate::common::theme::lock();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         use serde_json::json;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::commands::ResourceKind;
         use srelens_tui::views::resource_table::ResourceTableState;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -1532,12 +1535,12 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         use serde_json::json;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::commands::ResourceKind;
         use srelens_tui::views::resource_table::ResourceTableState;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -2766,9 +2769,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_cluster_events_stream_and_warning_triage() {
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("prod-cluster".to_string()),
             Some("prod".to_string()),
             false,
@@ -2911,12 +2914,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_crd_dynamic_printer_columns_kubectl_parity() {
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::commands::{resolve_command_with_crds, CrdMeta, PrinterColumn};
         use srelens_tui::views::resource_table::extract_field_str;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("prod-cluster".to_string()),
             Some("prod".to_string()),
             false,
@@ -4480,10 +4483,10 @@ mod tests {
     async fn test_slash_commands_and_ai_playbooks() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::ai_skills::expand_slash_command;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-cluster".to_string()),
             Some("production".to_string()),
             false,
@@ -4582,11 +4585,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_action_palette_playbooks() {
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::ui::dialogs::{Modal, QuickActionId};
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-cluster".to_string()),
             Some("default".to_string()),
             false,
@@ -4668,14 +4671,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_unreachable_cluster_timeout_triggers_cracked_lens() {
+        let _theme = crate::common::theme::lock();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        use srelens_tui::app::App;
         use std::time::{Duration, Instant};
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("unreachable-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -4734,11 +4737,11 @@ mod tests {
     #[tokio::test]
     async fn test_overview_summarise_cluster_health_hotkey() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::views::overview_view::{ClusterOverviewData, OverviewViewState};
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("prod-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -4791,15 +4794,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_reason_rail_inline_and_modal_filtering() {
+        let _theme = crate::common::theme::lock();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::commands::ResourceKind;
         use srelens_tui::views::resource_table::ResourceTableState;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("prod-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -4868,18 +4872,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_panel_modal_and_timeline() {
+        let _theme = crate::common::theme::lock();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         use srelens_kube::metrics::MetricSample;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::commands::ResourceKind;
         use srelens_tui::ui::dialogs::Modal;
         use srelens_tui::views::metrics_panel_view::MetricsTimeRange;
         use srelens_tui::views::resource_table::ResourceTableState;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("prod-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -4964,12 +4969,12 @@ mod tests {
     async fn test_caveman_mode_activation_and_levels() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::ai_skills::CavemanLevel;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
 
         let _ai_guard = isolate_ai_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("prod-cluster".to_string()),
             Some("default".to_string()),
             false,
@@ -5048,12 +5053,12 @@ mod tests {
     async fn test_caveman_natural_language_triggers() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::ai_skills::CavemanLevel;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
 
         let _ai_guard = isolate_ai_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("prod-cluster".to_string()),
             Some("default".to_string()),
             false,
@@ -5105,12 +5110,13 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         use srelens_tui::ai_skills::CavemanLevel;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
 
         let _ai_guard = isolate_ai_settings();
+        let _theme = crate::common::theme::lock();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("prod-cluster".to_string()),
             Some("default".to_string()),
             false,
@@ -5148,12 +5154,12 @@ mod tests {
     async fn test_caveman_inline_query_and_prompt_injection() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::ai_skills::CavemanLevel;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
 
         let _ai_guard = isolate_ai_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("prod-cluster".to_string()),
             Some("default".to_string()),
             false,
@@ -5202,10 +5208,10 @@ mod tests {
     #[tokio::test]
     async fn test_assistant_typing_character_n_and_other_keys() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("prod-cluster".to_string()),
             Some("default".to_string()),
             false,
@@ -5748,6 +5754,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_workloads_rebuild_aggregation_and_status_verdicts() {
+        let _theme = crate::common::theme::lock();
         use serde_json::json;
         use srelens_kube::client_cache::ClientCache;
         use srelens_streams::logs::LogStreamManager;
@@ -6082,52 +6089,50 @@ mod tests {
         }
     }
 
-    static THEME_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn test_theme_palette_switching_and_lookups() {
-        let _lock = THEME_TEST_MUTEX.lock().unwrap();
+        let mut theme = crate::common::theme::lock();
         use ratatui::widgets::BorderType;
         use srelens_tui::theme::{HeaderStyle, Theme, ThemeId, ALL_THEMES};
 
         assert_eq!(ALL_THEMES.len(), 15);
 
         // Test theme lookup and setting by id/name
-        let nord = Theme::set_theme_by_name("nord");
+        let nord = theme.set_by_name("nord");
         assert!(nord.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::Nord);
         assert_eq!(Theme::active_palette().name, "nord");
 
-        let dracula = Theme::set_theme_by_name("dracula");
+        let dracula = theme.set_by_name("dracula");
         assert!(dracula.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::Dracula);
 
-        let tokyo = Theme::set_theme_by_name("tokyo-night");
+        let tokyo = theme.set_by_name("tokyo-night");
         assert!(tokyo.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::TokyoNight);
         assert_eq!(Theme::border_type(), BorderType::Rounded);
 
-        let gruvbox = Theme::set_theme_by_name("gruvbox");
+        let gruvbox = theme.set_by_name("gruvbox");
         assert!(gruvbox.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::GruvboxDark);
 
-        let solarized = Theme::set_theme_by_name("solarized");
+        let solarized = theme.set_by_name("solarized");
         assert!(solarized.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::SolarizedDark);
         assert_eq!(Theme::header_style(), HeaderStyle::Minimal);
         assert_eq!(Theme::border_type(), BorderType::Plain);
 
-        let monokai = Theme::set_theme_by_name("monokai");
+        let monokai = theme.set_by_name("monokai");
         assert!(monokai.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::MonokaiPro);
 
-        let latte = Theme::set_theme_by_name("catppuccin-latte");
+        let latte = theme.set_by_name("catppuccin-latte");
         assert!(latte.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::CatppuccinLatte);
         assert!(Theme::active_palette().is_light);
 
         // Test new themes & visual chrome traits
-        let fino = Theme::set_theme_by_name("fino-time");
+        let fino = theme.set_by_name("fino-time");
         assert!(fino.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::FinoTime);
         assert_eq!(Theme::header_style(), HeaderStyle::FinoTime);
@@ -6136,7 +6141,7 @@ mod tests {
         assert_eq!(Theme::bullet_glyph(), "○");
         assert!(Theme::show_live_clock());
 
-        let cyber = Theme::set_theme_by_name("cyberpunk");
+        let cyber = theme.set_by_name("cyberpunk");
         assert!(cyber.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::Cyberpunk);
         assert_eq!(Theme::border_type(), BorderType::Thick);
@@ -6145,20 +6150,20 @@ mod tests {
         assert_eq!(Theme::brand_icon(), "⚡ ");
         assert!(Theme::show_live_clock());
 
-        let rose = Theme::set_theme_by_name("rose-pine");
+        let rose = theme.set_by_name("rose-pine");
         assert!(rose.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::RosePine);
         assert_eq!(Theme::prompt_glyph(), "❯ ");
         assert_eq!(Theme::bullet_glyph(), "◆");
         assert_eq!(Theme::brand_icon(), "✦ ");
 
-        let onedark = Theme::set_theme_by_name("one-dark");
+        let onedark = theme.set_by_name("one-dark");
         assert!(onedark.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::OneDark);
         assert_eq!(Theme::header_style(), HeaderStyle::Standard);
         assert_eq!(Theme::border_type(), BorderType::Plain);
 
-        let sre_hc = Theme::set_theme_by_name("sre-high-contrast");
+        let sre_hc = theme.set_by_name("sre-high-contrast");
         assert!(sre_hc.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::SreHighContrast);
         assert_eq!(
@@ -6166,35 +6171,35 @@ mod tests {
             ratatui::style::Color::Rgb(203, 213, 225)
         );
 
-        let sre_alias = Theme::set_theme_by_name("contrast");
+        let sre_alias = theme.set_by_name("contrast");
         assert!(sre_alias.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::SreHighContrast);
 
-        let storm = Theme::set_theme_by_name("tokyo-storm");
+        let storm = theme.set_by_name("tokyo-storm");
         assert!(storm.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::TokyoStorm);
 
-        let github = Theme::set_theme_by_name("github-dark-hc");
+        let github = theme.set_by_name("github-dark-hc");
         assert!(github.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::GitHubDarkHc);
 
         // Reset to default Mocha
-        let mocha = Theme::set_theme_by_name("catppuccin-mocha");
+        let mocha = theme.set_by_name("catppuccin-mocha");
         assert!(mocha.is_some());
         assert_eq!(Theme::active_palette().id, ThemeId::CatppuccinMocha);
         assert!(!Theme::active_palette().is_light);
 
         // Test index switching
-        assert!(Theme::set_theme_by_index(3)); // Nord is index 3
+        assert!(theme.set_by_index(3)); // Nord is index 3
         assert_eq!(Theme::active_index(), 3);
         assert_eq!(Theme::active_palette().name, "nord");
 
         // Out of bounds index
-        assert!(!Theme::set_theme_by_index(999));
+        assert!(!theme.set_by_index(999));
         assert_eq!(Theme::active_index(), 3);
 
         // Reset to 0
-        Theme::set_theme_by_index(0);
+        theme.set_by_index(0);
         assert_eq!(Theme::active_index(), 0);
     }
 
@@ -6284,7 +6289,7 @@ mod tests {
     /// theme, so the runtime accessor is what the pod table must read.
     #[test]
     fn node_inspector_secondary_text_follows_the_active_theme() {
-        let _lock = THEME_TEST_MUTEX.lock().unwrap();
+        let mut theme = crate::common::theme::lock();
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         use srelens_kube::node_inspector::{NodeInspectorDetails, NodePodItem};
@@ -6293,18 +6298,7 @@ mod tests {
             render_node_inspector_view, NodeInspectorState,
         };
 
-        // Restored on every exit, a panic included: the theme is process
-        // global, and a failed assertion here must not leave the other tests
-        // in this binary rendering solarized-dark.
-        struct RestoreTheme(usize);
-        impl Drop for RestoreTheme {
-            fn drop(&mut self) {
-                Theme::set_theme_by_index(self.0);
-            }
-        }
-        let _restore = RestoreTheme(Theme::active_index());
-
-        assert!(Theme::set_theme_by_name("solarized-dark").is_some());
+        assert!(theme.set_by_name("solarized-dark").is_some());
         assert_ne!(
             Theme::dim(),
             Theme::DIM,
@@ -6384,15 +6378,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_theme_picker_live_preview_revert_and_commit() {
-        let _lock = THEME_TEST_MUTEX.lock().unwrap();
+        // Committing a theme saves AI settings. Without this the save wrote the
+        // developer's real ai_settings.json (#671).
+        let _ai_guard = isolate_ai_settings();
+        // The environment before the theme: `new_app` takes the theme lock, so
+        // the other order deadlocks against a test that isolated its settings
+        // and then built an app.
+        let mut theme = crate::common::theme::lock();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::App;
         use srelens_tui::commands::CommandTarget;
         use srelens_tui::theme::Theme;
         use srelens_tui::ui::dialogs::Modal;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -6404,7 +6403,7 @@ mod tests {
         .unwrap();
 
         // Ensure starting at default Mocha (index 0)
-        Theme::set_theme_by_index(0);
+        theme.set_by_index(0);
         assert_eq!(Theme::active_index(), 0);
 
         // Open theme picker
@@ -6446,7 +6445,7 @@ mod tests {
         assert_eq!(Theme::active_index(), 0); // Reverted!
 
         // 3. Commitment: Open again, navigate to Nord (index 3), press Enter
-        Theme::set_theme_by_index(0);
+        theme.set_by_index(0);
         app.execute_view_target(CommandTarget::ThemePicker).await;
         app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .await; // 1
@@ -6461,20 +6460,59 @@ mod tests {
         assert!(app.modal.is_none());
         assert_eq!(Theme::active_index(), 3); // Committed!
         assert_eq!(app.ai_settings.theme, Some("nord".to_string()));
+    }
 
-        // Reset theme back to Mocha for other tests
-        Theme::set_theme_by_index(0);
+    /// `App::new` applies the theme its AI settings name. A test builds its
+    /// app through `common::theme::new_app`, which has to leave the active
+    /// theme as it found it. Otherwise one test's app repaints a sibling
+    /// mid-assertion (#676).
+    #[tokio::test]
+    async fn building_an_app_leaves_the_active_theme_as_it_found_it() {
+        use srelens_tui::ai_config::AiSettings;
+        use srelens_tui::theme::Theme;
+
+        let _ai_guard = isolate_ai_settings();
+        AiSettings {
+            theme: Some("nord".to_string()),
+            ..AiSettings::default()
+        }
+        .save()
+        .expect("the isolated settings file is writable");
+        let _theme = crate::common::theme::lock();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = crate::common::theme::new_app(
+            Some("test-ctx".to_string()),
+            Some("default".to_string()),
+            false,
+            None,
+            vec![],
+            tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            app.ai_settings.theme.as_deref(),
+            Some("nord"),
+            "the app loaded the isolated settings"
+        );
+        assert_eq!(
+            Theme::active_index(),
+            0,
+            "building the app switched the active theme"
+        );
     }
 
     #[tokio::test]
     async fn test_command_autocomplete_navigation_and_selection() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::commands::{CrdMeta, ResourceKind};
         use srelens_tui::ui::InputMode;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -6575,7 +6613,7 @@ mod tests {
     #[tokio::test]
     async fn test_crd_settings_vs_ai_settings_autocomplete_and_resolution() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::commands::{
             command_suggestions_with_crds, resolve_command, resolve_command_with_crds,
             CommandTarget, CrdMeta, ResourceKind,
@@ -6653,7 +6691,7 @@ mod tests {
 
         // 4. Test interactive UI selection in App
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -6732,12 +6770,12 @@ mod tests {
     #[tokio::test]
     async fn test_node_inspector_cordon_typed_confirmation_and_streamlined_hints() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::ui::dialogs::Modal;
         use srelens_tui::views::node_inspector_view::{NodeInspectorDetails, NodeInspectorState};
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -6838,6 +6876,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_nodes_view_cordoned_status_and_dynamic_spacing() {
+        let _theme = crate::common::theme::lock();
         use srelens_tui::theme::{status_style, Theme};
         use srelens_tui::views::resource_table::{extract_field_str, ResourceTableState};
 
@@ -7850,13 +7889,13 @@ mod tests {
     #[tokio::test]
     async fn test_helm_views_navigation_and_interactions() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::ui::Modal;
         use srelens_tui::views::helm_detail_view::{HelmDetailTab, ValuesDiffMode};
         use srelens_tui::views::helm_view::{HelmReleaseItem, HelmViewState};
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -8127,13 +8166,13 @@ mod tests {
     async fn test_argo_views_navigation_and_interactions() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_kube::argo::ArgoApplication;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::ui::Modal;
         use srelens_tui::views::argo_detail_view::ArgoDetailTab;
         use srelens_tui::views::argo_view::ArgoViewState;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -8380,10 +8419,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_colon_command_with_namespace_argument() {
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -8414,11 +8453,10 @@ mod tests {
     #[tokio::test]
     async fn test_argo_confirm_modal_with_eks_arn_context() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use srelens_tui::app::App;
         use srelens_tui::ui::dialogs::Modal;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -8480,11 +8518,11 @@ mod tests {
     #[tokio::test]
     async fn test_argo_view_renders_loading_error_empty_hub_and_table_states() {
         use srelens_kube::argo::ArgoApplication;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::views::argo_view::ArgoViewState;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -8553,11 +8591,11 @@ mod tests {
     #[tokio::test]
     async fn test_argo_detail_view_renders_all_tabs() {
         use srelens_kube::argo::ArgoApplication;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::views::argo_detail_view::{ArgoDetailTab, ArgoDetailViewState};
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -8648,12 +8686,12 @@ mod tests {
     async fn test_argo_sync_and_toggle_auto_confirm_modals_render() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_kube::argo::ArgoApplication;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::ui::dialogs::Modal;
         use srelens_tui::views::argo_view::ArgoViewState;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,
@@ -8717,12 +8755,12 @@ mod tests {
     async fn test_argo_list_and_detail_key_handlers_exercise_side_panels_safely() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_kube::argo::ArgoApplication;
-        use srelens_tui::app::{ActiveView, App};
+        use srelens_tui::app::ActiveView;
         use srelens_tui::views::argo_detail_view::ArgoDetailTab;
         use srelens_tui::views::argo_view::ArgoViewState;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = App::new(
+        let mut app = crate::common::theme::new_app(
             Some("test-ctx".to_string()),
             Some("default".to_string()),
             false,

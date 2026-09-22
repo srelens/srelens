@@ -4,7 +4,7 @@ mod common;
 use std::time::Duration;
 
 use crossterm::event::KeyCode;
-use srelens_tui::{app::App, event::AppEvent, ui::Modal};
+use srelens_tui::{event::AppEvent, ui::Modal};
 
 async fn recovery_controls_remain_responsive(stalled: bool) {
     // Dropping the listener models a deleted cluster. Keeping it open without
@@ -30,7 +30,7 @@ async fn recovery_controls_remain_responsive(stalled: bool) {
     });
     std::fs::write(&path, config.to_string()).unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = App::new(
+    let mut app = common::theme::new_app(
         Some("offline".into()),
         None,
         true,

@@ -1,4 +1,3 @@
-use srelens_tui::app::App;
 use srelens_tui::event::AppEvent;
 use srelens_tui::ui::dialogs::Modal;
 use tokio::sync::mpsc::unbounded_channel;
@@ -61,7 +60,7 @@ async fn test_import_kubeconfig_from_yaml_content() {
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
-    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+    let mut app = common::theme::new_app(None, None, false, None, vec![initial_config.clone()], tx)
         .await
         .unwrap();
 
@@ -128,7 +127,7 @@ async fn test_import_kubeconfig_from_file_path() {
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
-    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+    let mut app = common::theme::new_app(None, None, false, None, vec![initial_config.clone()], tx)
         .await
         .unwrap();
 
@@ -192,7 +191,7 @@ async fn test_add_cluster_modal_bracketed_paste() {
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
-    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+    let mut app = common::theme::new_app(None, None, false, None, vec![initial_config.clone()], tx)
         .await
         .unwrap();
 
@@ -228,7 +227,7 @@ async fn test_add_cluster_modal_oversized_paste() {
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
-    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+    let mut app = common::theme::new_app(None, None, false, None, vec![initial_config.clone()], tx)
         .await
         .unwrap();
 
@@ -526,7 +525,7 @@ async fn test_add_cluster_modal_submit_flow() {
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
-    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+    let mut app = common::theme::new_app(None, None, false, None, vec![initial_config.clone()], tx)
         .await
         .unwrap();
 
@@ -589,7 +588,7 @@ async fn test_same_context_import_refreshes_metadata_and_reconnects() {
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
 
-    let mut app = App::new(None, None, false, None, vec![initial_config.clone()], tx)
+    let mut app = common::theme::new_app(None, None, false, None, vec![initial_config.clone()], tx)
         .await
         .unwrap();
 

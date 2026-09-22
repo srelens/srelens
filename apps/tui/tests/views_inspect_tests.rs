@@ -341,6 +341,7 @@ fn node_inspector_header_shows_status_role_type_kubelet_os_kernel_and_runtime() 
 
 #[test]
 fn node_inspector_header_shows_cordon_badge_gpu_model_zone_pool_and_ip() {
+    let _theme = common::theme::lock();
     let mut details = node_details("gpu-node");
     details.status = "NotReady".to_string();
     details.unschedulable = true;
@@ -438,6 +439,7 @@ fn node_inspector_gauges_report_zero_when_allocatable_is_zero() {
 
 #[test]
 fn node_inspector_gauges_go_yellow_then_red_as_pressure_rises() {
+    let _theme = common::theme::lock();
     let mut details = node_details("node-1");
     details.cpu_requests_millicores = 6000; // 77%
     details.mem_requests_mib = 30000; // 97%
@@ -473,6 +475,7 @@ fn node_inspector_gpu_gauge_prefers_vram_when_memory_requests_are_known() {
 
 #[test]
 fn node_inspector_gpu_gauge_counts_slices_when_more_than_one_gpu_is_allocatable() {
+    let _theme = common::theme::lock();
     let mut details = node_details("gpu-node");
     details.has_gpu = true;
     details.gpu_model = Some("A100".to_string());
@@ -546,6 +549,7 @@ fn node_inspector_sparklines_only_appear_when_the_terminal_is_tall_enough() {
 
 #[test]
 fn node_inspector_conditions_and_taints_render_or_say_none() {
+    let _theme = common::theme::lock();
     let mut state = node_state(node_details("node-1"));
     let text = render_node(160, 40, &state);
     assert!(text.contains("Health Conditions & Taints"), "{text}");
@@ -612,6 +616,7 @@ fn node_inspector_conditions_and_taints_render_or_say_none() {
 
 #[test]
 fn node_inspector_pods_table_lists_pods_and_marks_the_selected_one() {
+    let _theme = common::theme::lock();
     let mut details = node_details("node-1");
     details.pods = vec![
         {
@@ -1169,6 +1174,7 @@ fn settings_view_reports_an_api_key_that_comes_from_the_environment() {
 
 #[test]
 fn settings_view_highlights_the_focused_field_on_the_selected_card() {
+    let _theme = common::theme::lock();
     let mut state = settings_state();
     state.selected_provider_idx = 1;
     state.selected_field = SettingField::Model;
@@ -1479,6 +1485,7 @@ fn overview_view_before_any_data_shows_placeholders_and_zeroed_gauges() {
 
 #[test]
 fn overview_view_populated_cluster_shows_health_version_nodes_and_gauges() {
+    let _theme = common::theme::lock();
     let state = OverviewViewState::with_data(overview_data());
     let lines = common::render_lines(120, 40, |f| render_overview_view(f, f.area(), &state));
     let text = lines.join("\n");
@@ -1520,6 +1527,7 @@ fn overview_view_populated_cluster_shows_health_version_nodes_and_gauges() {
 
 #[test]
 fn overview_view_prefixes_a_bare_version_with_v_and_uses_small_units_for_small_totals() {
+    let _theme = common::theme::lock();
     let mut data = overview_data();
     data.k8s_version = "1.29.0".to_string();
     data.total_cpu_millicores = 900;
@@ -1952,6 +1960,7 @@ fn yaml_view_renders_only_the_visible_window_from_the_scroll_offset() {
 
 #[test]
 fn yaml_view_search_badge_counts_matches_and_highlights_them_in_yellow() {
+    let _theme = common::theme::lock();
     let mut state = yaml_state(POD_YAML);
     state.set_search_query("Nginx");
     // 160 columns keep the whole title, badge included, off the border.
@@ -1998,6 +2007,7 @@ fn yaml_view_search_badge_counts_matches_and_highlights_them_in_yellow() {
 
 #[test]
 fn yaml_view_selection_changes_the_hint_and_shades_the_selected_rows() {
+    let _theme = common::theme::lock();
     let mut state = yaml_state(POD_YAML);
     state.start_selection(2);
     state.update_selection(0);
@@ -2029,6 +2039,7 @@ fn yaml_view_selection_changes_the_hint_and_shades_the_selected_rows() {
 
 #[test]
 fn yaml_view_colours_comments_separators_keys_and_scalar_values() {
+    let _theme = common::theme::lock();
     let state = yaml_state(POD_YAML);
     let lines = common::render_lines(120, 40, |f| render_yaml_view(f, f.area(), &state));
     let buf = render_buffer(120, 40, |f| render_yaml_view(f, f.area(), &state));
