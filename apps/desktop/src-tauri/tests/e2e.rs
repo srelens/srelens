@@ -2733,6 +2733,89 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     );
     assert_eq!(resource_version(&unchanged), resource_version(&refreshed));
 
+    println!("=== host action primitives (#549) ===");
+    // The writes an app's declared action makes, against the same live CRD.
+    // Each one re-reads first: every primitive pins the patch to the UID and
+    // resourceVersion it was handed, so the previous write invalidates them.
+    let ks_object = json!({
+        "context": ctx, "group": "kustomize.toolkit.fluxcd.io", "version": "v1",
+        "plural": "kustomizations", "kind": "Kustomization", "namespaced": true,
+        "namespace": NS, "name": KUSTOMIZATION
+    });
+    let reviewed = |inspected: &Value| {
+        let mut input = ks_object.clone();
+        input["uid"] = inspected["resource"]["metadata"]["uid"].clone();
+        input["resourceVersion"] = json!(resource_version(inspected));
+        input
+    };
+
+    let before = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+    let mut input = reviewed(&before);
+    input["key"] = json!("reconcile.fluxcd.io/requestedAt");
+    input["value"] = json!("$now");
+    assert_eq!(
+        h.ok("k8s.annotate", input).await,
+        json!({"requested": true})
+    );
+    let annotated = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+    let requested_at = annotated["resource"]["metadata"]["annotations"]
+        ["reconcile.fluxcd.io/requestedAt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no requestedAt annotation: {annotated}"));
+    assert!(
+        requested_at.ends_with('Z') && requested_at.contains('.'),
+        "$now is RFC 3339 nanoseconds in UTC: {requested_at}"
+    );
+    // The review is spent: the same UID and resourceVersion cannot write twice.
+    let mut stale = reviewed(&before);
+    stale["key"] = json!("reconcile.fluxcd.io/requestedAt");
+    stale["value"] = json!("$now");
+    let err = h.err("k8s.annotate", stale).await;
+    assert!(err.contains("Resource changed or was replaced"), "{err}");
+
+    let mut input = reviewed(&annotated);
+    input["fields"] = json!({"/spec/suspend": true});
+    h.ok("k8s.setFields", input).await;
+    let suspended = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+    assert_eq!(
+        suspended["resource"]["spec"]["suspend"], true,
+        "{suspended}"
+    );
+    // And back, so the object is left as the rest of the suite found it.
+    let mut input = reviewed(&suspended);
+    input["fields"] = json!({"/spec/suspend": false});
+    h.ok("k8s.setFields", input).await;
+    let resumed = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+    assert_eq!(resumed["resource"]["spec"]["suspend"], false, "{resumed}");
+
+    let mut input = reviewed(&resumed);
+    input["patch"] = json!({"spec": {"prune": false}});
+    h.ok("k8s.mergePatch", input).await;
+    let patched = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+    assert_eq!(patched["resource"]["spec"]["prune"], false, "{patched}");
+    assert_eq!(
+        patched["resource"]["spec"]["path"], "./deploy",
+        "a merge patch leaves the fields it does not name: {patched}"
+    );
+
+    let mut input = reviewed(&patched);
+    input["conditionType"] = json!("Issuing");
+    input["conditionStatus"] = json!("True");
+    input["reason"] = json!("ManuallyTriggered");
+    input["message"] = json!("Requested from the srelens e2e suite");
+    h.ok("k8s.setStatusCondition", input).await;
+    let conditioned = h.ok("k8s.getCustomResource", ks_object.clone()).await;
+    let conditions = conditioned["resource"]["status"]["conditions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no conditions: {conditioned}"));
+    let issuing = conditions
+        .iter()
+        .find(|c| c["type"] == "Issuing")
+        .unwrap_or_else(|| panic!("no Issuing condition: {conditioned}"));
+    assert_eq!(issuing["status"], "True", "{issuing}");
+    assert_eq!(issuing["reason"], "ManuallyTriggered", "{issuing}");
+    assert!(issuing["lastTransitionTime"].is_string(), "{issuing}");
+
     println!("=== extensions: disable and remove ===");
     // A disabled app's views stop reading, and say why.
     h.ok(

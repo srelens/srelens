@@ -72,6 +72,15 @@
     "confirm": null
   },
   {
+    "id": "k8s.annotate",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": false,
+    "impact": "medium",
+    "confirm": "Set the action's annotation[ on {resource}][ in cluster {cluster}]? What the controller does next is up to it."
+  },
+  {
     "id": "k8s.applyManifest",
     "readOnly": false,
     "destructive": false,
@@ -630,6 +639,15 @@
     "confirm": null
   },
   {
+    "id": "k8s.mergePatch",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": false,
+    "impact": "high",
+    "confirm": "Apply the change this action declares[ to {resource}][ in cluster {cluster}]? It can start work the controller runs straight away, including replacing what is running."
+  },
+  {
     "id": "k8s.nodeJournalLogs",
     "readOnly": true,
     "destructive": false,
@@ -808,6 +826,24 @@
     "sensitive": false,
     "impact": "medium",
     "confirm": "Change the replica count[ of {resource}][ in cluster {cluster}]?"
+  },
+  {
+    "id": "k8s.setFields",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": false,
+    "impact": "medium",
+    "confirm": "Change the fields this action sets[ on {resource}][ in cluster {cluster}]? Workloads already running are not stopped."
+  },
+  {
+    "id": "k8s.setStatusCondition",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": false,
+    "impact": "medium",
+    "confirm": "Write the action's status condition[ on {resource}][ in cluster {cluster}]? The controller acts on it."
   },
   {
     "id": "k8s.synthesizeClusterKubeconfig",

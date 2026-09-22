@@ -195,7 +195,49 @@ pub struct Manifest {
     pub kind: ManifestKind,
     pub permissions: Vec<String>,
     pub capabilities: Vec<Binding>,
+    /// Declared mutations (#549). Absent in a manifest that only reads, and
+    /// left out of the serialized form when empty so a manifest stored and
+    /// signed without it still round-trips to its own bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ActionBinding>,
     pub contributions: Contributions,
+}
+
+/// Most actions one manifest may declare.
+pub const MAX_ACTIONS: usize = 32;
+
+/// The inputs an action takes, fixed by the host.
+///
+/// Not the app's to choose, unlike a reader binding's `inputs`: everything a
+/// caller may vary about a declared mutation is the object it names and the
+/// version of that object the operator reviewed. An app that could expose its
+/// own input would be back to sending a Kubernetes request the host did not
+/// write.
+pub const ACTION_INPUTS: &[&str] = &["context", "namespace", "name", "uid", "resourceVersion"];
+
+/// The arguments the host fills in from the reader binding an action names,
+/// which is what restricts an action to a kind the app already holds a granted
+/// reader for. An action that bound any of these itself would choose its own
+/// kind, so binding one is refused.
+pub const ACTION_IDENTITY: &[&str] = &["group", "version", "plural", "kind", "namespaced"];
+
+/// One declared mutation: a host action primitive, the reader binding whose
+/// kind it acts on, and the arguments that fix what it writes.
+///
+/// There is no `preconditions` field yet — #550 adds it, and #551 is what
+/// moves the Flux and Argo CD actions in core into manifests that use both.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActionBinding {
+    pub name: String,
+    pub title: String,
+    /// A host action primitive, e.g. `k8s.annotate`.
+    pub target: String,
+    /// The name of a reader binding in `capabilities`. The action acts on that
+    /// binding's kind and on no other.
+    pub resource: String,
+    /// What this action writes, fixed at install time.
+    pub arguments: Map<String, Value>,
 }
 
 /// Only data is executable in this first host. Code-bearing manifests must go
@@ -478,6 +520,44 @@ impl Manifest {
         check_api_fields_in(&value, &admitted, fields)
     }
 
+    /// The binding the host registers for one declared action: the primitive
+    /// it names, the identity of the reader binding it acts through, and its
+    /// own arguments, with the inputs the host fixes.
+    ///
+    /// This is where "an action reaches only the kind of a granted reader
+    /// binding" is true rather than merely intended: the kind is *copied* from
+    /// that binding, so there is no field an app could write it in.
+    pub fn action_binding(&self, action: &ActionBinding) -> Result<Binding, String> {
+        let reader = self
+            .capabilities
+            .iter()
+            .find(|binding| binding.name == action.resource)
+            .ok_or_else(|| format!("\"{}\" is not a declared capability", action.resource))?;
+        let mut arguments = Map::new();
+        for key in ACTION_IDENTITY {
+            let Some(value) = reader.arguments.get(*key) else {
+                return Err(format!(
+                    "\"{}\" does not fix `{key}`, so it cannot scope an action to one kind",
+                    action.resource
+                ));
+            };
+            arguments.insert((*key).to_owned(), value.clone());
+        }
+        for (key, value) in &action.arguments {
+            if ACTION_IDENTITY.contains(&key.as_str()) || ACTION_INPUTS.contains(&key.as_str()) {
+                return Err(format!("`{key}` is filled in by the host"));
+            }
+            arguments.insert(key.clone(), value.clone());
+        }
+        Ok(Binding {
+            name: action.name.clone(),
+            title: action.title.clone(),
+            target: action.target.clone(),
+            arguments,
+            inputs: ACTION_INPUTS.iter().map(|i| (*i).to_owned()).collect(),
+        })
+    }
+
     /// Checks the manifest's rules, reporting every violation with the path at fault.
     pub fn validate(&self) -> Result<(), ValidationErrors> {
         const LABEL: &str =
@@ -587,6 +667,58 @@ impl Manifest {
                         format!("Declare at most {MAX_PRINTER_COLUMNS} printerColumns"),
                     );
                 }
+            }
+        }
+        if self.actions.len() > MAX_ACTIONS {
+            problems.push(
+                Code::InvalidValue,
+                "actions",
+                format!("Declare at most {MAX_ACTIONS} actions"),
+            );
+        }
+        // An action's name becomes a capability id beside the readers', so the
+        // two share one name space.
+        let mut declared: BTreeSet<&str> = names.clone();
+        for (index, action) in self.actions.iter().enumerate() {
+            let at = format!("actions[{index}]");
+            if !identifier(&action.name) {
+                problems.push(Code::InvalidValue, format!("{at}.name"), IDENTIFIER);
+            } else if !declared.insert(action.name.as_str()) {
+                problems.push(
+                    Code::DuplicateIdentifier,
+                    format!("{at}.name"),
+                    format!("\"{}\" is already used by another capability", action.name),
+                );
+            }
+            if !label(&action.title) {
+                problems.push(Code::InvalidValue, format!("{at}.title"), LABEL);
+            }
+            if action.target.starts_with("plugin/") {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("{at}.target"),
+                    "An app cannot forward to another app's capability",
+                );
+            }
+            targets.insert(action.target.as_str());
+            for key in action.arguments.keys() {
+                if ACTION_IDENTITY.contains(&key.as_str()) || ACTION_INPUTS.contains(&key.as_str())
+                {
+                    problems.push(
+                        Code::InvalidBinding,
+                        format!("{at}.arguments.{key}"),
+                        format!(
+                            "`{key}` is filled in by the host, from the reader binding this action names"
+                        ),
+                    );
+                }
+            }
+            if !names.contains(action.resource.as_str()) {
+                problems.push(
+                    Code::UnresolvedCapability,
+                    format!("{at}.resource"),
+                    format!("Capability \"{}\" is not declared", action.resource),
+                );
             }
         }
         if targets != permissions {

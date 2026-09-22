@@ -53,6 +53,7 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     kind: "required",
     permissions: "required",
     capabilities: "required",
+    actions: "optional",
     contributions: "required",
   } satisfies Presence<ExtensionManifest>,
   Binding: {
@@ -62,6 +63,13 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     arguments: "required",
     inputs: "required",
   } satisfies Presence<ExtensionManifest["capabilities"][number]>,
+  ActionBinding: {
+    name: "required",
+    title: "required",
+    target: "required",
+    resource: "required",
+    arguments: "required",
+  } satisfies Presence<NonNullable<ExtensionManifest["actions"]>[number]>,
   Contributions: {
     pages: "required",
     detailTabs: "required",

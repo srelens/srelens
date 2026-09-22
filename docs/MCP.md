@@ -323,6 +323,13 @@ carries one row per tool. `k8s.gitOpsAction` is `high` because one of its
 eight actions is an Argo CD sync, although its `refresh` action is `low`.
 The per-action level comes back with the resource, on `extensions.resource`.
 
+The host action primitives an extension binds as declared actions —
+`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition` and
+`k8s.mergePatch` — publish one row each, and an app's bound action inherits
+its primitive's row and can only be raised above it. `k8s.mergePatch` is
+`high` because it is the one that can express an Argo CD sync; the three
+narrower ones are `medium`.
+
 ## Client configuration
 
 **Prerequisite: `srelens` must resolve on `PATH`.** Every generated config

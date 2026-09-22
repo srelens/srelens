@@ -27,6 +27,12 @@ kube = { version = "4", default-features = false, features = ["client", "config"
 k8s-openapi = { version = "0.28", features = ["v1_34"] }
 futures = "0.3"
 base64 = "0.22"
+# `$now` in an action primitive is RFC 3339 with nanoseconds. k8s-openapi
+# depends on chrono but does not re-export it, so name it here.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# `$uuid` in an action primitive. Already in the lockfile via the desktop app
+# and the TUI, so this builds no crate the workspace did not already build.
+uuid = { version = "1", features = ["v4"] }
 flate2 = "1"
 http = "1"
 similar = "2"

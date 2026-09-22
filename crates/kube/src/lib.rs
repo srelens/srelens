@@ -120,6 +120,7 @@ mod age_tests {
 }
 
 pub mod access;
+pub mod action_primitives;
 pub mod actions;
 pub mod argo;
 pub mod auth_resolver;
