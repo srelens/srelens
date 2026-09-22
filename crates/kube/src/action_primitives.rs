@@ -613,17 +613,33 @@ fn check_object_parents(current: &Value, fields: &Map<String, Value>) -> Result<
         let mut node = current;
         let mut walked = String::new();
         for segment in parents {
-            if !node.is_object() && !node.is_null() {
-                return Err(format!(
-                    "`{walked}` is not an object on this resource, so `{pointer}` cannot reach through it; a setFields action writes object fields and writes a list whole"
-                ));
-            }
+            object_or_absent(node, &walked, pointer)?;
             walked.push('/');
             walked.push_str(segment);
             node = node.get(segment.as_str()).unwrap_or(ABSENT);
         }
+        // The last parent as well: the loop descends into it and would
+        // otherwise never look at it, which is the whole of `/spec/containers/0`
+        // versus `/spec/containers/0/image`.
+        object_or_absent(node, &walked, pointer)?;
     }
     Ok(())
+}
+
+/// One parent of a `k8s.setFields` pointer. Absent is fine — the patch creates
+/// an object there — and anything that is not an object is not.
+fn object_or_absent(node: &Value, walked: &str, pointer: &str) -> Result<(), String> {
+    if node.is_object() || node.is_null() {
+        return Ok(());
+    }
+    let at = if walked.is_empty() {
+        "this resource".to_owned()
+    } else {
+        format!("`{walked}`")
+    };
+    Err(format!(
+        "{at} is not an object on this resource, so `{pointer}` cannot reach through it; a setFields action writes object fields and writes a list whole"
+    ))
 }
 
 /// The argument `name` as a string, or why the binding cannot be accepted.
@@ -1105,6 +1121,42 @@ mod tests {
             1,
             "the GET happened, the PATCH must not"
         );
+    }
+
+    /// And the shallow case: the value's *immediate* parent. `/spec/containers/0`
+    /// nests `{"containers": {"0": …}}` just the same, so it replaces the list
+    /// just the same — the pointer is one segment shorter, and nothing else
+    /// about it is different.
+    #[tokio::test]
+    async fn an_immediate_list_or_scalar_parent_is_refused_too() {
+        for (spec, pointer, parent) in [
+            (
+                json!({"containers": [{"image": "a"}]}),
+                "/spec/containers/0",
+                "/spec/containers",
+            ),
+            (
+                json!({"suspend": true}),
+                "/spec/suspend/paused",
+                "/spec/suspend",
+            ),
+        ] {
+            let (client, requests) = mock(object(json!({"spec": spec})));
+            let mut input = helmrelease(json!({}));
+            input["fields"] = json!({});
+            input["fields"][pointer] = json!("x");
+            let input = serde_json::from_value(input).expect("input deserializes");
+            let err = match set_fields(client, input).await {
+                Err(err) => err,
+                Ok(out) => panic!("{pointer} was written: {out}"),
+            };
+            assert!(err.contains(parent), "{pointer}: {err}");
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                1,
+                "{pointer}: the GET happened, the PATCH must not"
+            );
+        }
     }
 
     /// What a declared action does instead: name the list itself and write it
