@@ -1,4 +1,4 @@
-import { createElement, useState, type ReactNode } from "react";
+import { createElement, useMemo, useState, type ReactNode } from "react";
 import { Button, CodeEditor, ErrorState, Table } from "@srelens/ui-kit";
 import { parseAssistantMarkdown, type MdBlock } from "@srelens/core/lib/assistantMarkdown";
 import type { NoteSpan } from "@srelens/core/lib/releaseNotes";
@@ -35,7 +35,7 @@ function links(text: string): ReactNode[] {
     const url = normalizeNativeComponentLink(text.slice(middle + 2, end));
     if (url && title && !title.includes("[") && text[start - 1] !== "!") {
       result.push(text.slice(from, start));
-      result.push(<ExternalLink key={start} url={url}>{title}</ExternalLink>);
+      result.push(<ExternalLink key={`${start}:${url}`} url={url}>{title}</ExternalLink>);
       from = end + 1;
     }
     search = end + 1;
@@ -57,7 +57,7 @@ function Block({ block }: { block: MdBlock }) {
   }
 }
 export function NativeMarkdown({ text }: { text: string }) {
-  const blocks = parseAssistantMarkdown(text);
+  const blocks = useMemo(() => parseAssistantMarkdown(text), [text]);
   // Keep pathological table width bounded too, rather than silently dropping columns.
   if (blocks.some(block => block.kind === "table" && (block.headers.length > 20 || block.rows.some(row => row.length > 20)))) {
     return <ErrorState title="Could not display Markdown" detail="Markdown tables support at most 20 columns."/>;

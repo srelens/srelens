@@ -106,3 +106,22 @@ it("rejects oversized Markdown tables visibly", () => {
   render(<NativeComponent label="Notes" payload={p("Markdown",{text:row+"\n"+Array(21).fill("---").join("|")})}/>);
   expect(screen.getByRole("alert").textContent).toContain("at most 20 columns");
 });
+
+it("clears a previous opening error when refreshed Markdown changes the link URL", async () => {
+  vi.spyOn(link, "openNativeComponentLink").mockRejectedValue(new Error("Old link unavailable"));
+  const { rerender } = render(<NativeComponent label="Notes" payload={p("Markdown", {text:"[Docs](https://old.example/docs)"})}/>);
+  fireEvent.click(screen.getByRole("link",{name:/Docs/}));
+  expect((await screen.findByRole("alert")).textContent).toContain("Old link unavailable");
+  rerender(<NativeComponent label="Notes" payload={p("Markdown", {text:"[Docs](https://new.example/docs)"})}/>);
+  expect(screen.getByRole("link",{name:/Docs/}).getAttribute("href")).toBe("https://new.example/docs");
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+it("preserves Markdown list expansion across unchanged parent rerenders", () => {
+  const text = Array.from({length:22},(_,i)=>`- Item ${i}`).join("\n");
+  const { rerender } = render(<NativeComponent label="Notes" payload={p("Markdown", {text})}/>);
+  fireEvent.click(screen.getByRole("button",{name:/Show 2 more/}));
+  expect(screen.getByText("Item 21")).toBeTruthy();
+  rerender(<NativeComponent label="Updated host label" payload={p("Markdown", {text})}/>);
+  expect(screen.getByText("Item 21")).toBeTruthy();
+  expect(screen.getByRole("button",{name:"Show fewer"})).toBeTruthy();
+});
