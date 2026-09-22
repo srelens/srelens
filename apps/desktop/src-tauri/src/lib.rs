@@ -35,7 +35,7 @@ mod watch;
 mod window;
 
 use app_log::{app_log_path, read_app_log, reveal_app_log};
-use bridge::{invoke_capability, AppRegistry};
+use bridge::{invoke_capability, AppAudit, AppRegistry};
 use bundle_cmd::{bundle_export, bundle_import, bundle_pick_file, bundle_preview};
 use exec::{exec_close, exec_input, exec_resize, start_pod_exec};
 use external::open_external;
@@ -416,7 +416,9 @@ pub fn run() {
                         std::sync::Arc::new(vault::VaultTokenStore(vault.clone()));
                     app.manage(token_store);
                     app.manage(vault);
-                    app.manage(McpAuditPath(dir.join("audit.jsonl")));
+                    let audit_path = dir.join("audit.jsonl");
+                    app.manage(McpAuditPath(audit_path.clone()));
+                    app.manage(app_audit(Some(&audit_path)));
 
                     let prompts_dir = dir.join("prompts");
                     if let Err(e) = std::fs::create_dir_all(&prompts_dir) {
@@ -428,6 +430,12 @@ pub fn run() {
                     app.manage(McpPromptsDir(prompts_dir));
                 }
                 Err(e) => log::warn!("MCP config dir unavailable: {e}"),
+            }
+            // `manage` does not replace, so this only lands when the branch
+            // above did not — see `app_audit` for why the absent case is a
+            // no-op sink rather than a refusal.
+            if app.try_state::<AppAudit>().is_none() {
+                app.manage(app_audit(None));
             }
             app.manage(std::sync::Arc::new(mcp_confirm::Pending::default()));
 
@@ -535,4 +543,89 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// The sink the app writes its capability trail to.
+///
+/// **ONE sink, and the UI bridge writes to it too (#555).** Not a second log
+/// beside the MCP one: an operator asking what happened to a cluster should
+/// not have to know whether they clicked it or an agent called it, and two
+/// files in two formats would make the Settings pane pick one. Same 5 MB cap
+/// and single rotation the MCP server wires in `mcp.rs`, which resolves THIS
+/// sink rather than building its own; the trail never leaves this machine.
+///
+/// `None` — no resolvable app config dir — **fails open**. There is nowhere
+/// to write a trail, and refusing `invoke_capability` for want of one would
+/// take the whole app down with it, so the sink is still there and records
+/// nothing. A capability call is not blocked by the bookkeeping around it,
+/// which is the same posture `JsonlAuditLog::record` takes towards I/O
+/// errors.
+///
+/// A function rather than two inline `manage` calls because which sink the
+/// app ends up with is a decision with a wrong answer in both directions,
+/// and `setup` cannot be called from a test.
+fn app_audit(audit_path: Option<&std::path::Path>) -> AppAudit {
+    match audit_path {
+        Some(path) => AppAudit(std::sync::Arc::new(srelens_mcp::audit::JsonlAuditLog::new(
+            path.to_path_buf(),
+            5 * 1024 * 1024,
+        ))),
+        None => AppAudit(std::sync::Arc::new(srelens_mcp::audit::NoopAudit)),
+    }
+}
+
+#[cfg(test)]
+mod audit_wiring_tests {
+    use super::*;
+    use srelens_capability::audit::{AuditRecord, Source};
+
+    fn a_record() -> AuditRecord {
+        AuditRecord {
+            source: Source::Ui,
+            tool: "k8s.deletePod".into(),
+            args: serde_json::json!({ "name": "web-0" }),
+            app: None,
+            cluster: None,
+            resource: None,
+            decision: "approved",
+            outcome: srelens_capability::audit::OUTCOME_OK,
+            error: None,
+        }
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("srelens-pr660-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// With a config dir there is somewhere to put the trail, and #555 means
+    /// a click in the app lands in it exactly as an agent's call does.
+    #[test]
+    fn a_config_dir_gets_a_trail_on_disk() {
+        let dir = scratch("withdir");
+        let path = dir.join("audit.jsonl");
+
+        app_audit(Some(&path)).0.record(a_record());
+
+        let body = std::fs::read_to_string(&path).expect("the trail must exist");
+        assert_eq!(body.lines().count(), 1);
+        assert!(body.contains("k8s.deletePod"), "unexpected line: {body}");
+    }
+
+    /// Fail OPEN, not closed: with no config dir there is nowhere to write a
+    /// trail, and refusing `invoke_capability` for want of one would take the
+    /// whole app down with it. The sink still exists — `invoke_capability`
+    /// takes it as managed state and would error without it — and it writes
+    /// nothing.
+    #[test]
+    fn no_config_dir_still_gets_a_sink_that_writes_nothing() {
+        let dir = scratch("nodir");
+
+        app_audit(None).0.record(a_record());
+
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert!(left.is_empty(), "nothing may be written: {left:?}");
+    }
 }

@@ -1,6 +1,7 @@
 //! Capability registry — the single source of truth for backend operations.
 
 mod annotations;
+pub mod audit;
 mod error;
 
 pub use annotations::Annotations;
@@ -116,6 +117,81 @@ impl Registry {
             .ok_or_else(|| CapabilityError::NotFound(id.to_string()))?;
         (cap.handler)(input).await
     }
+
+    /// Invoke a capability and write one audit record for the call.
+    ///
+    /// **This is the single writer of an invocation record, for both
+    /// surfaces.** The MCP server used to build its own record in
+    /// `handle_request` while the desktop bridge called [`Registry::invoke`]
+    /// straight through, so a Flux reconcile clicked in the app left nothing
+    /// behind while the identical call from an agent was logged (#555). The
+    /// registry is where the two paths meet, so the record is written here and
+    /// a new surface gets the trail by calling this instead of `invoke`.
+    ///
+    /// `decision` is the caller's consent verdict — `"auto"` when nothing
+    /// needed confirming, `"approved"` when a policy said yes. A refusal never
+    /// reaches here, because a refused call is not an invocation:
+    /// [`crate::audit::AuditSink::record`] is called directly for those.
+    ///
+    /// What the record says about the result is read off the error, because
+    /// "srelens would not do this" and "the cluster would not" are different
+    /// answers to "did my sync happen?":
+    ///
+    /// - no error — [`audit::OUTCOME_OK`];
+    /// - [`CapabilityError::NotFound`] or [`CapabilityError::InvalidInput`] —
+    ///   [`audit::OUTCOME_REJECTED`], since nothing ran;
+    /// - [`CapabilityError::Handler`] — [`audit::OUTCOME_FAILED`], the call ran
+    ///   and did not finish.
+    ///
+    /// Arguments are redacted before anything is written, and the error text is
+    /// scrubbed against that same redaction — a capability that refuses an
+    /// argument tends to echo it back.
+    pub async fn invoke_audited(
+        &self,
+        id: &str,
+        input: Value,
+        sink: &dyn audit::AuditSink,
+        source: audit::Source,
+        decision: &'static str,
+    ) -> Result<Value, CapabilityError> {
+        let annotations = self.caps.get(id).map(|c| c.annotations);
+        // An unknown capability has no safety class to read, so the UI cannot
+        // know whether it was a mutation; nothing was invoked either way, and
+        // the bridge logs the refusal. MCP records it, as it records every
+        // other call it is asked to make.
+        let audited = match source {
+            audit::Source::Ui => annotations.as_ref().is_some_and(audit::is_audited_from_ui),
+            _ => true,
+        };
+        if !audited {
+            return self.invoke(id, input).await;
+        }
+        let sensitive = annotations.is_some_and(|a| a.sensitive);
+        let redacted = audit::redact(&input, sensitive);
+        let called = self.invoke(id, input.clone()).await;
+        let (app, cluster, resource) = audit::describe_target(&redacted);
+        sink.record(audit::AuditRecord {
+            source,
+            tool: id.to_string(),
+            app,
+            cluster,
+            resource,
+            decision,
+            outcome: match called.as_ref().err() {
+                None => audit::OUTCOME_OK,
+                Some(CapabilityError::NotFound(_) | CapabilityError::InvalidInput(_)) => {
+                    audit::OUTCOME_REJECTED
+                }
+                Some(CapabilityError::Handler(_)) => audit::OUTCOME_FAILED,
+            },
+            error: called
+                .as_ref()
+                .err()
+                .map(|e| audit::redact_error(&e.to_string(), &input, &redacted)),
+            args: redacted,
+        });
+        called
+    }
 }
 
 /// Crate version sentinel used by the scaffold smoke test.
@@ -164,6 +240,155 @@ mod registry_tests {
         let mut ids = reg.ids();
         ids.sort();
         assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[derive(Default)]
+    struct Spy(std::sync::Mutex<Vec<audit::AuditRecord>>);
+
+    impl audit::AuditSink for Spy {
+        fn record(&self, rec: audit::AuditRecord) {
+            self.0.lock().unwrap().push(rec);
+        }
+    }
+
+    impl Spy {
+        fn seen(&self) -> Vec<audit::AuditRecord> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    fn reg_with_a_read_and_a_write() -> Registry {
+        let mut reg = Registry::new();
+        reg.register(Capability::read_only("k8s.listPods", "lists", |_| async {
+            Ok(json!([]))
+        }));
+        let mut write = Capability::read_only("k8s.deletePod", "deletes", |_| async {
+            Ok(json!({ "deleted": true }))
+        });
+        write.annotations = Annotations::DESTRUCTIVE;
+        reg.register(write);
+        reg
+    }
+
+    /// The asymmetry #555 settles: MCP is a third party and every call it
+    /// makes is an event, including the reads. The UI is the user, and only
+    /// what they changed (or what secret they revealed) is.
+    #[tokio::test]
+    async fn mcp_records_every_call_and_the_ui_records_only_the_ones_that_matter() {
+        let reg = reg_with_a_read_and_a_write();
+        let spy = Spy::default();
+
+        for source in [audit::Source::McpStdio, audit::Source::Ui] {
+            reg.invoke_audited("k8s.listPods", json!({}), &spy, source, "auto")
+                .await
+                .unwrap();
+        }
+
+        let seen = spy.seen();
+        assert_eq!(seen.len(), 1, "expected only the MCP read, got {seen:?}");
+        assert_eq!(seen[0].source, audit::Source::McpStdio);
+    }
+
+    /// The same capability from either surface lands in the trail in the same
+    /// shape, differing only in who called it — which is the property that
+    /// makes one pane able to show both.
+    #[tokio::test]
+    async fn a_write_is_recorded_identically_from_either_surface() {
+        let reg = reg_with_a_read_and_a_write();
+        let spy = Spy::default();
+        let args = json!({ "context": "prod", "namespace": "team", "name": "web-0" });
+
+        reg.invoke_audited("k8s.deletePod", args.clone(), &spy, audit::Source::Ui, "auto")
+            .await
+            .unwrap();
+        reg.invoke_audited(
+            "k8s.deletePod",
+            args,
+            &spy,
+            audit::Source::McpHttp,
+            "approved",
+        )
+        .await
+        .unwrap();
+
+        let seen = spy.seen();
+        assert_eq!(seen.len(), 2, "both surfaces record, got {seen:?}");
+        assert_eq!(seen[0].source.as_str(), "ui");
+        assert_eq!(seen[1].source.as_str(), "mcp");
+        assert_eq!(seen[0].decision, "auto");
+        assert_eq!(seen[1].decision, "approved");
+        for rec in &seen {
+            assert_eq!(rec.tool, "k8s.deletePod");
+            assert_eq!(rec.outcome, audit::OUTCOME_OK);
+            assert_eq!(rec.cluster.as_deref(), Some("prod"));
+            assert_eq!(rec.resource.as_deref(), Some("team/web-0"));
+            assert!(rec.error.is_none());
+        }
+    }
+
+    /// A capability the registry does not have never ran, so from the UI there
+    /// is nothing to say about whether it mutated anything; MCP records the
+    /// attempt, because an agent reaching for a tool it was not given is
+    /// exactly what the trail is read for.
+    #[tokio::test]
+    async fn an_unknown_capability_is_recorded_for_mcp_and_not_for_the_ui() {
+        let reg = reg_with_a_read_and_a_write();
+        let spy = Spy::default();
+
+        for source in [audit::Source::Ui, audit::Source::McpStdio] {
+            assert!(reg
+                .invoke_audited("k8s.nope", json!({}), &spy, source, "auto")
+                .await
+                .is_err());
+        }
+
+        let seen = spy.seen();
+        assert_eq!(seen.len(), 1, "expected only the MCP attempt, got {seen:?}");
+        assert_eq!(seen[0].outcome, audit::OUTCOME_REJECTED);
+    }
+
+    /// `k8s.helmRepoAdd` takes the repository URL as free text and is audited
+    /// because it mutates, so a private chart repo added with its credentials
+    /// in the URL — the form `helm repo add` documents — used to land on disk
+    /// verbatim, from either surface. The record has to keep saying WHICH repo
+    /// was added, so the host and the path stay and only the credentials go.
+    #[tokio::test]
+    async fn a_url_with_credentials_is_not_written_to_the_log() {
+        let mut reg = Registry::new();
+        let mut add = Capability::read_only("k8s.helmRepoAdd", "adds a repo", |_| async {
+            Ok(json!({ "output": "\"internal\" has been added" }))
+        });
+        add.annotations = Annotations::MUTATING;
+        reg.register(add);
+
+        let dir = std::env::temp_dir().join(format!("srelens-pr660-url-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audit.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let log = audit::JsonlAuditLog::new(path.clone(), 5 * 1024 * 1024);
+
+        reg.invoke_audited(
+            "k8s.helmRepoAdd",
+            json!({
+                "context": "prod",
+                "name": "internal",
+                "url": "https://deploy:s3cr3t-pass@charts.example.com/stable?access_key=AKIAHUNTER2",
+            }),
+            &log,
+            audit::Source::Ui,
+            "approved",
+        )
+        .await
+        .unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        for leaked in ["s3cr3t-pass", "deploy:", "AKIAHUNTER2"] {
+            assert!(!body.contains(leaked), "{leaked} reached the log: {body}");
+        }
+        assert!(
+            body.contains("charts.example.com/stable"),
+            "the repo the record is about has to survive: {body}"
+        );
     }
 
     #[test]

@@ -90,8 +90,11 @@ impl Pending {
     }
 }
 
-pub struct PromptUser {
-    app: tauri::AppHandle,
+/// Generic over the runtime only so a unit test can build one — and, through
+/// it, a whole `McpServer` — over a `tauri::test::mock_app`; the app always
+/// instantiates it on Wry, which is the default.
+pub struct PromptUser<R: Runtime = tauri::Wry> {
+    app: tauri::AppHandle<R>,
     pending: Arc<Pending>,
     timeout: Duration,
 }
@@ -103,8 +106,7 @@ pub struct PromptUser {
 /// and broadcasts `mcp://confirm-resolved`, so neither the app-wide modal nor
 /// the transcript's inline card can outlive the request they prompt for.
 ///
-/// Generic over the runtime only so the unit test below can hold one over a
-/// `tauri::test::mock_app`; `PromptUser` itself is Wry.
+/// Generic over the runtime for the same reason [`PromptUser`] is.
 struct ResolveOnDrop<R: Runtime> {
     app: tauri::AppHandle<R>,
     pending: Arc<Pending>,
@@ -119,14 +121,14 @@ impl<R: Runtime> Drop for ResolveOnDrop<R> {
     }
 }
 
-impl PromptUser {
-    pub fn new(app: tauri::AppHandle, pending: Arc<Pending>, timeout: Duration) -> Self {
+impl<R: Runtime> PromptUser<R> {
+    pub fn new(app: tauri::AppHandle<R>, pending: Arc<Pending>, timeout: Duration) -> Self {
         Self { app, pending, timeout }
     }
 }
 
 #[async_trait::async_trait]
-impl ConfirmPolicy for PromptUser {
+impl<R: Runtime> ConfirmPolicy for PromptUser<R> {
     /// `kind` is deliberately unused: a human being shown the tool name and its
     /// arguments is the consent mechanism either way, so the GUI prompts for a
     /// sensitive read exactly as it does for a mutation. The distinction exists

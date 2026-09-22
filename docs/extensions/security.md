@@ -30,6 +30,15 @@ mitigation and the risk that remains.
   The frontend never fetches catalog URLs or writes catalog caches to browser storage.
 - **The web host refuses app capabilities** until state is per user
   ([capabilities.md](capabilities.md#web-host)).
+- **Every write is recorded locally, wherever it came from.** A mutating or
+  sensitive capability call is appended to `audit.jsonl` whether an agent made
+  it over MCP or a person clicked it in srelens — with the source, the app and
+  revision it went through, the cluster, the object and the outcome. The sink
+  sits beside the capability registry, which is the one place both paths meet
+  (`crates/capability/src/audit.rs`), so a new surface cannot acquire writes
+  without acquiring the record
+  ([threat-model.md](threat-model.md#mcp-client-abuse)). Argument values are
+  redacted before anything is written, and the file never leaves the machine.
 
 ## Not yet protected
 
@@ -40,4 +49,3 @@ Declarative support does not claim these protections:
 - revocation and a kill switch ([#561](https://github.com/srelens/srelens/issues/561))
 - executable apps and OS sandboxing ([#521](https://github.com/srelens/srelens/issues/521))
 - a permission diff on update ([#554](https://github.com/srelens/srelens/issues/554))
-- auditing of UI-path writes ([#555](https://github.com/srelens/srelens/issues/555))

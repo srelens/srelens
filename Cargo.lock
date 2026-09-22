@@ -6418,11 +6418,13 @@ dependencies = [
 name = "srelens-capability"
 version = "0.15.0"
 dependencies = [
+ "aho-corasick",
  "schemars 0.8.22",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -6511,7 +6513,6 @@ dependencies = [
 name = "srelens-mcp"
 version = "0.15.0"
 dependencies = [
- "aho-corasick",
  "async-trait",
  "axum",
  "futures-core",

@@ -21,19 +21,82 @@ import type { AuditEntry } from "@srelens/core";
  */
 const DENIED: AuditEntry = {
   ts: 1_700_000_100,
+  source: "mcp",
   transport: "http",
   tool: "secret.read",
   args: { context: "prod-eu", namespace: "checkout", name: "checkout-db" },
+  app: null,
+  cluster: "prod-eu",
+  resource: "checkout/checkout-db",
   decision: "denied",
-  outcome: "error",
+  outcome: "rejected",
   err: "sensitive reads are off for this session",
 };
 
 const ALLOWED: AuditEntry = {
   ts: 1_700_000_000,
+  source: "mcp",
   transport: "stdio",
   tool: "resource.list",
   args: { context: "prod-eu", namespace: "payments" },
+  app: null,
+  cluster: "prod-eu",
+  resource: "payments",
+  decision: "auto",
+  outcome: "ok",
+  err: null,
+};
+
+/**
+ * The two branches `DENIED` cannot reach. `verdictOf` returns on
+ * `decision === "denied"` before it ever reads `outcome`, so the denied row
+ * alone leaves `rejected` and `failed` untested — delete either branch and the
+ * suite stays green. These two are the calls that were NOT refused by consent:
+ * one srelens would not make, one the cluster would not finish.
+ */
+const REJECTED: AuditEntry = {
+  ts: 1_700_000_300,
+  source: "ui",
+  transport: "ui",
+  tool: "extensions.action",
+  args: { action: "sync" },
+  app: null,
+  cluster: "prod-eu",
+  resource: "checkout/web",
+  decision: "auto",
+  outcome: "rejected",
+  err: "a resourceVersion is required",
+};
+
+const FAILED: AuditEntry = {
+  ts: 1_700_000_400,
+  source: "mcp",
+  transport: "stdio",
+  tool: "k8s.deletePod",
+  args: { context: "prod-eu", namespace: "payments", name: "web-0" },
+  app: null,
+  cluster: "prod-eu",
+  resource: "payments/web-0",
+  decision: "approved",
+  outcome: "failed",
+  err: "the apiserver closed the connection",
+};
+
+/**
+ * #555: a Flux reconcile clicked in srelens, through an installed app. Before
+ * that issue this row could not exist — the UI path never reached the audit
+ * sink at all, so the pane's answer to "did anyone reconcile this?" was silent
+ * about the operator's own clicks.
+ */
+const FROM_THE_UI: AuditEntry = {
+  ts: 1_700_000_200,
+  source: "ui",
+  transport: "ui",
+  tool: "extensions.action",
+  args: { action: "reconcile" },
+  app: { id: "org.example.flux", revision: 4 },
+  cluster: "prod-eu",
+  resource: "checkout/web",
   decision: "auto",
   outcome: "ok",
   err: null,
@@ -58,6 +121,69 @@ describe("AuditPane", () => {
     expect(screen.getByText(/denied · sensitive reads are off/i)).toBeTruthy();
     // An allowed row carries no reason, so the word stands alone.
     expect(screen.getByText("allowed")).toBeTruthy();
+  });
+
+  /**
+   * "srelens would not do this" and "the cluster would not" are different
+   * answers to "did my sync happen?" — in the word AND in the colour, since a
+   * reader scanning a table of fifty rows reads the colour first. Asserted on
+   * non-denied entries, because `decision: "denied"` short-circuits the
+   * verdict before `outcome` is looked at.
+   */
+  it("tells a call srelens refused from one that ran and broke", async () => {
+    core.auditTail.mockResolvedValue([FAILED, REJECTED]);
+    render(<AuditPane />);
+
+    // `startsWith` on the verdict cell rather than its whole text: the reason
+    // beside the word goes through `describeError`, and this case is about the
+    // verdict, not about that wrapper's phrasing.
+    const verdict = (word: string) =>
+      screen.getByText((_, el) => el?.textContent?.startsWith(`${word} · `) === true, {
+        selector: "span",
+      });
+
+    const rejected = await screen.findByText((_, el) =>
+      el?.textContent?.startsWith("rejected · ") === true, { selector: "span" });
+    const failed = verdict("failed");
+    expect(rejected.textContent).toContain("a resourceVersion is required");
+    expect(failed.textContent).toContain("the apiserver closed the connection");
+    // And not only in the word. A reader scanning fifty rows reads the colour
+    // first, so two different answers must not be one colour.
+    expect(rejected.style.color).toBeTruthy();
+    expect(failed.style.color).toBeTruthy();
+    expect(failed.style.color).not.toEqual(rejected.style.color);
+  });
+
+  /**
+   * #555's point, on the screen: a mutating call made in srelens itself is in
+   * the trail, it says it came from the app rather than from an agent, and it
+   * names the app it went through. Until that issue the UI path never reached
+   * the audit sink, so this row did not exist and the pane quietly answered
+   * "no one reconciled anything" for a reconcile the reader had just clicked.
+   */
+  it("shows a call made in the app, marked as coming from it", async () => {
+    core.auditTail.mockResolvedValue([FROM_THE_UI, DENIED, ALLOWED]);
+    render(<AuditPane />);
+    expect(await screen.findByText("extensions.action")).toBeTruthy();
+    const sources = screen.getAllByTestId("audit-source").map((el) => el.textContent);
+    expect(sources).toContain("ui");
+    // The MCP rows still say which transport carried them.
+    expect(sources.some((s) => s?.includes("mcp") && s.includes("http"))).toBe(true);
+    // And the app it went through, revision included: an update rolls the
+    // revision and leaves the ID alone.
+    expect(screen.getByTestId("audit-app").textContent).toContain("org.example.flux@4");
+  });
+
+  /**
+   * The pane says what it does and does not record, because a reader who
+   * assumes symmetry with MCP would read the absence of their own reads as a
+   * fact about the cluster. And it says the trail stays on this machine.
+   */
+  it("says what it records from the app, and that the log goes nowhere", async () => {
+    render(<AuditPane />);
+    await screen.findByText("secret.read");
+    expect(screen.getByText(/changed something or read secret material/i)).toBeTruthy();
+    expect(screen.getByText(/never sent anywhere/i)).toBeTruthy();
   });
 
   it("caps and truncates the target, with the full value in a title", async () => {
@@ -184,15 +310,16 @@ describe("AuditPane", () => {
   });
 
   /**
-   * #369: srelens does not track which client connected, and `AuditEntry`
-   * carries the transport a call arrived on. A `Client` header over `stdio` /
-   * `http` claims exactly what the issue says srelens cannot know.
+   * #369: srelens does not track which client connected. The column holds
+   * where a call came from — `ui`, or `mcp` and the transport it arrived on —
+   * so a `Client` header over it would claim exactly what that issue says
+   * srelens cannot know.
    */
-  it("names the transport column for the value it holds", async () => {
+  it("names the source column for the value it holds", async () => {
     render(<AuditPane />);
     await screen.findByText("secret.read");
     const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
-    expect(headers).toContain("Transport");
+    expect(headers).toContain("Source");
     expect(headers).not.toContain("Client");
   });
   it("shows prompt file diagnostics and refreshes them independently of the audit result", async () => {
