@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "./Button";
 import { cx } from "./cx";
 import type { IconComponent } from "./IconButton";
+import { Tooltip } from "./Tooltip";
 import { Popover } from "./Popover";
 import { filled } from "./slot";
 import { toneColor } from "./tone";
@@ -209,6 +210,7 @@ function BarButton({ action: a }: { action: ActionBarAction }) {
     // blocked button would remount it the moment a verdict arrived, and a
     // verdict can arrive while the button has focus.
     <span className="action-slot">
+      <Tooltip label={blocked ? <span className="block max-w-[min(18rem,calc(100vw-2rem))] whitespace-normal break-words">{a.disabledReason}</span> : null} disabled={!blocked}>
       <Button
         type="button"
         variant={a.danger ? "danger" : "secondary"}
@@ -229,6 +231,7 @@ function BarButton({ action: a }: { action: ActionBarAction }) {
         {confirming ? <CheckGlyph /> : Icon && <Icon size={12} aria-hidden="true" />}
         {actionWord(a, state)}
       </Button>
+      </Tooltip>
       {blocked && <BlockedReason id={reasonId}>{a.disabledReason}</BlockedReason>}
     </span>
   );
@@ -241,9 +244,9 @@ function BarButton({ action: a }: { action: ActionBarAction }) {
  * A sibling of the control, not a child: inside the button it would become part
  * of the accessible name. It is clipped out of sight rather than hidden, because
  * `display: none` also takes it out of the accessibility tree, and then the
- * description points at nothing. `.action-slot:focus-within` brings it back on
- * screen, which is the part a sighted keyboard user was missing: the `title`
- * beside it only draws its tooltip on hover. (#670)
+ * description points at nothing. Bar buttons use the kit's portalled Tooltip
+ * so pane clipping and viewport edges cannot hide the reason. Menu rows show
+ * their reason in the row flow while focused. (#670)
  */
 function BlockedReason({ id, children }: { id: string; children: ReactNode }) {
   return (

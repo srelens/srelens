@@ -60,12 +60,17 @@ function description(el: Element): string | null {
   const ids = el.getAttribute("aria-describedby");
   if (ids === null) return null;
   return ids
-    .split(/s+/)
+    .split(/\s+/)
     .filter(Boolean)
     .map((id) => el.ownerDocument.getElementById(id)?.textContent ?? "")
     .join(" ")
     .trim();
 }
+
+it("resolves every whitespace-separated description ID in order", () => {
+  render(<><button aria-describedby={"reason-first\t reason-second\n"}>Test descriptions</button><span id="reason-first">First reason</span><span id="reason-second">Second reason</span></>);
+  expect(description(screen.getByRole("button", { name: "Test descriptions" }))).toBe("First reason Second reason");
+});
 
 const more = () => screen.getByRole("button", { name: "More actions" });
 
@@ -275,6 +280,15 @@ describe("ActionBar", () => {
       expect(description(screen.getByRole("button", { name: "Delete" }))).toBe(
         "You cannot delete pods in kube-system",
       );
+    });
+
+    it("shows the blocked bar reason in a tooltip outside a clipping footer", async () => {
+      render(<footer data-testid="clipping-footer" style={{ overflow: "hidden" }}><ActionBar label="Footer actions" actions={blocked} /></footer>);
+      await userEvent.tab();
+      const tip = await screen.findByRole("tooltip");
+      expect(tip.textContent).toBe("You cannot delete pods in kube-system");
+      expect(screen.getByTestId("clipping-footer").contains(tip)).toBe(false);
+      expect(description(screen.getByRole("button", { name: "Delete" }))).toBe("You cannot delete pods in kube-system");
     });
 
     it("describes a blocked row in the menu the same way", () => {
