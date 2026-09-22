@@ -9,6 +9,8 @@ const EXCLUDED: Record<string, string> = {
   "k8s.annotate": "a host action primitive: reached only through an app's declared action, on a reviewed resource",
   "k8s.setFields": "a host action primitive: reached only through an app's declared action, on a reviewed resource",
   "k8s.setStatusCondition": "a host action primitive: reached only through an app's declared action, on a reviewed resource",
+  "k8s.requestRolloutRestart": "reviewed app action adapter; the palette uses k8s.rolloutRestart without a reviewed UID/resourceVersion",
+  "k8s.requestCordonNode": "reviewed app action adapter; the palette uses k8s.cordonNode without a reviewed UID/resourceVersion",
   "k8s.mergePatch": "a host action primitive: reached only through an app's declared action, on a reviewed resource",
   "k8s.nodeServiceRestart": "node service remediation is surfaced in Node view / incident actions and requires an SSH target",
   "extensions.action": "host-owned app resource actions use explicit confirmation in the Apps inspector",

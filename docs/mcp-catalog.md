@@ -5,7 +5,7 @@
 
 Everything this server exposes over MCP, generated from the live registry so it cannot drift. Written for someone wiring an agent to srelens; the narrative reference is [MCP.md](MCP.md).
 
-## Tools (111)
+## Tools (113)
 
 Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
@@ -82,7 +82,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.podConnections` | medium | read the established TCP connections of pods, from their own /proc/net/tcp |
 | `k8s.topologyProbe` | medium | the topology graph, plus each pod's open connections read over pods/exec (one exec per pod) |
 
-### Kubernetes — needs confirmation (11)
+### Kubernetes — needs confirmation (13)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -92,6 +92,8 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.cronjobSetSuspend` | medium | suspend or resume a CronJob (set spec.suspend) |
 | `k8s.cronjobTriggerNow` | medium | run a CronJob immediately by creating a Job from its jobTemplate |
 | `k8s.mergePatch` | high | Send the fixed merge patch an app's action declares, past the host deny-list, to the reviewed resource; requires confirmation |
+| `k8s.requestCordonNode` | medium | Request cordon or uncordon of the reviewed Node without eviction; requires confirmation |
+| `k8s.requestRolloutRestart` | high | Request a rolling restart of the reviewed built-in workload; requires confirmation |
 | `k8s.rolloutRestart` | medium | trigger a rolling restart of a workload |
 | `k8s.scale` | medium | set the replica count of a workload (Deployment/StatefulSet/ReplicaSet) |
 | `k8s.setFields` | medium | Set fixed spec fields on the reviewed resource, as an app's action declares them; requires confirmation |

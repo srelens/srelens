@@ -222,6 +222,20 @@ pub const ACTION_INPUTS: &[&str] = &["context", "namespace", "name", "uid", "res
 /// kind, so binding one is refused.
 pub const ACTION_IDENTITY: &[&str] = &["group", "version", "plural", "kind", "namespaced"];
 
+/// Built-in summary readers usable to scope the host's narrow operational actions.
+/// Identity comes from the host, never from an app's bound arguments.
+pub fn builtin_reader_identity(target: &str) -> Option<Map<String, Value>> {
+    let (group, plural, kind, namespaced) = match target {
+        "k8s.listDeployments" => ("apps", "deployments", "Deployment", true),
+        "k8s.listStatefulSets" => ("apps", "statefulsets", "StatefulSet", true),
+        "k8s.listDaemonSets" => ("apps", "daemonsets", "DaemonSet", true),
+        "k8s.listNodes" => ("", "nodes", "Node", false),
+        _ => return None,
+    };
+    Some(serde_json::json!({"group":group,"version":"v1","plural":plural,"kind":kind,"namespaced":namespaced})
+        .as_object().expect("object").clone())
+}
+
 /// The predicate lists an action declares in fields of its own (#550), which
 /// is why binding one as an argument is refused: two spellings of one
 /// declaration would leave the host reading whichever it happened to look at.
@@ -592,8 +606,20 @@ impl Manifest {
             .find(|binding| binding.name == action.resource)
             .ok_or_else(|| format!("\"{}\" is not a declared capability", action.resource))?;
         let mut arguments = Map::new();
+        let builtin = builtin_reader_identity(&reader.target);
+        if let Some(identity) = &builtin {
+            let target = if identity["kind"] == "Node" {
+                "k8s.requestCordonNode"
+            } else {
+                "k8s.requestRolloutRestart"
+            };
+            if action.target != target {
+                return Err(format!("{} scopes only {target}", reader.target));
+            }
+        }
+        let identity = builtin.unwrap_or_else(|| reader.arguments.clone());
         for key in ACTION_IDENTITY {
-            let Some(value) = reader.arguments.get(*key) else {
+            let Some(value) = identity.get(*key) else {
                 return Err(format!(
                     "\"{}\" does not fix `{key}`, so it cannot scope an action to one kind",
                     action.resource

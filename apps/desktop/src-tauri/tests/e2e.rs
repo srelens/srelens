@@ -1911,6 +1911,24 @@ async fn run_suite() {
         .await;
     assert_eq!(out["ok"], true);
 
+    // The extension adapter uses the same rollout operation, with a reviewed identity.
+    let current = h
+        .reg
+        .invoke(
+            "k8s.getObject",
+            json!({"context":ctx,"kind":"Deployment","namespace":NS,"name":DEPLOY}),
+        )
+        .await
+        .unwrap();
+    let reviewed = json!({"context":ctx,"group":"apps","version":"v1","kind":"Deployment",
+        "plural":"deployments","namespaced":true,"namespace":NS,"name":DEPLOY,
+        "uid":current["object"]["metadata"]["uid"],"resourceVersion":current["object"]["metadata"]["resourceVersion"]});
+    assert_eq!(
+        h.ok("k8s.requestRolloutRestart", reviewed.clone()).await["requested"],
+        true
+    );
+    h.err("k8s.requestRolloutRestart", reviewed).await;
+
     let out = h
         .ok(
             "k8s.cronjobSetSuspend",
@@ -2253,6 +2271,25 @@ async fn run_suite() {
         .as_str()
         .unwrap()
         .to_string();
+
+    // Both scheduling directions are reviewed and never evict pods.
+    for unschedulable in [true, false] {
+        let current = h
+            .reg
+            .invoke(
+                "k8s.getObject",
+                json!({"context":ctx,"kind":"Node","namespace":"","name":node_name}),
+            )
+            .await
+            .unwrap();
+        let reviewed = json!({"context":ctx,"group":"","version":"v1","kind":"Node","plural":"nodes",
+            "namespaced":false,"namespace":"","name":node_name,"unschedulable":unschedulable,
+            "uid":current["object"]["metadata"]["uid"],"resourceVersion":current["object"]["metadata"]["resourceVersion"]});
+        assert_eq!(
+            h.ok("k8s.requestCordonNode", reviewed).await["requested"],
+            true
+        );
+    }
 
     let out = h
         .ok(

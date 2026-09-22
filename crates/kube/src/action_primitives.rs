@@ -51,8 +51,20 @@ pub const SET_STATUS_CONDITION: &str = "k8s.setStatusCondition";
 /// CD's `operation.sync`, which no narrower primitive can express.
 pub const MERGE_PATCH: &str = "k8s.mergePatch";
 
+/// Restart a reviewed Deployment, StatefulSet or DaemonSet through the host rollout operation.
+pub const REQUEST_RESTART: &str = "k8s.requestRolloutRestart";
+/// Change scheduling on a reviewed Node without evicting pods.
+pub const REQUEST_CORDON: &str = "k8s.requestCordonNode";
+
 /// Every host action primitive, in the order they are documented.
-pub const PRIMITIVES: &[&str] = &[ANNOTATE, SET_FIELDS, SET_STATUS_CONDITION, MERGE_PATCH];
+pub const PRIMITIVES: &[&str] = &[
+    ANNOTATE,
+    SET_FIELDS,
+    SET_STATUS_CONDITION,
+    MERGE_PATCH,
+    REQUEST_RESTART,
+    REQUEST_CORDON,
+];
 
 /// The value tokens a binding may write instead of a literal.
 const NOW: &str = "$now";
@@ -162,6 +174,11 @@ action_input!(
     }
 );
 
+action_input!(RequestRestartIn {});
+action_input!(RequestCordonIn {
+    unschedulable: bool
+});
+
 /// The object a request is pinned to: its identity, and the version the
 /// operator reviewed.
 struct Reviewed<'a> {
@@ -223,6 +240,17 @@ async fn request(
     build: impl FnOnce(&Value) -> Result<Value, String>,
 ) -> Result<Value, String> {
     reviewed.resource.validate()?;
+    request_validated(client, reviewed, preconditions, status, build).await
+}
+
+/// Shared GET, guards and pinned PATCH after the caller validates its resource identity.
+async fn request_validated(
+    client: Client,
+    reviewed: Reviewed<'_>,
+    preconditions: &[Predicate],
+    status: bool,
+    build: impl FnOnce(&Value) -> Result<Value, String>,
+) -> Result<Value, String> {
     let api = reviewed.resource.api(client);
     let current = serde_json::to_value(
         api.get(&reviewed.resource.name)
@@ -715,6 +743,31 @@ pub fn check_bound_arguments(
     // predicate this refuses cannot be reached from the cluster side either.
     check_bound_preconditions(arguments)?;
     match capability {
+        REQUEST_RESTART | REQUEST_CORDON => {
+            let resource = ResourceIn {
+                context: "binding".into(),
+                namespace: String::new(),
+                name: "binding".into(),
+                group: text(arguments, "group")?.into(),
+                version: text(arguments, "version")?.into(),
+                plural: text(arguments, "plural")?.into(),
+                kind: text(arguments, "kind")?.into(),
+                namespaced: arguments
+                    .get("namespaced")
+                    .and_then(Value::as_bool)
+                    .ok_or("`namespaced` must be a boolean")?,
+            };
+            check_builtin_identity(capability, &resource)?;
+            if capability == REQUEST_CORDON
+                && arguments
+                    .get("unschedulable")
+                    .and_then(Value::as_bool)
+                    .is_none()
+            {
+                return Err("`unschedulable` must be bound as a boolean".into());
+            }
+            Ok(())
+        }
         ANNOTATE => {
             check_annotation_key(text(arguments, "key")?)?;
             resolve_value(text(arguments, "value")?)?;
@@ -750,6 +803,65 @@ pub fn check_bound_arguments(
         }
         other => Err(format!("{other} is not a host action primitive")),
     }
+}
+
+fn check_builtin_identity(capability: &str, resource: &ResourceIn) -> Result<(), String> {
+    let valid = match capability {
+        REQUEST_RESTART => {
+            resource.group == "apps"
+                && resource.version == "v1"
+                && resource.namespaced
+                && matches!(
+                    (resource.kind.as_str(), resource.plural.as_str()),
+                    ("Deployment", "deployments")
+                        | ("StatefulSet", "statefulsets")
+                        | ("DaemonSet", "daemonsets")
+                )
+        }
+        REQUEST_CORDON => {
+            resource.group.is_empty()
+                && resource.version == "v1"
+                && !resource.namespaced
+                && resource.kind == "Node"
+                && resource.plural == "nodes"
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err("This action requires its exact built-in workload or Node identity".into());
+    }
+    Ok(())
+}
+
+fn validate_builtin(capability: &str, reviewed: &Reviewed<'_>) -> Result<(), String> {
+    check_builtin_identity(capability, &reviewed.resource)?;
+    // Reuse the strict path/scope validation; only this already-checked Node may
+    // use the core API group. Generic primitives keep their nonempty-group rule.
+    let mut identity = reviewed.resource.clone();
+    if identity.group.is_empty() {
+        identity.group = "core".into();
+    }
+    identity.validate()
+}
+
+async fn request_restart(client: Client, input: RequestRestartIn) -> Result<Value, String> {
+    let reviewed = input.reviewed();
+    validate_builtin(REQUEST_RESTART, &reviewed)?;
+    check_predicates(&input.preconditions)?;
+    request_validated(client, reviewed, &input.preconditions, false, |_| {
+        Ok(crate::actions::restart_patch())
+    })
+    .await
+}
+
+async fn request_cordon(client: Client, input: RequestCordonIn) -> Result<Value, String> {
+    let reviewed = input.reviewed();
+    validate_builtin(REQUEST_CORDON, &reviewed)?;
+    check_predicates(&input.preconditions)?;
+    request_validated(client, reviewed, &input.preconditions, false, |_| {
+        Ok(crate::actions::cordon_patch(input.unschedulable))
+    })
+    .await
 }
 
 async fn annotate(client: Client, input: AnnotateIn) -> Result<Value, String> {
@@ -834,6 +946,8 @@ async fn set_status_condition(
 /// to write both annotations atomically, inheriting its high impact.
 fn metadata(primitive: &str) -> (Impact, &'static str) {
     match primitive {
+        REQUEST_RESTART => (Impact::High, "Request a rolling restart[ of {resource}][ in cluster {cluster}]? Running pods will be replaced."),
+        REQUEST_CORDON => (Impact::Medium, "Change scheduling[ on {resource}][ in cluster {cluster}]? Running pods are not evicted."),
         ANNOTATE => (
             Impact::Medium,
             "Set the action's annotation[ on {resource}][ in cluster {cluster}]? What the controller does next is up to it.",
@@ -919,8 +1033,10 @@ pub fn capabilities(cache: Arc<ClientCache>) -> Vec<Capability> {
             "Send the fixed merge patch an app's action declares, past the host deny-list, to the reviewed resource; requires confirmation",
             MergePatchIn,
             set_merge_patch,
-            cache
+            cache.clone()
         ),
+        primitive!(REQUEST_RESTART, "Request a rolling restart of the reviewed built-in workload; requires confirmation", RequestRestartIn, request_restart, cache.clone()),
+        primitive!(REQUEST_CORDON, "Request cordon or uncordon of the reviewed Node without eviction; requires confirmation", RequestCordonIn, request_cordon, cache),
     ]
 }
 
@@ -1091,6 +1207,150 @@ mod tests {
 
     fn annotate_in(extra: Value) -> AnnotateIn {
         serde_json::from_value(helmrelease(extra)).expect("input deserializes")
+    }
+
+    fn builtin(kind: &str, plural: &str, node: bool) -> Value {
+        json!({"context":"cluster/a","group":if node {""} else {"apps"},"version":"v1",
+            "plural":plural,"kind":kind,"namespaced":!node,"namespace":if node {""} else {"team"},
+            "name":"api","uid":"u","resourceVersion":"2"})
+    }
+
+    #[tokio::test]
+    async fn builtin_requests_share_the_guarded_get_and_pinned_patch() {
+        for (kind, plural) in [
+            ("Deployment", "deployments"),
+            ("StatefulSet", "statefulsets"),
+            ("DaemonSet", "daemonsets"),
+        ] {
+            let current = json!({"apiVersion":"apps/v1","kind":kind,"metadata":{"name":"api","namespace":"team","uid":"u","resourceVersion":"2"}});
+            let (client, requests) = mock(current);
+            let out = request_restart(
+                client,
+                serde_json::from_value(builtin(kind, plural, false)).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(out, json!({"requested":true}));
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len(), 2);
+            assert_eq!(
+                captured[0].0,
+                format!("GET /apis/apps/v1/namespaces/team/{plural}/api")
+            );
+            assert_eq!(
+                captured[1].0,
+                format!("PATCH /apis/apps/v1/namespaces/team/{plural}/api?")
+            );
+            assert_eq!(
+                captured[1].1["metadata"],
+                json!({"uid":"u","resourceVersion":"2"})
+            );
+            assert!(captured[1].1["spec"]["template"]["metadata"]["annotations"]
+                ["kubectl.kubernetes.io/restartedAt"]
+                .as_str()
+                .is_some());
+        }
+        for unschedulable in [true, false] {
+            let (client, requests) = mock(
+                json!({"apiVersion":"v1","kind":"Node","metadata":{"name":"api","uid":"u","resourceVersion":"2"}}),
+            );
+            let mut input = builtin("Node", "nodes", true);
+            input["unschedulable"] = json!(unschedulable);
+            assert_eq!(
+                request_cordon(client, serde_json::from_value(input).unwrap())
+                    .await
+                    .unwrap(),
+                json!({"requested":true})
+            );
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len(), 2);
+            assert_eq!(captured[0].0, "GET /api/v1/nodes/api");
+            assert_eq!(captured[1].0, "PATCH /api/v1/nodes/api?");
+            assert_eq!(
+                captured[1].1,
+                json!({"metadata":{"uid":"u","resourceVersion":"2"},"spec":{"unschedulable":unschedulable}})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_requests_refuse_stale_deleted_and_unmet_reviews_without_patching() {
+        for node in [false, true] {
+            for extra in [
+                json!({"uid":"replacement"}),
+                json!({"resourceVersion":"3"}),
+                json!({"deletionTimestamp":"2026-01-01T00:00:00Z"}),
+                json!({}),
+            ] {
+                let mut current = json!({"apiVersion":if node {"v1"} else {"apps/v1"},"kind":if node {"Node"} else {"Deployment"},"metadata":{"name":"api","uid":"u","resourceVersion":"2"}});
+                merge(&mut current["metadata"], &extra);
+                let (client, requests) = mock(current);
+                let mut input = if node {
+                    builtin("Node", "nodes", true)
+                } else {
+                    builtin("Deployment", "deployments", false)
+                };
+                input["preconditions"] = json!([{"jsonPath":".metadata.labels.allowed","equals":"yes","reason":"Needs approval"}]);
+                let result = if node {
+                    input["unschedulable"] = json!(true);
+                    request_cordon(client, serde_json::from_value(input).unwrap()).await
+                } else {
+                    request_restart(client, serde_json::from_value(input).unwrap()).await
+                };
+                assert!(result.is_err());
+                assert_eq!(requests.lock().unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_identity_and_wire_contract_fail_closed() {
+        for change in [
+            json!({"group":"evil.io"}),
+            json!({"version":"v2"}),
+            json!({"kind":"ReplicaSet"}),
+            json!({"plural":"secrets"}),
+            json!({"namespaced":false}),
+            json!({"namespace":""}),
+        ] {
+            let (client, requests) = mock(object(json!({})));
+            let mut input = builtin("Deployment", "deployments", false);
+            merge(&mut input, &change);
+            assert!(
+                request_restart(client, serde_json::from_value(input).unwrap())
+                    .await
+                    .is_err()
+            );
+            assert!(requests.lock().unwrap().is_empty());
+        }
+        let input = builtin("Deployment", "deployments", false);
+        assert!(serde_json::from_value::<RequestRestartIn>(input.clone()).is_ok());
+        for field in ["uid", "resourceVersion"] {
+            let mut wrong = input.clone();
+            wrong.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<RequestRestartIn>(wrong).is_err());
+        }
+        let mut wrong = input.clone();
+        wrong.as_object_mut().unwrap().remove("resourceVersion");
+        wrong["resource_version"] = json!("2");
+        assert!(serde_json::from_value::<RequestRestartIn>(wrong).is_err());
+        let caps = capabilities(ClientCache::new_many(vec![]));
+        assert_eq!(
+            caps.iter()
+                .find(|c| c.id == REQUEST_RESTART)
+                .unwrap()
+                .annotations
+                .impact,
+            Impact::High
+        );
+        assert_eq!(
+            caps.iter()
+                .find(|c| c.id == REQUEST_CORDON)
+                .unwrap()
+                .annotations
+                .impact,
+            Impact::Medium
+        );
     }
 
     #[tokio::test]
@@ -1844,6 +2104,12 @@ mod tests {
         let good = json!([{"jsonPath": ".spec.suspend", "absent": true, "reason": "r"}]);
         let arguments = |primitive: &str, predicates: &Value| {
             let mut args = match primitive {
+                REQUEST_RESTART => builtin("Deployment", "deployments", false),
+                REQUEST_CORDON => {
+                    let mut input = builtin("Node", "nodes", true);
+                    input["unschedulable"] = json!(true);
+                    input
+                }
                 ANNOTATE => json!({"key": "a.example.io/b", "value": "normal"}),
                 SET_FIELDS => json!({"fields": {"/spec/suspend": true}}),
                 SET_STATUS_CONDITION => json!({

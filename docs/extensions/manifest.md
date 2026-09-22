@@ -80,7 +80,7 @@ the request:
 |---|---|
 | `name` | Local action name, unique across `capabilities` and `actions`. Addressed as `plugin/<id>/<name>`. |
 | `title` | Display title, held to the same rules as a binding's. |
-| `target` | A host action primitive: `k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition` or `k8s.mergePatch`. |
+| `target` | A host action primitive: `k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition`, `k8s.mergePatch`, `k8s.requestRolloutRestart` or `k8s.requestCordonNode`. |
 | `resource` | The `name` of a reader binding in `capabilities`. The action acts on that binding's kind and on no other. |
 | `arguments` | What the action writes, fixed here. |
 
@@ -181,6 +181,51 @@ The host-owned confirmation dialog
 ([#552](https://github.com/srelens/srelens/issues/552)) is not part of this API version
 yet, and the Flux and Argo CD actions in core still come from the host's own table
 until [#551](https://github.com/srelens/srelens/issues/551) moves them into manifests.
+
+## Built-in operational action bindings
+
+Four existing summary readers can scope operational actions. Their `arguments`
+must be empty: the host derives the exact API group, version, plural, kind and
+scope from the reader target.
+
+| Reader | Inputs | Allowed action | Fixed action arguments | Impact |
+|---|---|---|---|---|
+| `k8s.listDeployments` | `context`, `namespace` | `k8s.requestRolloutRestart` | `{}` | High |
+| `k8s.listStatefulSets` | `context`, `namespace` | `k8s.requestRolloutRestart` | `{}` | High |
+| `k8s.listDaemonSets` | `context`, `namespace` | `k8s.requestRolloutRestart` | `{}` | High |
+| `k8s.listNodes` | `context` | `k8s.requestCordonNode` | `{"unschedulable": true}` to cordon, `false` to uncordon | Medium |
+
+Grant both the reader and action target. For example:
+
+```json
+"capabilities": [{
+  "name": "deployments", "title": "Deployments", "target": "k8s.listDeployments",
+  "arguments": {}, "inputs": ["context", "namespace"]
+}],
+"actions": [{
+  "name": "restart", "title": "Restart", "target": "k8s.requestRolloutRestart",
+  "resource": "deployments", "arguments": {}
+}]
+```
+
+The reviewing host supplies `context`, `namespace`, `name`, `uid` and
+`resourceVersion`; use an empty namespace for Nodes. Each request freshly reads
+the object, refuses a changed or deleting object and unmet `preconditions`, and
+pins its patch to the reviewed UID and resource version. Success means
+`{"requested": true}`, not that rollout has finished. Host confirmation and
+impact annotations are inherited by the registered app action.
+
+These adapters share patch construction with `k8s.rolloutRestart` and
+`k8s.cordonNode`. They have separate capability IDs because those interactive
+operations do not accept a reviewed object identity. Apps cannot bind the
+interactive operations. General annotation, field, status and merge-patch writes
+remain unavailable on built-in reader bindings. Drain remains deferred: cordon
+never evicts pods.
+
+Built-in readers return their existing summary formats. They do not provide
+whole objects, and cannot back the custom-resource table or detail contributions.
+This contract adds action bindings, not a built-in resource screen. Custom-resource
+bindings still require a real CRD; an app cannot disguise a built-in kind as one.
 
 ## Contributions
 
