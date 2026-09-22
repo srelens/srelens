@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
     Frame,
 };
 use serde_json::Value;
@@ -1074,7 +1074,8 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
         let loading_msg = Paragraph::new(Line::from(vec![
             Span::styled("⚡ Loading ", Style::default().fg(Theme::cyan()).add_modifier(Modifier::BOLD)),
             Span::styled(format!("{} from cluster API...", state.kind.display_name()), Style::default().fg(Theme::dim())),
-        ]));
+        ]))
+        .wrap(Wrap { trim: true });
         f.render_widget(loading_msg, inner);
         return;
     }
@@ -1082,7 +1083,8 @@ fn render_single_resource_table(f: &mut Frame, area: Rect, state: &ResourceTable
     if state.filtered_indices.is_empty() {
         let empty_msg = Paragraph::new(Line::from(vec![
             Span::styled(format!("No {} found in this scope.", state.kind.display_name()), Style::default().fg(Theme::dim())),
-        ]));
+        ]))
+        .wrap(Wrap { trim: true });
         f.render_widget(empty_msg, inner);
         return;
     }

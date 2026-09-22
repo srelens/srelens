@@ -62,14 +62,19 @@ impl HelmViewState {
             self.error = None;
             return;
         }
-        let sel_target = self.selected_release().map(|r| (r.name.clone(), r.namespace.clone()));
+        let sel_target = self
+            .selected_release()
+            .map(|r| (r.name.clone(), r.namespace.clone()));
         self.releases = releases;
         self.is_loading = false;
         self.error = None;
         let indices = self.filtered_indices();
         if let Some((name, ns)) = sel_target {
             if let Some(pos) = indices.iter().position(|&idx| {
-                self.releases.get(idx).map(|r| r.name == name && r.namespace == ns).unwrap_or(false)
+                self.releases
+                    .get(idx)
+                    .map(|r| r.name == name && r.namespace == ns)
+                    .unwrap_or(false)
             }) {
                 self.selected_idx = pos;
                 return;
@@ -148,6 +153,7 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
 
     if state.is_loading {
         let loading_msg = Paragraph::new("⟳ Loading Helm releases from cluster...")
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::cyan()));
         f.render_widget(loading_msg, inner);
         return;
@@ -167,10 +173,16 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
             "Press R to retry. Rollback is disabled."
         } else {
             "Press R to retry."
-        }).wrap(Wrap { trim: true }).style(Style::default().fg(Theme::red()));
+        })
+        .wrap(Wrap { trim: true })
+        .style(Style::default().fg(Theme::red()));
         let recovery_height = recovery.line_count(inner.width).min(inner.height as usize) as u16;
         // Keep the table header, its margin and at least one cached release visible.
-        let table_height = if stale { 3.min(inner.height.saturating_sub(recovery_height)) } else { 0 };
+        let table_height = if stale {
+            3.min(inner.height.saturating_sub(recovery_height))
+        } else {
+            0
+        };
         let available = inner.height.saturating_sub(recovery_height + table_height);
         let error_lines = error.line_count(inner.width);
         let error_height = error_lines.min(available as usize) as u16;
@@ -181,26 +193,39 @@ pub fn render_helm_view(f: &mut Frame, area: Rect, state: &HelmViewState) {
             Constraint::Length(marker_height),
             Constraint::Length(recovery_height),
             Constraint::Min(table_height),
-        ]).split(inner);
+        ])
+        .split(inner);
         f.render_widget(error, regions[0]);
         if truncated {
-            f.render_widget(Paragraph::new("… error truncated").style(Style::default().fg(Theme::red())), regions[1]);
+            f.render_widget(
+                Paragraph::new("… error truncated")
+                    .wrap(Wrap { trim: true })
+                    .style(Style::default().fg(Theme::red())),
+                regions[1],
+            );
         }
         f.render_widget(recovery, regions[2]);
-        if !stale { return; }
+        if !stale {
+            return;
+        }
         inner = regions[3];
     }
 
     if state.releases.is_empty() {
         let empty_msg = Paragraph::new("No Helm releases found in current namespace.")
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty_msg, inner);
         return;
     }
 
     if filtered.is_empty() {
-        let empty_msg = Paragraph::new(format!("No releases matching filter '{}'", state.filter_query))
-            .style(Style::default().fg(Theme::dim()));
+        let empty_msg = Paragraph::new(format!(
+            "No releases matching filter '{}'",
+            state.filter_query
+        ))
+        .wrap(Wrap { trim: true })
+        .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty_msg, inner);
         return;
     }

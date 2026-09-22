@@ -2,7 +2,7 @@ use std::cell::Cell;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Wrap};
 use ratatui::Frame;
 
 use srelens_kube::gpu_info::{format_vram_mib, GpuClusterInfo, GpuNodeInfo, GpuPodItem};
@@ -236,7 +236,8 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
         let p = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled("  ⚡ Querying cluster GPU nodes...", Style::default().fg(Theme::CYAN))),
-        ]);
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
         return;
     }
@@ -246,7 +247,8 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
             Line::from(""),
             Line::from(Span::styled(format!("  ✖ Error: {}", err), Style::default().fg(Theme::RED))),
             Line::from(Span::styled("  Press 'r' to retry.", Style::default().fg(Theme::DIM))),
-        ]);
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
         return;
     }
@@ -260,7 +262,8 @@ fn render_nodes_list(f: &mut Frame, area: Rect, state: &GpuViewState, max_node_n
             Line::from(Span::styled("  No nodes in this cluster report", Style::default().fg(Theme::DIM))),
             Line::from(Span::styled("  nvidia.com/gpu, amd.com/gpu, or", Style::default().fg(Theme::DIM))),
             Line::from(Span::styled("  accelerator device labels.", Style::default().fg(Theme::DIM))),
-        ]);
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
         return;
     }
@@ -350,7 +353,8 @@ fn render_details_pane(f: &mut Frame, area: Rect, state: &GpuViewState) {
         let p = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled("  Select a GPU node on the left to inspect its GPU & VRAM allocation.", Style::default().fg(Theme::DIM))),
-        ]);
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
         return;
     }
@@ -360,7 +364,7 @@ fn render_details_pane(f: &mut Frame, area: Rect, state: &GpuViewState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8), // Top: Node GPU metrics & allocation gauges
+            Constraint::Length(9), // Top: Node GPU metrics & allocation gauges
             Constraint::Min(6),    // Bottom: Pods requesting GPU table
         ])
         .split(area);
@@ -381,16 +385,15 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Inner layout: Line 1 info, Row 2/3 Gauges, Row 4 summary
+    // Info, VRAM and the summary get two rows so a long model, driver or
+    // capacity note wraps instead of being clipped. The GPU gauge stays one row.
     let inner_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Hardware details
-            Constraint::Length(1), // Spacing
-            Constraint::Length(1), // GPU count gauge
-            Constraint::Length(1), // VRAM gauge
-            Constraint::Length(1), // Summary footer
-            Constraint::Min(0),
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Length(2),
         ])
         .split(inner);
 
@@ -410,7 +413,10 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
         Span::styled("Instance: ", Theme::header_label()),
         Span::styled(itype, Theme::header_val()),
     ]);
-    f.render_widget(Paragraph::new(info_line), inner_chunks[0]);
+    f.render_widget(
+        Paragraph::new(info_line).wrap(Wrap { trim: true }),
+        inner_chunks[0],
+    );
 
     // 2. GPU Count Allocation Gauge
     let gpu_cap = node.gpu_capacity.max(1);
@@ -428,7 +434,7 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
         .gauge_style(Style::default().fg(gpu_color))
         .label(Span::styled(gpu_gauge_label, Style::default().fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)))
         .percent(gpu_pct.min(100));
-    f.render_widget(gpu_gauge, inner_chunks[2]);
+    f.render_widget(gpu_gauge, inner_chunks[1]);
 
     // 3. VRAM Allocation Gauge
     if let Some(tot_vram) = node.vram_capacity_total_mib {
@@ -453,13 +459,16 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
             .gauge_style(Style::default().fg(vram_color))
             .label(Span::styled(vram_gauge_label, Style::default().fg(Theme::SEL_FG).add_modifier(Modifier::BOLD)))
             .percent(vram_pct.min(100));
-        f.render_widget(vram_gauge, inner_chunks[3]);
+        f.render_widget(vram_gauge, inner_chunks[2]);
     } else {
         let vram_label = Line::from(Span::styled(
             format!("VRAM Requested: {} (Total capacity not reported by node labels)", format_vram_mib(node.vram_requests_total_mib)),
             Style::default().fg(Theme::YELLOW),
         ));
-        f.render_widget(Paragraph::new(vram_label), inner_chunks[3]);
+        f.render_widget(
+            Paragraph::new(vram_label).wrap(Wrap { trim: true }),
+            inner_chunks[2],
+        );
     }
 
     // 4. Summary footer stats
@@ -478,7 +487,10 @@ fn render_node_gpu_summary(f: &mut Frame, area: Rect, node: &GpuNodeInfo) {
         Span::styled("Available VRAM: ", Theme::header_label()),
         Span::styled(free_vram_str, Style::default().fg(Theme::CYAN).add_modifier(Modifier::BOLD)),
     ]);
-    f.render_widget(Paragraph::new(summary_line), inner_chunks[4]);
+    f.render_widget(
+        Paragraph::new(summary_line).wrap(Wrap { trim: true }),
+        inner_chunks[3],
+    );
 }
 
 fn render_node_pods_table(f: &mut Frame, area: Rect, state: &GpuViewState, node: &GpuNodeInfo) {
@@ -520,7 +532,8 @@ fn render_node_pods_table(f: &mut Frame, area: Rect, state: &GpuViewState, node:
                 ),
                 Style::default().fg(Theme::DIM)
             )),
-        ]);
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
         return;
     }

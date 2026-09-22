@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -109,6 +109,7 @@ pub fn render_reason_rail_widget(
             "No events in scope",
             Style::default().fg(Theme::DIM),
         )))
+        .wrap(Wrap { trim: true })
         .alignment(Alignment::Center);
         f.render_widget(p, inner);
         return;

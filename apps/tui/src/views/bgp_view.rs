@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use std::cell::Cell;
 
@@ -481,7 +481,7 @@ fn render_summary_header(f: &mut Frame, area: Rect, state: &BgpViewState) {
         },
     ]);
 
-    let p = Paragraph::new(vec![l1, l2]);
+    let p = Paragraph::new(vec![l1, l2]).wrap(Wrap { trim: true });
     f.render_widget(p, inner);
 }
 
@@ -543,7 +543,8 @@ fn render_tab_content(f: &mut Frame, area: Rect, state: &BgpViewState) {
                 "  ⚡ Querying BGP control plane & peering topology...",
                 Style::default().fg(Theme::cyan()),
             )),
-        ]);
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
         return;
     }
@@ -567,7 +568,8 @@ fn render_tab_content(f: &mut Frame, area: Rect, state: &BgpViewState) {
                 "  Press 'r' to retry query.",
                 Style::default().fg(Theme::dim()),
             )),
-        ]);
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, inner);
         return;
     }
@@ -597,7 +599,8 @@ fn render_peers_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
                 "  to establish BGP peering with upstream Top-of-Rack (ToR) switches.",
                 Style::default().fg(Theme::dim()),
             )),
-        ]);
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, area);
         return;
     }
@@ -830,7 +833,8 @@ fn render_services_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
                 "  ⊘ No LoadBalancer VIPs currently advertised via BGP.",
                 Style::default().fg(Theme::yellow()),
             )),
-        ]);
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, area);
         return;
     }
@@ -967,7 +971,8 @@ fn render_pools_table(f: &mut Frame, area: Rect, state: &BgpViewState) {
                 "  ⊘ No Cilium/MetalLB IP Pools found.",
                 Style::default().fg(Theme::yellow()),
             )),
-        ]);
+        ])
+        .wrap(Wrap { trim: false });
         f.render_widget(p, area);
         return;
     }
@@ -1205,18 +1210,16 @@ fn render_detail_footer(f: &mut Frame, area: Rect, state: &BgpViewState) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" │ Advertised Prefixes: ", Theme::header_label()),
-            Span::styled(
-                truncate_str(&prefixes_summary, area.width.saturating_sub(45) as usize),
-                Style::default().fg(Theme::dim()),
-            ),
+            Span::styled(prefixes_summary, Style::default().fg(Theme::dim())),
         ]);
 
-        let p = Paragraph::new(vec![l1, l2, l3]);
+        let p = Paragraph::new(vec![l1, l2, l3]).wrap(Wrap { trim: true });
         f.render_widget(p, inner);
     } else {
         let p = Paragraph::new(vec![
             Line::from(Span::styled("  Select a peer above to inspect BGP timers, MultiHop TTL, and advertised route prefixes.", Style::default().fg(Theme::dim()))),
-        ]);
+        ])
+        .wrap(Wrap { trim: true });
         f.render_widget(p, inner);
     }
 }

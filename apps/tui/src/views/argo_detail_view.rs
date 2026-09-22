@@ -232,6 +232,7 @@ pub fn render_argo_detail_view(f: &mut Frame, area: Rect, state: &ArgoDetailView
             "⟳ Fetching details for ArgoCD application '{}/{}'...",
             state.app_namespace, state.app_name
         ))
+        .wrap(Wrap { trim: true })
         .style(Style::default().fg(Theme::cyan()));
         f.render_widget(loading, inner);
         return;
@@ -239,6 +240,7 @@ pub fn render_argo_detail_view(f: &mut Frame, area: Rect, state: &ArgoDetailView
 
     if let Some(ref err) = state.error {
         let err_msg = Paragraph::new(format!("⚠ Error fetching application: {}", err))
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::red()));
         f.render_widget(err_msg, inner);
         return;
@@ -246,6 +248,7 @@ pub fn render_argo_detail_view(f: &mut Frame, area: Rect, state: &ArgoDetailView
 
     let Some(ref app) = state.application else {
         let not_found = Paragraph::new("Application details not available.")
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::dim()));
         f.render_widget(not_found, inner);
         return;
@@ -293,16 +296,6 @@ fn render_overview_tab(
     app: &ArgoApplication,
     state: &ArgoDetailViewState,
 ) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(7),
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Min(6),
-        ])
-        .split(area);
-
     // 1. App & Status block
     let (sync_badge, sync_style) = sync_status_badge(&app.sync_status);
     let (health_badge, health_style) = health_status_badge(&app.health_status);
@@ -395,13 +388,12 @@ fn render_overview_tab(
         ]),
     ];
 
-    let p1 = Paragraph::new(app_info).block(
+    let p1 = Paragraph::new(app_info).wrap(Wrap { trim: true }).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::border()))
             .title(Span::styled(" Status & Policies ", Theme::title())),
     );
-    f.render_widget(p1, chunks[0]);
 
     // 2. Source & Destination
     let dest_name = if !app.destination_name.is_empty() {
@@ -444,13 +436,12 @@ fn render_overview_tab(
         ]),
     ];
 
-    let p2 = Paragraph::new(source_dest).block(
+    let p2 = Paragraph::new(source_dest).wrap(Wrap { trim: true }).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::border()))
             .title(Span::styled(" Source & Destination ", Theme::title())),
     );
-    f.render_widget(p2, chunks[1]);
 
     // 3. Last Operation Details
     let op_phase = if app.operation_phase.is_empty() {
@@ -497,7 +488,7 @@ fn render_overview_tab(
         ]),
     ];
 
-    let p3 = Paragraph::new(op_info).block(
+    let p3 = Paragraph::new(op_info).wrap(Wrap { trim: true }).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::border()))
@@ -506,7 +497,6 @@ fn render_overview_tab(
                 Theme::title(),
             )),
     );
-    f.render_widget(p3, chunks[2]);
 
     // 4. Action Levers summary
     let actions = vec![
@@ -568,7 +558,7 @@ fn render_overview_tab(
         ]),
     ];
 
-    let p4 = Paragraph::new(actions).block(
+    let p4 = Paragraph::new(actions).wrap(Wrap { trim: true }).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Theme::border()))
@@ -577,6 +567,25 @@ fn render_overview_tab(
                 Theme::title(),
             )),
     );
+
+    // Cards keep their old minimum so a short message still looks the same,
+    // and grow when a health message, Git URL, or sync error wraps.
+    let text_width = area.width.saturating_sub(2).max(1);
+    let h1 = (p1.line_count(text_width) as u16).max(7);
+    let h2 = (p2.line_count(text_width) as u16).max(5);
+    let h3 = (p3.line_count(text_width) as u16).max(5);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(h1),
+            Constraint::Length(h2),
+            Constraint::Length(h3),
+            Constraint::Min(6),
+        ])
+        .split(area);
+    f.render_widget(p1, chunks[0]);
+    f.render_widget(p2, chunks[1]);
+    f.render_widget(p3, chunks[2]);
     f.render_widget(p4, chunks[3]);
 }
 
@@ -588,6 +597,7 @@ fn render_resources_tab(
 ) {
     if app.resources.is_empty() {
         let empty = Paragraph::new("No managed Kubernetes resources reported by ArgoCD.")
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty, area);
         return;
@@ -691,7 +701,7 @@ fn render_drift_tab(
                 Theme::dim(),
             )),
         ];
-        let p = Paragraph::new(msg);
+        let p = Paragraph::new(msg).wrap(Wrap { trim: true });
         f.render_widget(p, area);
         return;
     }
@@ -788,6 +798,7 @@ fn render_history_tab(
 ) {
     if app.sync_history.is_empty() {
         let empty = Paragraph::new("No synchronization history available.")
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::dim()));
         f.render_widget(empty, area);
         return;

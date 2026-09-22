@@ -381,12 +381,20 @@ impl HelmDetailViewState {
 }
 
 pub fn render_helm_detail_view(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
+    let show_hints = !state.is_loading && state.error.is_none();
+    let hints = helm_detail_hints(state);
+    let hint_para = Paragraph::new(format!(" {hints}")).wrap(Wrap { trim: true });
+    let hint_height = if show_hints {
+        (hint_para.line_count(area.width.max(1)) as u16).clamp(1, 3)
+    } else {
+        0
+    };
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Tab navigation bar
             Constraint::Min(10),   // Active tab contents
-            Constraint::Length(1), // Bottom hints
+            Constraint::Length(hint_height),
         ])
         .split(area);
 
@@ -400,6 +408,7 @@ pub fn render_helm_detail_view(f: &mut Frame, area: Rect, state: &HelmDetailView
         let inner = block.inner(main_chunks[1]);
         f.render_widget(block, main_chunks[1]);
         let msg = Paragraph::new(format!("⟳ Loading Helm release details for '{}/{}'...", state.namespace, state.release_name))
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::cyan()));
         f.render_widget(msg, inner);
         return;
@@ -413,6 +422,7 @@ pub fn render_helm_detail_view(f: &mut Frame, area: Rect, state: &HelmDetailView
         let inner = block.inner(main_chunks[1]);
         f.render_widget(block, main_chunks[1]);
         let msg = Paragraph::new(format!("⚠ Failed to load release: {}", err))
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::red()));
         f.render_widget(msg, inner);
         return;
@@ -532,7 +542,7 @@ fn render_overview_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         ]),
     ];
 
-    let meta_para = Paragraph::new(meta_lines);
+    let meta_para = Paragraph::new(meta_lines).wrap(Wrap { trim: true });
     f.render_widget(meta_para, chunks[0]);
 
     // Resource breakdown from manifest
@@ -556,7 +566,7 @@ fn render_overview_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         }
     }
 
-    let res_para = Paragraph::new(count_lines);
+    let res_para = Paragraph::new(count_lines).wrap(Wrap { trim: false });
     f.render_widget(res_para, chunks[2]);
 }
 
@@ -594,6 +604,7 @@ fn render_values_diff_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState
     let diff_lines = state.compute_values_diff();
     if diff_lines.is_empty() {
         let msg = Paragraph::new("No values diff detected (values identical or empty).")
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::dim()));
         f.render_widget(msg, inner);
         return;
@@ -640,7 +651,7 @@ fn render_values_diff_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState
         })
         .collect();
 
-    let para = Paragraph::new(visible_lines);
+    let para = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
 }
 
@@ -656,7 +667,9 @@ fn render_revisions_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) 
 
     let Some(ref d) = state.detail else { return };
     if d.history.is_empty() {
-        let msg = Paragraph::new("No revision history available.").style(Style::default().fg(Theme::dim()));
+        let msg = Paragraph::new("No revision history available.")
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Theme::dim()));
         f.render_widget(msg, inner);
         return;
     }
@@ -768,7 +781,9 @@ fn render_manifest_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
 
     let Some(ref d) = state.detail else { return };
     if d.manifest.is_empty() {
-        let msg = Paragraph::new("Manifest is empty.").style(Style::default().fg(Theme::dim()));
+        let msg = Paragraph::new("Manifest is empty.")
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Theme::dim()));
         f.render_widget(msg, inner);
         return;
     }
@@ -819,7 +834,7 @@ fn render_manifest_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         })
         .collect();
 
-    let para = Paragraph::new(lines);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
 }
 
@@ -851,6 +866,7 @@ fn render_notes_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
     let Some(ref d) = state.detail else { return };
     if d.notes.is_empty() {
         let msg = Paragraph::new("No release notes (NOTES.txt) provided by chart.")
+            .wrap(Wrap { trim: true })
             .style(Style::default().fg(Theme::dim()));
         f.render_widget(msg, inner);
         return;
@@ -887,20 +903,24 @@ fn render_notes_tab(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
         })
         .collect();
 
-    let para = Paragraph::new(lines);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
 }
 
-fn render_bottom_hints(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
-    let hints = match state.active_tab {
+fn helm_detail_hints(state: &HelmDetailViewState) -> &'static str {
+    match state.active_tab {
         HelmDetailTab::Overview => "<Tab> Switch Tab  <1-5> Jump Tab  <Esc> Back to Releases",
         HelmDetailTab::ValuesDiff => "<Tab> Switch Tab  <m> Toggle Diff Mode  </> Search  <n/N> Next/Prev  <j/k> Scroll  <g/G> Top/Bottom  <Esc> Back",
         HelmDetailTab::Revisions => "<Tab> Switch Tab  <j/k> Select Rev  <r> Rollback to Selected  <Enter>/<v> View  <Esc> Back",
         HelmDetailTab::Manifest => "<Tab> Switch Tab  <j/k> Scroll  <g/G> Top/Bottom  <y> Copy  </> Search  <n/N> Next/Prev  <Esc> Back",
         HelmDetailTab::Notes => "<Tab> Switch Tab  <j/k> Scroll  <g/G> Top/Bottom  <y> Copy  </> Search  <n/N> Next/Prev  <Esc> Back",
-    };
+    }
+}
 
-    let p = Paragraph::new(format!(" {}", hints))
+fn render_bottom_hints(f: &mut Frame, area: Rect, state: &HelmDetailViewState) {
+    let hints = helm_detail_hints(state);
+    let p = Paragraph::new(format!(" {hints}"))
+        .wrap(Wrap { trim: true })
         .style(Style::default().fg(Theme::dim()));
     f.render_widget(p, area);
 }

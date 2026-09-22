@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -540,7 +540,7 @@ pub fn render_tui_config_view(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // Top description
+            Constraint::Length(3), // Top description, with a row for wrap
             Constraint::Min(10),   // Controls and Live Preview
             Constraint::Length(1), // Bottom key hints
         ])
@@ -560,7 +560,10 @@ pub fn render_tui_config_view(
             Style::default().fg(Theme::dim()),
         )]),
     ];
-    f.render_widget(Paragraph::new(desc_lines), chunks[0]);
+    f.render_widget(
+        Paragraph::new(desc_lines).wrap(Wrap { trim: true }),
+        chunks[0],
+    );
 
     // 2. Middle Region: Controls (left) & Live Preview (right) or stacked if narrow
     let (controls_area, preview_area) = if chunks[1].width >= 90 {
@@ -652,7 +655,10 @@ pub fn render_tui_config_view(
             Span::styled(" to adjust", Style::default().fg(Theme::dim())),
         ]),
     ];
-    f.render_widget(Paragraph::new(width_lines), width_inner);
+    f.render_widget(
+        Paragraph::new(width_lines).wrap(Wrap { trim: true }),
+        width_inner,
+    );
 
     // Setting 1: Command Popup Max Visible Rows
     let is_rows_selected = state.selected_field == 1;
@@ -713,7 +719,10 @@ pub fn render_tui_config_view(
             Span::styled(" to adjust", Style::default().fg(Theme::dim())),
         ]),
     ];
-    f.render_widget(Paragraph::new(rows_lines), rows_inner);
+    f.render_widget(
+        Paragraph::new(rows_lines).wrap(Wrap { trim: true }),
+        rows_inner,
+    );
 
     // Setting 2: Command Popup Text Size / Density
     let is_density_selected = state.selected_field == 2;
@@ -782,7 +791,10 @@ pub fn render_tui_config_view(
             Span::styled(" to adjust", Style::default().fg(Theme::dim())),
         ]),
     ];
-    f.render_widget(Paragraph::new(density_lines), density_inner);
+    f.render_widget(
+        Paragraph::new(density_lines).wrap(Wrap { trim: true }),
+        density_inner,
+    );
 
     // Setting 3: Startup Feature Banner
     let is_banner_selected = state.selected_field == 3;
@@ -864,7 +876,10 @@ pub fn render_tui_config_view(
             Span::styled(" to toggle", Style::default().fg(Theme::dim())),
         ]),
     ];
-    f.render_widget(Paragraph::new(banner_lines), banner_inner);
+    f.render_widget(
+        Paragraph::new(banner_lines).wrap(Wrap { trim: true }),
+        banner_inner,
+    );
 
     // Setting 4: Startup Update Check
     let is_update_selected = state.selected_field == 4;
@@ -944,7 +959,10 @@ pub fn render_tui_config_view(
             Span::styled(" to toggle", Style::default().fg(Theme::dim())),
         ]),
     ];
-    f.render_widget(Paragraph::new(update_lines), update_inner);
+    f.render_widget(
+        Paragraph::new(update_lines).wrap(Wrap { trim: true }),
+        update_inner,
+    );
 
     // Setting 5: ArgoCD Hub Context
     let is_hub_ctx_selected = state.selected_field == 5;
@@ -1000,7 +1018,10 @@ pub fn render_tui_config_view(
             Span::styled(" Clear", Style::default().fg(Theme::dim())),
         ]));
     }
-    f.render_widget(Paragraph::new(hub_ctx_lines), hub_ctx_inner);
+    f.render_widget(
+        Paragraph::new(hub_ctx_lines).wrap(Wrap { trim: true }),
+        hub_ctx_inner,
+    );
 
     // Setting 6: ArgoCD Hub Kubeconfig Path
     let is_hub_cfg_selected = state.selected_field == 6;
@@ -1057,7 +1078,10 @@ pub fn render_tui_config_view(
             Span::styled(" Clear to Default", Style::default().fg(Theme::dim())),
         ]));
     }
-    f.render_widget(Paragraph::new(hub_cfg_lines), hub_cfg_inner);
+    f.render_widget(
+        Paragraph::new(hub_cfg_lines).wrap(Wrap { trim: true }),
+        hub_cfg_inner,
+    );
 
     // 3. Live Preview (Feature Banner, ArgoCD GitOps, or Command Popup)
     if state.selected_field == 3 {
@@ -1220,7 +1244,7 @@ pub fn render_tui_config_view(
             ]),
         ];
 
-        let p = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true });
+        let p = Paragraph::new(lines).wrap(Wrap { trim: true });
         f.render_widget(p, preview_inner);
     } else if state.selected_field == 5 || state.selected_field == 6 {
         let preview_block = Block::default()
@@ -1389,7 +1413,7 @@ pub fn render_tui_config_view(
             Span::styled(" Jump to ArgoCD", Style::default().fg(Theme::dim())),
         ]));
 
-        let p = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true });
+        let p = Paragraph::new(lines).wrap(Wrap { trim: true });
         f.render_widget(p, preview_inner);
     } else {
         let preview_block = Block::default()
@@ -1830,7 +1854,10 @@ pub fn render_tui_config_view(
         ),
         Span::styled("Back", Style::default().fg(Theme::dim())),
     ]);
-    f.render_widget(Paragraph::new(hints_line), chunks[2]);
+    f.render_widget(
+        Paragraph::new(hints_line).wrap(Wrap { trim: true }),
+        chunks[2],
+    );
 
     // 5. Edit Modal Dialog (if currently editing field 5 or 6)
     if state.is_editing {
@@ -1871,7 +1898,9 @@ pub fn render_tui_config_view(
             6 => "Enter absolute path to the kubeconfig for ArgoCD (leave empty to clear):",
             _ => "Enter new value:",
         };
-        let prompt_p = Paragraph::new(prompt_text).style(Style::default().fg(Theme::dim()));
+        let prompt_p = Paragraph::new(prompt_text)
+            .wrap(Wrap { trim: true })
+            .style(Style::default().fg(Theme::dim()));
         f.render_widget(prompt_p, v_chunks[0]);
 
         let chars: Vec<char> = state.edit_buffer.chars().collect();
@@ -1947,6 +1976,9 @@ pub fn render_tui_config_view(
             ),
             Span::styled("Clear", Style::default().fg(Theme::dim())),
         ]);
-        f.render_widget(Paragraph::new(hint_line), v_chunks[2]);
+        f.render_widget(
+            Paragraph::new(hint_line).wrap(Wrap { trim: true }),
+            v_chunks[2],
+        );
     }
 }

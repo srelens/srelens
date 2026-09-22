@@ -18,6 +18,9 @@ use srelens_kube::lineage::{LineageNode, LineageRelation};
 use srelens_kube::metrics::MetricSample;
 use srelens_tui::commands::{CrdMeta, PrinterColumn, ResourceKind};
 use srelens_tui::theme::Theme;
+use srelens_tui::views::argo_detail_view::{
+    render_argo_detail_view, ArgoDetailTab, ArgoDetailViewState,
+};
 use srelens_tui::views::cracked_lens::render_cracked_lens;
 use srelens_tui::views::describe_view::{render_describe_view, DescribeViewState};
 use srelens_tui::views::helm_view::{render_helm_view, HelmReleaseItem, HelmViewState};
@@ -2674,4 +2677,41 @@ fn custom_resource_table_colours_printer_status_columns() {
     assert!(r2.contains("Degraded"), "{r2}");
     assert_eq!(fg_of(&buf, y2 as u16, "False"), Theme::status_error().fg);
     assert_eq!(fg_of(&buf, y2 as u16, "Degraded"), Theme::status_error().fg);
+}
+
+#[test]
+fn a_long_argo_sync_error_wraps_instead_of_clipping() {
+    let mut state = ArgoDetailViewState::new("my-app".to_string(), "argocd".to_string(), None);
+    let marker = "CRD-ERROR-TAIL";
+    let mut app = srelens_kube::argo::ArgoApplication::from_json(&json!({
+        "metadata": { "name": "my-app", "namespace": "argocd" }
+    }));
+    app.operation_phase = "Failed".to_string();
+    app.operation_message = format!(
+        "one or more objects failed to apply, CustomResourceDefinition.apiextensions.k8s.io {} {marker}",
+        "x".repeat(80),
+    );
+    state.set_application(app);
+    state.active_tab = ArgoDetailTab::Overview;
+
+    let rows = common::render_lines(80, 40, |f| {
+        render_argo_detail_view(f, f.area(), &state);
+    });
+    let text = rows.join("\n");
+    assert!(
+        text.contains(marker),
+        "sync error was clipped at the card edge:\n{text}"
+    );
+    let start = rows
+        .iter()
+        .position(|row| row.contains("one or more objects failed"))
+        .expect("message start");
+    let end = rows
+        .iter()
+        .position(|row| row.contains(marker))
+        .expect("message tail");
+    assert!(
+        end > start,
+        "the error should wrap onto a later row, not stay on one clipped line:\n{text}"
+    );
 }

@@ -739,13 +739,14 @@ fn node_inspector_pods_table_scrolls_to_keep_the_selection_visible() {
         .collect();
     let mut state = node_state(details);
 
-    // Wide/tall: 21 visible rows. Selecting the last pod scrolls down.
+    // Wide/tall. The footer hints wrap onto a second row, so the pod table
+    // shows 20 rows. Selecting the last pod scrolls down.
     state.select_last();
     let text = render_node(120, 40, &state);
     assert!(text.contains("▶ default"), "{text}");
     assert!(text.contains("pod-29"), "{text}");
     assert!(!text.contains("pod-00"), "{text}");
-    assert_eq!(state.last_scroll_offset.get(), 9);
+    assert_eq!(state.last_scroll_offset.get(), 10);
     assert!(state.last_pods_table_rect.get().height > 0);
 
     // A stale scroll offset below the selection snaps back up to it.
