@@ -2,6 +2,39 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { CapabilityImpact } from "./capabilities";
 
+/**
+ * What the HOST read out of a gated call: the cluster it is pinned to and the
+ * object it names.
+ *
+ * Every value here is derived in the backend by
+ * `srelens_capability::confirm_fields` — the same closed vocabulary the
+ * confirmation sentence is rendered from, escaped and bounded to 80 characters
+ * there. It is on the wire so that a write clicked in the app and the same
+ * write asked for by an agent name their target through one reading of the
+ * arguments rather than two: the alternative is a second parse, in TypeScript,
+ * of a payload the caller controls.
+ *
+ * Each field is independently optional, and an absent one is `null` rather
+ * than an empty string: "this call named no namespace" and "this call named
+ * the empty namespace" are different facts.
+ *
+ * **There is deliberately no app here**, so the confirmation this feeds names
+ * no requester. "Requested by app X (signed by Y)" is the host vouching for
+ * who asked, and on the MCP path the host has no grounds for it:
+ * `extensions.action` is reachable over MCP, and while the registry checks
+ * that a call's `resource.id` and `revision` name an installed, enabled app,
+ * nothing authenticates the CALLER as that app — an MCP client is a bearer
+ * token. An attribution read off the request would be provenance chosen by
+ * the party being vouched for. An app's own screens have real host context
+ * and do draw the line; see `confirmationApp.ts`.
+ */
+export interface ConfirmTarget {
+  cluster?: string | null;
+  namespace?: string | null;
+  name?: string | null;
+  kind?: string | null;
+}
+
 export interface ConfirmRequest {
   id: string;
   tool: string;
@@ -33,6 +66,15 @@ export interface ConfirmRequest {
    * narrows rather than casts; the backend always sends it.
    */
   impact?: CapabilityImpact;
+  /**
+   * The cluster, the object and the app, as the host read them. See
+   * {@link ConfirmTarget}.
+   *
+   * Optional for the same reason `impact` is: it crosses a process boundary
+   * and consumers narrow rather than cast. The backend always sends it, empty
+   * when the call named nothing.
+   */
+  target?: ConfirmTarget | null;
 }
 
 /**

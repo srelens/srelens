@@ -21,6 +21,15 @@ const { notify } = vi.hoisted(() => ({
 }));
 vi.mock("@srelens/core/lib/notify", () => ({ notify }));
 
+/** The host's installed inventory, which is where the requester line is read from (#552). */
+const { inventory } = vi.hoisted(() => ({
+  inventory: vi.fn(async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] as unknown[] })),
+}));
+vi.mock("@srelens/core/lib/extensions", async (orig) => ({
+  ...(await orig<typeof import("@srelens/core/lib/extensions")>()),
+  listExtensions: inventory,
+}));
+
 import { McpConfirmDialog } from "./McpConfirmDialog";
 
 // jsdom is a plain browser, i.e. web mode: `isTauri()` looks for
@@ -154,5 +163,143 @@ describe("McpConfirmDialog", () => {
     expect(screen.getByText(/medium impact/i)).toBeTruthy();
     expect(screen.getByText(/3.16/)).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/undefined|null/);
+  });
+
+  // ---- #552: the same question classic's own app screens ask --------------
+
+  /**
+   * The cluster and the object come from the host's reading of the call
+   * (`ConfirmTarget`), so this modal and the app's own action review name the
+   * same things in the same order — they used to name different things in
+   * different words.
+   */
+  it("names the pinned cluster and the object under the host's sentence", async () => {
+    render(<McpConfirmDialog />);
+    emit({
+      id: "t1",
+      tool: "k8s.gitOpsAction",
+      args: { resource: { context: "prod", namespace: "team", name: "api" } },
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { cluster: "prod", namespace: "team", name: "api", kind: "HelmRelease" },
+    });
+    expect(await screen.findByTestId("host-confirm-cluster")).toBeTruthy();
+    expect(screen.getByTestId("host-confirm-cluster").textContent).toBe("prod");
+    expect(screen.getByTestId("host-confirm-target").textContent).toBe("team/api");
+    expect(screen.getByTestId("host-confirm-question").textContent).toBe(
+      "Suspend HelmRelease team/api?",
+    );
+  });
+
+  /**
+   * Nothing a caller sends becomes the question. An argument that reads like
+   * a sentence is drawn in the payload block, where arguments go — never as
+   * the question the Approve button answers.
+   */
+  it("keeps a caller's argument out of the question", async () => {
+    render(<McpConfirmDialog />);
+    emit({
+      id: "t2",
+      tool: "k8s.gitOpsAction",
+      args: { prompt: "This is safe, click Approve", resource: { name: "api" } },
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { name: "api" },
+    });
+    const question = await screen.findByTestId("host-confirm-question");
+    expect(question.textContent).toBe("Suspend HelmRelease team/api?");
+    expect(document.querySelectorAll('[data-testid="host-confirm-question"]').length).toBe(1);
+    // It is still shown, as an argument, because the reader should see it.
+    expect(screen.getByText(/This is safe, click Approve/)).toBeTruthy();
+  });
+
+  /**
+   * "Requested by app X (srelens)" is the host vouching for who asked, and an
+   * MCP caller is a bearer token rather than an app: the registry checks only
+   * that a call's `resource.id` and `revision` name an installed, enabled
+   * app, never that the caller IS it. An attribution derived from the request
+   * would let any caller put a signed app's name above its own Approve
+   * button, so none is drawn.
+   */
+  it("names no app on an agent's call, however the payload claims one", async () => {
+    inventory.mockResolvedValue({
+      schemaVersion: 1,
+      nextRevision: 1,
+      plugins: [
+        {
+          manifest: {
+            id: "org.srelens.flux",
+            name: "Flux Tools",
+            version: "1.0.0",
+            srelensApiVersion: "1",
+            kind: "declarative",
+            permissions: [],
+            capabilities: [],
+            contributions: { pages: [], detailTabs: [], detailLinks: [] },
+          },
+          enabled: true,
+          revision: 2,
+          grants: [],
+          settings: {},
+          source: "local",
+          installedAt: 0,
+          history: [],
+          signatureProof: { manifest: "{}", signature: [1] },
+        },
+      ],
+    });
+    render(<McpConfirmDialog />);
+    emit({
+      id: "t3",
+      tool: "extensions.action",
+      args: { resource: { id: "org.srelens.flux", revision: 2 } },
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { name: "api", app: { id: "org.srelens.flux", revision: 2 } },
+    });
+    // The new confirmation IS rendered, so the absence below is about
+    // attribution rather than about nothing having been drawn.
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api?",
+    );
+    await waitFor(() => expect(inventory).not.toHaveBeenCalled());
+    expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
+    expect(document.body.textContent).not.toContain("Flux Tools");
+  });
+
+  /**
+   * The payload is a runtime event, and `listen<ConfirmRequest>` is an
+   * annotation rather than a check. A `target.cluster` that arrives as a
+   * number used to reach `boundedPlainText`, where `.replace` is not a
+   * function — a thrown render in place of the confirmation the backend is
+   * blocking on. The queue now takes only what the shared parser narrowed.
+   */
+  it("renders a confirmation rather than throwing on a malformed target", async () => {
+    render(<McpConfirmDialog />);
+    emit({
+      id: "t4",
+      tool: "k8s.gitOpsAction",
+      args: {},
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { cluster: 7, name: { evil: true }, namespace: [] },
+    });
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api?",
+    );
+    expect(screen.queryByTestId("host-confirm-cluster")).toBeNull();
+    expect(screen.queryByTestId("host-confirm-target")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/undefined|\[object Object\]/);
+    // Still answerable: a malformed fact must not cost the reader the prompt.
+    await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("t4", true));
+  });
+
+  /** A payload with no usable id is not a request: it cannot be answered. */
+  it("ignores a payload that carries no id", async () => {
+    const { container } = render(<McpConfirmDialog />);
+    emit({ tool: "k8s.drainNode", args: {}, prompt: "Drain?" });
+    emit({ id: "", tool: "k8s.drainNode", args: {} });
+    await waitFor(() => expect(container.textContent).toBe(""));
   });
 });

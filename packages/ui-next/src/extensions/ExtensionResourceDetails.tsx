@@ -1,19 +1,34 @@
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useEffect, useRef, useState } from "react";
-import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, type ExtensionResourceDetail, type ExtensionResourceSelection } from "@srelens/core";
+import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, renderConfirmTemplate, type ExtensionResourceDetail, type ExtensionResourceSelection } from "@srelens/core";
 import { Inspector, Button, CodeEditor, KV } from "@srelens/ui-kit";
 import { Icons } from "../lib/icons";
 import { ErrorNotice } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
-const actions: Record<string,{label:string;description:string}> = {
-  suspend:{label:"Suspend",description:"Pause future reconciliation. Workloads already running are not stopped."},
-  resume:{label:"Resume",description:"Allow the controller to reconcile this resource again."},
-  reconcile:{label:"Reconcile",description:"Ask Flux to reconcile now using the configured source."},
-  force:{label:"Force reconcile",description:"Force a Helm install or upgrade, even if the chart and values have not changed."},
-  reset:{label:"Reset retries",description:"Reset Helm remediation retries and request reconciliation."},
-  refresh:{label:"Refresh status",description:"Ask Argo CD to refresh this application's status."},
-  "hard-refresh":{label:"Hard refresh",description:"Invalidate Argo CD's manifest cache and refresh this application."},
-  sync:{label:"Sync",description:"Apply the application's desired resources with Argo CD. This request does not enable pruning. Application sync options and hooks still apply."},
+import { HostConfirmation } from "../confirm/HostConfirmation";
+import { useConfirmationApp } from "../confirm/confirmationApp";
+import { confirmFields } from "../confirm/confirmRequest";
+/**
+ * What the BUTTON says. Only that.
+ *
+ * The descriptions that used to sit here beside each label are gone (#552).
+ * They were the words a person read before approving a cluster write, written
+ * in a UI constant three packages away from the handler that performs it — so
+ * the same write asked for by an agent was confirmed in different words,
+ * through different code, and an app declaring a new action (#549) had nowhere
+ * to get any words at all. The sentence now comes from the host's own
+ * template, delivered per action in `ExtensionResourceDetail.actionMeta`
+ * (#548) and rendered by the one confirmation every surface uses.
+ */
+const actions: Record<string,{label:string}> = {
+  suspend:{label:"Suspend"},
+  resume:{label:"Resume"},
+  reconcile:{label:"Reconcile"},
+  force:{label:"Force reconcile"},
+  reset:{label:"Reset retries"},
+  refresh:{label:"Refresh status"},
+  "hard-refresh":{label:"Hard refresh"},
+  sync:{label:"Sync"},
 };
 const fieldLabels: Record<string,string> = {sourceRef:"Source reference",suspend:"Suspended",prune:"Prune",wait:"Wait for readiness",force:"Force",apiVersion:"API version"};
 function fieldLabel(key:string) {
@@ -59,8 +74,33 @@ function Events({detail}:{detail?:ExtensionResourceDetail}) {
     {events.length ? <div className="extension-condition-list">{events.map((event,i)=><article key={i}><strong>{event.type} · {event.reason}</strong><p>{event.message}</p><span>Count: {event.count??1}</span></article>)}</div> : !detail?.eventsPartial&&<p className="extension-message">No events reported.</p>}
   </>;
 }
+/**
+ * The host's sentence for one action on one resource, or `null`.
+ *
+ * Rendered HERE from the template the host sent for THIS action
+ * (`actionMeta`, #548) against the fields the host's own vocabulary allows —
+ * the same template, the same vocabulary and the same escaping the backend
+ * uses when an agent asks for the identical write. `null` when the host
+ * authored no template, or when the template names something this call has no
+ * value for: the confirmation then shows the facts and the buttons without a
+ * sentence, rather than a sentence with a hole in it.
+ */
+function hostQuestion(detail:ExtensionResourceDetail|undefined,action:string,selection:ExtensionResourceSelection,kind:string|undefined):string|null {
+  const template=detail?.actionMeta?.[action]?.confirm;
+  if(!template)return null;
+  return renderConfirmTemplate(template,confirmFields({
+    action,
+    cluster:selection.context,
+    kind,
+    namespace:selection.namespace,
+    name:selection.name,
+  }));
+}
 export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{selection:ExtensionResourceSelection;onClose?():void;fullPage?:boolean}) {
   const openResource=useContext(ExtensionResourceNavigation);
+  // Who the host says asked: read from its own installed inventory, never
+  // from the app. See `confirmationApp.ts`.
+  const app=useConfirmationApp({id:selection.id,revision:selection.revision});
 
   const data=useResource(()=>inspectExtensionResource(selection),[selection.id,selection.revision,selection.capability,selection.context,selection.namespace,selection.name]);
   const {reload}=data;
@@ -115,8 +155,22 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
     {message&&<p role="status" className="extension-message">{message}</p>}
     {data.status==="error"?<ErrorNotice cluster message={data.error} retry={data.reload}/>:data.status==="loading"?<p className="extension-message">Loading resource details…</p>:resource&&<>
       {pending&&<div className="extension-action-review" role="dialog" aria-label={`Review ${actions[pending.action].label}`} tabIndex={-1} ref={review}>
-        <strong>{actions[pending.action].label}: {selection.namespace}/{selection.name}</strong><p>Cluster: {selection.context}</p><p>{actions[pending.action].description}</p>
-        <div className="extension-toolbar"><Button disabled={busy} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${actions[pending.action].label}`}</Button><Button variant="outline" disabled={busy} onClick={cancel}>Cancel</Button></div>
+        {/* The one host confirmation (#552), in this screen's own frame. The
+            frame is all this surface supplies: the sentence, the level, the
+            cluster, the resource and the requester are the component's, and
+            they are identical to what an agent asking for this same write is
+            shown. */}
+        <HostConfirmation
+          question={hostQuestion(data.data,pending.action,selection,resource?.kind)}
+          impact={data.data?.actionMeta?.[pending.action]?.impact ?? null}
+          cluster={selection.context}
+          subject={{kind:"object",namespace:selection.namespace||null,name:selection.name}}
+          app={app}
+          actions={<>
+            <Button disabled={busy} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${actions[pending.action].label}`}</Button>
+            <Button variant="outline" disabled={busy} onClick={cancel}>Cancel</Button>
+          </>}
+        />
       </div>}
       {tab==="manifest"?<div className="flex h-full min-h-0 flex-col"><div className="min-h-0 flex-1"><CodeEditor value={formatResourceManifest(resource)} readOnly language="yaml" fill copy ariaLabel={`${selection.name} manifest`}/></div></div>:<>
         <h4 className="extension-detail-heading">Overview</h4><Fields value={{Name:resource.metadata.name,Namespace:resource.metadata.namespace??"—",Kind:resource.kind,API:resource.apiVersion,Created:resource.metadata.creationTimestamp??"—",...(resource.spec??{})}}/>

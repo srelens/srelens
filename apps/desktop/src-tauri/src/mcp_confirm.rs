@@ -62,6 +62,49 @@ pub struct PendingRequest {
     /// Shown beside the question, because "an agent wants to run a cluster
     /// action" is the same sentence for a status refresh and a node drain.
     pub impact: String,
+    /// What the HOST read out of the call: the cluster it is pinned to, the
+    /// object it names, and the app it was made through. See [`ConfirmTarget`].
+    pub target: ConfirmTarget,
+}
+
+/// The facts the one confirmation names under its question (#552), as the host
+/// reads them — not as the window parses them.
+///
+/// **Why the host and not the window.** The same question is asked for a write
+/// clicked in an app's resource view and for the same write asked for by an
+/// agent, and the app path knows its cluster and object directly. Leaving the
+/// MCP path to dig them out of `args` would be a second reading of a
+/// caller-controlled payload, in TypeScript, drifting from the one the
+/// sentence is rendered from. So both come from
+/// [`srelens_capability::confirm_fields`]: one vocabulary, one escaping, one
+/// 80-character bound, already applied here.
+///
+/// Every field is optional and an absent one stays `None`: a call that names
+/// no namespace and one that names the empty namespace are different facts,
+/// and the surface draws them apart.
+///
+/// **There is deliberately no `app` here**, and that is a decision rather than
+/// an omission. The confirmation's "Requested by app … (signed by …)" is the
+/// host vouching for who asked, and on this path the host has no grounds for
+/// it. `extensions.action` is reachable over MCP; the registry checks that
+/// `resource.id` and `revision` name an installed, enabled app, but nothing
+/// authenticates the CALLER as that app — an MCP client is a bearer token, not
+/// an app. Reading the attribution out of `args` would therefore let any
+/// caller put a signed app's name above its own Approve button: provenance
+/// chosen by the party being vouched for, which is the spoof #552 exists to
+/// prevent. Saying nothing is the honest answer and is what the window draws.
+///
+/// The line comes back when an authenticated, host-owned execution context
+/// carries the app — a declared action the host runs on an app's behalf
+/// (#549) — and not before. An app's own screens already have that context,
+/// and already draw the line (`ExtensionResourceDetails`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ConfirmTarget {
+    /// The kubeconfig context, escaped and bounded.
+    pub cluster: Option<String>,
+    pub namespace: Option<String>,
+    pub name: Option<String>,
+    pub kind: Option<String>,
 }
 
 impl PendingRequest {
@@ -69,12 +112,23 @@ impl PendingRequest {
     /// call. Pure, so the three cases that matter — a sentence, no template,
     /// and a template that cannot render — are testable without a window.
     pub fn from_consent(id: String, request: &srelens_mcp::policy::ConsentRequest) -> Self {
+        // The same read the sentence is rendered from: one closed vocabulary,
+        // escaped and bounded once, so the facts under the question cannot
+        // disagree with the question.
+        let fields = srelens_capability::confirm_fields(&request.args);
+        let field = |key: &str| fields.get(key).cloned();
         Self {
             id,
             tool: request.tool.clone(),
             args: request.args.clone(),
             prompt: request.confirm_text.clone(),
             impact: request.impact.as_str().to_string(),
+            target: ConfirmTarget {
+                cluster: field("cluster"),
+                namespace: field("namespace"),
+                name: field("name"),
+                kind: field("kind"),
+            },
         }
     }
 }
@@ -253,6 +307,10 @@ mod tests {
             args: json!({ "name": id }),
             prompt: None,
             impact: "medium".into(),
+            target: ConfirmTarget {
+                name: Some(id.into()),
+                ..ConfirmTarget::default()
+            },
         }
     }
 
@@ -424,6 +482,118 @@ mod tests {
             );
             assert_eq!(got.impact, word);
         }
+    }
+
+    // ---- What the host itself read out of the call (#552) ------------------
+
+    /// The one confirmation names the pinned cluster and the object, and the
+    /// window must not have to parse the caller's arguments to find them: it
+    /// is handed what the HOST read, through the same escaped, bounded
+    /// vocabulary the sentence is rendered from.
+    #[test]
+    fn the_window_is_told_the_cluster_and_the_object_the_host_read() {
+        let got = PendingRequest::from_consent(
+            "id-6".into(),
+            &consent(
+                "k8s.gitOpsAction",
+                Annotations::DESTRUCTIVE.with_confirm("Suspend[ {resource}]?"),
+                json!({
+                    "resource": { "context": "prod", "namespace": "team", "name": "api" },
+                    "kind": "HelmRelease",
+                    "action": "suspend",
+                }),
+            ),
+        );
+        assert_eq!(got.target.cluster.as_deref(), Some("prod"));
+        assert_eq!(got.target.namespace.as_deref(), Some("team"));
+        assert_eq!(got.target.name.as_deref(), Some("api"));
+        assert_eq!(got.target.kind.as_deref(), Some("HelmRelease"));
+    }
+
+    /// **An MCP call attributes itself to no app, whatever its arguments say.**
+    ///
+    /// The confirmation's "Requested by app … (signed by …)" is the host
+    /// vouching for who asked, and on this path the host has no grounds for
+    /// it. `extensions.action` is reachable over MCP; the registry checks
+    /// that `resource.id`/`revision` name an installed, enabled app, but
+    /// nothing authenticates the CALLER as that app — an MCP client is a
+    /// bearer token, not an app. Deriving the line from `args` would let any
+    /// caller put a signed app's name on its own prompt, which is the exact
+    /// spoof #552 exists to prevent. It is better to say nothing than to say
+    /// something an attacker chose.
+    ///
+    /// The line comes back when an authenticated, host-owned execution
+    /// context carries the app — a declared action the host runs on an app's
+    /// behalf (#549) — and not before.
+    #[test]
+    fn an_mcp_call_is_attributed_to_no_app_whatever_its_arguments_claim() {
+        let got = PendingRequest::from_consent(
+            "id-7".into(),
+            &consent(
+                "extensions.action",
+                Annotations::DESTRUCTIVE.with_confirm("Suspend[ {resource}]?"),
+                json!({
+                    "resource": { "id": "org.srelens.flux", "revision": 4, "context": "prod", "name": "api" },
+                    "action": "suspend",
+                    "app": { "id": "srelens-core", "revision": 1 },
+                }),
+            ),
+        );
+        let payload = serde_json::to_value(&got).unwrap();
+        assert!(
+            payload.get("app").is_none() && payload["target"].get("app").is_none(),
+            "no app identity may cross this wire: {payload}"
+        );
+        // What the host DID read is still carried, because none of it is a
+        // claim about who asked.
+        assert_eq!(got.target.cluster.as_deref(), Some("prod"));
+        assert_eq!(got.target.name.as_deref(), Some("api"));
+    }
+
+    /// The target travels through the same escaping and the same 80-character
+    /// bound as the sentence: a name carrying a right-to-left override must
+    /// not reorder the facts under the question, and one long enough to push
+    /// the tail out of the frame is cut.
+    #[test]
+    fn a_hostile_name_reaches_the_window_escaped_and_bounded() {
+        let got = PendingRequest::from_consent(
+            "id-9".into(),
+            &consent(
+                "k8s.drainNode",
+                Annotations::DESTRUCTIVE,
+                json!({ "context": "pr\u{202e}od", "name": "n".repeat(400) }),
+            ),
+        );
+        let cluster = got.target.cluster.expect("the cluster is carried");
+        assert!(
+            !cluster.contains('\u{202e}'),
+            "an override reached the window drawn"
+        );
+        assert!(cluster.contains("\\u{202e}"));
+        let name = got.target.name.expect("the name is carried");
+        assert_eq!(
+            name.chars().count(),
+            srelens_capability::CONFIRM_FIELD_MAX_CHARS
+        );
+        assert!(name.ends_with('…'));
+    }
+
+    /// A replayed request and a live one are the same question, target
+    /// included — the emit sends this value and the snapshot returns it.
+    #[tokio::test]
+    async fn the_snapshot_replays_the_target() {
+        let p = Pending::default();
+        let sent = PendingRequest::from_consent(
+            "id-10".into(),
+            &consent(
+                "k8s.gitOpsAction",
+                Annotations::DESTRUCTIVE.with_confirm("Suspend[ {resource}]?"),
+                json!({ "resource": { "context": "prod", "namespace": "team", "name": "api" } }),
+            ),
+        );
+        let (tx, _rx) = oneshot::channel();
+        p.register(sent.clone(), tx);
+        assert_eq!(p.snapshot(), vec![sent]);
     }
 
     #[test]

@@ -83,6 +83,9 @@ const core = vi.hoisted(() => ({
   listAgents: vi.fn(async () => [
     { kind: "claude", label: "Claude", available: true, path: "/c", version: "1", installUrl: "", gated: false },
   ]),
+  // The installed inventory the requester line is read from (#552). Empty by
+  // default: a prompt with no app behind it names none.
+  listExtensions: vi.fn(async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] })),
 }));
 
 vi.mock("@srelens/core", async (orig) => ({
@@ -95,6 +98,7 @@ vi.mock("@srelens/core", async (orig) => ({
   startChat: core.startChat,
   sendChat: core.sendChat,
   listAgents: core.listAgents,
+  listExtensions: core.listExtensions,
   // Resolves once the registration has landed — the real one's contract.
   subscribe: (channel: string, handler: (payload: unknown) => void) => {
     core.subscribe(channel, handler);
@@ -1075,5 +1079,114 @@ describe("the host's own words", () => {
     await mount();
     expect(await screen.findByText("Drain node-7?")).toBeTruthy();
     expect(screen.getByText(/high impact/i)).toBeTruthy();
+  });
+
+  // ---- #552: the same question as the app's own confirmation --------------
+
+  /**
+   * The cluster and the object are named under the question, and they come
+   * from the HOST's reading of the call (`ConfirmTarget`) rather than from
+   * this component digging through `args` — the second parse the one
+   * confirmation exists to remove.
+   */
+  it("names the pinned cluster and the object the host read", async () => {
+    await mount();
+    askWith({
+      id: "t1",
+      tool: "k8s.gitOpsAction",
+      args: { resource: { context: "prod", namespace: "team", name: "api" } },
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { cluster: "prod", namespace: "team", name: "api", kind: "HelmRelease", app: null },
+    });
+    expect(await screen.findByTestId("host-confirm-cluster")).toBeTruthy();
+    expect(screen.getByTestId("host-confirm-cluster").textContent).toBe("prod");
+    expect(screen.getByTestId("host-confirm-target").textContent).toBe("team/api");
+  });
+
+  /**
+   * A malformed target is dropped, not drawn: no `undefined` under Approve,
+   * and no crash from handing a number to the text helpers.
+   *
+   * The absences below only mean something beside the presence above them —
+   * the old dialog had no fact rows either, so a test of absences alone would
+   * pass against it and prove nothing.
+   */
+  it("draws no fact it was not sent", async () => {
+    await mount();
+    askWith({
+      id: "t2",
+      tool: "toolbox.installHelm",
+      args: {},
+      prompt: "Install Helm?",
+      impact: "medium",
+      target: { cluster: 7, name: null },
+    });
+    const dialog = await screen.findByRole("dialog");
+    expect(screen.getByTestId("host-confirm-question").textContent).toBe("Install Helm?");
+    expect(screen.getByTestId("host-confirm-impact").textContent).toBe("Medium impact");
+    expect(dialog.textContent).not.toMatch(/undefined|null/);
+    expect(dialog.textContent).not.toContain("7");
+    expect(screen.queryByTestId("host-confirm-cluster")).toBeNull();
+    expect(screen.queryByTestId("host-confirm-target")).toBeNull();
+  });
+
+  /**
+   * **An agent's call is attributed to no app, whatever it claims.**
+   *
+   * "Requested by app X (srelens)" is the host vouching for who asked.
+   * `extensions.action` is reachable over MCP and the registry only checks
+   * that the ID and revision name an installed, enabled app — nothing
+   * authenticates the caller AS that app. So an attribution derived from the
+   * request would be provenance chosen by the party being vouched for, and
+   * it is not drawn: not from a `target.app` the payload invents, and not
+   * from a real installed app named in one.
+   */
+  it("names no app on an agent's call, however the payload claims one", async () => {
+    core.listExtensions.mockResolvedValue({
+      schemaVersion: 1,
+      nextRevision: 1,
+      plugins: [
+        {
+          manifest: {
+            id: "org.srelens.flux",
+            name: "Flux Tools",
+            version: "1.0.0",
+            srelensApiVersion: "1",
+            kind: "declarative",
+            permissions: [],
+            capabilities: [],
+            contributions: { pages: [], detailTabs: [], detailLinks: [] },
+          },
+          enabled: true,
+          revision: 2,
+          grants: [],
+          settings: {},
+          source: "local",
+          installedAt: 0,
+          history: [],
+          signatureProof: { manifest: "{}", signature: [1] },
+        },
+      ],
+    } as never);
+    await mount();
+    askWith({
+      id: "t3",
+      tool: "extensions.action",
+      args: { resource: { id: "org.srelens.flux", revision: 2 } },
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { name: "api", app: { id: "org.srelens.flux", revision: 2 } },
+    });
+    // The question IS drawn — this is the new confirmation, not the old
+    // dialog, so the absence below is about attribution and not about the
+    // component failing to render.
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api?",
+    );
+    expect(screen.getByTestId("host-confirm-target").textContent).toBe("api");
+    await waitFor(() => expect(core.listExtensions).not.toHaveBeenCalled());
+    expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
+    expect(screen.getByRole("dialog").textContent).not.toContain("Flux Tools");
   });
 });
