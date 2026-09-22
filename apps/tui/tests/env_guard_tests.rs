@@ -140,13 +140,16 @@ fn settings_readers_share_the_guard_with_environment_writers() {
     let guards =
         regex::Regex::new(r"(?:env::lock|isolate_ai_settings|isolate_settings)\(\)").unwrap();
     let mut offenders = Vec::new();
-    for file in [
-        "tui_tests.rs",
-        "app_state_tests.rs",
-        "app_input_tests.rs",
-        "add_cluster_tests.rs",
-    ] {
-        let source = std::fs::read_to_string(tests.join(file)).unwrap();
+    let excluded = [
+        tests.join("common").join("env.rs"),
+        tests.join("common").join("mod.rs"),
+        tests.join("env_guard_tests.rs"),
+    ];
+    let mut files = Vec::new();
+    rust_files(&tests, &mut files);
+    for file in files.into_iter().filter(|file| !excluded.contains(file)) {
+        let source = std::fs::read_to_string(&file).unwrap();
+        let file = file.strip_prefix(&tests).unwrap().display();
         // Each test function ends at a closing brace with its declaration's
         // indentation; nested blocks are indented further.
         for function in functions.captures_iter(&source) {

@@ -8,24 +8,6 @@ mod tests {
     };
     use srelens_tui::views::ResourceTableState;
 
-    fn isolate_ai_settings() -> SettingsGuard {
-        let mut env = crate::common::env::lock();
-        let dir = tempfile::tempdir().expect("a scratch directory for AI settings");
-        env.set(
-            "SRELENS_AI_SETTINGS_PATH",
-            dir.path().join("ai_settings.json"),
-        );
-        SettingsGuard {
-            _env: env,
-            _dir: dir,
-        }
-    }
-
-    struct SettingsGuard {
-        _env: crate::common::env::EnvGuard,
-        _dir: tempfile::TempDir,
-    }
-
     #[test]
     fn test_resolve_command_aliases() {
         assert!(matches!(
@@ -398,7 +380,7 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
 
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
         let (tx, _rx) = unbounded_channel();
 
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
@@ -4966,7 +4948,7 @@ mod tests {
         use srelens_tui::ai_skills::CavemanLevel;
         use srelens_tui::app::{ActiveView, App};
 
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -5050,7 +5032,7 @@ mod tests {
         use srelens_tui::ai_skills::CavemanLevel;
         use srelens_tui::app::{ActiveView, App};
 
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -5107,7 +5089,7 @@ mod tests {
         use srelens_tui::ai_skills::CavemanLevel;
         use srelens_tui::app::{ActiveView, App};
 
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -5150,7 +5132,7 @@ mod tests {
         use srelens_tui::ai_skills::CavemanLevel;
         use srelens_tui::app::{ActiveView, App};
 
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -6388,7 +6370,7 @@ mod tests {
         let _lock = THEME_TEST_MUTEX.lock().unwrap();
         // Committing a theme saves AI settings. Without this the save wrote the
         // developer's real ai_settings.json (#671).
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::App;
         use srelens_tui::commands::CommandTarget;
