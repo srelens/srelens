@@ -592,6 +592,7 @@ fn a_ready_ratio_parses_leniently() {
 
 #[tokio::test]
 async fn a_pods_watch_for_the_current_channel_keeps_previous_metrics_and_fills_the_cache() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut table = table_with(ResourceKind::Pods, vec![pod("web-0", "default")]);
     table.raw_items[0]["cpu"] = json!("5m");
@@ -625,6 +626,7 @@ async fn a_pods_watch_for_the_current_channel_keeps_previous_metrics_and_fills_t
 
 #[tokio::test]
 async fn a_watch_for_another_channel_only_updates_the_cache() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(ResourceKind::Deployments, vec![]));
     app.current_watch_channel = Some("watch:test-cluster:default:deployments".into());
@@ -647,6 +649,7 @@ async fn a_watch_for_another_channel_only_updates_the_cache() {
 
 #[tokio::test]
 async fn a_non_pod_watch_for_the_current_channel_replaces_the_rows() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(ResourceKind::Services, vec![]));
     let channel = "watch:test-cluster:default:services".to_string();
@@ -663,6 +666,7 @@ async fn a_non_pod_watch_for_the_current_channel_replaces_the_rows() {
 
 #[tokio::test]
 async fn a_workloads_table_is_rebuilt_when_a_constituent_kind_arrives() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(ResourceKind::Workloads, vec![]));
 
@@ -684,6 +688,7 @@ async fn a_workloads_table_is_rebuilt_when_a_constituent_kind_arrives() {
 
 #[tokio::test]
 async fn a_namespaces_watch_replaces_the_sorted_namespace_list() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.handle_stream_event(
         "watch:test-cluster::namespaces".into(),
@@ -701,6 +706,7 @@ async fn a_namespaces_watch_replaces_the_sorted_namespace_list() {
 
 #[tokio::test]
 async fn log_lines_and_status_markers_for_the_open_log_stream_are_appended() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let logs = LogsViewState::new(
         "web-0".into(),
@@ -726,6 +732,7 @@ async fn log_lines_and_status_markers_for_the_open_log_stream_are_appended() {
 
 #[tokio::test]
 async fn every_table_kind_renders_its_own_key_hints() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.pod_count = 7;
     let secret_store_crd = ResourceKind::CustomResource(CrdMeta {
@@ -793,6 +800,7 @@ async fn every_table_kind_renders_its_own_key_hints() {
 
 #[tokio::test]
 async fn an_unreachable_cluster_with_no_rows_renders_the_cracked_lens() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.cluster_unreachable = true;
     app.active_view = ActiveView::Table(table_with(ResourceKind::Pods, vec![]));
@@ -811,6 +819,7 @@ async fn an_unreachable_cluster_with_no_rows_renders_the_cracked_lens() {
 
 #[tokio::test]
 async fn text_views_render_their_titles_search_counts_and_hints() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     let mut yaml = YamlViewState::new(
@@ -867,6 +876,7 @@ async fn text_views_render_their_titles_search_counts_and_hints() {
 
 #[tokio::test]
 async fn list_views_render_their_rows_and_hints() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::PortForwards(port_forwards());
@@ -895,6 +905,7 @@ async fn list_views_render_their_rows_and_hints() {
 
 #[tokio::test]
 async fn the_overview_renders_cluster_health_with_gauges_and_hints() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Overview(OverviewViewState::with_data(overview_data()));
 
@@ -954,6 +965,7 @@ async fn the_assistant_settings_and_tree_views_render_with_their_hints() {
 
 #[tokio::test]
 async fn the_node_inspector_renders_loading_error_and_detail_states() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::NodeInspector(NodeInspectorState::new("gpu-1".into()));
@@ -989,6 +1001,7 @@ async fn the_node_inspector_renders_loading_error_and_detail_states() {
 
 #[tokio::test]
 async fn every_modal_variant_renders_over_the_view() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Pods,
@@ -1077,6 +1090,7 @@ async fn every_modal_variant_renders_over_the_view() {
 
 #[tokio::test]
 async fn the_status_bar_reflects_input_mode_toast_and_filter() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Pods,
@@ -1109,6 +1123,7 @@ async fn the_status_bar_reflects_input_mode_toast_and_filter() {
 
 #[tokio::test]
 async fn rendering_with_a_screen_selection_captures_the_highlighted_text() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Pods,
@@ -1133,6 +1148,7 @@ async fn rendering_with_a_screen_selection_captures_the_highlighted_text() {
 
 #[tokio::test]
 async fn clicking_and_scrolling_a_table_moves_the_selection() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let items: Vec<Value> = (0..6)
         .map(|i| pod(&format!("pod-{i}"), "default"))
@@ -1179,6 +1195,7 @@ async fn clicking_and_scrolling_a_table_moves_the_selection() {
 
 #[tokio::test]
 async fn dragging_in_the_yaml_view_copies_the_selected_lines() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let content: String = (0..12).map(|i| format!("line-{i}\n")).collect();
     app.active_view = ActiveView::Yaml(YamlViewState::new(
@@ -1239,6 +1256,7 @@ async fn dragging_in_the_yaml_view_copies_the_selected_lines() {
 
 #[tokio::test]
 async fn mouse_in_the_assistant_toggles_tool_chips_and_selects_text() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.assistant_state
         .add_assistant_message("alpha beta gamma".into());
@@ -1303,6 +1321,7 @@ async fn mouse_in_the_assistant_toggles_tool_chips_and_selects_text() {
 
 #[tokio::test]
 async fn mouse_in_the_node_inspector_pod_table_selects_and_scrolls_pods() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::NodeInspector(inspector_with_details("gpu-1", false));
     wide(&mut app);
@@ -1340,6 +1359,7 @@ async fn mouse_in_the_node_inspector_pod_table_selects_and_scrolls_pods() {
 
 #[tokio::test]
 async fn scroll_wheel_moves_tree_logs_and_describe_views() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::Tree(tree_view());
@@ -1399,6 +1419,7 @@ async fn scroll_wheel_moves_tree_logs_and_describe_views() {
 
 #[tokio::test]
 async fn a_drag_over_visible_text_copies_it_and_an_empty_drag_is_dropped() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Pods,
@@ -1473,6 +1494,7 @@ async fn a_drag_over_visible_text_copies_it_and_an_empty_drag_is_dropped() {
 
 #[tokio::test]
 async fn clicking_a_context_chip_opens_the_picker_or_switches_context() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     *app.context_chip_rects.borrow_mut() = vec![
         (Rect::new(0, 1, 10, 1), ":ctx".into()),
@@ -1502,6 +1524,7 @@ async fn clicking_a_context_chip_opens_the_picker_or_switches_context() {
 
 #[tokio::test]
 async fn yaml_view_keys_scroll_copy_edit_and_share() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let content: String = (0..40).map(|i| format!("k{i}: v\n")).collect();
     app.active_view = ActiveView::Yaml(YamlViewState::new(
@@ -1560,6 +1583,7 @@ async fn yaml_view_keys_scroll_copy_edit_and_share() {
 
 #[tokio::test]
 async fn describe_view_keys_scroll_copy_and_share() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let content: String = (0..40).map(|i| format!("Line {i}\n")).collect();
     app.active_view = ActiveView::Describe(DescribeViewState::new(
@@ -1603,6 +1627,7 @@ async fn describe_view_keys_scroll_copy_and_share() {
 
 #[tokio::test]
 async fn logs_view_keys_toggle_flags_scroll_save_copy_and_share() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut logs = LogsViewState::new(
         "web-0".into(),
@@ -1660,6 +1685,7 @@ async fn logs_view_keys_toggle_flags_scroll_save_copy_and_share() {
 
 #[tokio::test]
 async fn port_forward_view_keys_copy_share_and_stop_a_forward() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::PortForwards(port_forwards());
 
@@ -1707,6 +1733,7 @@ async fn port_forward_view_keys_copy_share_and_stop_a_forward() {
 
 #[tokio::test]
 async fn helm_view_keys_navigate_and_copy_release_links() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Helm(helm_releases());
 
@@ -1737,6 +1764,7 @@ async fn helm_view_keys_navigate_and_copy_release_links() {
 
 #[tokio::test]
 async fn toolbox_keys_copy_the_tool_path_or_name() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Toolbox(toolbox());
 
@@ -1795,6 +1823,7 @@ async fn overview_keys_refresh_copy_share_and_summarise() {
 
 #[tokio::test]
 async fn assistant_editing_keys_shape_the_input_buffer() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Assistant;
 
@@ -1867,6 +1896,7 @@ async fn assistant_editing_keys_shape_the_input_buffer() {
 
 #[tokio::test]
 async fn assistant_history_and_slash_suggestions_drive_the_arrow_keys() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Assistant;
     app.assistant_state.prompt_history = vec!["first".into(), "second".into()];
@@ -1914,6 +1944,7 @@ async fn assistant_history_and_slash_suggestions_drive_the_arrow_keys() {
 
 #[tokio::test]
 async fn assistant_scroll_keys_move_the_viewport() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Assistant;
     for i in 0..80 {
@@ -1976,6 +2007,7 @@ async fn submitting_a_query_without_an_api_key_answers_with_setup_guidance() {
 
 #[tokio::test]
 async fn a_configured_provider_starts_a_native_agent_turn() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut settings = AiSettings::default();
     settings.default_provider = AiProvider::OpenAiCompatible;
@@ -2187,6 +2219,7 @@ async fn settings_keys_navigate_toggle_edit_and_save() {
 
 #[tokio::test]
 async fn tree_keys_move_copy_and_open_logs_or_actions() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Tree(tree_view());
 
@@ -2248,6 +2281,7 @@ async fn tree_keys_move_copy_and_open_logs_or_actions() {
 
 #[tokio::test]
 async fn node_inspector_keys_navigate_pods_and_offer_node_actions() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.nav_stack
         .push(ActiveView::Table(table_with(ResourceKind::Nodes, vec![])));
@@ -2328,6 +2362,7 @@ async fn node_inspector_keys_navigate_pods_and_offer_node_actions() {
 
 #[tokio::test]
 async fn node_inspector_without_pods_targets_the_node_and_toggles_uncordon() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut details = node_details("gpu-1", true);
     details.pods.clear();
@@ -2365,6 +2400,7 @@ async fn node_inspector_without_pods_targets_the_node_and_toggles_uncordon() {
 
 #[tokio::test]
 async fn node_inspector_enter_and_l_jump_to_the_highlighted_pod() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::NodeInspector(inspector_with_details("gpu-1", false));
     app.handle_key_event(common::ch('j')).await;
@@ -2393,6 +2429,7 @@ async fn node_inspector_enter_and_l_jump_to_the_highlighted_pod() {
 
 #[tokio::test]
 async fn filters_apply_and_clear_in_every_text_view() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::Describe(DescribeViewState::new(
@@ -2458,6 +2495,7 @@ async fn filters_apply_and_clear_in_every_text_view() {
 
 #[tokio::test]
 async fn pasted_text_lands_in_the_active_input() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.input_mode = InputMode::Command;
@@ -2526,6 +2564,7 @@ async fn pasted_text_lands_in_the_active_input() {
 
 #[tokio::test]
 async fn colon_commands_open_tree_actions_and_metrics_for_the_selected_row() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::Table(table_with(
@@ -2605,6 +2644,7 @@ async fn colon_commands_open_tree_actions_and_metrics_for_the_selected_row() {
 
 #[tokio::test]
 async fn colon_commands_open_the_reason_rail_clear_ai_and_fall_back_to_fuzzy_matches() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::Table(table_with(
@@ -2647,6 +2687,7 @@ async fn colon_commands_open_the_reason_rail_clear_ai_and_fall_back_to_fuzzy_mat
 
 #[tokio::test]
 async fn view_targets_open_pickers_help_quit_and_deep_links() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.namespaces = vec!["default".into(), "kube-system".into()];
     app.active_namespace = "kube-system".into();
@@ -2701,6 +2742,7 @@ async fn view_targets_open_pickers_help_quit_and_deep_links() {
 
 #[tokio::test]
 async fn deep_links_switch_namespace_select_rows_or_filter_for_missing_rows() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.resource_cache.insert(
         ("test-cluster".into(), "prod".into(), "pods".into()),
@@ -2768,6 +2810,7 @@ async fn deep_links_switch_namespace_select_rows_or_filter_for_missing_rows() {
 
 #[tokio::test]
 async fn switching_to_a_crd_uses_cached_instances_and_discovered_columns() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut discovered = CrdMeta {
         crd_name: "widgets.example.io".into(),
@@ -2825,6 +2868,7 @@ async fn switching_to_a_crd_uses_cached_instances_and_discovered_columns() {
 
 #[tokio::test]
 async fn crd_live_watch_channel_management_and_stream_updates() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_context = "test-cluster".into();
     app.active_namespace = "default".into();
@@ -2925,6 +2969,7 @@ fn cached_pod_spec(name: &str) -> Value {
 
 #[tokio::test]
 async fn a_multi_container_pod_prompts_for_the_container_before_logs_or_shell() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.resource_cache.insert(
         ("test-cluster".into(), "default".into(), "Pods".into()),
@@ -2964,6 +3009,7 @@ async fn a_multi_container_pod_prompts_for_the_container_before_logs_or_shell() 
 
 #[tokio::test]
 async fn a_single_or_unknown_container_pod_goes_straight_to_logs_or_shell() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.resource_cache.insert(
         ("test-cluster".into(), "default".into(), "Pods".into()),
@@ -3030,6 +3076,7 @@ async fn a_single_or_unknown_container_pod_goes_straight_to_logs_or_shell() {
 
 #[tokio::test]
 async fn opening_a_resource_tree_without_a_cluster_reports_the_error_through_the_event_loop() {
+    let _settings = common::env::isolate_settings();
     let (mut app, mut rx) = common::app().await;
     app.open_resource_tree("Deployment".into(), "web".into(), Some("default".into()));
     assert!(matches!(&app.active_view, ActiveView::Tree(t) if t.is_loading));
@@ -3063,6 +3110,7 @@ async fn opening_a_resource_tree_without_a_cluster_reports_the_error_through_the
 
 #[tokio::test]
 async fn opening_the_node_inspector_seeds_history_and_reports_the_connection_error() {
+    let _settings = common::env::isolate_settings();
     let (mut app, mut rx) = common::app().await;
     app.node_metrics_history.insert(
         "gpu-1".into(),
@@ -3111,6 +3159,7 @@ async fn opening_the_node_inspector_seeds_history_and_reports_the_connection_err
 
 #[tokio::test]
 async fn ai_palette_actions_prefill_the_assistant_prompt() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let cases = [
         (
@@ -3141,6 +3190,7 @@ async fn ai_palette_actions_prefill_the_assistant_prompt() {
 
 #[tokio::test]
 async fn navigation_palette_actions_open_the_matching_view_or_modal() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.modal = Some(palette(
@@ -3250,6 +3300,7 @@ async fn navigation_palette_actions_open_the_matching_view_or_modal() {
 
 #[tokio::test]
 async fn the_palette_filter_narrows_what_enter_runs() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(ResourceTableState::new(ResourceKind::Nodes));
     let make = |filter: &str, selected_idx: usize| Modal::ActionPalette {
@@ -3287,6 +3338,7 @@ async fn the_palette_filter_narrows_what_enter_runs() {
 
 #[tokio::test]
 async fn confirmed_actions_without_a_cluster_report_a_connection_error() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Pods,
@@ -3346,6 +3398,7 @@ async fn confirmed_actions_without_a_cluster_report_a_connection_error() {
 
 #[tokio::test]
 async fn scale_and_port_forward_modals_run_on_enter() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Table(table_with(
         ResourceKind::Deployments,
@@ -3403,6 +3456,7 @@ async fn scale_and_port_forward_modals_run_on_enter() {
 
 #[tokio::test]
 async fn the_overview_starts_from_cached_data_and_live_updates_replace_it() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.cluster_overview_data = Some(overview_data());
     app.cluster_version = "v1.31.0".into();
@@ -3439,6 +3493,7 @@ async fn the_overview_starts_from_cached_data_and_live_updates_replace_it() {
 
 #[tokio::test]
 async fn the_overview_falls_back_to_header_counts_without_cached_data() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.cluster_overview_data = None;
     app.node_count = 4;
@@ -3455,6 +3510,7 @@ async fn the_overview_falls_back_to_header_counts_without_cached_data() {
 
 #[tokio::test]
 async fn node_ssh_opens_modal_and_executes_suspend_action() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     app.active_view = ActiveView::Table(table_with(
@@ -3491,6 +3547,7 @@ async fn node_ssh_opens_modal_and_executes_suspend_action() {
 
 #[tokio::test]
 async fn test_node_ssh_modal_cursor_navigation() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _) = common::app().await;
 
     // Open NodeSsh modal with "worker-1" and "10.0.1.20"
@@ -3659,6 +3716,7 @@ async fn test_node_ssh_modal_cursor_navigation() {
 
 #[tokio::test]
 async fn crd_table_view_renders_without_loading_and_updates_live() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.crds = vec![
         CrdMeta {
@@ -3758,6 +3816,7 @@ async fn crd_table_view_renders_without_loading_and_updates_live() {
 
 #[tokio::test]
 async fn crd_table_drilldown_switches_view_and_triggers_fetch() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let vm_crd = CrdMeta {
         crd_name: "virtualmachines.kubevirt.io".into(),
@@ -3793,6 +3852,7 @@ async fn crd_table_drilldown_switches_view_and_triggers_fetch() {
 
 #[tokio::test]
 async fn crd_stream_error_payload_and_instances_failed_clears_loading() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let vm_crd = CrdMeta {
         crd_name: "virtualmachines.kubevirt.io".into(),

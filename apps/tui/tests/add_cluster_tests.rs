@@ -163,6 +163,7 @@ users:
 
 #[tokio::test]
 async fn test_add_cluster_modal_bracketed_paste() {
+    let _settings = common::env::isolate_settings();
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
     let initial_config = temp.path().join("config");
@@ -199,6 +200,7 @@ async fn test_add_cluster_modal_bracketed_paste() {
 
 #[tokio::test]
 async fn test_add_cluster_modal_oversized_paste() {
+    let _settings = common::env::isolate_settings();
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
     let initial_config = temp.path().join("config");
@@ -361,6 +363,7 @@ fn test_import_deep_link_parse_and_to_url() {
 
 #[tokio::test]
 async fn test_execute_colon_command_import_and_aliases() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     // Execute :import
@@ -393,6 +396,7 @@ async fn test_execute_colon_command_import_and_aliases() {
 
 #[tokio::test]
 async fn test_context_picker_shortcuts_open_add_cluster_modal() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     // Open context picker
@@ -420,6 +424,7 @@ async fn test_context_picker_shortcuts_open_add_cluster_modal() {
 
 #[tokio::test]
 async fn test_add_cluster_modal_key_editing_and_navigation() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     // Open modal directly

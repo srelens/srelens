@@ -65,3 +65,22 @@ impl Drop for EnvGuard {
         }
     }
 }
+
+/// Keep both configuration files private for the full lifetime of a test's App.
+/// Construct this before the App so it is dropped after settings-sensitive work.
+pub fn isolate_settings() -> SettingsGuard {
+    let mut env = lock();
+    let dir = tempfile::tempdir().expect("scratch configuration directory");
+    env.set("SRELENS_AI_SETTINGS_PATH", dir.path().join("ai_settings.json"));
+    env.set("SRELENS_TUI_CONFIG_PATH", dir.path().join("tui.json"));
+    SettingsGuard {
+        _env: env,
+        _dir: dir,
+    }
+}
+
+pub struct SettingsGuard {
+    // Restore the environment before deleting the files it pointed at.
+    _env: EnvGuard,
+    _dir: tempfile::TempDir,
+}

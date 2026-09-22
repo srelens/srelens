@@ -1325,6 +1325,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_port_forward_lifecycle_and_view_sync() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::commands::ResourceKind;
@@ -1395,6 +1396,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pod_port_forward_indication_and_close_key() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
@@ -1517,6 +1519,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mouse_click_close_port_forward_button() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
@@ -2755,6 +2758,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cluster_events_stream_and_warning_triage() {
+        let _settings = crate::common::env::isolate_settings();
         use srelens_tui::app::{ActiveView, App};
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -2900,6 +2904,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_crd_dynamic_printer_columns_kubectl_parity() {
+        let _settings = crate::common::env::isolate_settings();
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::commands::{resolve_command_with_crds, CrdMeta, PrinterColumn};
         use srelens_tui::views::resource_table::extract_field_str;
@@ -4467,6 +4472,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_slash_commands_and_ai_playbooks() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::ai_skills::expand_slash_command;
         use srelens_tui::app::{ActiveView, App};
@@ -4571,6 +4577,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_action_palette_playbooks() {
+        let _settings = crate::common::env::isolate_settings();
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::dialogs::{Modal, QuickActionId};
 
@@ -4657,6 +4664,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unreachable_cluster_timeout_triggers_cracked_lens() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
@@ -4722,6 +4730,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_overview_summarise_cluster_health_hotkey() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::views::overview_view::{ClusterOverviewData, OverviewViewState};
@@ -4780,6 +4789,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_reason_rail_inline_and_modal_filtering() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
@@ -4857,6 +4867,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_panel_modal_and_timeline() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
@@ -5190,6 +5201,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_assistant_typing_character_n_and_other_keys() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::{ActiveView, App};
 
@@ -6465,6 +6477,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_autocomplete_navigation_and_selection() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::commands::{CrdMeta, ResourceKind};
@@ -6571,6 +6584,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_crd_settings_vs_ai_settings_autocomplete_and_resolution() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::commands::{
@@ -6728,6 +6742,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_inspector_cordon_typed_confirmation_and_streamlined_hints() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::dialogs::Modal;
@@ -7846,6 +7861,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_helm_views_navigation_and_interactions() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::ui::Modal;
@@ -8122,6 +8138,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_views_navigation_and_interactions() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::{ActiveView, App};
@@ -8380,6 +8397,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_colon_command_with_namespace_argument() {
+        let _settings = crate::common::env::isolate_settings();
         use srelens_tui::app::{ActiveView, App};
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -8413,6 +8431,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_confirm_modal_with_eks_arn_context() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::App;
         use srelens_tui::ui::dialogs::Modal;
@@ -8479,6 +8498,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_view_renders_loading_error_empty_hub_and_table_states() {
+        let _settings = crate::common::env::isolate_settings();
         use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::views::argo_view::ArgoViewState;
@@ -8552,6 +8572,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_detail_view_renders_all_tabs() {
+        let _settings = crate::common::env::isolate_settings();
         use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::{ActiveView, App};
         use srelens_tui::views::argo_detail_view::{ArgoDetailTab, ArgoDetailViewState};
@@ -8646,6 +8667,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_sync_and_toggle_auto_confirm_modals_render() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::{ActiveView, App};
@@ -8715,6 +8737,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_list_and_detail_key_handlers_exercise_side_panels_safely() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::{ActiveView, App};

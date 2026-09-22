@@ -111,3 +111,57 @@ fn every_env_write_in_the_tui_tests_goes_through_the_shared_guard() {
         offenders.join("\n  ")
     );
 }
+
+#[test]
+fn a_panicking_guard_restores_the_environment_and_the_next_lock_recovers() {
+    const NAME: &str = "SRELENS_ENV_GUARD_TEST_PANIC";
+    let mut env = common::env::lock();
+    let before = std::env::var_os(NAME);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        env.set(NAME, "first");
+        env.remove(NAME);
+        env.set(NAME, "last");
+        panic!("exercise guard unwinding");
+    }));
+    assert!(panic.is_err());
+    let _next = common::env::lock();
+    assert!(std::env::var_os(NAME) == before);
+}
+
+#[test]
+fn settings_readers_share_the_guard_with_environment_writers() {
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let functions =
+        regex::Regex::new(r"(?m)^([ ]*)(?:async )?fn (\w+)\([^\n]*\).*\{").unwrap();
+    let readers = regex::Regex::new(
+        r"App::new\(|\bapp\(\)\.await|app_with\(|AiSettings::load\(|TuiConfig::load\(",
+    )
+    .unwrap();
+    let guards =
+        regex::Regex::new(r"(?:env::lock|isolate_ai_settings|isolate_settings)\(\)").unwrap();
+    let mut offenders = Vec::new();
+    for file in [
+        "tui_tests.rs",
+        "app_state_tests.rs",
+        "app_input_tests.rs",
+        "add_cluster_tests.rs",
+    ] {
+        let source = std::fs::read_to_string(tests.join(file)).unwrap();
+        // Each test function ends at a closing brace with its declaration's
+        // indentation; nested blocks are indented further.
+        for function in functions.captures_iter(&source) {
+            let rest = &source[function.get(0).unwrap().end()..];
+            let end = regex::Regex::new(&format!(r"(?m)^{}\}}", &function[1])).unwrap();
+            let body = &rest[..end.find(rest).expect("function closing brace").start()];
+            if let Some(reader) = readers.find(body) {
+                if !guards.find(body).is_some_and(|guard| guard.start() < reader.start()) {
+                    offenders.push(format!("{file}:{}", &function[2]));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "hold a settings guard before reading configuration and through the test: {offenders:?}"
+    );
+}
