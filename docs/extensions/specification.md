@@ -19,6 +19,43 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Field reference
   chosen kubeconfig contexts; on the others it is hidden and the host refuses its reads
   and actions.
 
+## Unsigned-app policy
+
+Settings → Apps stores **Allow unsigned apps to modify clusters and run code**
+(`allowUnsignedApps`) in the extension inventory. It is **off by default**.
+
+- Read-only declarative apps from any source, including unsigned local and catalog
+  manifests, need their normal permission grants only.
+- An app declaring any write action needs either a cryptographically verified
+  publisher signature or this setting. Source labels, catalog membership, repository
+  URLs, app IDs, and granted permission strings do not establish publisher trust.
+  Signature proofs are checked again whenever installed apps are loaded.
+- Install, update, enable, and rollback enforce the policy in the host. A permission
+  review alone cannot authorize an unsigned writer. Validation reports the setting
+  needed before installation.
+- Turning the setting off disables affected apps without uninstalling them or
+  removing their grants, settings, cluster scope, or version history. Apps shows the
+  reason in `policyBlocked`, separate from a failed-signature `quarantined` reason.
+  Turning the setting back on does not re-enable apps: enable each app explicitly.
+- Every new read, resource inspection, or action through the broker checks the latest
+  inventory, including calls through registrations created before the setting changed.
+  Calls already admitted may finish. The generic `PluginHost` binding primitive is
+  used by the trusted installer; production invocation passes through this broker.
+- Existing inventories without `allowUnsignedApps` migrate to false. Legacy
+  `developerMode: true` does not grant the new permission. Legacy disabled entries
+  remain disabled. The next atomic save persists the policy; transient denial reasons
+  are recomputed, never trusted from disk.
+- All executable apps without a verified publisher require the same policy even if
+  they declare no writes. **This host does not yet support executable apps**: its
+  manifest parser rejects executable kinds regardless of this setting. A future
+  runtime must extend the exhaustive kind classifier and enforce this gate before
+  admitting code; enabling this setting does not enable an SDK or runtime today.
+
+The configuration payload is
+`{"action":"unsignedApps","allowUnsignedApps":true}` through the existing
+confirm-gated `extensions.configure` capability. The setting never replaces normal
+permission grants, action confirmation, cluster scoping, or manifest validation.
+
 ## Terms
 
 - **Extension API version**: the version of this contract, in SemVer form
@@ -222,6 +259,9 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ### 0.3.0
 
+- Unsigned apps declaring write actions require the default-off inventory policy
+  described above (#558). Turning it off disables affected installations without
+  removing them; normal read-only declarative permission grants are unchanged.
 - The host supports only API 0.3; API 0.1 and 0.2 manifests are incompatible.
 - Flux and Argo CD actions are declared by manifests, with their target reader,
   primitive write binding, confirmation metadata and availability predicates.

@@ -1303,3 +1303,19 @@ it("reports a failed availability read and retries instead of excluding an unrea
   fireEvent.click(await screen.findByRole("button", { name: "Reconcile" }));
   expect(screen.getByTestId("host-confirm-target").textContent).toBe("3 resources");
 });
+
+it("persists the unsigned apps policy and explains affected apps without removing them", async () => {
+  const blocked = { ...plugin, enabled: false, source: "catalog", policyBlocked: 'Turn on "Allow unsigned apps to modify clusters and run code" in Settings → Apps to enable this app.' };
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, allowUnsignedApps: false, plugins: [blocked] } as any);
+  render(<ExtensionManager />);
+  const policy = await screen.findByLabelText("Allow unsigned apps to modify clusters and run code") as HTMLInputElement;
+  expect(policy.checked).toBe(false);
+  expect((screen.getByLabelText("Enable GitOps") as HTMLInputElement).disabled).toBe(true);
+  expect(screen.getByText(/Disabled: Turn on/)).toBeTruthy();
+  expect(screen.getByText("Remove")).toBeTruthy();
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, allowUnsignedApps: true, plugins: [{ ...plugin, enabled: false, source: "catalog" }] } as any);
+  fireEvent.click(policy);
+  await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "unsignedApps", allowUnsignedApps: true }));
+  await waitFor(() => expect(policy.checked).toBe(true));
+  expect((screen.getByLabelText("Enable GitOps") as HTMLInputElement).checked).toBe(false);
+});
