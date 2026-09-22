@@ -51,6 +51,8 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     "k8s.setFields",
     "k8s.setStatusCondition",
     "k8s.mergePatch",
+    "k8s.requestRolloutRestart",
+    "k8s.requestCordonNode",
     "k8s.deleteContext",
     "k8s.helmRepoAdd",
     "k8s.helmRepoUpdate",

@@ -349,14 +349,17 @@ fn validate_app(
     let mut problems = manifest.validate().err().unwrap_or_default();
     for (index, binding) in manifest.capabilities.iter().enumerate() {
         let at = format!("capabilities[{index}]");
-        if !matches!(
-            binding.target.as_str(),
-            "k8s.listCustomResource" | "k8s.listEvents"
-        ) {
+        let builtin = srelens_plugin_host::builtin_reader_identity(&binding.target);
+        if builtin.is_none()
+            && !matches!(
+                binding.target.as_str(),
+                "k8s.listCustomResource" | "k8s.listEvents"
+            )
+        {
             problems.push(
                 Code::UnsupportedTarget,
                 format!("{at}.target"),
-                "This app version supports only k8s.listCustomResource and k8s.listEvents readers",
+                "This host supports custom-resource, event, and narrow workload/node summary readers",
             );
             continue;
         }
@@ -390,6 +393,17 @@ fn validate_app(
             }
         }
         let accepts = |key: &str| binding.inputs.iter().any(|input| input == key);
+        if let Some(identity) = builtin {
+            let namespaced = identity["namespaced"] == true;
+            if !binding.arguments.is_empty()
+                || !accepts("context")
+                || accepts("namespace") != namespaced
+            {
+                problems.push(Code::InvalidBinding, format!("{at}.arguments"),
+                    "Built-in summary readers take no bound arguments and accept context plus namespace only for workloads");
+            }
+            continue;
+        }
         if binding.target == "k8s.listEvents" {
             if !binding.arguments.is_empty() {
                 problems.push(
@@ -473,6 +487,22 @@ fn validate_app(
                 ),
             );
             continue;
+        }
+        if manifest
+            .capabilities
+            .iter()
+            .find(|b| b.name == action.resource)
+            .is_some_and(|b| srelens_plugin_host::builtin_reader_identity(&b.target).is_some())
+            && !matches!(
+                action.target.as_str(),
+                "k8s.requestRolloutRestart" | "k8s.requestCordonNode"
+            )
+        {
+            problems.push(
+                Code::UnsupportedTarget,
+                at.clone(),
+                "Built-in readers scope only reviewed workload restart or node cordon actions",
+            );
         }
         if core.get(&action.target).is_none() {
             problems.push(
@@ -1876,6 +1906,67 @@ mod tests {
         value["contributions"]["pages"][1]["capability"] = json!("events");
         let invalid = Manifest::parse(&value.to_string()).unwrap();
         assert!(validate_app(&invalid, &grants, core).is_err());
+    }
+
+    #[test]
+    fn builtin_actions_are_narrowly_bound_to_host_reader_identity() {
+        let core = Arc::new(crate::build_registry_with_paths(
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            vec![],
+        ));
+        for (reader, target, arguments) in [
+            (
+                "k8s.listDeployments",
+                "k8s.requestRolloutRestart",
+                json!({}),
+            ),
+            (
+                "k8s.listStatefulSets",
+                "k8s.requestRolloutRestart",
+                json!({}),
+            ),
+            ("k8s.listDaemonSets", "k8s.requestRolloutRestart", json!({})),
+            (
+                "k8s.listNodes",
+                "k8s.requestCordonNode",
+                json!({"unschedulable":true}),
+            ),
+            (
+                "k8s.listNodes",
+                "k8s.requestCordonNode",
+                json!({"unschedulable":false}),
+            ),
+        ] {
+            let mut source: Value = serde_json::from_str(&manifest()).unwrap();
+            source["contributions"] = json!({"pages":[],"detailTabs":[],"detailLinks":[]});
+            source["permissions"] = json!([reader, target]);
+            source["capabilities"] = json!([{"name":"objects","title":"Objects","target":reader,"arguments":{},
+                "inputs":if reader == "k8s.listNodes" {vec!["context"]} else {vec!["context","namespace"]}}]);
+            source["actions"] = json!([{"name":"request","title":"Request","target":target,"resource":"objects","arguments":arguments}]);
+            let parsed = Manifest::parse(&source.to_string()).unwrap();
+            let grants = parsed.permissions.clone();
+            validate_app(&parsed, &grants, core.clone()).unwrap();
+            assert!(validate_app(&parsed, &[reader.into()], core.clone()).is_err());
+            for denied in [
+                "k8s.annotate",
+                "k8s.setFields",
+                "k8s.mergePatch",
+                "k8s.drainNode",
+            ] {
+                let mut wrong = source.clone();
+                wrong["permissions"] = json!([reader, denied]);
+                wrong["actions"][0]["target"] = json!(denied);
+                let wrong = Manifest::parse(&wrong.to_string()).unwrap();
+                assert!(
+                    validate_app(&wrong, &wrong.permissions, core.clone()).is_err(),
+                    "{reader}: {denied}"
+                );
+            }
+            let mut forged = source.clone();
+            forged["capabilities"][0]["arguments"] = json!({"group":"evil.io","kind":"Secret"});
+            let forged = Manifest::parse(&forged.to_string()).unwrap();
+            assert!(validate_app(&forged, &grants, core.clone()).is_err());
+        }
     }
 
     /// An app's readers and its declared actions are separate grants against
