@@ -2,6 +2,39 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "ActionBinding": {
+      "additionalProperties": false,
+      "description": "One declared mutation: a host action primitive, the reader binding whose kind it acts on, and the arguments that fix what it writes.\n\nThere is no `preconditions` field yet — #550 adds it, and #551 is what moves the Flux and Argo CD actions in core into manifests that use both.",
+      "properties": {
+        "arguments": {
+          "additionalProperties": true,
+          "description": "What this action writes, fixed at install time.",
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "resource": {
+          "description": "The name of a reader binding in `capabilities`. The action acts on that binding's kind and on no other.",
+          "type": "string"
+        },
+        "target": {
+          "description": "A host action primitive, e.g. `k8s.annotate`.",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "arguments",
+        "name",
+        "resource",
+        "target",
+        "title"
+      ],
+      "type": "object"
+    },
     "Binding": {
       "additionalProperties": false,
       "properties": {
@@ -251,6 +284,13 @@
         "string",
         "null"
       ]
+    },
+    "actions": {
+      "description": "Declared mutations (#549). Absent in a manifest that only reads, and left out of the serialized form when empty so a manifest stored and signed without it still round-trips to its own bytes.",
+      "items": {
+        "$ref": "#/definitions/ActionBinding"
+      },
+      "type": "array"
     },
     "capabilities": {
       "items": {

@@ -31,6 +31,11 @@ spec:
   - name: v1
     served: true
     storage: true
+    # Upstream's Kustomization has one, and #549's `k8s.setStatusCondition`
+    # writes through it: without the subresource, a patch to `/status` is a
+    # 404 and the primitive could not be exercised against a real API server.
+    subresources:
+      status: {}
     schema:
       openAPIV3Schema:
         type: object

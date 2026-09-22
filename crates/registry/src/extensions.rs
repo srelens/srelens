@@ -458,6 +458,30 @@ fn validate_app(
             ),
         }
     }
+    // A declared action binds a host action primitive (#549) and nothing else.
+    // The readers above and these are separate grants: `k8s.annotate` in
+    // `permissions` buys an action, never a reader, and the reverse.
+    for (index, action) in manifest.actions.iter().enumerate() {
+        let at = format!("actions[{index}].target");
+        if !srelens_kube::action_primitives::PRIMITIVES.contains(&action.target.as_str()) {
+            problems.push(
+                Code::UnsupportedTarget,
+                at,
+                format!(
+                    "An action binds a host action primitive: {}",
+                    srelens_kube::action_primitives::PRIMITIVES.join(", ")
+                ),
+            );
+            continue;
+        }
+        if core.get(&action.target).is_none() {
+            problems.push(
+                Code::UnsupportedTarget,
+                at,
+                "This host does not provide the action primitive",
+            );
+        }
+    }
     // Built-in groups such as apps are not custom resources, whatever their syntax.
     let groups: Vec<_> = crd::group_problems(manifest)
         .0
@@ -563,6 +587,24 @@ fn validate_app(
         }
         let found: Vec<_> = host
             .binding_problems(index, binding)
+            .into_iter()
+            .filter(|found| !problems.0.iter().any(|p| p.path == found.path))
+            .collect();
+        problems.0.extend(found);
+    }
+    // And each declared action against the primitive it names, which is where
+    // the primitive's own rules for a bound template are applied.
+    for (index, action) in manifest.actions.iter().enumerate() {
+        let target = format!("actions[{index}].target");
+        if problems
+            .0
+            .iter()
+            .any(|p| p.code == Code::UnsupportedTarget && p.path == target)
+        {
+            continue;
+        }
+        let found: Vec<_> = host
+            .action_problems(index, manifest, action)
             .into_iter()
             .filter(|found| !problems.0.iter().any(|p| p.path == found.path))
             .collect();
@@ -1834,6 +1876,65 @@ mod tests {
         value["contributions"]["pages"][1]["capability"] = json!("events");
         let invalid = Manifest::parse(&value.to_string()).unwrap();
         assert!(validate_app(&invalid, &grants, core).is_err());
+    }
+
+    /// An app's readers and its declared actions are separate grants against
+    /// separate host capabilities (#549): a reader still cannot bind a write,
+    /// and an action can only bind one of the host's action primitives.
+    #[test]
+    fn declared_actions_bind_the_host_primitives_and_nothing_else() {
+        let core = Arc::new(crate::build_registry_with_paths(
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            vec![],
+        ));
+        let mut value: Value =
+            serde_json::from_str(include_str!("../../../examples/extensions/argocd.json")).unwrap();
+        value["permissions"] = json!(["k8s.listCustomResource", "k8s.annotate"]);
+        value["actions"] = json!([{
+            "name":"refresh", "title":"Refresh", "target":"k8s.annotate", "resource":"applications",
+            "arguments":{"key":"argocd.argoproj.io/refresh","value":"normal"}
+        }]);
+        let grants = vec!["k8s.listCustomResource".into(), "k8s.annotate".into()];
+        let parsed = Manifest::parse(&value.to_string()).unwrap();
+        validate_app(&parsed, &grants, core.clone()).unwrap();
+
+        // The action target has to be granted like any other permission.
+        assert!(validate_app(&parsed, &["k8s.listCustomResource".into()], core.clone()).is_err());
+
+        // A reader binding still cannot dispatch a write.
+        let mut writing_reader = value.clone();
+        writing_reader["capabilities"][0]["target"] = json!("k8s.annotate");
+        writing_reader["capabilities"][0]["arguments"] =
+            json!({"key":"a.example.io/b","value":"$now"});
+        writing_reader["permissions"] = json!(["k8s.annotate"]);
+        let parsed = Manifest::parse(&writing_reader.to_string()).unwrap();
+        let refused = validate_app(&parsed, &["k8s.annotate".into()], core.clone()).unwrap_err();
+        assert!(
+            refused
+                .0
+                .iter()
+                .any(|p| p.code == Code::UnsupportedTarget && p.path == "capabilities[0].target"),
+            "{refused}"
+        );
+
+        // And an action cannot bind a host mutation that is not a primitive.
+        let mut wrong = value;
+        wrong["actions"][0]["target"] = json!("k8s.deletePod");
+        wrong["permissions"] = json!(["k8s.listCustomResource", "k8s.deletePod"]);
+        let parsed = Manifest::parse(&wrong.to_string()).unwrap();
+        let refused = validate_app(
+            &parsed,
+            &["k8s.listCustomResource".into(), "k8s.deletePod".into()],
+            core,
+        )
+        .unwrap_err();
+        assert!(
+            refused
+                .0
+                .iter()
+                .any(|p| p.code == Code::UnsupportedTarget && p.path == "actions[0].target"),
+            "{refused}"
+        );
     }
 
     #[test]

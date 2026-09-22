@@ -7,6 +7,10 @@ import { paletteActionCapabilityIds } from "./paletteActions";
 // fail CI until they are either palette-registered or excluded here.
 const EXCLUDED: Record<string, string> = {
   "k8s.gitOpsAction": "requires a selected resource and reviewed UID/resourceVersion in the Apps inspector",
+  "k8s.annotate": "a host action primitive: reached only through an app's declared action, on a reviewed resource",
+  "k8s.setFields": "a host action primitive: reached only through an app's declared action, on a reviewed resource",
+  "k8s.setStatusCondition": "a host action primitive: reached only through an app's declared action, on a reviewed resource",
+  "k8s.mergePatch": "a host action primitive: reached only through an app's declared action, on a reviewed resource",
   "k8s.nodeServiceRestart": "node service remediation is surfaced in Node view / incident actions and requires an SSH target",
   "extensions.action": "host-owned app resource actions use explicit confirmation in the Apps inspector",
   "extensions.configure": "extension lifecycle and permissions are managed in Settings → Apps",

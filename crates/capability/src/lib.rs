@@ -23,6 +23,12 @@ pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 pub type Handler =
     Arc<dyn Fn(Value) -> BoxFuture<Result<Value, CapabilityError>> + Send + Sync>;
 
+/// A capability's own rules for the arguments a manifest may bind to it, for
+/// the rules an input schema cannot state. Returns why the binding is not one
+/// this capability accepts.
+pub type BoundArguments =
+    Arc<dyn Fn(&serde_json::Map<String, Value>) -> Result<(), String> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Capability {
     pub id: String,
@@ -31,6 +37,19 @@ pub struct Capability {
     pub input_schema: Value,
     pub output_schema: Value,
     pub handler: Handler,
+    /// What a manifest may bind to this capability, beyond the input schema.
+    ///
+    /// A schema says a field is a string; it cannot say that the string is one
+    /// of two substitution tokens, that a JSON pointer stays under `spec`, or
+    /// that a merge patch does not touch `metadata.finalizers`. Those rules
+    /// live with the handler that enforces them (`srelens_kube`'s action
+    /// primitives), and the broker runs the same closure where a binding is
+    /// accepted — at install, and again when a stored app is reverified — so a
+    /// manifest cannot be admitted holding a template the handler would refuse.
+    ///
+    /// `None` for a capability with no such rule, which is all of them but the
+    /// action primitives.
+    pub bound_arguments: Option<BoundArguments>,
 }
 
 impl Capability {
@@ -47,6 +66,7 @@ impl Capability {
             input_schema: Value::Null,
             output_schema: Value::Null,
             handler: Arc::new(move |v| Box::pin(f(v))),
+            bound_arguments: None,
         }
     }
 
@@ -80,7 +100,18 @@ impl Capability {
             input_schema,
             output_schema,
             handler,
+            bound_arguments: None,
         }
+    }
+
+    /// The same capability, with its own rules for what a manifest may bind to
+    /// it. See [`Capability::bound_arguments`].
+    pub fn checking_bound_arguments<F>(mut self, check: F) -> Self
+    where
+        F: Fn(&serde_json::Map<String, Value>) -> Result<(), String> + Send + Sync + 'static,
+    {
+        self.bound_arguments = Some(Arc::new(check));
+        self
     }
 }
 
