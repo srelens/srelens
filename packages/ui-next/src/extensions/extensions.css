@@ -465,3 +465,49 @@
 .extension-bulk-result[data-status="partial"] .extension-bulk-headline { color: var(--warn, var(--fl-color-warning)); }
 .extension-bulk-group { margin-top: 8px; }
 .extension-bulk-group h5 { margin: 0; font-size: inherit; font-weight: 600; }
+/* An action the declared `availableWhen` rules exclude (#550).
+   The control keeps its place and its focus, and the reason it carries is a
+   real element rather than only a `title`: `title` draws on hover alone and
+   the accessibility tree reads it as a description of last resort, so a
+   sighted keyboard user reached the dimmed control and was told nothing.
+   Hidden visually — never with `display: none`, which would take it out of
+   the tree the control's `aria-describedby` points into — and brought on
+   screen while the control has focus. It is positioned rather than laid out,
+   so revealing it does not reflow the row of buttons around it.
+
+   It is anchored to the ROW, across the row's full width and just above it —
+   not to its own button. Anchored to the button and sized to its text, the
+   reason ran off the right edge of a 375px screen for any button in the right
+   half, and from a button that had wrapped onto a second line it sat on top
+   of the buttons above. Spanning the row, it cannot leave the row's bounds
+   and cannot cover one of its buttons; a long reason wraps, and grows upward
+   over the content the row sits under. (#668 review) */
+.extension-actions { position: relative; }
+.extension-action { display: inline-flex; }
+.extension-action-reason {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.extension-action:focus-within .extension-action-reason {
+  width: auto;
+  height: auto;
+  padding: 5px 8px;
+  overflow: visible;
+  clip-path: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  bottom: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 3;
+  border: 1px solid var(--rule, var(--fl-color-border));
+  background: var(--surface, var(--fl-color-surface));
+  color: var(--ink, var(--fl-color-text));
+  font-size: var(--text-meta, 0.6875rem);
+  line-height: 1.35;
+}

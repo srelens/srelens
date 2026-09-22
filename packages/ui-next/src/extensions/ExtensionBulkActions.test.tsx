@@ -1,4 +1,5 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
@@ -175,7 +176,7 @@ describe("bulk actions over an app's resource table", () => {
     fireEvent.click(screen.getByRole("button", { name: "Reconcile 2 resources" }));
     const result = await screen.findByTestId("bulk-result");
     expect(result.getAttribute("data-status")).toBe("failed");
-    expect(result.textContent).toContain("None of the 2");
+    expect(result.textContent).toContain("No acceptance was confirmed for the 2");
   });
 
   it("draws a cluster's reason and an over-long name as plain text that cannot reorder the list", async () => {
@@ -220,4 +221,91 @@ describe("bulk actions over an app's resource table", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("Access denied");
     expect(screen.queryByRole("button", { name: "Reconcile" })).toBeNull();
   });
+});
+
+it.each(["Escape", "Cancel"])("returns keyboard focus after %s closes review", async (close) => {
+  const user = userEvent.setup();
+  render(<ExtensionBulkActions target={target} selection={rows(2)} onClear={vi.fn()} />);
+  const trigger = await screen.findByRole("button", { name: "Reconcile" });
+  trigger.focus();
+  await user.keyboard("{Enter}");
+  const dialog = screen.getByRole("dialog");
+  expect(dialog.contains(document.activeElement)).toBe(true);
+  if (close === "Escape") await user.keyboard("{Escape}");
+  else await user.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+});
+
+it("keeps keyboard focus on the running operation after confirmation", async () => {
+  const held = gate();
+  vi.mocked(actOnExtensionResource).mockImplementation(async () => {
+    await held.promise;
+    return { requested: true };
+  });
+  render(<ExtensionBulkActions target={target} selection={rows(2)} onClear={vi.fn()} />);
+  await openConfirmation();
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile 2 resources" }));
+  expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel remaining" }));
+  await act(async () => held.open());
+});
+
+it.each(["inspection", "transport", "empty"])("reports %s errors as failures without claiming a rejection", async (failure) => {
+  const held = gate();
+  render(<ExtensionBulkActions target={target} selection={rows(2)} onClear={vi.fn()} />);
+  await openConfirmation();
+  if (failure === "inspection") {
+    vi.mocked(inspectExtensionResource).mockImplementation(async (s) => {
+      if (s.name === "app-0") throw new Error("Could not read the resource");
+      return detailFor(s.name);
+    });
+  }
+  vi.mocked(actOnExtensionResource).mockImplementation(async (s) => {
+    if (s.name === "app-0") throw new Error(failure === "empty" ? "" : "Connection lost");
+    await held.promise;
+    return { requested: true };
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile 2 resources" }));
+  await waitFor(() => expect(screen.getByTestId("bulk-item-team/app-0").textContent).toContain("Failed"));
+  expect(screen.getByRole("status").textContent).toBe("1 of 2 completed");
+  await act(async () => held.open());
+  const result = await screen.findByTestId("bulk-result");
+  expect(result.textContent).toContain("1 failed");
+  expect(result.textContent).not.toMatch(/rejected/i);
+  expect(screen.getByTestId("bulk-failures").textContent).toContain(
+    failure === "inspection" ? "Could not read the resource" : failure === "empty" ? "The operation failed without a reason." : "Connection lost",
+  );
+  if (failure === "inspection") expect(vi.mocked(actOnExtensionResource).mock.calls.map(([s]) => s.name)).toEqual(["app-1"]);
+});
+
+it("bounds long failure reasons in both progress and results", async () => {
+  const held = gate();
+  vi.mocked(actOnExtensionResource).mockImplementation(async (s) => {
+    if (s.name === "app-0") throw new Error("x".repeat(1000));
+    await held.promise;
+    return { requested: true };
+  });
+  render(<ExtensionBulkActions target={target} selection={rows(2)} onClear={vi.fn()} />);
+  await openConfirmation();
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile 2 resources" }));
+  const expected = "x".repeat(79) + "…";
+  await waitFor(() => expect(screen.getByTestId("bulk-item-team/app-0").querySelector(".extension-bulk-reason")?.textContent).toBe(expected));
+  await act(async () => held.open());
+  expect((await screen.findByTestId("bulk-failures")).querySelector(".extension-bulk-reason")?.textContent).toBe(expected);
+});
+
+it("stops obsolete availability queues when the selection changes", async () => {
+  const held = gate();
+  const inspected: string[] = [];
+  vi.mocked(inspectExtensionResource).mockImplementation(async (s) => {
+    inspected.push(s.name);
+    if (s.name.startsWith("app-")) await held.promise;
+    return detailFor(s.name);
+  });
+  const view = render(<ExtensionBulkActions target={target} selection={rows(12)} onClear={vi.fn()} />);
+  await waitFor(() => expect(inspected).toHaveLength(4));
+  view.rerender(<ExtensionBulkActions target={target} selection={[{namespace:"team",name:"new"}]} onClear={vi.fn()} />);
+  await screen.findByRole("button", { name: "Reconcile" });
+  await act(async () => held.open());
+  expect(inspected).toEqual(["app-0", "app-1", "app-2", "app-3", "new"]);
 });

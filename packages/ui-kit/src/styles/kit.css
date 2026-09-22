@@ -200,7 +200,12 @@
   .btn[data-size="icon"] { width: 28px; height: 26px; }
   .btn[data-size="icon-lg"] { width: 32px; height: 30px; }
 
-  .btn:disabled, .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  /* `aria-disabled` looks the same as `disabled` and stays focusable, which
+     is what a control that must also explain itself needs: a keyboard and a
+     screen reader can reach it and read the reason. The caller ignores the
+     click; the appearance is the kit's. */
+  .btn:disabled, .icon-btn:disabled,
+  .btn[aria-disabled="true"], .icon-btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
 
   /* --- badges --------------------------------------------------- */
   .badge {

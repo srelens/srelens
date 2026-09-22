@@ -4,6 +4,8 @@ import {
   inspectExtensionResource,
   renderConfirmTemplate,
   runBulk,
+  unmetPredicate,
+  type ExtensionResourceDetail,
   type BulkProgress,
 } from "@srelens/core";
 import { Button } from "@srelens/ui-kit";
@@ -11,8 +13,8 @@ import { HostConfirmation, boundedPlainText } from "../confirm/HostConfirmation"
 import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
 import { useResource } from "../lib/useResource";
+import { ACTION_AVAILABILITY } from "./actionAvailability";
 import { ACTION_LABELS, isKnownAction } from "./actionLabels";
-import { plainText } from "./displayText";
 import {
   bulkActionResult,
   bulkApplicability,
@@ -57,16 +59,7 @@ export interface ExtensionBulkTarget {
   context: string;
 }
 
-/**
- * Whether one action can run against one resource — **the seam for #550**.
- *
- * Declarative `availableWhen` preconditions are #550's, being implemented
- * alongside this. Nothing here evaluates a predicate: the default is "every
- * selected resource is available", because a host with no predicate to run has
- * no grounds to say an action does not apply. When #550 lands it supplies this
- * function and `applies to 9 of 12` starts telling the truth about a mixed
- * selection without anything else here changing.
- */
+/** Optional additional availability supplied by the table. */
 export type BulkActionAvailability = (action: string, resource: BulkResource) => boolean;
 
 export interface ExtensionBulkActionsProps {
@@ -85,7 +78,7 @@ const STATE_LABEL: Record<BulkProgress<BulkResource>["state"], string> = {
   pending: "Pending",
   running: "Requesting…",
   ok: "Accepted",
-  error: "Rejected",
+  error: "Failed",
   cancelled: "Not requested",
 };
 
@@ -114,20 +107,27 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
   // Who the host says asked: read from its own installed inventory, never from
   // the app. See `confirmationApp.ts`.
   const app = useConfirmationApp({ id: target.id, revision: target.revision });
-  const first = selection[0];
-  const firstKey = first ? bulkResourceKey(first) : "";
-  /**
-   * The host's menu for this KIND, read once from the first selected resource.
-   *
-   * `actions` and `actionMeta` are facts about the capability and the action,
-   * not about the row — the same list and the same level the detail pane shows
-   * for any resource of this binding. Reading one is what lets the bar offer
-   * only what the host would actually run, instead of a button per action this
-   * build happens to have a label for.
-   */
+  const selectionKey = JSON.stringify(selection);
+  const inspectionAbort = useRef<AbortController | null>(null);
+  // Printer columns do not contain the fields predicates address. Inspect the
+  // selection before offering actions, with the same bounded scheduler as writes.
+  // Any failed read blocks review and exposes retry; unread is not unavailable.
   const menu = useResource(
-    async () => (first ? await inspectExtensionResource({ ...target, namespace: first.namespace, name: first.name }) : null),
-    [target.id, target.revision, target.capability, target.context, firstKey],
+    async () => {
+      inspectionAbort.current?.abort();
+      const controller = new AbortController();
+      inspectionAbort.current = controller;
+      const details = new Map<string, ExtensionResourceDetail>();
+      const outcomes = await runBulk(selection, async (resource) => {
+        const detail = await inspectExtensionResource({ ...target, ...resource });
+        details.set(bulkResourceKey(resource), detail);
+        return { ok: true };
+      }, BULK_CONCURRENCY, { signal: controller.signal });
+      const failed = outcomes.find((item) => item.status === "error");
+      if (failed) throw new Error(`${bulkResourceKey(failed.item)}: ${failed.error || "The resource could not be read."}`);
+      return { first: selection[0] ? details.get(bulkResourceKey(selection[0])) : undefined, details };
+    },
+    [target.id, target.revision, target.capability, target.context, selectionKey],
     () => false,
   );
   const [pending, setPending] = useState<string | null>(null);
@@ -136,21 +136,38 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
   const [busy, setBusy] = useState(false);
   const abort = useRef<AbortController | null>(null);
   const alive = useRef(true);
+  const review = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement | null>(null);
+  const cancelRun = useRef<HTMLDivElement>(null);
+  const done = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (pending) review.current?.focus();
+    else if (busy) cancelRun.current?.querySelector("button")?.focus();
+    else if (result) done.current?.querySelector("button")?.focus();
+    else if (trigger.current?.isConnected) trigger.current.focus();
+  }, [pending, busy, result]);
   useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
+      abort.current?.abort();
+      inspectionAbort.current?.abort();
     };
   }, []);
 
-  const offered = (menu.data?.actions ?? []).filter(isKnownAction);
+  const offered = (menu.data?.first?.actions ?? []).filter(isKnownAction);
   const applicability = useMemo(
-    () => bulkApplicability(selection, (resource) => (pending && available ? available(pending, resource) : true)),
-    [selection, pending, available],
+    () => bulkApplicability(selection, (resource) => {
+      if (!pending) return true;
+      if (available) return available(pending, resource);
+      const detail = menu.data?.details.get(bulkResourceKey(resource));
+      return !!detail && !!detail.actions?.includes(pending) && !unmetPredicate(ACTION_AVAILABILITY[pending], detail.resource);
+    }),
+    [selection, pending, available, menu.data],
   );
 
   const label = pending ? ACTION_LABELS[pending] : "";
-  const meta = pending ? menu.data?.actionMeta?.[pending] : undefined;
+  const meta = pending ? menu.data?.first?.actionMeta?.[pending] : undefined;
   /**
    * The host's sentence, where the host's template can be rendered without an
    * object.
@@ -164,7 +181,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
   const question = meta
     ? renderConfirmTemplate(
         meta.confirm,
-        confirmFields({ action: pending ?? undefined, cluster: target.context, kind: menu.data?.resource?.kind }),
+        confirmFields({ action: pending ?? undefined, cluster: target.context, kind: menu.data?.first?.resource?.kind }),
       )
     : null;
 
@@ -183,13 +200,13 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
         ? { ok: true }
         : { error: "The action was not acknowledged; refresh to check the resource." };
     } catch (e) {
-      return { error: e instanceof Error ? e.message : String(e) };
+      return { error: (e instanceof Error ? e.message : String(e)).trim() || "The operation failed without a reason." };
     }
   };
 
   const start = async (action: string) => {
     const items = applicability.applicable;
-    if (items.length === 0) return;
+    if (items.length === 0 || menu.status !== "ready") return;
     const controller = new AbortController();
     abort.current = controller;
     setPending(null);
@@ -222,7 +239,8 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
               variant="outline"
               size="xs"
               disabled={busy || pending !== null}
-              onClick={() => {
+              onClick={(event) => {
+                trigger.current = event.currentTarget;
                 setResult(null);
                 setProgress(null);
                 setPending(action);
@@ -241,8 +259,8 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
         // rather than drawing an empty bar.
         <div className="extension-error" role="alert">
           <div>
-            <strong>Could not read the actions for this kind</strong>
-            <p>{menu.error}</p>
+            <strong>Could not read actions and availability for the selection</strong>
+            <p>{boundedPlainText(menu.error ?? "The resource could not be read.")}</p>
           </div>
           <Button variant="outline" size="xs" onClick={menu.reload}>
             Retry
@@ -250,7 +268,13 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
         </div>
       )}
       {pending !== null && (
-        <div className="extension-action-review" role="dialog" aria-label={`Review ${label} on ${resources(applicability.applicable.length)}`}>
+        <div ref={review} tabIndex={-1} onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            setPending(null);
+          }
+        }} className="extension-action-review" role="dialog" aria-label={`Review ${label} on ${resources(applicability.applicable.length)}`}>
           {/* The one host confirmation (#552), in this screen's own frame. The
               selection is named by its count, which is the only part of the
               question a bulk execution changes. */}
@@ -279,7 +303,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
             actions={
               <>
                 <Button
-                  disabled={applicability.applicable.length === 0}
+                  disabled={applicability.applicable.length === 0 || menu.status !== "ready"}
                   onClick={() => void start(pending)}
                 >
                   {`${label} ${resources(applicability.applicable.length)}`}
@@ -293,11 +317,11 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
         </div>
       )}
       {progress && !result && (
-        <div className="extension-bulk-run">
+        <div className="extension-bulk-run" ref={cancelRun}>
           <div className="extension-bulk-bar">
             <strong role="status">
-              {progress.filter((item) => item.state === "ok" || item.state === "error").length.toLocaleString("en-US")} of{" "}
-              {progress.length.toLocaleString("en-US")} requested
+              {progress.filter((item) => item.state !== "pending" && item.state !== "running").length.toLocaleString("en-US")} of{" "}
+              {progress.length.toLocaleString("en-US")} completed
             </strong>
             <Button
               variant="outline"
@@ -315,7 +339,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
                 <li key={key} data-testid={`bulk-item-${key}`} data-state={item.state}>
                   <span className="extension-bulk-name">{drawResource(key)}</span>
                   <span className="extension-bulk-state">{STATE_LABEL[item.state]}</span>
-                  {item.error && <span className="extension-bulk-reason">{plainText(item.error)}</span>}
+                  {item.error && <span className="extension-bulk-reason">{boundedPlainText(item.error)}</span>}
                 </li>
               );
             })}
@@ -333,17 +357,17 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
             {result.status === "success"
               ? `All ${resources(result.succeeded.length)} were accepted.`
               : result.status === "failed"
-                ? `None of the ${resources(result.succeeded.length + result.failed.length + result.cancelled.length)} were accepted.`
-                : `Partial: ${result.succeeded.length.toLocaleString("en-US")} accepted, ${result.failed.length.toLocaleString("en-US")} rejected, ${result.cancelled.length.toLocaleString("en-US")} not requested.`}
+                ? `No acceptance was confirmed for the ${resources(result.succeeded.length + result.failed.length + result.cancelled.length)}.`
+                : `Partial: ${result.succeeded.length.toLocaleString("en-US")} accepted, ${result.failed.length.toLocaleString("en-US")} failed, ${result.cancelled.length.toLocaleString("en-US")} not requested.`}
           </p>
           {result.failed.length > 0 && (
             <div className="extension-bulk-group" data-testid="bulk-failures">
-              <h5>Rejected ({result.failed.length.toLocaleString("en-US")})</h5>
+              <h5>Failed ({result.failed.length.toLocaleString("en-US")})</h5>
               <ul>
                 {result.failed.map((failure) => (
                   <li key={failure.resource}>
                     <span className="extension-bulk-name">{drawResource(failure.resource)}</span>
-                    <span className="extension-bulk-reason">{plainText(failure.reason)}</span>
+                    <span className="extension-bulk-reason">{boundedPlainText(failure.reason)}</span>
                   </li>
                 ))}
               </ul>
@@ -351,7 +375,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
           )}
           <NameList testId="bulk-cancelled" title="Not requested" items={result.cancelled} />
           <NameList testId="bulk-succeeded" title="Accepted" items={result.succeeded} />
-          <div className="extension-bulk-bar">
+          <div className="extension-bulk-bar" ref={done}>
             <Button
               variant="outline"
               size="xs"

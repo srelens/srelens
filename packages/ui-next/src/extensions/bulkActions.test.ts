@@ -71,8 +71,8 @@ describe("bulkActionResult", () => {
     );
     expect(result.status).toBe("failed");
     expect(result.failed).toEqual([
-      { resource: "team/a", reason: "The cluster rejected the request without a reason." },
-      { resource: "team/b", reason: "The cluster rejected the request without a reason." },
+      { resource: "team/a", reason: "The operation failed without a reason." },
+      { resource: "team/b", reason: "The operation failed without a reason." },
     ]);
   });
 

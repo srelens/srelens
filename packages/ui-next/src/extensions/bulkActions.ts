@@ -24,16 +24,7 @@ export function bulkResourceKey(resource: BulkResource): string {
   return resource.namespace ? `${resource.namespace}/${resource.name}` : resource.name;
 }
 
-/**
- * Whether one action can run against one resource — **the seam for #550**.
- *
- * #550 adds declarative `availableWhen` preconditions and will supply the real
- * predicate here. Until it lands the default is "available", and that is a
- * deliberate default rather than an accident: the host has no predicate to
- * evaluate, so it does not claim an action is unavailable anywhere. Callers
- * that DO know — a resource whose detail says the host does not offer this
- * action on it — pass their own.
- */
+/** A caller-supplied availability decision for one resource. */
 export type BulkAvailability = (resource: BulkResource) => boolean;
 
 export interface BulkApplicability {
@@ -66,7 +57,7 @@ export function bulkApplicability(
   };
 }
 
-/** One resource the cluster did not accept, and why it said so. */
+/** One resource whose operation failed, with the reason reported by the failing call. */
 export interface BulkFailure {
   resource: string;
   reason: string;
@@ -95,8 +86,8 @@ export interface BulkActionResult {
   cancelled: string[];
 }
 
-/** What a rejection with nothing in it says, so a failure is never an absence. */
-const NO_REASON = "The cluster rejected the request without a reason.";
+/** What a failure with no message says, without claiming a cluster rejection. */
+const NO_REASON = "The operation failed without a reason.";
 
 /**
  * A finished run's outcomes as the result the screen reports.

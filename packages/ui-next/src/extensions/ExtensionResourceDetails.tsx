@@ -1,7 +1,8 @@
 import { ExtensionResourceNavigation } from "./resourceNavigation";
-import { useContext, useEffect, useRef, useState } from "react";
-import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, renderConfirmTemplate, type ExtensionResourceDetail, type ExtensionResourceSelection } from "@srelens/core";
+import { useContext, useEffect, useId, useRef, useState } from "react";
+import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, renderConfirmTemplate, unmetPredicate, type ExtensionResourceDetail, type ExtensionResourceSelection } from "@srelens/core";
 import { Inspector, Button, CodeEditor, KV } from "@srelens/ui-kit";
+import { plainText } from "./displayText";
 import { Icons } from "../lib/icons";
 import { ErrorNotice } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
@@ -12,6 +13,7 @@ import { confirmFields } from "../confirm/confirmRequest";
 // two surfaces cannot drift into two names for one action. See
 // `actionLabels.ts` for why the descriptions that used to live here are gone.
 import { ACTION_LABELS, isKnownAction } from "./actionLabels";
+import { ACTION_AVAILABILITY } from "./actionAvailability";
 const fieldLabels: Record<string,string> = {sourceRef:"Source reference",suspend:"Suspended",prune:"Prune",wait:"Wait for readiness",force:"Force",apiVersion:"API version"};
 function fieldLabel(key:string) {
   const words=key.replace(/([a-z0-9])([A-Z])/g,"$1 $2").replace(/_/g," ");
@@ -117,8 +119,17 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
     }catch(e){if(alive.current){setError(e instanceof Error?e.message:String(e));setPending(null);}}
     finally{if(alive.current)setBusy(false);}
   };
-  const suspended=resource?.spec?.suspend === true;
-  const supported=(data.data?.actions??[]).filter(a=>isKnownAction(a) && (a!=="suspend"||!suspended) && (a!=="resume"||suspended));
+  // The same resource can be open in a peek and in its own tab, so the reason
+  // elements need ids that are this view's and no other's.
+  const reasons=useId();
+  const supported=(data.data?.actions??[]).filter(isKnownAction);
+  // The declared reason is drawn through `plainText` because #551 makes these
+  // predicates a manifest's, and an app's sentence must not be able to reorder
+  // or hide the host's words around it.
+  const excuse=(action:string)=>{
+    const unmet=resource&&unmetPredicate(ACTION_AVAILABILITY[action],resource);
+    return unmet?plainText(unmet.reason):undefined;
+  };
   const OpenIcon=Icons.openTab;
   return <div className="extension-resource-detail" ref={heading} tabIndex={-1} onKeyDownCapture={e=>{if(e.key==="Escape" && (pending || busy)){e.preventDefault();e.stopPropagation();if(pending)cancel();}}}>
     <Inspector
@@ -128,9 +139,31 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
       actions={!fullPage && openResource ? <Button variant="outline" size="xs" disabled={busy} onClick={()=>openResource(selection)}><OpenIcon size={12} aria-hidden="true"/>Open tab</Button> : undefined}
       tabs={[{id:"overview",label:"Overview"},{id:"manifest",label:"Manifest"}]}
       activeTab={tab} onTabChange={setTab} tabsLabel="Resource views"
-      footer={<div className="flex flex-wrap items-center gap-1.5">
+      footer={<div className="extension-actions flex flex-wrap items-center gap-1.5">
         <Button variant="outline" size="xs" disabled={busy||!!pending} onClick={()=>{setError("");setMessage("");data.reload();}}>Refresh details</Button>
-        {data.status==="ready" && resource && supported.map(action=><Button key={action} variant="outline" size="xs" disabled={busy || !!pending || !resource.metadata.uid || !resource.metadata.resourceVersion || (suspended&&["reconcile","force","reset"].includes(action))} onClick={()=>{trigger.current=document.activeElement as HTMLElement;setError("");setMessage("");setPending({action,uid:resource.metadata.uid,resourceVersion:resource.metadata.resourceVersion});}}>{ACTION_LABELS[action]}</Button>)}
+        {data.status==="ready" && resource && supported.map(action=>{
+          // `aria-disabled` rather than `disabled`: the control stays
+          // focusable, so the reason can be read without a pointer. A busy or
+          // pending view has nothing to explain, so that stays a plain
+          // `disabled`.
+          //
+          // The reason is an element this control *names*. `title` alone is
+          // half a fix: it draws on hover only, and the accessibility tree
+          // reads it as a description of last resort — so a sighted keyboard
+          // user reached the dimmed button and was told nothing at all. It
+          // stays for pointer users; `aria-describedby` is what makes the
+          // sentence part of the control, and the stylesheet brings the same
+          // sentence on screen while the control has focus. (#668 review)
+          const unavailable=excuse(action);
+          const reasonId=unavailable?`${reasons}-${action}`:undefined;
+          return <span key={action} className="extension-action">
+            <Button variant="outline" size="xs"
+              disabled={busy || !!pending || !resource.metadata.uid || !resource.metadata.resourceVersion}
+              aria-disabled={unavailable?true:undefined} aria-describedby={reasonId} title={unavailable}
+              onClick={()=>{if(unavailable)return;trigger.current=document.activeElement as HTMLElement;setError("");setMessage("");setPending({action,uid:resource.metadata.uid,resourceVersion:resource.metadata.resourceVersion});}}>{ACTION_LABELS[action]}</Button>
+            {unavailable&&<span id={reasonId} className="extension-action-reason">{unavailable}</span>}
+          </span>;
+        })}
       </div>}
     >
     {error&&<p role="alert" className="extension-error">{error}</p>}

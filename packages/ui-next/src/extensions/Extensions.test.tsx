@@ -1240,3 +1240,66 @@ it("confirms a bulk action once for the whole selection from the table", async (
   await waitFor(() => expect(actOnExtensionResource).toHaveBeenCalledTimes(3));
   expect((await screen.findByTestId("bulk-result")).getAttribute("data-status")).toBe("success");
 });
+
+it("stops queued old-cluster writes on a scope change while in-flight writes finish", async () => {
+  const { inspectExtensionResource, actOnExtensionResource } = await import("@srelens/core");
+  const items = Array.from({ length: 8 }, (_, i) => ({ name: `app-${i}`, namespace: "team", age: "1d", columns: [] }));
+  vi.mocked(readExtension).mockResolvedValue({ items } as any);
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const completed: string[] = [];
+  vi.mocked(actOnExtensionResource).mockImplementation(async (s) => {
+    await held;
+    completed.push(`${s.context}/${s.name}`);
+    return { requested: true };
+  });
+  const view = render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  fireEvent.click(await screen.findByLabelText("Select all"));
+  fireEvent.click(await screen.findByRole("button", { name: "Reconcile" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile 8 resources" }));
+  await waitFor(() => expect(actOnExtensionResource).toHaveBeenCalledTimes(4));
+  view.rerender(<ExtensionResults plugin={actionable} capability="list" context="cluster/b" />);
+  await screen.findByLabelText("Select all");
+  await act(async () => release());
+  expect(completed).toEqual(["cluster/a/app-0", "cluster/a/app-1", "cluster/a/app-2", "cluster/a/app-3"]);
+  expect(actOnExtensionResource).toHaveBeenCalledTimes(4);
+  fireEvent.click(screen.getByLabelText("Select all"));
+  expect(screen.queryByTestId("bulk-result")).toBeNull();
+  expect(screen.queryByTestId("bulk-progress")).toBeNull();
+});
+
+it("uses real resource predicates for bulk applicability without an injected callback", async () => {
+  const { inspectExtensionResource, actOnExtensionResource } = await import("@srelens/core");
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  vi.mocked(inspectExtensionResource).mockImplementation(async (s) => ({
+    ...menuDetail,
+    resource: { ...menuDetail.resource, spec: { suspend: s.name === "web" } },
+  }) as any);
+  vi.mocked(actOnExtensionResource).mockResolvedValue({ requested: true });
+  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  fireEvent.click(await screen.findByLabelText("Select all"));
+  fireEvent.click(await screen.findByRole("button", { name: "Reconcile" }));
+  expect(screen.getByTestId("bulk-applies").textContent).toBe("applies to 2 of 3");
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile 2 resources" }));
+  await screen.findByTestId("bulk-result");
+  expect(vi.mocked(actOnExtensionResource).mock.calls.map(([s]) => s.name)).toEqual(["apps", "infra"]);
+});
+
+it("reports a failed availability read and retries instead of excluding an unread row", async () => {
+  const { inspectExtensionResource, actOnExtensionResource } = await import("@srelens/core");
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  vi.mocked(inspectExtensionResource).mockImplementation(async (s) => {
+    if (s.name === "web") throw new Error("Resource read timed out");
+    return menuDetail as any;
+  });
+  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  fireEvent.click(await screen.findByLabelText("Select all"));
+  expect((await screen.findByRole("alert")).textContent).toContain("Resource read timed out");
+  expect(screen.queryByRole("button", { name: "Reconcile" })).toBeNull();
+  expect(actOnExtensionResource).not.toHaveBeenCalled();
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Reconcile" }));
+  expect(screen.getByTestId("host-confirm-target").textContent).toBe("3 resources");
+});

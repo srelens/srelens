@@ -104,9 +104,8 @@ export function ExtensionResults({
   refresh?: number;
   hideToolbar?: boolean;
   /**
-   * Whether one action applies to one selected resource — the seam for #550's
-   * declarative `availableWhen`. Absent means every selected resource is
-   * available, which is what a host with no predicate to evaluate knows.
+   * Optional availability override for the embedding surface. By default the
+   * bulk bar evaluates the shared predicates against inspected resources.
    */
   actionAvailability?: BulkActionAvailability;
 }) {
@@ -290,6 +289,7 @@ export function ExtensionResults({
       )}
       {selectable && (
         <ExtensionBulkActions
+          key={scope}
           target={{id:plugin.manifest.id,revision:plugin.revision,capability,context}}
           selection={pickedRows}
           onClear={()=>setPicked(new Set())}

@@ -2782,11 +2782,38 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         "{suspended}"
     );
     // And back, so the object is left as the rest of the suite found it.
+    // A declared precondition (#550), against the object as it now is. The
+    // host reads it fresh and refuses before any patch, with the app's reason.
+    let reconcile_unless_suspended = |inspected: &Value| {
+        let mut input = reviewed(inspected);
+        input["key"] = json!("reconcile.fluxcd.io/requestedAt");
+        input["value"] = json!("$now");
+        input["preconditions"] = json!([{
+            "jsonPath": ".spec.suspend", "notEquals": true,
+            "reason": "Resume this resource before requesting reconciliation"
+        }]);
+        input
+    };
+    let err = h
+        .err("k8s.annotate", reconcile_unless_suspended(&suspended))
+        .await;
+    assert!(
+        err.contains("Resume this resource before requesting reconciliation"),
+        "{err}"
+    );
+
     let mut input = reviewed(&suspended);
     input["fields"] = json!({"/spec/suspend": false});
     h.ok("k8s.setFields", input).await;
     let resumed = h.ok("k8s.getCustomResource", ks_object.clone()).await;
     assert_eq!(resumed["resource"]["spec"]["suspend"], false, "{resumed}");
+    // The same action, the same predicate, on a resource it now admits.
+    assert_eq!(
+        h.ok("k8s.annotate", reconcile_unless_suspended(&resumed))
+            .await,
+        json!({"requested": true})
+    );
+    let resumed = h.ok("k8s.getCustomResource", ks_object.clone()).await;
 
     let mut input = reviewed(&resumed);
     input["patch"] = json!({"spec": {"prune": false}});
