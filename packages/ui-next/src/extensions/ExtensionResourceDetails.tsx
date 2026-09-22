@@ -8,28 +8,10 @@ import { useResource } from "../lib/useResource";
 import { HostConfirmation } from "../confirm/HostConfirmation";
 import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
-/**
- * What the BUTTON says. Only that.
- *
- * The descriptions that used to sit here beside each label are gone (#552).
- * They were the words a person read before approving a cluster write, written
- * in a UI constant three packages away from the handler that performs it — so
- * the same write asked for by an agent was confirmed in different words,
- * through different code, and an app declaring a new action (#549) had nowhere
- * to get any words at all. The sentence now comes from the host's own
- * template, delivered per action in `ExtensionResourceDetail.actionMeta`
- * (#548) and rendered by the one confirmation every surface uses.
- */
-const actions: Record<string,{label:string}> = {
-  suspend:{label:"Suspend"},
-  resume:{label:"Resume"},
-  reconcile:{label:"Reconcile"},
-  force:{label:"Force reconcile"},
-  reset:{label:"Reset retries"},
-  refresh:{label:"Refresh status"},
-  "hard-refresh":{label:"Hard refresh"},
-  sync:{label:"Sync"},
-};
+// What each button says, shared with the bulk bar (#553): one copy, so the
+// two surfaces cannot drift into two names for one action. See
+// `actionLabels.ts` for why the descriptions that used to live here are gone.
+import { ACTION_LABELS, isKnownAction } from "./actionLabels";
 const fieldLabels: Record<string,string> = {sourceRef:"Source reference",suspend:"Suspended",prune:"Prune",wait:"Wait for readiness",force:"Force",apiVersion:"API version"};
 function fieldLabel(key:string) {
   const words=key.replace(/([a-z0-9])([A-Z])/g,"$1 $2").replace(/_/g," ");
@@ -136,7 +118,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
     finally{if(alive.current)setBusy(false);}
   };
   const suspended=resource?.spec?.suspend === true;
-  const supported=(data.data?.actions??[]).filter(a=>Object.hasOwn(actions,a) && (a!=="suspend"||!suspended) && (a!=="resume"||suspended));
+  const supported=(data.data?.actions??[]).filter(a=>isKnownAction(a) && (a!=="suspend"||!suspended) && (a!=="resume"||suspended));
   const OpenIcon=Icons.openTab;
   return <div className="extension-resource-detail" ref={heading} tabIndex={-1} onKeyDownCapture={e=>{if(e.key==="Escape" && (pending || busy)){e.preventDefault();e.stopPropagation();if(pending)cancel();}}}>
     <Inspector
@@ -148,13 +130,13 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
       activeTab={tab} onTabChange={setTab} tabsLabel="Resource views"
       footer={<div className="flex flex-wrap items-center gap-1.5">
         <Button variant="outline" size="xs" disabled={busy||!!pending} onClick={()=>{setError("");setMessage("");data.reload();}}>Refresh details</Button>
-        {data.status==="ready" && resource && supported.map(action=><Button key={action} variant="outline" size="xs" disabled={busy || !!pending || !resource.metadata.uid || !resource.metadata.resourceVersion || (suspended&&["reconcile","force","reset"].includes(action))} onClick={()=>{trigger.current=document.activeElement as HTMLElement;setError("");setMessage("");setPending({action,uid:resource.metadata.uid,resourceVersion:resource.metadata.resourceVersion});}}>{actions[action].label}</Button>)}
+        {data.status==="ready" && resource && supported.map(action=><Button key={action} variant="outline" size="xs" disabled={busy || !!pending || !resource.metadata.uid || !resource.metadata.resourceVersion || (suspended&&["reconcile","force","reset"].includes(action))} onClick={()=>{trigger.current=document.activeElement as HTMLElement;setError("");setMessage("");setPending({action,uid:resource.metadata.uid,resourceVersion:resource.metadata.resourceVersion});}}>{ACTION_LABELS[action]}</Button>)}
       </div>}
     >
     {error&&<p role="alert" className="extension-error">{error}</p>}
     {message&&<p role="status" className="extension-message">{message}</p>}
     {data.status==="error"?<ErrorNotice cluster message={data.error} retry={data.reload}/>:data.status==="loading"?<p className="extension-message">Loading resource details…</p>:resource&&<>
-      {pending&&<div className="extension-action-review" role="dialog" aria-label={`Review ${actions[pending.action].label}`} tabIndex={-1} ref={review}>
+      {pending&&<div className="extension-action-review" role="dialog" aria-label={`Review ${ACTION_LABELS[pending.action]}`} tabIndex={-1} ref={review}>
         {/* The one host confirmation (#552), in this screen's own frame. The
             frame is all this surface supplies: the sentence, the level, the
             cluster, the resource and the requester are the component's, and
@@ -167,7 +149,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
           subject={{kind:"object",namespace:selection.namespace||null,name:selection.name}}
           app={app}
           actions={<>
-            <Button disabled={busy} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${actions[pending.action].label}`}</Button>
+            <Button disabled={busy} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${ACTION_LABELS[pending.action]}`}</Button>
             <Button variant="outline" disabled={busy} onClick={cancel}>Cancel</Button>
           </>}
         />
