@@ -461,6 +461,9 @@ mod tests {
         let raw = current.as_bytes();
         entry.release.srelens_api_version = "^0.3".into();
         entry.release.sha256 = format!("{:x}", Sha256::digest(raw));
+        assert!(verify_release(&entry, raw, Some(sig.clone()))
+            .unwrap_err()
+            .contains("signature"));
         assert!(verify_release(&entry, raw, None)
             .unwrap_err()
             .contains("missing"));
@@ -497,10 +500,13 @@ mod tests {
             Some(format!("{}.sig", entry.release.manifest_url))
         );
         assert!(super::super::signing::verify_for(&entry.id, raw, &sig).is_ok());
-        assert!(verify_release(&entry, raw, Some(sig)).unwrap_err().contains("requires API ^0.1"));
+        assert!(verify_release(&entry, raw, Some(sig.clone())).unwrap_err().contains("requires API ^0.1"));
         let current = std::str::from_utf8(raw).unwrap().replace("^0.1", "^0.3");
         entry.release.srelens_api_version = "^0.3".into();
         entry.release.sha256 = format!("{:x}", Sha256::digest(current.as_bytes()));
+        assert!(verify_release(&entry, current.as_bytes(), Some(sig))
+            .unwrap_err()
+            .contains("signature"));
         assert!(verify_release(&entry, current.as_bytes(), None).unwrap_err().contains("missing"));
         // An owner that only looks like the trusted one stays an unsigned third party.
         entry.id = "org.srelensx.argocd".into();
