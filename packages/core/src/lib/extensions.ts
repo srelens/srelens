@@ -92,7 +92,7 @@ export interface InstalledExtension {
   signatureProof?: {manifest:string;signature:number[]};
   /** Set by the host when a stored app failed re-verification; the app is disabled. */
   quarantined?: string;
-  /** Disabled by the unsigned-app policy; retained until explicitly re-enabled. */
+  /** Host-computed unsigned-app policy denial; the affected app is disabled. */
   policyBlocked?: string;
   manifest: ExtensionManifest;
   enabled: boolean;
