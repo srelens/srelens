@@ -1063,17 +1063,25 @@ mod tests {
         // Captures what each side actually received, rather than trusting
         // that "the tool ran" and "the policy approved" implies either saw
         // the right shape of arguments.
-        let policy_saw: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        //
+        // The policy records the *whole* `ConsentRequest`, not just its
+        // arguments (PR #661 review): `impact` and `confirm_text` are the
+        // host metadata #548 added, and recording only `args` would still
+        // pass if `consent_request` hard-coded a level or dropped the
+        // sentence on the floor. The capability below therefore carries a
+        // level and wording no preset would produce by accident.
+        let policy_saw: Arc<Mutex<Option<crate::policy::ConsentRequest>>> =
+            Arc::new(Mutex::new(None));
         let tool_saw: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
 
-        struct Yes(Arc<Mutex<Option<Value>>>);
+        struct Yes(Arc<Mutex<Option<crate::policy::ConsentRequest>>>);
         #[async_trait::async_trait]
         impl crate::policy::ConfirmPolicy for Yes {
             async fn confirm(
                 &self,
                 request: &crate::policy::ConsentRequest,
             ) -> crate::policy::Decision {
-                *self.0.lock().unwrap() = Some(request.args.clone());
+                *self.0.lock().unwrap() = Some(request.clone());
                 crate::policy::Decision::Approved
             }
         }
@@ -1089,7 +1097,9 @@ mod tests {
                 }
             })
         };
-        cap.annotations = Annotations::DESTRUCTIVE;
+        cap.annotations = Annotations::MUTATING
+            .with_impact(srelens_capability::Impact::High)
+            .with_confirm("Recycle {resource} in cluster {cluster}?");
         reg.register(cap);
         let server =
             McpServer::new(Arc::new(reg)).with_policy(Arc::new(Yes(policy_saw.clone())));
@@ -1098,7 +1108,13 @@ mod tests {
             &server,
             &json!({
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": { "name": "danger", "arguments": { "_confirm": true } }
+                "params": { "name": "danger", "arguments": {
+                    "_confirm": true,
+                    "context": "cluster/prod",
+                    "kind": "Deployment",
+                    "namespace": "team",
+                    "name": "api"
+                } }
             }),
             Transport::Http,
         )
@@ -1114,9 +1130,24 @@ mod tests {
 
         let seen_by_policy = policy_saw.lock().unwrap().clone().expect("policy consulted");
         assert_eq!(
-            seen_by_policy.get("_confirm"),
+            seen_by_policy.args.get("_confirm"),
             Some(&json!(true)),
-            "policy must see _confirm, got {seen_by_policy}"
+            "policy must see _confirm, got {:?}",
+            seen_by_policy.args
+        );
+        assert_eq!(seen_by_policy.tool, "danger");
+        assert_eq!(seen_by_policy.kind, crate::policy::ConsentKind::Destructive);
+        assert_eq!(
+            seen_by_policy.impact,
+            srelens_capability::Impact::High,
+            "the policy gets the capability's own level, not one inferred \
+             from its kind"
+        );
+        assert_eq!(
+            seen_by_policy.confirm_text.as_deref(),
+            Some("Recycle Deployment team/api in cluster cluster/prod?"),
+            "the policy gets the host's sentence, rendered against these \
+             arguments"
         );
     }
 
