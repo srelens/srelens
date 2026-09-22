@@ -440,3 +440,40 @@
 .extension-entries th, .extension-entries td { padding: 5px 8px; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-entries th { position: sticky; top: 0; z-index: 1; background: var(--surface, var(--fl-color-surface)); font-weight: 600; }
 .extension-entries tbody tr:last-child td { border-bottom: 0; }
+
+/* An action the declared `availableWhen` rules exclude (#550).
+   The control keeps its place and its focus, and the reason it carries is a
+   real element rather than only a `title`: `title` draws on hover alone and
+   the accessibility tree reads it as a description of last resort, so a
+   sighted keyboard user reached the dimmed control and was told nothing.
+   Hidden visually — never with `display: none`, which would take it out of
+   the tree the control's `aria-describedby` points into — and brought on
+   screen while the control has focus. It is positioned rather than laid out,
+   so revealing it does not reflow the row of buttons around it. */
+.extension-action { position: relative; display: inline-flex; }
+.extension-action-reason {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.extension-action:focus-within .extension-action-reason {
+  width: max-content;
+  max-width: 18rem;
+  height: auto;
+  padding: 5px 8px;
+  overflow: visible;
+  clip-path: none;
+  white-space: normal;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 3;
+  border: 1px solid var(--rule, var(--fl-color-border));
+  background: var(--surface, var(--fl-color-surface));
+  color: var(--ink, var(--fl-color-text));
+  font-size: var(--text-meta, 0.6875rem);
+  line-height: 1.35;
+}

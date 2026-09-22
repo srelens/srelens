@@ -118,6 +118,11 @@ it("promotes a peek to its own tab while keeping the list's close control separa
 // evaluated by the same rules the host applies before it writes. A control the
 // rules exclude stays on screen, disabled, saying why — a button that vanishes
 // teaches nothing, and a button that is merely grey teaches no more.
+/** The description a screen reader reads for `control`, as the tree resolves it. */
+function describedBy(control:HTMLElement) {
+  const ids=(control.getAttribute("aria-describedby")??"").split(/\s+/).filter(Boolean);
+  return ids.map(id=>document.getElementById(id)?.textContent??"").join(" ");
+}
 it("disables an action its availability rules exclude and gives the reason as its tooltip",async()=>{
   vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,spec:{suspend:true}}});
   render(<ExtensionResourceDetails selection={selection}/>);
@@ -136,6 +141,27 @@ it("disables an action its availability rules exclude and gives the reason as it
   expect(resume.getAttribute("title")).toBeNull();
   fireEvent.click(resume);
   expect(screen.getByRole("dialog")).toBeTruthy();
+});
+// `title` draws a tooltip on hover and is only a *fallback* description, so a
+// sighted keyboard user reaches the dimmed control and is told nothing. The
+// reason is an element the control names, which is what a focus ring can
+// reveal and a screen reader always reads. (#668 review)
+it("names the reason from the control, so focus reaches it without a pointer",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,spec:{suspend:true}},actions:["suspend","resume","reconcile","force","reset"]});
+  render(<ExtensionResourceDetails selection={selection}/>);
+  const reconcile=await screen.findByRole("button",{name:"Reconcile"});
+  expect(describedBy(reconcile)).toBe("Resume this resource before requesting reconciliation");
+  expect(describedBy(screen.getByRole("button",{name:"Suspend"}))).toBe("This resource is already suspended");
+  // The reason is in the accessibility tree, not hidden from it.
+  const note=document.getElementById(reconcile.getAttribute("aria-describedby")!)!;
+  expect(note.getAttribute("aria-hidden")).toBeNull();
+  expect(note.hasAttribute("hidden")).toBe(false);
+  // A control that applies describes nothing: there is nothing to say.
+  const resume=screen.getByRole("button",{name:"Resume"});
+  expect(resume.getAttribute("aria-describedby")).toBeNull();
+  // Each unavailable control names its own reason, never a shared one.
+  const ids=["Reconcile","Force reconcile","Reset retries"].map(name=>screen.getByRole("button",{name}).getAttribute("aria-describedby"));
+  expect(new Set(ids).size).toBe(3);
 });
 it("does not offer an Argo CD sync while an operation is already running",async()=>{
   // The host refuses this (`gitops.rs`); stating it as a predicate is what
