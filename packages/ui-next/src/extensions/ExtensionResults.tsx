@@ -1,6 +1,8 @@
 import { AgeCell } from "../lib/ageCell";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
-import { ResizeHandle } from "@srelens/ui-kit";
+import { ExtensionBulkActions, type BulkActionAvailability } from "./ExtensionBulkActions";
+import { bulkResourceKey } from "./bulkActions";
+import { Checkbox, ResizeHandle } from "@srelens/ui-kit";
 import { clampPeekWidth, savePeekWidth, setPeekWidth, usePeekBounds, usePeekWidth } from "../lib/peekWidth";
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useEffect, useRef, useState } from "react";
@@ -8,6 +10,7 @@ import {
   describeError,
   onExtensionResourceChanged,
   readExtension,
+  type ExtensionResourceResult,
   type InstalledExtension,
 } from "@srelens/core";
 import { ExtensionControls } from "./ExtensionControls";
@@ -91,6 +94,7 @@ export function ExtensionResults({
   search = "",
   refresh = 0,
   hideToolbar = false,
+  actionAvailability,
 }: {
   plugin: InstalledExtension;
   capability: string;
@@ -99,6 +103,11 @@ export function ExtensionResults({
   search?: string;
   refresh?: number;
   hideToolbar?: boolean;
+  /**
+   * Optional availability override for the embedding surface. By default the
+   * bulk bar evaluates the shared predicates against inspected resources.
+   */
+  actionAvailability?: BulkActionAvailability;
 }) {
   const { Button } = useContext(ExtensionControls);
   const openResource = useContext(ExtensionResourceNavigation);
@@ -107,6 +116,23 @@ export function ExtensionResults({
   const peekWidth = clampPeekWidth(usePeekWidth(), listRow.bounds);
   const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,namespace]);
   const [selected,setSelected] = useState<{scope:string;name:string;namespace:string}|null>(null);
+  // The rows a bulk action would run against, by key. Cleared whenever the
+  // scope moves: a rail switch behind the bar must not leave prod's rows
+  // selected on staging, and a key from another namespace's list resolves to
+  // no row here — a count the bar could not act on.
+  const [picked,setPicked] = useState<Set<string>>(new Set());
+  useEffect(()=>{setPicked(new Set());},[scope]);
+  // Whether this scope has answered once. A new scope starts over: its first
+  // read has nothing to keep on screen and everything on screen belongs to a
+  // cluster or namespace the reader has left.
+  const loaded = useRef(false);
+  // The rows of the last answered read, kept across a refresh. `useResource`
+  // drops its data the moment a reload starts, and a selection the reader made
+  // is resolved back to rows — so without this, every refresh emptied the
+  // selection for as long as the read was out, which is exactly while a bulk
+  // action's own accepted writes are refreshing the list.
+  const lastRows = useRef<ExtensionResourceResult["items"]>([]);
+  useEffect(()=>{loaded.current=false;lastRows.current=[];},[scope]);
   const data = useResource(
     async () =>
       context
@@ -156,6 +182,9 @@ export function ExtensionResults({
   useEffect(() => {
     setVisible(PAGE);
   }, [scope, search, refresh, data.status]);
+  useEffect(() => {
+    if (data.status !== "loading") loaded.current = true;
+  }, [data.status]);
   if (!context)
     return (
       <p className="extension-message">
@@ -190,13 +219,20 @@ export function ExtensionResults({
       />
     );
   }
-  if (data.status === "loading" && selected?.scope !== scope)
+  // Only the FIRST load of a scope replaces the section. A later refresh is
+  // reported inside it ("Refreshing resources…"), because the section is not
+  // only the table: an accepted write announces its resource and reloads this
+  // list, so tearing the section down on every refresh took a running bulk
+  // action's progress and its result away with it at the first acceptance —
+  // and, before that, flashed the whole list away after every single write.
+  if (data.status === "loading" && !loaded.current && selected?.scope !== scope)
     return (
       <p role="status" className="extension-message">
         Loading app resources…
       </p>
     );
-  const rows = (data.data?.items ?? []).filter((row) =>
+  if (data.data?.items) lastRows.current = data.data.items;
+  const rows = (data.data?.items ?? lastRows.current).filter((row) =>
     [row.name, row.namespace, ...row.columns]
       .join(" ")
       .toLowerCase()
@@ -204,6 +240,30 @@ export function ExtensionResults({
   );
   const shown = rows.slice(0, visible);
   const hidden = Math.max(0, rows.length - shown.length);
+  // Only a binding the host runs actions against gets a selection column:
+  // checkboxes over a table with nothing to do on it are furniture.
+  const selectable = binding?.target === "k8s.listCustomResource";
+  // Resolved back to rows, never counted out of the set: a key the current
+  // filter no longer shows is a resource the bar cannot act on, and a count
+  // that includes it would promise a write that never happens.
+  const pickedRows = selectable ? rows.filter((row) => picked.has(bulkResourceKey(row))) : [];
+  const visibleKeys = shown.map((row) => bulkResourceKey(row));
+  const allVisiblePicked = visibleKeys.length > 0 && visibleKeys.every((key) => picked.has(key));
+  const toggleAllVisible = () =>
+    setPicked((prev) => {
+      const next = new Set(prev);
+      for (const key of visibleKeys) {
+        if (allVisiblePicked) next.delete(key);
+        else next.add(key);
+      }
+      return next;
+    });
+  const toggleRow = (key: string) =>
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
   return (
     <section className="extension-results" ref={listRow.ref}>
       <div className="extension-resource-list">
@@ -227,11 +287,30 @@ export function ExtensionResults({
           </Button>
         </div>
       )}
+      {selectable && (
+        <ExtensionBulkActions
+          key={scope}
+          target={{id:plugin.manifest.id,revision:plugin.revision,capability,context}}
+          selection={pickedRows}
+          onClear={()=>setPicked(new Set())}
+          available={actionAvailability}
+        />
+      )}
       {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <ErrorNotice cluster message={data.error} retry={data.reload}/> : shown.length ? (
         <div className="extension-table-scroll">
           <table>
             <thead>
               <tr>
+                {selectable && (
+                  <th className="extension-check" scope="col">
+                    <Checkbox
+                      checked={allVisiblePicked}
+                      indeterminate={!allVisiblePicked && visibleKeys.some((key)=>picked.has(key))}
+                      onChange={toggleAllVisible}
+                      ariaLabel="Select all"
+                    />
+                  </th>
+                )}
                 <th>Name</th>
                 <th>Namespace</th>
                 {columns.map((c, i) => (
@@ -243,6 +322,17 @@ export function ExtensionResults({
             <tbody>
               {shown.map((row) => (
                 <tr key={`${row.namespace}/${row.name}`} aria-selected={selected?.scope===scope && selected.name===row.name && selected.namespace===row.namespace} onDoubleClick={openResource && binding?.target === "k8s.listCustomResource" ? ()=>openResource({id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:row.namespace,name:row.name}):undefined} onClick={binding?.target === "k8s.listCustomResource" ? ()=>setSelected({scope,name:row.name,namespace:row.namespace}):undefined}>
+                  {selectable && (
+                    // Checking a box picks a row for a bulk action; it does not
+                    // also open the detail peek behind it.
+                    <td className="extension-check" onClick={(event)=>event.stopPropagation()}>
+                      <Checkbox
+                        checked={picked.has(bulkResourceKey(row))}
+                        onChange={()=>toggleRow(bulkResourceKey(row))}
+                        ariaLabel={`Select ${bulkResourceKey(row)}`}
+                      />
+                    </td>
+                  )}
                   <td>
                     {binding?.target === "k8s.listCustomResource" ? <button className="extension-resource-link" ref={node=>{const key=`${row.namespace}/${row.name}`;if(node)rowButtons.current.set(key,node);else rowButtons.current.delete(key);}} onKeyDown={e=>{if(e.key==="Enter" && openResource){e.preventDefault();openResource({id:plugin.manifest.id,revision:plugin.revision,capability,context,namespace:row.namespace,name:row.name});}}} onClick={()=>setSelected({scope,name:row.name,namespace:row.namespace})}>{row.name}</button> : <span className="extension-resource-name" title={row.name}>{row.name}</span>}
                   </td>

@@ -10,6 +10,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   validateExtension: vi.fn(),
   readExtension: vi.fn(),
   inspectExtensionResource: vi.fn(),
+  actOnExtensionResource: vi.fn(),
   saveTextFile: vi.fn(),
   listContexts: vi.fn(),
 }));
@@ -1109,4 +1110,196 @@ it("uses live files saved before the cluster picker mounts", async () => {
  render(<ExtensionClusters plugin={plugin} busy={false} change={vi.fn()}/>);
  await waitFor(()=>expect(listContexts).toHaveBeenLastCalledWith(["/kube/session.yaml"]));
  saveKubeconfigFiles([]);
+});
+
+/** An app whose binding reads a custom resource, so the host offers actions on its rows. */
+const actionable = {
+  ...plugin,
+  manifest: {
+    ...plugin.manifest,
+    capabilities: [{ ...plugin.manifest.capabilities[0], target: "k8s.listCustomResource" }],
+  },
+} as any;
+const threeRows = {
+  items: [
+    { name: "apps", namespace: "team", age: "1d", columns: [] },
+    { name: "infra", namespace: "team", age: "2d", columns: [] },
+    { name: "web", namespace: "shop", age: "3d", columns: [] },
+  ],
+};
+const menuDetail = {
+  resource: { kind: "Kustomization", metadata: { name: "apps", namespace: "team", uid: "u", resourceVersion: "1" } },
+  actions: ["reconcile"],
+  actionMeta: { reconcile: { impact: "medium", confirm: "Reconcile [{kind} ]in cluster {cluster}?" } },
+};
+
+it("selects rows one by one and all at once, and says how many are selected", async () => {
+  const { inspectExtensionResource } = await import("@srelens/core");
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  const row = (await screen.findByLabelText("Select team/apps")) as HTMLInputElement;
+  // Nothing is selected until the reader says so.
+  expect(row.checked).toBe(false);
+  expect(screen.queryByTestId("bulk-count")).toBeNull();
+  fireEvent.click(row);
+  expect((await screen.findByTestId("bulk-count")).textContent).toBe("1 selected");
+  const all = screen.getByLabelText("Select all") as HTMLInputElement;
+  // One of three: the header box says "some", not "none" and not "all".
+  expect(all.indeterminate).toBe(true);
+  fireEvent.click(all);
+  expect(screen.getByTestId("bulk-count").textContent).toBe("3 selected");
+  expect((screen.getByLabelText("Select shop/web") as HTMLInputElement).checked).toBe(true);
+  fireEvent.click(all);
+  expect(screen.queryByTestId("bulk-count")).toBeNull();
+});
+
+it("offers no selection column on a table whose rows the host has no actions for", async () => {
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  render(<ExtensionResults plugin={plugin} capability="list" context="cluster/a" />);
+  await screen.findByText("apps");
+  expect(screen.queryByLabelText("Select all")).toBeNull();
+  expect(screen.queryByLabelText("Select team/apps")).toBeNull();
+});
+
+it("drops the selection when the cluster under it changes", async () => {
+  const { inspectExtensionResource } = await import("@srelens/core");
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  const view = render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  fireEvent.click(await screen.findByLabelText("Select team/apps"));
+  expect((await screen.findByTestId("bulk-count")).textContent).toBe("1 selected");
+  // A rail switch behind the bar must not leave prod's rows selected on staging.
+  view.rerender(<ExtensionResults plugin={actionable} capability="list" context="cluster/b" />);
+  expect(screen.queryByTestId("bulk-count")).toBeNull();
+});
+
+it("keeps a bulk run on screen while the writes it accepts refresh the list under it", async () => {
+  // Every accepted write announces its resource, and this list reloads on it.
+  // A reload that replaces the whole section with "Loading app resources…"
+  // takes the run's progress and its result down with it — the reader watches
+  // a twelve-resource run vanish at the first acceptance and is told nothing.
+  const { inspectExtensionResource, actOnExtensionResource, EXTENSION_RESOURCE_CHANGED } =
+    await import("@srelens/core");
+  // The reload is a cluster read: it takes time, and while it is out the list
+  // has no rows. That is the window the run has to survive.
+  vi.mocked(readExtension)
+    .mockResolvedValueOnce(threeRows as any)
+    .mockReturnValue(new Promise(() => {}) as any);
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  vi.mocked(actOnExtensionResource).mockImplementation(async (resource) => {
+    window.dispatchEvent(new CustomEvent(EXTENSION_RESOURCE_CHANGED, { detail: resource }));
+    return { requested: true };
+  });
+  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  fireEvent.click(await screen.findByLabelText("Select all"));
+  fireEvent.click(await screen.findByRole("button", { name: "Reconcile" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile 3 resources" }));
+  expect((await screen.findByTestId("bulk-result")).getAttribute("data-status")).toBe("success");
+  await act(async () => {
+    await Promise.resolve();
+  });
+  // Still there after the reload the run's own writes set off, and the list is
+  // reported as refreshing inside the section rather than replacing it.
+  expect(screen.queryByTestId("bulk-result")).not.toBeNull();
+  expect(screen.getByTestId("bulk-count").textContent).toBe("3 selected");
+  expect(screen.queryByText("Loading app resources…")).toBeNull();
+});
+
+it("passes the host's availability predicate through to the count the bar shows", async () => {
+  // The seam #550 fills. Nothing in this build supplies a predicate, so the
+  // table has to be able to hand one down once something does.
+  const { inspectExtensionResource } = await import("@srelens/core");
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  render(
+    <ExtensionResults
+      plugin={actionable}
+      capability="list"
+      context="cluster/a"
+      actionAvailability={(_action, resource) => resource.namespace === "team"}
+    />,
+  );
+  fireEvent.click(await screen.findByLabelText("Select all"));
+  fireEvent.click(await screen.findByRole("button", { name: "Reconcile" }));
+  expect(screen.getByTestId("bulk-applies").textContent).toBe("applies to 2 of 3");
+  expect(screen.getByTestId("bulk-resources").textContent).not.toContain("shop/web");
+});
+
+it("confirms a bulk action once for the whole selection from the table", async () => {
+  const { inspectExtensionResource, actOnExtensionResource } = await import("@srelens/core");
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  vi.mocked(actOnExtensionResource).mockResolvedValue({ requested: true });
+  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  fireEvent.click(await screen.findByLabelText("Select all"));
+  fireEvent.click(await screen.findByRole("button", { name: "Reconcile" }));
+  expect(screen.getByTestId("host-confirm-target").textContent).toBe("3 resources");
+  expect(screen.getByTestId("bulk-resources").textContent).toContain("shop/web");
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile 3 resources" }));
+  await waitFor(() => expect(actOnExtensionResource).toHaveBeenCalledTimes(3));
+  expect((await screen.findByTestId("bulk-result")).getAttribute("data-status")).toBe("success");
+});
+
+it("stops queued old-cluster writes on a scope change while in-flight writes finish", async () => {
+  const { inspectExtensionResource, actOnExtensionResource } = await import("@srelens/core");
+  const items = Array.from({ length: 8 }, (_, i) => ({ name: `app-${i}`, namespace: "team", age: "1d", columns: [] }));
+  vi.mocked(readExtension).mockResolvedValue({ items } as any);
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const completed: string[] = [];
+  vi.mocked(actOnExtensionResource).mockImplementation(async (s) => {
+    await held;
+    completed.push(`${s.context}/${s.name}`);
+    return { requested: true };
+  });
+  const view = render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  fireEvent.click(await screen.findByLabelText("Select all"));
+  fireEvent.click(await screen.findByRole("button", { name: "Reconcile" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile 8 resources" }));
+  await waitFor(() => expect(actOnExtensionResource).toHaveBeenCalledTimes(4));
+  view.rerender(<ExtensionResults plugin={actionable} capability="list" context="cluster/b" />);
+  await screen.findByLabelText("Select all");
+  await act(async () => release());
+  expect(completed).toEqual(["cluster/a/app-0", "cluster/a/app-1", "cluster/a/app-2", "cluster/a/app-3"]);
+  expect(actOnExtensionResource).toHaveBeenCalledTimes(4);
+  fireEvent.click(screen.getByLabelText("Select all"));
+  expect(screen.queryByTestId("bulk-result")).toBeNull();
+  expect(screen.queryByTestId("bulk-progress")).toBeNull();
+});
+
+it("uses real resource predicates for bulk applicability without an injected callback", async () => {
+  const { inspectExtensionResource, actOnExtensionResource } = await import("@srelens/core");
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  vi.mocked(inspectExtensionResource).mockImplementation(async (s) => ({
+    ...menuDetail,
+    resource: { ...menuDetail.resource, spec: { suspend: s.name === "web" } },
+  }) as any);
+  vi.mocked(actOnExtensionResource).mockResolvedValue({ requested: true });
+  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  fireEvent.click(await screen.findByLabelText("Select all"));
+  fireEvent.click(await screen.findByRole("button", { name: "Reconcile" }));
+  expect(screen.getByTestId("bulk-applies").textContent).toBe("applies to 2 of 3");
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile 2 resources" }));
+  await screen.findByTestId("bulk-result");
+  expect(vi.mocked(actOnExtensionResource).mock.calls.map(([s]) => s.name)).toEqual(["apps", "infra"]);
+});
+
+it("reports a failed availability read and retries instead of excluding an unread row", async () => {
+  const { inspectExtensionResource, actOnExtensionResource } = await import("@srelens/core");
+  vi.mocked(readExtension).mockResolvedValue(threeRows as any);
+  vi.mocked(inspectExtensionResource).mockImplementation(async (s) => {
+    if (s.name === "web") throw new Error("Resource read timed out");
+    return menuDetail as any;
+  });
+  render(<ExtensionResults plugin={actionable} capability="list" context="cluster/a" />);
+  fireEvent.click(await screen.findByLabelText("Select all"));
+  expect((await screen.findByRole("alert")).textContent).toContain("Resource read timed out");
+  expect(screen.queryByRole("button", { name: "Reconcile" })).toBeNull();
+  expect(actOnExtensionResource).not.toHaveBeenCalled();
+  vi.mocked(inspectExtensionResource).mockResolvedValue(menuDetail as any);
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Reconcile" }));
+  expect(screen.getByTestId("host-confirm-target").textContent).toBe("3 resources");
 });

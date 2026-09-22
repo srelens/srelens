@@ -441,6 +441,30 @@
 .extension-entries th { position: sticky; top: 0; z-index: 1; background: var(--surface, var(--fl-color-surface)); font-weight: 600; }
 .extension-entries tbody tr:last-child td { border-bottom: 0; }
 
+/* Bulk actions over a selection of an app's resources (#553). */
+.extension-results th.extension-check, .extension-results td.extension-check { width: 2.25rem; padding-right: 0; }
+.extension-bulk { flex-shrink: 0; border-bottom: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }
+.extension-bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; }
+.extension-bulk > .extension-action-review { border-top: 1px solid var(--rule, var(--fl-color-border)); border-bottom: 0; }
+.extension-bulk-applies { margin: 8px 0 0; font-weight: 600; }
+/* A run's lists scroll rather than pushing the table off the screen, and no
+   single name can widen the row: a 253-character resource name is a legal
+   name, and a row that grows to fit one hides every row under it. */
+.extension-bulk-list, .extension-bulk-group ul { margin: 4px 0 0; padding: 0; list-style: none; max-height: 12rem; overflow: auto; }
+.extension-bulk-list > li, .extension-bulk-group li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; min-width: 0; padding: 3px 0; }
+.extension-bulk-name { min-width: 0; flex: 1 1 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+.extension-bulk-state { flex-shrink: 0; font-weight: 600; }
+.extension-bulk-reason { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-bulk-list > li[data-state="error"] .extension-bulk-state { color: var(--sev, var(--fl-color-danger)); }
+.extension-bulk-list > li[data-state="cancelled"] .extension-bulk-state { color: var(--warn, var(--fl-color-warning)); }
+.extension-bulk-list > li[data-state="ok"] .extension-bulk-state { color: var(--ok, var(--fl-color-success)); }
+.extension-bulk-run, .extension-bulk-result { padding: 0 12px 8px; border-top: 1px solid var(--rule, var(--fl-color-border)); }
+.extension-bulk-run > .extension-bulk-bar, .extension-bulk-result > .extension-bulk-bar { padding-left: 0; padding-right: 0; }
+.extension-bulk-headline { margin: 8px 0 0; font-weight: 600; }
+.extension-bulk-result[data-status="failed"] .extension-bulk-headline { color: var(--sev, var(--fl-color-danger)); }
+.extension-bulk-result[data-status="partial"] .extension-bulk-headline { color: var(--warn, var(--fl-color-warning)); }
+.extension-bulk-group { margin-top: 8px; }
+.extension-bulk-group h5 { margin: 0; font-size: inherit; font-weight: 600; }
 /* An action the declared `availableWhen` rules exclude (#550).
    The control keeps its place and its focus, and the reason it carries is a
    real element rather than only a `title`: `title` draws on hover alone and
@@ -487,3 +511,8 @@
   font-size: var(--text-meta, 0.6875rem);
   line-height: 1.35;
 }
+
+/* Full identifiers remain single-line machine text; focus permits native
+   horizontal keyboard scrolling without widening the containing panel. */
+.extension-bulk-name[data-expanded="true"] { overflow-x: auto; text-overflow: clip; }
+.extension-bulk-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

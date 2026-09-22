@@ -1,6 +1,6 @@
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useEffect, useId, useRef, useState } from "react";
-import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, renderConfirmTemplate, unmetPredicate, type ActionPredicate, type ExtensionResourceDetail, type ExtensionResourceSelection } from "@srelens/core";
+import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, renderConfirmTemplate, unmetPredicate, type ExtensionResourceDetail, type ExtensionResourceSelection } from "@srelens/core";
 import { Inspector, Button, CodeEditor, KV } from "@srelens/ui-kit";
 import { plainText } from "./displayText";
 import { Icons } from "../lib/icons";
@@ -9,41 +9,11 @@ import { useResource } from "../lib/useResource";
 import { HostConfirmation } from "../confirm/HostConfirmation";
 import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
-/**
- * What the BUTTON says, and when it applies.
- *
- * The descriptions that used to sit here beside each label are gone (#552).
- * They were the words a person read before approving a cluster write, written
- * in a UI constant three packages away from the handler that performs it — so
- * the same write asked for by an agent was confirmed in different words,
- * through different code, and an app declaring a new action (#549) had nowhere
- * to get any words at all. The sentence now comes from the host's own
- * template, delivered per action in `ExtensionResourceDetail.actionMeta`
- * (#548) and rendered by the one confirmation every surface uses.
- *
- * `availableWhen` is the other half of that move (#550): the refusals
- * `guard_action` in `crates/kube/src/gitops.rs` makes, said here as declared
- * predicates rather than as an expression, so a person learns why a control
- * is off before asking for the write rather than from the refusal afterwards.
- * The host still makes every one of them against its own fresh read — this
- * view can be seconds out of date, and none of it is a check the host skips.
- *
- * They are written in the host for now because these actions are still a
- * closed table in core; #551 moves the actions and their rules together into
- * the manifests that declare them, at which point this table is the
- * manifest's own `availableWhen` and nothing about the evaluation changes.
- */
-const notSuspended: ActionPredicate = {jsonPath:".spec.suspend",notEquals:true,reason:"Resume this resource before requesting reconciliation"};
-const actions: Record<string,{label:string;availableWhen?:ActionPredicate[]}> = {
-  suspend:{label:"Suspend",availableWhen:[{jsonPath:".spec.suspend",notEquals:true,reason:"This resource is already suspended"}]},
-  resume:{label:"Resume",availableWhen:[{jsonPath:".spec.suspend",equals:true,reason:"This resource is not suspended"}]},
-  reconcile:{label:"Reconcile",availableWhen:[notSuspended]},
-  force:{label:"Force reconcile",availableWhen:[notSuspended]},
-  reset:{label:"Reset retries",availableWhen:[notSuspended]},
-  refresh:{label:"Refresh status"},
-  "hard-refresh":{label:"Hard refresh"},
-  sync:{label:"Sync",availableWhen:[{jsonPath:".operation",absent:true,reason:"An Argo CD operation is already in progress"}]},
-};
+// What each button says, shared with the bulk bar (#553): one copy, so the
+// two surfaces cannot drift into two names for one action. See
+// `actionLabels.ts` for why the descriptions that used to live here are gone.
+import { ACTION_LABELS, isKnownAction } from "./actionLabels";
+import { ACTION_AVAILABILITY } from "./actionAvailability";
 const fieldLabels: Record<string,string> = {sourceRef:"Source reference",suspend:"Suspended",prune:"Prune",wait:"Wait for readiness",force:"Force",apiVersion:"API version"};
 function fieldLabel(key:string) {
   const words=key.replace(/([a-z0-9])([A-Z])/g,"$1 $2").replace(/_/g," ");
@@ -152,12 +122,12 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
   // The same resource can be open in a peek and in its own tab, so the reason
   // elements need ids that are this view's and no other's.
   const reasons=useId();
-  const supported=(data.data?.actions??[]).filter(a=>Object.hasOwn(actions,a));
+  const supported=(data.data?.actions??[]).filter(isKnownAction);
   // The declared reason is drawn through `plainText` because #551 makes these
   // predicates a manifest's, and an app's sentence must not be able to reorder
   // or hide the host's words around it.
   const excuse=(action:string)=>{
-    const unmet=resource&&unmetPredicate(actions[action].availableWhen,resource);
+    const unmet=resource&&unmetPredicate(ACTION_AVAILABILITY[action],resource);
     return unmet?plainText(unmet.reason):undefined;
   };
   const OpenIcon=Icons.openTab;
@@ -190,7 +160,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
             <Button variant="outline" size="xs"
               disabled={busy || !!pending || !resource.metadata.uid || !resource.metadata.resourceVersion}
               aria-disabled={unavailable?true:undefined} aria-describedby={reasonId} title={unavailable}
-              onClick={()=>{if(unavailable)return;trigger.current=document.activeElement as HTMLElement;setError("");setMessage("");setPending({action,uid:resource.metadata.uid,resourceVersion:resource.metadata.resourceVersion});}}>{actions[action].label}</Button>
+              onClick={()=>{if(unavailable)return;trigger.current=document.activeElement as HTMLElement;setError("");setMessage("");setPending({action,uid:resource.metadata.uid,resourceVersion:resource.metadata.resourceVersion});}}>{ACTION_LABELS[action]}</Button>
             {unavailable&&<span id={reasonId} className="extension-action-reason">{unavailable}</span>}
           </span>;
         })}
@@ -199,7 +169,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
     {error&&<p role="alert" className="extension-error">{error}</p>}
     {message&&<p role="status" className="extension-message">{message}</p>}
     {data.status==="error"?<ErrorNotice cluster message={data.error} retry={data.reload}/>:data.status==="loading"?<p className="extension-message">Loading resource details…</p>:resource&&<>
-      {pending&&<div className="extension-action-review" role="dialog" aria-label={`Review ${actions[pending.action].label}`} tabIndex={-1} ref={review}>
+      {pending&&<div className="extension-action-review" role="dialog" aria-label={`Review ${ACTION_LABELS[pending.action]}`} tabIndex={-1} ref={review}>
         {/* The one host confirmation (#552), in this screen's own frame. The
             frame is all this surface supplies: the sentence, the level, the
             cluster, the resource and the requester are the component's, and
@@ -212,7 +182,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
           subject={{kind:"object",namespace:selection.namespace||null,name:selection.name}}
           app={app}
           actions={<>
-            <Button disabled={busy} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${actions[pending.action].label}`}</Button>
+            <Button disabled={busy} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${ACTION_LABELS[pending.action]}`}</Button>
             <Button variant="outline" disabled={busy} onClick={cancel}>Cancel</Button>
           </>}
         />
