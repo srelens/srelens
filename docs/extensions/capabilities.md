@@ -21,6 +21,89 @@ declarative contract allows. App-installed operations go through `extensions.rea
 per-app `plugin/...` tool discovery is a developer-harness feature (see
 [testing.md](testing.md#developer-harness)).
 
+## Host-defined capability metadata
+
+Every capability carries six host-authored facts, written in
+`crates/capability/src/annotations.rs` beside the handler they describe and
+projected into the committed
+[`capability-catalog.json`](../../packages/core/src/lib/capability-catalog.json):
+
+| Field | Meaning |
+|---|---|
+| `readOnly` | Changes nothing. |
+| `destructive` | Destroys or disrupts something, as opposed to merely changing it. |
+| `requiresConfirm` | Execution stops at a consent step. The flag that actually gates a call, and not derivable from the others. |
+| `sensitive` | Reads or reveals secret material. A redaction flag for the audit log, not a safety class. |
+| `impact` | `low`, `medium` or `high` — how much a successful call disturbs. |
+| `confirm` | The host's confirmation wording, as a template, or `null`. |
+
+**Nothing outside the host supplies any of it.** A manifest declares no
+annotations, and a binding inherits the target capability's row through
+`Annotations::for_binding`, which can raise every field and lower none — so an
+app cannot turn a destructive host operation into a read-only-looking tool, drop
+its level, or put its own words in the dialog that authorizes it. The same
+function fails closed over the host row itself: a capability that mutates,
+destroys or returns secrets is gated even if its own annotation forgot to say so.
+
+### Impact
+
+`requiresConfirm` is true for a Secret read and for a node drain alike, so on its
+own it cannot tell a reader which of two prompts deserves a pause. `impact`
+answers the other question:
+
+- **`low`** — a read, or a write whose only effect is to make a controller look
+  again (an Argo CD status refresh).
+- **`medium`** — changes cluster or host state, leaving workloads running: a
+  scale, a suspend, a tool install, a Secret handed to a caller.
+- **`high`** — destroys, disrupts or replaces something running: a delete, a
+  drain, a sync that applies manifests and runs hooks.
+
+The level and the gate cannot disagree: anything `destructive` is `high`,
+anything gated is at least `medium`, and an ungated read is `low`.
+`assert_impact_matches_the_gate` (`crates/mcp/src/completeness.rs`) fails the
+build over the whole registry otherwise.
+
+A capability that accepts several named operations publishes **the highest level
+any of them reaches**, because `tools/list` and the catalog carry one row per
+capability and a row that understated the worst case would mislead every reader
+of it. `k8s.gitOpsAction` is `high` for that reason — one of its eight actions is
+an Argo CD sync — and the per-action level travels with the resource instead, as
+`actionMeta` on `extensions.resource`'s reply. See
+[Host GitOps actions](#host-gitops-actions).
+
+### Confirmation templates
+
+`confirm` is a template, not a finished sentence: it is rendered against one
+call's arguments. The scheme is small and deliberately closed.
+
+- `{field}` is replaced by that field's value. `field` is one of `action`,
+  `cluster`, `kind`, `name`, `namespace`, `resource` — a fixed vocabulary, so a
+  capability cannot paste a token, a manifest or a Secret value into a dialog
+  title. `{resource}` is derived from the others (`kind namespace/name`,
+  collapsed to whatever is known) and is never read from the arguments.
+- `[ … ]` is an **optional segment**: kept only when every `{field}` inside it
+  has a value, dropped whole otherwise. Segments do not nest.
+- A `{field}` **outside** a segment with no value makes the render fail. The
+  confirming surface then shows the capability summary rather than a sentence
+  with a hole in it. Every committed template must render with no fields at all,
+  which `assert_confirm_templates_are_renderable` enforces.
+
+So `k8s.scale` carries:
+
+```
+Change the replica count[ of {resource}][ in cluster {cluster}]?
+```
+
+which reads as *Change the replica count of Deployment team/api in cluster prod?*
+for a call that names both, and *Change the replica count?* for one that names
+neither.
+
+Both the host (`srelens_capability::render_confirm`) and the frontend
+(`renderConfirmTemplate` in `@srelens/core`) implement the same scheme, so the
+sentence in an MCP denial and the sentence in a dialog are one string, written
+once. A host-owned confirmation UI built on this is
+[#552](https://github.com/srelens/srelens/issues/552).
+
 ## Host GitOps actions
 
 The host derives the API group, kind, plural, version and scope from the enabled app's
@@ -40,6 +123,26 @@ write:
   not enable pruning; configured sync options and hooks still apply.
 - **Other resources and API versions** remain inspectable without invented or
   unsupported actions.
+
+`extensions.resource` returns an `actionMeta` entry for every action it offers,
+carrying the host's level and confirmation wording for that action. The levels
+are not uniform, which is the reason they are per action:
+
+| Action | Impact | Because |
+|---|---|---|
+| Refresh status | `low` | Argo CD re-reads the application's status. No manifest is applied. |
+| Hard refresh | `medium` | Also drops Argo CD's manifest cache. |
+| Sync | `high` | Applies the application's desired resources and runs its sync hooks. |
+| Suspend, Resume, Reconcile, Reset retries | `medium` | Change what a controller does next; workloads already running are not stopped. |
+| Force reconcile | `high` | Re-runs the Helm install or upgrade even when chart and values are unchanged. |
+
+The `k8s.gitOpsAction` capability itself is published as `high` — the ceiling of
+that table — and was deliberately **not** split into one capability per action.
+The host, not the app, decides which actions a resource offers, so separate IDs
+would not narrow what an installed app can reach; and
+[#549](https://github.com/srelens/srelens/issues/549) replaces this table with
+action primitives that derive the same two fields from the primitive and its
+target fields.
 
 The backend fetches the resource again, checks the reviewed UID and resourceVersion,
 and includes both in a conditional PATCH, rejecting stale or replaced resources. It

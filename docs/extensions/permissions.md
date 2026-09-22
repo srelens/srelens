@@ -41,14 +41,21 @@ version, plural, kind and scope, plus explicitly granted `k8s.listEvents` reader
 
 ## Consent
 
-Annotations come from the host capability and cannot be weakened by a binding. The
-app-level operations follow the normal MCP consent gate:
+Annotations come from the host capability and cannot be weakened by a binding —
+the gate, the impact level and the confirmation wording alike. See
+[Host-defined capability metadata](capabilities.md#host-defined-capability-metadata)
+for what each field means and for the rule (`Annotations::for_binding`) that
+raises a binding's row and never lowers it.
 
-- `extensions.configure` (install, enable, remove, settings, rollback, clusters) is mutating. A
-  rollback takes the grants explicitly, like an install, because it grants the restored
-  version's permissions again.
-- `extensions.action` (host GitOps actions) is mutating, and in the UI every action
-  opens a review naming the cluster and resource first.
+The app-level operations follow the normal MCP consent gate:
+
+- `extensions.configure` (install, enable, remove, settings, rollback, clusters) is mutating,
+  `medium` impact. A rollback takes the grants explicitly, like an install, because it
+  grants the restored version's permissions again.
+- `extensions.action` (host GitOps actions) is mutating and `high` impact, because it
+  forwards to `k8s.gitOpsAction` and so reaches an Argo CD sync. The per-action level
+  is lower for most actions and travels with the resource; in the UI every action opens
+  a review naming the cluster and resource first.
 
 See [capabilities.md](capabilities.md) for the full list.
 

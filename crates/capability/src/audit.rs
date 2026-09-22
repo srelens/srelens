@@ -1372,10 +1372,8 @@ mod tests {
         );
         assert!(
             is_audited_from_ui(&Annotations {
-                read_only: true,
-                destructive: false,
-                requires_confirm: false,
                 sensitive: true,
+                ..Annotations::READ_ONLY
             }),
             "`k8s.diffManifest` is read-only and sensitive; what it can echo back is why"
         );

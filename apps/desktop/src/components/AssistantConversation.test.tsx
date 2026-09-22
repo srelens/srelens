@@ -1668,3 +1668,65 @@ describe("AssistantConversation agent persistence", () => {
     await waitFor(() => expect(trigger.textContent).toMatch(/codex/i));
   });
 });
+
+/**
+ * #548. The inline card is the same `mcp://confirm-request` the modal answers,
+ * drawn beside the turn that triggered it — so it has to ask the same question.
+ * It used to say only "<tool> wants to run", which is the same sentence for an
+ * Argo CD status refresh and a node drain. The backend now renders the host's
+ * own sentence for the call and sends the impact level beside it, and the card
+ * carries both.
+ */
+describe("the inline confirmation card's host metadata (#548)", () => {
+  const marker = window as unknown as Record<string, unknown>;
+
+  afterEach(() => {
+    delete marker.__TAURI_INTERNALS__;
+  });
+
+  /** Hands the component a `mcp://confirm-request` the way the backend emits it. */
+  async function ask(payload: Record<string, unknown>) {
+    const subscription = tauriEvent.listen.mock.calls.find((c) => c[0] === "mcp://confirm-request");
+    const handler = subscription?.[1] as (event: { payload: unknown }) => void;
+    expect(handler).toBeTruthy();
+    await act(async () => {
+      handler({ payload });
+    });
+  }
+
+  it("leads with the host's sentence and names the impact", async () => {
+    marker.__TAURI_INTERNALS__ = {};
+    render(<AssistantConversation />);
+    await ask({
+      id: "c1",
+      tool: "k8s.drainNode",
+      args: { context: "prod", name: "node-7" },
+      prompt: "Drain node-7 in cluster prod?",
+      impact: "high",
+    });
+    const card = (await screen.findByRole("button", { name: /^approve$/i })).closest("div")
+      ?.parentElement as HTMLElement;
+    expect(within(card).getByText("Drain node-7 in cluster prod?")).toBeTruthy();
+    expect(within(card).getByText(/high impact/i)).toBeTruthy();
+    // The call itself still travels: the sentence says what it does, the tool
+    // id says exactly which call is being approved.
+    expect(within(card).getByText("k8s.drainNode")).toBeTruthy();
+  });
+
+  /**
+   * No template is not a hole. A capability the host wrote no wording for, or
+   * one whose template names a field this call has no value for, arrives with
+   * no `prompt` — and the card shows what it always showed, with the level
+   * still named. Half a sentence over an Approve button is worse than none.
+   */
+  it("still names the impact when the host authored no sentence", async () => {
+    marker.__TAURI_INTERNALS__ = {};
+    render(<AssistantConversation />);
+    await ask({ id: "c2", tool: "toolbox.installHelm", args: { version: "3.16" }, impact: "medium" });
+    const card = (await screen.findByRole("button", { name: /^approve$/i })).closest("div")
+      ?.parentElement as HTMLElement;
+    expect(within(card).getByText(/medium impact/i)).toBeTruthy();
+    expect(within(card).getByText("toolbox.installHelm")).toBeTruthy();
+    expect(card.textContent).not.toMatch(/undefined|null/);
+  });
+});

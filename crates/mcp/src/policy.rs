@@ -3,6 +3,7 @@
 //! flags), and tests (a stub) without branching inside the request handler.
 
 use serde_json::Value;
+use srelens_capability::Impact;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
@@ -33,7 +34,7 @@ impl ConsentKind {
     }
 
     /// What the tool does, for a denial an agent has to act on.
-    fn effect(self) -> &'static str {
+    pub fn effect(self) -> &'static str {
         match self {
             ConsentKind::Destructive => "mutates the cluster",
             ConsentKind::SensitiveRead => "returns sensitive material",
@@ -41,9 +42,45 @@ impl ConsentKind {
     }
 }
 
+/// One gated call, with everything a policy needs to decide and everything a
+/// human needs to be asked.
+///
+/// A struct rather than four arguments because the host metadata is what grows:
+/// `impact` and `confirm_text` arrived with #548, the host-owned confirmation
+/// (#552) reads them, and a policy that ignores them still compiles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsentRequest {
+    pub tool: String,
+    /// The arguments as the caller sent them, `_confirm` included — a policy
+    /// may read that hint; the tool never does.
+    pub args: Value,
+    pub kind: ConsentKind,
+    /// How much this call disturbs. Not the same question as `kind`: a Secret
+    /// read and a node drain are different kinds AND different levels, and two
+    /// destructive calls can differ in level between themselves.
+    pub impact: Impact,
+    /// The host's own sentence for this call, rendered from the capability's
+    /// confirmation template against `args`.
+    ///
+    /// `None` when the capability carries no template, or when the template
+    /// names something this call has no value for. A surface that gets `None`
+    /// shows the tool summary; it does not show half a sentence.
+    pub confirm_text: Option<String>,
+}
+
+impl ConsentRequest {
+    /// What to put in front of a person or an agent: the host's sentence if it
+    /// has one, else a plain statement of the effect.
+    pub fn prompt(&self) -> String {
+        self.confirm_text
+            .clone()
+            .unwrap_or_else(|| format!("`{}` {}", self.tool, self.kind.effect()))
+    }
+}
+
 #[async_trait::async_trait]
 pub trait ConfirmPolicy: Send + Sync {
-    async fn confirm(&self, tool: &str, args: &Value, kind: ConsentKind) -> Decision;
+    async fn confirm(&self, request: &ConsentRequest) -> Decision;
 }
 
 /// The default. A host that wires no policy must not permit gated tools.
@@ -72,17 +109,19 @@ impl FlagGated {
 
 #[async_trait::async_trait]
 impl ConfirmPolicy for AlwaysDeny {
-    async fn confirm(&self, tool: &str, _args: &Value, kind: ConsentKind) -> Decision {
+    async fn confirm(&self, request: &ConsentRequest) -> Decision {
         Decision::Denied(format!(
-            "`{tool}` {} and no consent mechanism is configured for this srelens process",
-            kind.effect()
+            "`{}` {} and no consent mechanism is configured for this srelens process",
+            request.tool,
+            request.kind.effect()
         ))
     }
 }
 
 #[async_trait::async_trait]
 impl ConfirmPolicy for FlagGated {
-    async fn confirm(&self, tool: &str, args: &Value, kind: ConsentKind) -> Decision {
+    async fn confirm(&self, request: &ConsentRequest) -> Decision {
+        let (tool, kind) = (&request.tool, request.kind);
         if !self.allows(kind) {
             return Decision::Denied(format!(
                 "`{tool}` {}; this srelens process was not started with {}",
@@ -90,11 +129,20 @@ impl ConfirmPolicy for FlagGated {
                 kind.flag()
             ));
         }
-        let confirmed = args.get("_confirm").and_then(Value::as_bool).unwrap_or(false);
+        let confirmed = request.args.get("_confirm").and_then(Value::as_bool).unwrap_or(false);
         if !confirmed {
+            // The host's own words, where it has them: an agent asked to state
+            // intent should be told what it is stating intent about, and the
+            // level is the part `mutates the cluster` cannot carry.
+            let detail = request
+                .confirm_text
+                .as_deref()
+                .map(|text| format!(" {text}"))
+                .unwrap_or_default();
             return Decision::Denied(format!(
-                "`{tool}` {}. Re-send with \"_confirm\": true to state intent.",
-                kind.effect()
+                "`{tool}` {} ({} impact).{detail} Re-send with \"_confirm\": true to state intent.",
+                kind.effect(),
+                request.impact.as_str(),
             ));
         }
         Decision::Approved
@@ -112,10 +160,26 @@ mod tests {
         FlagGated::new(true, true)
     }
 
+    /// A request as `McpServer::consent_request` would build one, with the
+    /// host metadata left at its least informative so a test that does not
+    /// care about it reads as though it isn't there.
+    fn request(tool: &str, args: Value, kind: ConsentKind) -> ConsentRequest {
+        ConsentRequest {
+            tool: tool.into(),
+            args,
+            kind,
+            impact: match kind {
+                ConsentKind::Destructive => Impact::High,
+                ConsentKind::SensitiveRead => Impact::Medium,
+            },
+            confirm_text: None,
+        }
+    }
+
     #[tokio::test]
     async fn always_deny_refuses_everything() {
         let d = AlwaysDeny
-            .confirm("k8s_deletePod", &json!({}), ConsentKind::Destructive)
+            .confirm(&request("k8s_deletePod", json!({}), ConsentKind::Destructive))
             .await;
         assert!(matches!(d, Decision::Denied(_)));
     }
@@ -123,7 +187,7 @@ mod tests {
     #[tokio::test]
     async fn always_deny_refuses_a_sensitive_read_too() {
         let d = AlwaysDeny
-            .confirm("k8s.getSecret", &json!({}), ConsentKind::SensitiveRead)
+            .confirm(&request("k8s.getSecret", json!({}), ConsentKind::SensitiveRead))
             .await;
         assert!(matches!(d, Decision::Denied(_)));
     }
@@ -132,21 +196,21 @@ mod tests {
     async fn flag_gated_requires_both_flag_and_confirm() {
         let with_flag = permissive();
         let without_flag = FlagGated::new(false, false);
-        let confirmed = json!({ "_confirm": true });
-        let bare = json!({});
         let k = ConsentKind::Destructive;
+        let confirmed = request("t", json!({ "_confirm": true }), k);
+        let bare = request("t", json!({}), k);
 
         // The full 2x2. Only flag AND _confirm approves.
-        assert_eq!(with_flag.confirm("t", &confirmed, k).await, Decision::Approved);
-        assert!(matches!(with_flag.confirm("t", &bare, k).await, Decision::Denied(_)));
-        assert!(matches!(without_flag.confirm("t", &confirmed, k).await, Decision::Denied(_)));
-        assert!(matches!(without_flag.confirm("t", &bare, k).await, Decision::Denied(_)));
+        assert_eq!(with_flag.confirm(&confirmed).await, Decision::Approved);
+        assert!(matches!(with_flag.confirm(&bare).await, Decision::Denied(_)));
+        assert!(matches!(without_flag.confirm(&confirmed).await, Decision::Denied(_)));
+        assert!(matches!(without_flag.confirm(&bare).await, Decision::Denied(_)));
     }
 
     #[tokio::test]
     async fn flag_gated_denial_explains_which_half_is_missing() {
         let d = FlagGated::new(false, false)
-            .confirm("t", &json!({ "_confirm": true }), ConsentKind::Destructive)
+            .confirm(&request("t", json!({ "_confirm": true }), ConsentKind::Destructive))
             .await;
         match d {
             Decision::Denied(r) => assert!(r.contains("--mcp-allow-destructive"), "got: {r}"),
@@ -160,7 +224,7 @@ mod tests {
     #[tokio::test]
     async fn allowing_sensitive_reads_authorizes_a_sensitive_read() {
         let d = FlagGated::new(false, true)
-            .confirm("k8s.getSecret", &json!({ "_confirm": true }), ConsentKind::SensitiveRead)
+            .confirm(&request("k8s.getSecret", json!({ "_confirm": true }), ConsentKind::SensitiveRead))
             .await;
         assert_eq!(d, Decision::Approved);
     }
@@ -169,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn allowing_sensitive_reads_does_not_authorize_a_destructive_tool() {
         let d = FlagGated::new(false, true)
-            .confirm("k8s.deletePod", &json!({ "_confirm": true }), ConsentKind::Destructive)
+            .confirm(&request("k8s.deletePod", json!({ "_confirm": true }), ConsentKind::Destructive))
             .await;
         match d {
             Decision::Denied(r) => assert!(r.contains("--mcp-allow-destructive"), "got: {r}"),
@@ -183,7 +247,7 @@ mod tests {
     #[tokio::test]
     async fn allowing_destructive_does_not_authorize_a_sensitive_read() {
         let d = FlagGated::new(true, false)
-            .confirm("k8s.getSecret", &json!({ "_confirm": true }), ConsentKind::SensitiveRead)
+            .confirm(&request("k8s.getSecret", json!({ "_confirm": true }), ConsentKind::SensitiveRead))
             .await;
         match d {
             Decision::Denied(r) => {
@@ -198,8 +262,50 @@ mod tests {
     #[tokio::test]
     async fn a_sensitive_read_still_needs_confirm() {
         let d = FlagGated::new(true, true)
-            .confirm("k8s.getSecret", &json!({}), ConsentKind::SensitiveRead)
+            .confirm(&request("k8s.getSecret", json!({}), ConsentKind::SensitiveRead))
             .await;
         assert!(matches!(d, Decision::Denied(_)));
+    }
+
+    /// An agent told only "mutates the cluster" cannot tell a node drain from
+    /// a status refresh. The denial it is asked to re-send now carries the
+    /// host's level and the host's own sentence.
+    #[tokio::test]
+    async fn the_denial_carries_the_level_and_the_hosts_words() {
+        let mut req = request("k8s.gitOpsAction", json!({}), ConsentKind::Destructive);
+        req.confirm_text = Some("Apply the desired resources of Application team/api?".into());
+        match permissive().confirm(&req).await {
+            Decision::Denied(r) => {
+                assert!(r.contains("high impact"), "got: {r}");
+                assert!(r.contains("Apply the desired resources"), "got: {r}");
+            }
+            other => panic!("expected denial, got {other:?}"),
+        }
+    }
+
+    /// And a capability with no template is still a complete sentence — the
+    /// host does not show half of one.
+    #[tokio::test]
+    async fn a_denial_without_host_words_still_reads() {
+        match permissive()
+            .confirm(&request("toolbox.install", json!({}), ConsentKind::Destructive))
+            .await
+        {
+            Decision::Denied(r) => {
+                assert!(r.contains("mutates the cluster (high impact)."), "got: {r}");
+                assert!(!r.contains(".."), "no gap where the sentence would be: {r}");
+            }
+            other => panic!("expected denial, got {other:?}"),
+        }
+    }
+
+    /// The fallback a confirming surface uses: the host's sentence when there
+    /// is one, a plain statement of the effect when there is not.
+    #[test]
+    fn prompt_prefers_the_hosts_sentence() {
+        let mut req = request("k8s.drainNode", json!({}), ConsentKind::Destructive);
+        assert_eq!(req.prompt(), "`k8s.drainNode` mutates the cluster");
+        req.confirm_text = Some("Drain node-1?".into());
+        assert_eq!(req.prompt(), "Drain node-1?");
     }
 }

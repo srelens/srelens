@@ -114,4 +114,45 @@ describe("McpConfirmDialog", () => {
     await waitFor(() => expect(screen.queryByText(/toolB/)).toBeNull());
     expect(respondToConfirm).not.toHaveBeenCalled();
   });
+
+  /**
+   * #548. The prompt was the tool id and a JSON blob — the same question for
+   * an Argo CD status refresh and a node drain. The backend now renders its
+   * own sentence for the call, from a template compiled into it, and sends the
+   * impact level beside it.
+   */
+  it("leads with the host's sentence and names the impact", async () => {
+    render(<McpConfirmDialog />);
+    emit({
+      id: "p1",
+      tool: "k8s.drainNode",
+      args: { context: "prod", name: "node-7" },
+      prompt: "Drain node-7 in cluster prod?",
+      impact: "high",
+    });
+    expect(await screen.findByText("Drain node-7 in cluster prod?")).toBeTruthy();
+    expect(screen.getByText(/high impact/i)).toBeTruthy();
+    // And the call itself still travels: the sentence says what it does, the
+    // payload says exactly which call it is.
+    expect(screen.getByText(/k8s.drainNode/)).toBeTruthy();
+  });
+
+  /**
+   * The fallback is as much the point as the sentence. A capability with no
+   * template, or one whose template names a field this call has no value for,
+   * arrives with no prompt at all — and the dialog shows what it always
+   * showed, rather than a sentence with a hole in it over an Approve button.
+   */
+  it("falls back to the tool and its arguments when there is no host sentence", async () => {
+    render(<McpConfirmDialog />);
+    emit({ id: "p2", tool: "toolbox.installHelm", args: { version: "3.16" }, impact: "medium" });
+    const tool = await screen.findByText(/toolbox.installHelm/);
+    expect(tool).toBeTruthy();
+    // The level is still named — it is the half of the metadata that does not
+    // depend on a template, and it is what distinguishes this prompt from the
+    // one the dialog drew before #548.
+    expect(screen.getByText(/medium impact/i)).toBeTruthy();
+    expect(screen.getByText(/3.16/)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/undefined|null/);
+  });
 });

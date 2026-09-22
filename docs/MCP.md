@@ -277,7 +277,13 @@ has both combinations, on purpose:
 - `k8s.diffManifest` is sensitive (it can echo back manifest content, so its
   arguments are redacted in the audit log) but is **not** confirm-gated —
   it changes nothing on the cluster, so it's classed plain **read-only**.
-  You can call it headlessly with no flag at all.
+  You can call it headlessly with no flag at all. What keeps that safe is
+  redaction rather than consent: for a `Secret`, the host blanks `data`,
+  `stringData` **and every `metadata.annotations` value** on both sides
+  before rendering the diff, so the base64 map an `apply`-managed Secret
+  carries in `kubectl.kubernetes.io/last-applied-configuration` never
+  reaches the response. `k8s.getManifest` runs the same redactor for the
+  same reason.
 - `k8s.getSecret` is sensitive **and** confirm-gated, because unlike a diff
   it returns actual secret values. That combination is its own class,
   **sensitive read**, gated behind `--mcp-allow-sensitive-reads` rather than
@@ -288,6 +294,34 @@ has both combinations, on purpose:
 If you only remember one thing from this section: don't infer whether a
 tool needs confirmation from whether the catalog marked it `sensitive` — go
 look up its actual safety class.
+
+### Impact is a third axis
+
+The catalog's tool tables also carry an **impact** level — `low`, `medium` or
+`high` — which answers a different question again: not *whether* a call is
+gated, but how much it disturbs if it runs.
+
+| Level | What it covers |
+| --- | --- |
+| `low` | A read, or a write whose only effect is to make a controller look again. |
+| `medium` | Changes cluster or host state but leaves workloads running: a scale, a suspend, a tool install, a Secret returned to the caller. |
+| `high` | Destroys, disrupts or replaces something running: a delete, a drain, a sync that applies manifests and runs hooks. |
+
+It cannot contradict the safety class — anything destructive is `high`,
+anything gated is at least `medium`, an ungated read is `low` — but it
+separates tools the class puts together. Two "needs confirmation" tools are
+not equally alarming.
+
+A headless denial now names the level and, where the host has authored one,
+the host's own sentence for the call, so an agent asked to re-send with
+`"_confirm": true` is told what it is confirming rather than only that the
+tool "mutates the cluster".
+
+One caveat, for a tool that takes a named operation: the published level is
+the **highest** any operation it accepts can reach, because `tools/list`
+carries one row per tool. `k8s.gitOpsAction` is `high` because one of its
+eight actions is an Argo CD sync, although its `refresh` action is `low`.
+The per-action level comes back with the resource, on `extensions.resource`.
 
 ## Client configuration
 

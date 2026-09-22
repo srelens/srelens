@@ -552,6 +552,48 @@ mod tests {
         srelens_mcp::completeness::assert_mutating_capabilities_are_gated(&reg);
     }
 
+    /// The host-owned metadata #548 adds, checked over the whole live registry
+    /// rather than over a preset: a capability that spells its own annotations
+    /// out is exactly the one that gets the level wrong, and a confirmation
+    /// template only proves itself against the arguments its capability
+    /// actually carries.
+    #[test]
+    fn every_capability_carries_coherent_v2_metadata() {
+        let reg = build_registry();
+        srelens_mcp::completeness::assert_impact_matches_the_gate(&reg);
+        srelens_mcp::completeness::assert_confirm_templates_are_renderable(&reg);
+    }
+
+    /// Every gated capability has the host's own words for it. A gate with no
+    /// sentence leaves a confirming surface to invent one, which is how the
+    /// wording ended up in UI constants (`ExtensionResourceDetails.tsx`) in the
+    /// first place.
+    #[test]
+    fn every_gated_capability_has_host_confirmation_text() {
+        let reg = build_registry();
+        let silent: Vec<&str> = reg
+            .ids()
+            .into_iter()
+            .filter(|id| {
+                reg.get(id)
+                    .is_some_and(|c| c.annotations.requires_confirm && c.annotations.confirm.is_none())
+            })
+            .collect();
+        assert!(silent.is_empty(), "gated with no confirmation text: {silent:?}");
+    }
+
+    /// `extensions.action` forwards to `k8s.gitOpsAction` and must not look
+    /// calmer than what it forwards to. A wrapper that kept the `MUTATING`
+    /// preset would publish `medium` for a call that can reach an Argo CD sync.
+    #[test]
+    fn the_app_facing_action_matches_the_host_action_it_forwards_to() {
+        let reg = build_registry();
+        let host = reg.get("k8s.gitOpsAction").expect("registered").annotations;
+        let app = reg.get("extensions.action").expect("registered").annotations;
+        assert_eq!(app.impact, host.impact);
+        assert_eq!(app.confirm, host.confirm);
+    }
+
     #[test]
     fn registers_core_capabilities() {
         let reg = build_registry();

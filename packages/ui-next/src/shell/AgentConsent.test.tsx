@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 /**
@@ -996,4 +996,84 @@ describe("AgentConsent", () => {
     });
   });
 
+});
+
+/**
+ * #548: the prompt used to be the tool id and a JSON blob, which is the same
+ * question for an Argo CD status refresh and a node drain. The backend now
+ * sends the host's own rendered sentence and the impact level beside it.
+ *
+ * The fallback is as much the point as the sentence: a template that cannot
+ * render (a field outside an optional segment with no value) arrives as no
+ * prompt at all, and the dialog shows what it always showed rather than a
+ * sentence with a hole in it.
+ */
+describe("the host's own words", () => {
+  const askWith = (payload: Record<string, unknown>) => emit(REQUEST, payload);
+
+  it("leads with the host sentence and names the impact for a high-impact call", async () => {
+    await mount();
+    askWith({
+      id: "h1",
+      tool: "k8s.drainNode",
+      args: { context: "prod", name: "node-7" },
+      prompt: "Drain node-7 in cluster prod?",
+      impact: "high",
+    });
+    expect(await screen.findByText("Drain node-7 in cluster prod?")).toBeTruthy();
+    expect(screen.getByText(/high impact/i)).toBeTruthy();
+    // The payload still travels: the sentence says what, this says which call.
+    expect(screen.getByText(/k8s.drainNode/)).toBeTruthy();
+    expect(screen.getByText(/node-7/, { selector: "code" })).toBeTruthy();
+  });
+
+  it("falls back to the tool and its arguments when the host authored no sentence", async () => {
+    await mount();
+    askWith({ id: "h2", tool: "toolbox.installHelm", args: { version: "3.16" }, impact: "medium" });
+    expect(await screen.findByText(/toolbox.installHelm/)).toBeTruthy();
+    expect(screen.getByText(/medium impact/i)).toBeTruthy();
+    expect(screen.getByText(/3.16/, { selector: "code" })).toBeTruthy();
+  });
+
+  /**
+   * A prompt that is not a non-empty string is dropped rather than drawn.
+   * `undefined` over an Approve button is the hole the backend's own
+   * fallback exists to avoid, and this is the last place it could reappear.
+   */
+  it("never draws a hole where a sentence would be", async () => {
+    await mount();
+    askWith({ id: "h3", tool: "k8s.drainNode", args: { context: "prod" }, prompt: null, impact: "high" });
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).not.toMatch(/undefined|null/);
+    expect(dialog.textContent).toContain("k8s.drainNode");
+    // A dropped sentence is not a dropped prompt: the level the host did send
+    // is still named, so this case is distinguishable from the dialog that
+    // drew neither. Without it the assertions above hold on the old dialog too.
+    expect(within(dialog).getByText(/high impact/i)).toBeTruthy();
+  });
+
+  /** An impact the host does not define is ignored, not printed. */
+  it("ignores a level outside the host's three words", async () => {
+    await mount();
+    askWith({ id: "h4", tool: "k8s.scale", args: {}, prompt: "Change the replica count?", impact: "CRITICAL" });
+    expect(await screen.findByText("Change the replica count?")).toBeTruthy();
+    expect(screen.queryByText(/CRITICAL/)).toBeNull();
+    expect(screen.queryByText(/impact/i)).toBeNull();
+  });
+
+  /** A replayed request carries the same words a live one does. */
+  it("shows the sentence on a request handed over by the snapshot", async () => {
+    core.pendingConfirms.mockResolvedValue([
+      {
+        id: "h5",
+        tool: "k8s.drainNode",
+        args: { name: "node-7" },
+        prompt: "Drain node-7?",
+        impact: "high",
+      },
+    ]);
+    await mount();
+    expect(await screen.findByText("Drain node-7?")).toBeTruthy();
+    expect(screen.getByText(/high impact/i)).toBeTruthy();
+  });
 });

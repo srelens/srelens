@@ -31,10 +31,124 @@ export interface CapabilityFacts {
   requiresConfirm: boolean;
   /** Reads or reveals secret material, e.g. `k8s.getSecret`. */
   sensitive: boolean;
+  /**
+   * How much a successful call disturbs — a different question from whether it
+   * is gated, and one no boolean here can answer.
+   *
+   * `requiresConfirm` is true for a Secret read and for a node drain alike, so
+   * a pane that shows one badge for both teaches a reader to click through all
+   * of them. `low` is a read, or a write whose only effect is to make a
+   * controller look again; `medium` changes something that leaves workloads
+   * running; `high` destroys, disrupts or replaces something running.
+   *
+   * A capability that accepts several named operations carries the highest
+   * level any of them reaches — `k8s.gitOpsAction` is `high` because one of its
+   * eight actions is an Argo CD sync. The per-operation level travels with the
+   * resource (`ExtensionResourceDetail.actionMeta`).
+   */
+  impact: CapabilityImpact;
+  /**
+   * The host's confirmation wording, as a TEMPLATE, or `null` where the host
+   * authored none and a confirming surface falls back to the summary.
+   *
+   * Host-authored means exactly that: the string is compiled into the backend
+   * beside the handler it describes, so nothing an extension manifest, a
+   * catalog entry or an MCP client sends can become the sentence a user is
+   * asked to approve. Render it with {@link renderConfirmTemplate}.
+   */
+  confirm: string | null;
 }
 
-/** Every capability the backend registers, sorted by id. */
-export const CAPABILITY_CATALOG: readonly CapabilityFacts[] = catalog;
+/** See {@link CapabilityFacts.impact}. */
+export type CapabilityImpact = "low" | "medium" | "high";
+
+/** Least to most disturbing, for sorting and comparison. */
+export const CAPABILITY_IMPACT_ORDER: readonly CapabilityImpact[] = ["low", "medium", "high"];
+
+/**
+ * The fields a confirmation template may name. Host-owned and closed: a
+ * template that could interpolate any argument would let a capability paste a
+ * token or a Secret value into a dialog title.
+ *
+ * Mirrors `CONFIRM_FIELDS` in `crates/capability/src/annotations.rs`, and
+ * `confirmTemplateFieldsMatchTheBackend` in `capabilities.test.ts` fails when
+ * the two drift.
+ */
+export const CONFIRM_TEMPLATE_FIELDS = [
+  "action",
+  "cluster",
+  "kind",
+  "name",
+  "namespace",
+  "resource",
+] as const;
+
+export type ConfirmTemplateField = (typeof CONFIRM_TEMPLATE_FIELDS)[number];
+
+/**
+ * Render a host confirmation template against one call's fields.
+ *
+ * The scheme, which the backend's `render_confirm` implements identically:
+ *
+ * - `{field}` is replaced by that field's value.
+ * - `[ … ]` is an **optional segment**: kept only if every `{field}` inside it
+ *   has a value, dropped whole otherwise. Segments do not nest.
+ * - A `{field}` **outside** a segment with no value makes the whole render
+ *   fail (`null`), because the alternative is showing a sentence with a hole
+ *   in it. Callers fall back to the capability summary — they do not invent
+ *   the missing half.
+ *
+ * So `"Suspend {resource}[ in cluster {cluster}]?"` gives
+ * `Suspend HelmRelease team/api in cluster prod?` when the call names a
+ * cluster and `Suspend HelmRelease team/api?` when it does not.
+ */
+export function renderConfirmTemplate(
+  template: string,
+  fields: Partial<Record<ConfirmTemplateField, string>>,
+): string | null {
+  const substitute = (segment: string): string | null => {
+    let missing = false;
+    const out = segment.replace(/\{([a-z]+)\}/g, (_match, field: string) => {
+      const value = fields[field as ConfirmTemplateField];
+      if (value === undefined || value === "") {
+        missing = true;
+        return "";
+      }
+      return value;
+    });
+    return missing ? null : out;
+  };
+  let out = "";
+  let rest = template;
+  for (;;) {
+    const open = rest.indexOf("[");
+    if (open === -1) {
+      const tail = substitute(rest);
+      return tail === null ? null : out + tail;
+    }
+    const before = substitute(rest.slice(0, open));
+    if (before === null) return null;
+    out += before;
+    const close = rest.indexOf("]", open);
+    if (close === -1) return null;
+    out += substitute(rest.slice(open + 1, close)) ?? "";
+    rest = rest.slice(close + 1);
+  }
+}
+
+/**
+ * Every capability the backend registers, sorted by id.
+ *
+ * The annotation on `rows` is the structural check that the committed JSON
+ * still matches `CapabilityFacts` — every field except `impact`, which
+ * TypeScript widens from the JSON's string literals to `string` and so cannot
+ * be narrowed to the union here. The three words are pinned at runtime instead,
+ * by `capability metadata v2` in `capabilities.test.ts`, and in Rust by the
+ * enum the generator serializes.
+ */
+type CatalogRow = Omit<CapabilityFacts, "impact"> & { impact: string };
+const rows: readonly CatalogRow[] = catalog;
+export const CAPABILITY_CATALOG: readonly CapabilityFacts[] = rows as readonly CapabilityFacts[];
 
 /**
  * The host-owned ids the catalog carries that a WEB registry does not register.

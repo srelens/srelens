@@ -223,9 +223,12 @@ reviews:
         to an empty list). Watches must handle relist/410 Gone and must not report
         recovery before a complete relist. A custom kind is resolved with its API
         group, not by kind name alone (a CRD may reuse a built-in kind's name,
-        including for delete). Secrets returned by `k8s.getManifest` are redacted
-        by the frontend; `k8s.getSecret` is the consent-gated read, so do not add a
-        second unconditional path that returns Secret values.
+        including for delete). Every ungated read of a Secret — `k8s.getObject`,
+        `k8s.getManifest`, `k8s.diffManifest` — runs `redact_secret_data` over
+        `data`, `stringData` and every annotation value before it serializes;
+        `k8s.getSecret` is the consent-gated read, so do not add a second
+        unconditional path that returns Secret values, and a new one needs a test
+        asserting the plaintext is absent from what the handler returns.
 
     - path: "crates/streams/**"
       instructions: |

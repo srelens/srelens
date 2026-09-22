@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { isTauri, pendingConfirms, respondToConfirm, subscribe, type ConfirmRequest } from "@srelens/core";
+import {
+  CAPABILITY_IMPACT_ORDER,
+  isTauri,
+  pendingConfirms,
+  respondToConfirm,
+  subscribe,
+  type CapabilityImpact,
+  type ConfirmRequest,
+} from "@srelens/core";
 import { getRun, noteGate, noteGateIn, runKeyHoldingGate } from "../lib/agentRun";
 import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
@@ -198,9 +206,45 @@ import { useWorkspaceSealed } from "./LockGate";
  */
 function asRequest(payload: unknown): ConfirmRequest | null {
   if (typeof payload !== "object" || payload === null) return null;
-  const { id, tool, args } = payload as Partial<ConfirmRequest>;
+  const { id, tool, args, prompt, impact } = payload as Partial<ConfirmRequest>;
   if (typeof id !== "string" || id === "" || typeof tool !== "string") return null;
-  return { id, tool, args: typeof args === "object" && args !== null ? args : {} };
+  return {
+    id,
+    tool,
+    args: typeof args === "object" && args !== null ? args : {},
+    // Narrowed like everything else that crosses the boundary. A `prompt` that
+    // is not a non-empty string is dropped rather than rendered: this is the
+    // sentence over an Approve button, and `undefined` drawn there is exactly
+    // the hole the backend's own fallback exists to avoid.
+    prompt: typeof prompt === "string" && prompt !== "" ? prompt : null,
+    impact: IMPACTS.includes(impact as CapabilityImpact) ? (impact as CapabilityImpact) : undefined,
+  };
+}
+
+const IMPACTS: readonly string[] = CAPABILITY_IMPACT_ORDER;
+
+/** What the level is called in front of a reader, and how loudly it is drawn. */
+const IMPACT_LABEL: Record<CapabilityImpact, string> = {
+  low: "Low impact",
+  medium: "Medium impact",
+  high: "High impact",
+};
+
+/**
+ * The level as a badge beside the question.
+ *
+ * A word, not only a colour — colour is never the only signal in this app, and
+ * this is the one place where a reader deciding in a hurry most needs to be
+ * told which of two identical-looking prompts is the dangerous one.
+ */
+function ImpactBadge({ impact }: { impact: CapabilityImpact }) {
+  const tone =
+    impact === "high" ? "text-sev" : impact === "medium" ? "text-warn" : "text-muted";
+  return (
+    <span className={`text-[0.6875rem] font-medium uppercase tracking-wide ${tone}`}>
+      {IMPACT_LABEL[impact]}
+    </span>
+  );
 }
 
 /** The id out of a `mcp://confirm-resolved` payload, or null. */
@@ -500,6 +544,21 @@ export function AgentConsent() {
         title="An agent wants to run a cluster action"
         message={
           <div className="flex flex-col gap-2">
+            {/*
+              The HOST's sentence, when it has one — see `ConfirmRequest.prompt`.
+              It leads, because it is the only line here written for a person:
+              the tool id and the argument payload say which call, and this says
+              what it does. When the capability carries no template, or the
+              template names something this call has no value for, the backend
+              sends nothing and the two lines below are the whole prompt, as
+              they were before. It never draws half a sentence.
+            */}
+            {(current.prompt || current.impact) && (
+              <div className="flex flex-col gap-1">
+                {current.impact && <ImpactBadge impact={current.impact} />}
+                {current.prompt && <p className="m-0 font-medium">{current.prompt}</p>}
+              </div>
+            )}
             <p className="m-0">
               Tool: <code className="code rounded px-1.5 py-0.5">{current.tool}</code>
             </p>

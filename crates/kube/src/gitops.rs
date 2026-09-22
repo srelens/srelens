@@ -8,7 +8,7 @@ use kube::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use srelens_capability::{Annotations, Capability, CapabilityError};
+use srelens_capability::{Annotations, Capability, CapabilityError, Impact};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -88,10 +88,89 @@ pub struct ActionIn {
     #[serde(rename = "resourceVersion")]
     pub resource_version: String,
 }
+/// What one named GitOps action does, as the host describes it.
+///
+/// Per action rather than per capability, because the actions behind
+/// `k8s.gitOpsAction` do not share a level: `refresh` writes an annotation that
+/// makes Argo CD re-read a status, and `sync` applies the application's
+/// manifests and runs its hooks. One `impact` on the capability could only be
+/// the ceiling of the two, which would describe neither. The capability's own
+/// annotation IS that ceiling — it has to be, since `tools/list` publishes one
+/// row — and this is what a confirming surface shows instead.
+///
+/// #549's action primitives derive the same two fields from the primitive and
+/// its target fields; this table is the shape they replace, not a second one.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct ActionMeta {
+    /// How much this action disturbs, whatever gate the capability carries.
+    pub impact: Impact,
+    /// The host's confirmation template, in the scheme
+    /// [`srelens_capability::render_confirm`] documents.
+    pub confirm: &'static str,
+}
+
+/// The host's metadata for one action name, or `None` if it names no action
+/// this host performs.
+///
+/// Every level here is the host's judgement of what the *patch* does, not of
+/// how the capability is gated: `refresh` is `low` although the capability that
+/// carries it is confirm-gated, because a status re-read disturbs nothing. The
+/// gate belongs to the capability; the level belongs to the action.
+pub fn action_meta(action: &str) -> Option<ActionMeta> {
+    let (impact, confirm) = match action {
+        // Writes `argocd.argoproj.io/refresh: normal`. Argo CD re-reads the
+        // application's status; no manifest is applied and no hook runs.
+        "refresh" => (
+            Impact::Low,
+            "Refresh the Argo CD status[ of {resource}][ in cluster {cluster}]?",
+        ),
+        // The same annotation with `hard`, which also drops Argo CD's manifest
+        // cache: more work for the controller, still no cluster write.
+        "hard-refresh" => (
+            Impact::Medium,
+            "Invalidate Argo CD's manifest cache and refresh[ {resource}][ in cluster {cluster}]?",
+        ),
+        // Applies the application's desired resources and runs its sync hooks.
+        // The one action here that can replace something running.
+        "sync" => (
+            Impact::High,
+            "Apply the desired resources[ of {resource}][ in cluster {cluster}]? Argo CD runs the application's sync hooks. Pruning is not enabled by this request.",
+        ),
+        "suspend" => (
+            Impact::Medium,
+            "Pause reconciliation[ of {resource}][ in cluster {cluster}]? Workloads already running are not stopped.",
+        ),
+        "resume" => (
+            Impact::Medium,
+            "Let the controller reconcile[ {resource}][ in cluster {cluster}] again?",
+        ),
+        "reconcile" => (
+            Impact::Medium,
+            "Ask Flux to reconcile[ {resource}][ in cluster {cluster}] now, from its configured source?",
+        ),
+        // Re-runs the Helm install or upgrade even when chart and values are
+        // unchanged, so the release's resources are rewritten.
+        "force" => (
+            Impact::High,
+            "Force a Helm install or upgrade[ of {resource}][ in cluster {cluster}], even though the chart and values have not changed?",
+        ),
+        "reset" => (
+            Impact::Medium,
+            "Reset Helm remediation retries[ for {resource}][ in cluster {cluster}] and request reconciliation?",
+        ),
+        _ => return None,
+    };
+    Some(ActionMeta { impact, confirm })
+}
+
 #[derive(Serialize, JsonSchema)]
 pub struct ResourceOut {
     pub resource: Value,
     pub actions: Vec<String>,
+    /// The host's level and wording for each entry in `actions`, keyed by
+    /// action name. Read by the confirming surface; the app never supplies it.
+    #[serde(rename = "actionMeta")]
+    pub action_meta: std::collections::BTreeMap<String, ActionMeta>,
     /// Newest first, at most `EVENTS_SHOWN`.
     pub events: Vec<Value>,
     #[serde(rename = "eventsTruncated")]
@@ -248,9 +327,14 @@ async fn inspect_with_timeout(
             ),
         }
     };
+    let actions = supported_actions(r);
     Ok(ResourceOut {
         resource,
-        actions: supported_actions(r),
+        action_meta: actions
+            .iter()
+            .filter_map(|a| action_meta(a).map(|m| (a.clone(), m)))
+            .collect(),
+        actions,
         events,
         events_truncated,
         events_partial,
@@ -381,8 +465,22 @@ pub fn resource_capability(cache: Arc<ClientCache>) -> Capability {
         },
     )
 }
+/// One capability, eight actions, three impact levels.
+///
+/// The annotation below is the CEILING of what any action it accepts can do —
+/// `sync` applies manifests and runs hooks, so the row says `High` — because
+/// `tools/list` and `capability-catalog.json` publish exactly one row per
+/// capability and a row that understated the worst case would be a lie told to
+/// every consumer of the catalog. The honest per-action level is
+/// [`action_meta`], which travels with the resource the user is looking at.
+///
+/// Splitting the capability per action was the alternative and it buys nothing
+/// here: the host, not the extension, decides which actions a resource offers
+/// (`supported_actions`), so separate ids would not narrow what an installed
+/// app can reach — and #549 replaces this table with action primitives that
+/// derive the same two fields, so the ids would be born to be deleted.
 pub fn action_capability(cache: Arc<ClientCache>) -> Capability {
-    Capability::typed::<ActionIn, Value, _, _>("k8s.gitOpsAction", "Request a supported Flux or Argo CD operation on the reviewed resource; requires confirmation", Annotations::MUTATING, move |input| {
+    Capability::typed::<ActionIn, Value, _, _>("k8s.gitOpsAction", "Request a supported Flux or Argo CD operation on the reviewed resource; requires confirmation", Annotations::MUTATING.with_impact(Impact::High).with_confirm("Run the requested GitOps operation[ ({action})][ on {resource}][ in cluster {cluster}]?"), move |input| {
         let cache = cache.clone(); async move {
             input.resource.validate().map_err(CapabilityError::InvalidInput)?;
             action_patch(&input.resource, &input.action, "validate").map_err(CapabilityError::InvalidInput)?;
@@ -860,6 +958,59 @@ mod tests {
             force_patch["metadata"]["annotations"]["reconcile.fluxcd.io/forceAt"],
             "2026-01-01T00:00:00Z"
         );
+    }
+
+    /// The reason this table exists instead of one number on the capability:
+    /// the two Argo CD actions that sit side by side in the same menu are a
+    /// status re-read and an apply that runs hooks.
+    #[test]
+    fn refresh_and_sync_do_not_share_an_impact_level() {
+        assert_eq!(action_meta("refresh").unwrap().impact, Impact::Low);
+        assert_eq!(action_meta("sync").unwrap().impact, Impact::High);
+        assert_eq!(action_meta("hard-refresh").unwrap().impact, Impact::Medium);
+        // And the capability's own row is the ceiling, never below the worst.
+        let cap = action_capability(ClientCache::new(std::path::PathBuf::from("/dev/null")));
+        assert_eq!(cap.annotations.impact, Impact::High);
+    }
+
+    /// Every action the host offers has host metadata, or a confirming surface
+    /// is back to inventing wording for the ones that don't.
+    #[test]
+    fn every_supported_action_has_renderable_host_metadata() {
+        for r in [
+            resource("argoproj.io", "Application", "applications"),
+            resource("helm.toolkit.fluxcd.io", "HelmRelease", "helmreleases"),
+            resource(
+                "kustomize.toolkit.fluxcd.io",
+                "Kustomization",
+                "kustomizations",
+            ),
+        ] {
+            for action in supported_actions(&r) {
+                let meta = action_meta(&action).unwrap_or_else(|| panic!("no metadata: {action}"));
+                srelens_capability::check_confirm_template(meta.confirm)
+                    .unwrap_or_else(|e| panic!("{action}: {e}"));
+                assert!(
+                    srelens_capability::render_confirm(meta.confirm, &Default::default()).is_some(),
+                    "{action} must read as a sentence with no fields resolved"
+                );
+            }
+        }
+        assert!(action_meta("not-an-action").is_none());
+    }
+
+    /// Inspecting a resource hands the metadata over with the action list, so
+    /// the surface that draws the buttons does not have to ask again.
+    #[test]
+    fn inspect_output_carries_the_metadata_for_every_action_it_offers() {
+        let r = resource("argoproj.io", "Application", "applications");
+        let actions = supported_actions(&r);
+        let meta: std::collections::BTreeMap<String, ActionMeta> = actions
+            .iter()
+            .filter_map(|a| action_meta(a).map(|m| (a.clone(), m)))
+            .collect();
+        assert_eq!(meta.len(), actions.len());
+        assert_eq!(meta["sync"].impact, Impact::High);
     }
 
     #[tokio::test]
