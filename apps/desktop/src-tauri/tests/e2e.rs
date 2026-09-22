@@ -182,6 +182,48 @@ impl Harness {
         }
     }
 
+    /// Controllers and node heartbeats can invalidate a review between the GET
+    /// and PATCH. Only this live-test helper re-reads and reviews on an explicit
+    /// stale-review refusal or API conflict. Production still refuses the write.
+    /// Return the accepted payload so the old review can be checked afterwards.
+    async fn reviewed_request(
+        &mut self,
+        id: &str,
+        mut input: Value,
+    ) -> Result<(Value, Value), srelens_capability::CapabilityError> {
+        for attempt in 0..8 {
+            let current = self
+                .reg
+                .invoke(
+                    "k8s.getObject",
+                    json!({
+                        "context":input["context"],"kind":input["kind"],
+                        "namespace":input["namespace"],"name":input["name"]
+                    }),
+                )
+                .await?;
+            input["uid"] = current["object"]["metadata"]["uid"].clone();
+            input["resourceVersion"] = current["object"]["metadata"]["resourceVersion"].clone();
+            match self.reg.invoke(id, input.clone()).await {
+                Ok(out) => {
+                    self.mark(id);
+                    return Ok((out, input));
+                }
+                Err(error) => {
+                    let review_race = matches!(&error, srelens_capability::CapabilityError::Handler(message)
+                        if message == "Resource changed or was replaced; refresh and review the action again"
+                            || (message.starts_with("ApiError:") && message.contains(": Conflict (Status {")
+                                && message.contains("code: 409,")));
+                    if !review_race || attempt == 7 {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        unreachable!("the final attempt returns its result")
+    }
+
     /// Invoke `id`, recording it covered; asserts the call returns Err (for
     /// negative paths) and returns the error message.
     async fn err(&mut self, id: &str, input: Value) -> String {
@@ -1911,23 +1953,23 @@ async fn run_suite() {
         .await;
     assert_eq!(out["ok"], true);
 
-    // The extension adapter uses the same rollout operation, with a reviewed identity.
-    let current = h
-        .reg
-        .invoke(
-            "k8s.getObject",
-            json!({"context":ctx,"kind":"Deployment","namespace":NS,"name":DEPLOY}),
+    // Review afresh only if a controller races this live fixture's pinned write.
+    let (out, reviewed) = h
+        .reviewed_request(
+            "k8s.requestRolloutRestart",
+            json!({
+                "context":ctx,"group":"apps","version":"v1","kind":"Deployment",
+                "plural":"deployments","namespaced":true,"namespace":NS,"name":DEPLOY
+            }),
         )
         .await
-        .unwrap();
-    let reviewed = json!({"context":ctx,"group":"apps","version":"v1","kind":"Deployment",
-        "plural":"deployments","namespaced":true,"namespace":NS,"name":DEPLOY,
-        "uid":current["object"]["metadata"]["uid"],"resourceVersion":current["object"]["metadata"]["resourceVersion"]});
-    assert_eq!(
-        h.ok("k8s.requestRolloutRestart", reviewed.clone()).await["requested"],
-        true
+        .expect("reviewed rollout restart");
+    assert_eq!(out["requested"], true);
+    let stale = h.err("k8s.requestRolloutRestart", reviewed).await;
+    assert!(
+        stale.contains("Resource changed or was replaced"),
+        "{stale}"
     );
-    h.err("k8s.requestRolloutRestart", reviewed).await;
 
     let out = h
         .ok(
@@ -2272,22 +2314,24 @@ async fn run_suite() {
         .unwrap()
         .to_string();
 
-    // Both scheduling directions are reviewed and never evict pods.
+    // Both scheduling directions are reviewed and never evict pods. A heartbeat
+    // can invalidate either review, just as a workload controller can above.
     for unschedulable in [true, false] {
-        let current = h
-            .reg
-            .invoke(
-                "k8s.getObject",
-                json!({"context":ctx,"kind":"Node","namespace":"","name":node_name}),
+        let (out, reviewed) = h
+            .reviewed_request(
+                "k8s.requestCordonNode",
+                json!({
+                    "context":ctx,"group":"","version":"v1","kind":"Node","plural":"nodes",
+                    "namespaced":false,"namespace":"","name":node_name,"unschedulable":unschedulable
+                }),
             )
             .await
-            .unwrap();
-        let reviewed = json!({"context":ctx,"group":"","version":"v1","kind":"Node","plural":"nodes",
-            "namespaced":false,"namespace":"","name":node_name,"unschedulable":unschedulable,
-            "uid":current["object"]["metadata"]["uid"],"resourceVersion":current["object"]["metadata"]["resourceVersion"]});
-        assert_eq!(
-            h.ok("k8s.requestCordonNode", reviewed).await["requested"],
-            true
+            .expect("reviewed node scheduling request");
+        assert_eq!(out["requested"], true);
+        let stale = h.err("k8s.requestCordonNode", reviewed).await;
+        assert!(
+            stale.contains("Resource changed or was replaced"),
+            "{stale}"
         );
     }
 
@@ -3286,6 +3330,73 @@ async fn mcp_prompts_name_only_real_capabilities() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[tokio::test]
+async fn reviewed_request_refreshes_only_explicit_review_races_and_bounds_retries() {
+    use srelens_capability::{Annotations, Capability, CapabilityError};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
+    const STALE: &str = "Resource changed or was replaced; refresh and review the action again";
+    const CONFLICT: &str = "ApiError: the object has been modified: Conflict (Status { status: Some(Failure), code: 409, message: modified })";
+    for (errors, expected_reads, succeeds) in [
+        (vec![STALE, CONFLICT], 3, true),
+        (vec!["Resource is being deleted"], 1, false),
+        (vec!["Action request timed out"], 1, false),
+        (vec!["Forbidden"], 1, false),
+        (vec!["This action is not available: wait"], 1, false),
+        (vec!["409 unrelated error"], 1, false),
+        (vec![STALE; 20], 8, false),
+    ] {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let mut reg = Registry::new();
+        let count = reads.clone();
+        reg.register(Capability::typed::<Value, Value, _, _>("k8s.getObject", "read", Annotations::READ_ONLY, move |_| {
+            let version = count.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {Ok(json!({"object":{"metadata":{"uid":"u","resourceVersion":version.to_string()}}}))}
+        }));
+        let captured = seen.clone();
+        reg.register(Capability::typed::<Value, Value, _, _>(
+            "reviewed",
+            "write",
+            Annotations::MUTATING,
+            move |input| {
+                let mut seen = captured.lock().unwrap();
+                let error = errors.get(seen.len()).copied();
+                seen.push(input);
+                async move {
+                    match error {
+                        Some(error) => Err(CapabilityError::Handler(error.into())),
+                        None => Ok(json!({"requested":true})),
+                    }
+                }
+            },
+        ));
+        let mut h = Harness::new(reg);
+        let result = h
+            .reviewed_request(
+                "reviewed",
+                json!({"context":"c","kind":"Node","namespace":"","name":"n","unschedulable":true}),
+            )
+            .await;
+        assert_eq!(result.is_ok(), succeeds, "{result:?}");
+        assert_eq!(reads.load(Ordering::SeqCst), expected_reads);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), expected_reads);
+        for (index, input) in seen.iter().enumerate() {
+            assert_eq!(input["resourceVersion"], (index + 1).to_string());
+            assert_eq!(input["uid"], "u");
+            assert_eq!(input["unschedulable"], true);
+        }
+        assert_eq!(h.covered.contains("reviewed"), succeeds);
+        if let Ok((out, review)) = result {
+            assert_eq!(out["requested"], true);
+            assert_eq!(review, *seen.last().unwrap());
         }
     }
 }
