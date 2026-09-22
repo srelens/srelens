@@ -34,8 +34,6 @@ use common::{ch, ctrl, key, shift, type_str};
 // Local helpers
 // ---------------------------------------------------------------------------
 
-static TUI_CONFIG_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 async fn press(app: &mut App, k: KeyEvent) {
     app.handle_key_event(k).await;
 }
@@ -4157,10 +4155,10 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
 
 #[tokio::test]
 async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
-    let _config_guard = TUI_CONFIG_ENV_LOCK.lock().await;
+    let mut env = common::env::lock();
     let temp = tempfile::tempdir().unwrap();
     let config_path = temp.path().join("tui.json");
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_path);
+    env.set("SRELENS_TUI_CONFIG_PATH", &config_path);
 
     let (tx, _rx) = unbounded_channel();
     let mut app = App::new(
@@ -4281,16 +4279,14 @@ async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
     // Press Esc pops back to table view
     press(&mut app, key(KeyCode::Esc)).await;
     assert!(matches!(app.active_view, ActiveView::Table(_)));
-
-    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
 }
 
 #[tokio::test]
 async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
-    let _config_guard = TUI_CONFIG_ENV_LOCK.lock().await;
+    let mut env = common::env::lock();
     let tmp = tempfile::tempdir().unwrap();
     let config_file = tmp.path().join("tui.json");
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_file);
+    env.set("SRELENS_TUI_CONFIG_PATH", &config_file);
 
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
@@ -4411,8 +4407,6 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
 
     press(&mut app, ch('i')).await;
     assert!(matches!(app.modal, Some(Modal::AddCluster { .. })));
-
-    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
 }
 
 #[tokio::test]
@@ -4625,9 +4619,10 @@ async fn node_inspector_press_b_jumps_to_bgp_dashboard() {
 
 #[tokio::test]
 async fn tui_config_hub_dialog_left_right_cursor_and_paste() {
+    let mut env = common::env::lock();
     let tmp = tempfile::tempdir().unwrap();
     let cfg_path = tmp.path().join("tui.json");
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", cfg_path.to_str().unwrap());
+    env.set("SRELENS_TUI_CONFIG_PATH", &cfg_path);
 
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
@@ -4701,8 +4696,6 @@ async fn tui_config_hub_dialog_left_right_cursor_and_paste() {
         assert!(!cfg.is_editing);
     }
     assert!(app.tui_config.argo_hub_context.is_some());
-
-    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
 }
 
 #[tokio::test]
@@ -5776,6 +5769,12 @@ async fn node_ssh_modal_keys_and_submit() {
 
 #[tokio::test]
 async fn tui_config_view_key_interactions() {
+    // Every adjustment below saves. With no path of its own this test wrote the
+    // developer's real `tui.json` (#671).
+    let mut env = common::env::lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("tui.json");
+    env.set("SRELENS_TUI_CONFIG_PATH", &cfg_path);
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
     app.tui_config = srelens_tui::tui_config::TuiConfig::default();
 
@@ -5848,6 +5847,8 @@ async fn tui_config_view_key_interactions() {
     if let ActiveView::TuiConfig(ref c) = app.active_view {
         assert!(!c.is_editing);
     }
+    let saved = std::fs::read_to_string(&cfg_path).expect("the save landed in the test's own file");
+    assert!(saved.contains(r#""argoHubContext": "x""#), "{saved}");
 
     // 4. Exit config view with 'q'
     press(&mut app, ch('q')).await;

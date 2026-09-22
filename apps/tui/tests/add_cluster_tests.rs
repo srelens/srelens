@@ -25,38 +25,14 @@ users:
     token: fake-token-123
 "#;
 
-static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-struct EnvVarGuard {
-    name: &'static str,
-    previous: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var_os(name);
-        std::env::set_var(name, value);
-        Self { name, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(self.name, value),
-            None => std::env::remove_var(self.name),
-        }
-    }
-}
-
 #[tokio::test]
 async fn test_import_kubeconfig_from_yaml_content() {
-    let _lock = ENV_LOCK.lock().await;
+    let mut env = common::env::lock();
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
     let managed_dir = temp.path().join("managed_configs");
     std::fs::create_dir_all(&managed_dir).unwrap();
-    let _guard = EnvVarGuard::set("SRELENS_KUBECONFIG_DIR", &managed_dir);
+    env.set("SRELENS_KUBECONFIG_DIR", &managed_dir);
 
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
@@ -118,12 +94,12 @@ users:
 
 #[tokio::test]
 async fn test_import_kubeconfig_from_file_path() {
-    let _lock = ENV_LOCK.lock().await;
+    let mut env = common::env::lock();
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
     let managed_dir = temp.path().join("managed_configs");
     std::fs::create_dir_all(&managed_dir).unwrap();
-    let _guard = EnvVarGuard::set("SRELENS_KUBECONFIG_DIR", &managed_dir);
+    env.set("SRELENS_KUBECONFIG_DIR", &managed_dir);
 
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
@@ -516,12 +492,12 @@ async fn test_add_cluster_modal_key_editing_and_navigation() {
 
 #[tokio::test]
 async fn test_add_cluster_modal_submit_flow() {
-    let _lock = ENV_LOCK.lock().await;
+    let mut env = common::env::lock();
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
     let managed_dir = temp.path().join("managed_configs");
     std::fs::create_dir_all(&managed_dir).unwrap();
-    let _guard = EnvVarGuard::set("SRELENS_KUBECONFIG_DIR", &managed_dir);
+    env.set("SRELENS_KUBECONFIG_DIR", &managed_dir);
 
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();
@@ -579,12 +555,12 @@ users:
 
 #[tokio::test]
 async fn test_same_context_import_refreshes_metadata_and_reconnects() {
-    let _lock = ENV_LOCK.lock().await;
+    let mut env = common::env::lock();
     let (tx, _rx) = unbounded_channel::<AppEvent>();
     let temp = tempfile::tempdir().unwrap();
     let managed_dir = temp.path().join("managed_configs");
     std::fs::create_dir_all(&managed_dir).unwrap();
-    let _guard = EnvVarGuard::set("SRELENS_KUBECONFIG_DIR", &managed_dir);
+    env.set("SRELENS_KUBECONFIG_DIR", &managed_dir);
 
     let initial_config = temp.path().join("config");
     std::fs::write(&initial_config, VALID_KUBECONFIG_YAML).unwrap();

@@ -1,3 +1,5 @@
+mod common;
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -7,34 +9,21 @@ mod tests {
     use srelens_tui::views::ResourceTableState;
 
     fn isolate_ai_settings() -> SettingsGuard {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = crate::common::env::lock();
         let dir = tempfile::tempdir().expect("a scratch directory for AI settings");
-        let previous = std::env::var("SRELENS_AI_SETTINGS_PATH").ok();
-        std::env::set_var(
+        env.set(
             "SRELENS_AI_SETTINGS_PATH",
             dir.path().join("ai_settings.json"),
         );
         SettingsGuard {
-            _lock: lock,
+            _env: env,
             _dir: dir,
-            previous,
         }
     }
 
     struct SettingsGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _env: crate::common::env::EnvGuard,
         _dir: tempfile::TempDir,
-        previous: Option<String>,
-    }
-
-    impl Drop for SettingsGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => std::env::set_var("SRELENS_AI_SETTINGS_PATH", value),
-                None => std::env::remove_var("SRELENS_AI_SETTINGS_PATH"),
-            }
-        }
     }
 
     #[test]
@@ -6385,6 +6374,9 @@ mod tests {
     #[tokio::test]
     async fn test_theme_picker_live_preview_revert_and_commit() {
         let _lock = THEME_TEST_MUTEX.lock().unwrap();
+        // Committing a theme saves AI settings. Without this the save wrote the
+        // developer's real ai_settings.json (#671).
+        let _ai_guard = isolate_ai_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::App;
         use srelens_tui::commands::CommandTarget;
@@ -6461,6 +6453,11 @@ mod tests {
         assert!(app.modal.is_none());
         assert_eq!(Theme::active_index(), 3); // Committed!
         assert_eq!(app.ai_settings.theme, Some("nord".to_string()));
+        assert_eq!(
+            srelens_tui::ai_config::AiSettings::load().theme,
+            Some("nord".to_string()),
+            "the commit was saved to the isolated settings file"
+        );
 
         // Reset theme back to Mocha for other tests
         Theme::set_theme_by_index(0);
@@ -8340,7 +8337,10 @@ mod tests {
         use srelens_tui::tui_config::TuiConfig;
         use std::path::PathBuf;
 
-        // When unset
+        // When unset — in the environment too, whatever the developer's shell exports.
+        let mut env = crate::common::env::lock();
+        env.remove("SRELENS_ARGO_HUB_CONTEXT");
+        env.remove("SRELENS_ARGO_HUB_KUBECONFIG");
         let mut cfg = TuiConfig::default();
         assert_eq!(cfg.resolved_argo_hub_context(), None);
         assert_eq!(cfg.resolved_argo_hub_kubeconfig(), None);
@@ -8358,8 +8358,8 @@ mod tests {
         );
 
         // Environment variables override config
-        std::env::set_var("SRELENS_ARGO_HUB_CONTEXT", "env-override-hub");
-        std::env::set_var("SRELENS_ARGO_HUB_KUBECONFIG", "/env/kubeconfig");
+        env.set("SRELENS_ARGO_HUB_CONTEXT", "env-override-hub");
+        env.set("SRELENS_ARGO_HUB_KUBECONFIG", "/env/kubeconfig");
         assert_eq!(
             cfg.resolved_argo_hub_context(),
             Some("env-override-hub".to_string())
@@ -8369,9 +8369,9 @@ mod tests {
             Some(PathBuf::from("/env/kubeconfig"))
         );
 
-        // Clean up environment variables
-        std::env::remove_var("SRELENS_ARGO_HUB_CONTEXT");
-        std::env::remove_var("SRELENS_ARGO_HUB_KUBECONFIG");
+        // Unset again: back to the config
+        env.remove("SRELENS_ARGO_HUB_CONTEXT");
+        env.remove("SRELENS_ARGO_HUB_KUBECONFIG");
         assert_eq!(
             cfg.resolved_argo_hub_context(),
             Some("platform-mgmt".to_string())

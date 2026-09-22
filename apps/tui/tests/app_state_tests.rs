@@ -58,43 +58,26 @@ const NARROW: (u16, u16) = (80, 24);
 /// the assertion reads `valuesk-test` instead of `sk-test`. A fresh directory
 /// per test cannot do that.
 fn isolate_ai_settings() -> SettingsGuard {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    // A test that panics while holding the lock poisons it; the next test
-    // still wants the lock, not the panic.
-    let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut env = common::env::lock();
     let dir = tempfile::tempdir().expect("a scratch directory for AI settings");
-    let previous = std::env::var("SRELENS_AI_SETTINGS_PATH").ok();
-    std::env::set_var(
+    env.set(
         "SRELENS_AI_SETTINGS_PATH",
         dir.path().join("ai_settings.json"),
     );
-    SettingsGuard {
-        _lock: lock,
-        _dir: dir,
-        previous,
-    }
+    SettingsGuard { env, _dir: dir }
 }
 
 struct SettingsGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    /// The binary's environment lock. Write any other variable through it.
+    env: common::env::EnvGuard,
     /// Held, not used: dropping it deletes the scratch directory.
     _dir: tempfile::TempDir,
-    previous: Option<String>,
-}
-
-impl Drop for SettingsGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var("SRELENS_AI_SETTINGS_PATH", value),
-            None => std::env::remove_var("SRELENS_AI_SETTINGS_PATH"),
-        }
-    }
 }
 
 /// An assistant configuration that can never reach a provider: Gemini with no
 /// key anywhere, so a submitted query is answered by the "No API key" reply.
-fn keyless_assistant(app: &mut App) {
-    std::env::remove_var("GEMINI_API_KEY");
+fn keyless_assistant(app: &mut App, env: &mut common::env::EnvGuard) {
+    env.remove("GEMINI_API_KEY");
     let mut settings = AiSettings::default();
     settings.default_provider = AiProvider::Gemini;
     settings.api_keys.clear();
@@ -1773,8 +1756,9 @@ async fn toolbox_keys_copy_the_tool_path_or_name() {
 
 #[tokio::test]
 async fn overview_keys_refresh_copy_share_and_summarise() {
+    let mut env = common::env::lock();
     let (mut app, _rx) = common::app().await;
-    keyless_assistant(&mut app);
+    keyless_assistant(&mut app, &mut env);
     app.active_view = ActiveView::Overview(OverviewViewState::with_data(overview_data()));
 
     app.handle_key_event(common::ch('r')).await;
@@ -1961,8 +1945,9 @@ async fn assistant_scroll_keys_move_the_viewport() {
 
 #[tokio::test]
 async fn submitting_a_query_without_an_api_key_answers_with_setup_guidance() {
+    let mut env = common::env::lock();
     let (mut app, _rx) = common::app().await;
-    keyless_assistant(&mut app);
+    keyless_assistant(&mut app, &mut env);
     app.active_view = ActiveView::Assistant;
 
     // Empty input submits nothing: the seeded greeting is all there is.
@@ -2023,9 +2008,9 @@ async fn a_configured_provider_starts_a_native_agent_turn() {
 
 #[tokio::test]
 async fn caveman_phrases_and_slash_commands_switch_the_terse_mode() {
-    let _settings = isolate_ai_settings();
+    let mut settings = isolate_ai_settings();
     let (mut app, _rx) = common::app().await;
-    keyless_assistant(&mut app);
+    keyless_assistant(&mut app, &mut settings.env);
     app.active_view = ActiveView::Assistant;
 
     compose(&mut app, "caveman mode").await;
@@ -2070,9 +2055,9 @@ async fn caveman_phrases_and_slash_commands_switch_the_terse_mode() {
 
 #[tokio::test]
 async fn utility_slash_commands_clear_open_settings_and_expand_playbooks() {
-    let _settings = isolate_ai_settings();
+    let mut settings = isolate_ai_settings();
     let (mut app, _rx) = common::app().await;
-    keyless_assistant(&mut app);
+    keyless_assistant(&mut app, &mut settings.env);
     app.active_view = ActiveView::Assistant;
     app.assistant_state.add_assistant_message("old".into());
 

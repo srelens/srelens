@@ -1151,12 +1151,12 @@ fn settings_view_masks_stored_api_keys_and_flags_missing_ones() {
 
 #[test]
 fn settings_view_reports_an_api_key_that_comes_from_the_environment() {
-    // Only this test touches GEMINI_API_KEY, and no other test in this file
-    // asserts on Gemini's key line, so the parallel runner cannot race it.
-    std::env::set_var("GEMINI_API_KEY", "from-env");
+    // Dropping the guard puts back any key the developer's shell exports.
+    let mut env = common::env::lock();
+    env.set("GEMINI_API_KEY", "from-env");
     let state = settings_state();
     let text = render_settings(120, 40, &state);
-    std::env::remove_var("GEMINI_API_KEY");
+    drop(env);
     assert!(
         text.contains("API Key: [env: GEMINI_API_KEY set]"),
         "{text}"
@@ -1881,10 +1881,11 @@ fn yaml_view_scrolling_stays_within_the_document() {
 fn yaml_view_spawn_editor_reports_a_missing_editor_without_running_anything() {
     // Point $EDITOR at a binary that cannot exist so the spawn fails fast.
     // The quoted form also exercises the shlex split.
-    std::env::set_var("EDITOR", "\"srelens-no-such-editor-0x5b\" --wait");
+    let mut env = common::env::lock();
+    env.set("EDITOR", "\"srelens-no-such-editor-0x5b\" --wait");
     let state = yaml_state(POD_YAML);
     let result = state.spawn_editor();
-    std::env::remove_var("EDITOR");
+    drop(env);
     let err = result.expect_err("a nonexistent editor cannot be spawned");
     assert!(
         err.starts_with("Failed to spawn editor '\"srelens-no-such-editor-0x5b\" --wait':"),
