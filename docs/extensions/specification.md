@@ -191,7 +191,8 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 - **Collisions between apps.** One installed app per ID. Installing an ID that is
   already installed is an explicit replacement after permission review. It keeps the
   app's settings and assigns a new revision.
-- **Names inside a manifest.** Capability `name`s are unique. Contribution `id`s are
+- **Names inside a manifest.** Capability `name`s are unique, and an action's `name`
+  shares that space, since both become `plugin/<id>/<name>`. Contribution `id`s are
   unique across `pages`, `detailTabs` and `detailLinks`. Both use `A–Z`, `a–z`, `0–9`
   and `-`, up to 64 characters.
 - **Names, titles and groups.** The app `name`, every `title` and a page `group` are

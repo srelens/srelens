@@ -113,6 +113,14 @@ the controller has done anything.
 | `k8s.setStatusCondition` | `conditionType`, `conditionStatus`, `reason`, `message?` | One condition, through the **status subresource**, carrying over the conditions it does not own. `conditionStatus` is `True`, `False` or `Unknown`, and `lastTransitionTime` moves only when the status changes. |
 | `k8s.mergePatch` | `patch` | A fixed JSON merge patch, past the deny-list below. |
 
+`k8s.setFields` writes **object fields**, and writes a list by naming the list
+(`"/spec/ignore": ["a", "b"]`). A pointer that reaches *through* a list —
+`/spec/containers/0/image` — is refused against the object the host just read,
+because a merge patch replaces a value of a different shape rather than merging into
+it, and on a field with no schema that would rewrite the whole list as an object. A
+numeric or `-` segment is still a legal object key and is accepted as one; only the
+live object decides.
+
 A string value is a **literal**, except for the two tokens the host substitutes per
 request: `$now` (RFC 3339, nanoseconds, UTC) and `$uuid`. Any other `$`-prefixed string
 is rejected rather than written through, because an app that asked for `$timestamp`

@@ -588,6 +588,44 @@ fn check_merge_patch(group: &str, kind: &str, patch: &Map<String, Value>) -> Res
     resolve_tokens(&Value::Object(patch.clone()))
 }
 
+/// Refuses a `k8s.setFields` pointer whose parent is not an object on the
+/// object that was just read.
+///
+/// [`fields_patch`] nests one object per segment, and a JSON merge patch
+/// *replaces* a value whose shape differs rather than merging into it
+/// (RFC 7386). So `/spec/containers/0/image` over a list sends
+/// `{"containers": {"0": …}}`: a schema with a type refuses it, but a CRD
+/// field under `x-kubernetes-preserve-unknown-fields` has no type, and the
+/// whole list would be replaced by an object — a field the action never
+/// named, silently rewritten.
+///
+/// This runs on the fresh GET rather than at install, because that is the
+/// only place the shape is known: a numeric or `-` segment is a legal object
+/// key, so [`pointer_segments`] cannot classify one from the manifest alone
+/// (CodeRabbit's point on PR #665). Addressing an *element* of a list would
+/// need RFC 6902 operations and a second way to pin the review, which #549
+/// does not ask for; a declared action writes a list by naming the list.
+fn check_object_parents(current: &Value, fields: &Map<String, Value>) -> Result<(), String> {
+    const ABSENT: &Value = &Value::Null;
+    for pointer in fields.keys() {
+        let segments = pointer_segments(pointer)?;
+        let (_, parents) = segments.split_last().expect("a pointer has a last segment");
+        let mut node = current;
+        let mut walked = String::new();
+        for segment in parents {
+            if !node.is_object() && !node.is_null() {
+                return Err(format!(
+                    "`{walked}` is not an object on this resource, so `{pointer}` cannot reach through it; a setFields action writes object fields and writes a list whole"
+                ));
+            }
+            walked.push('/');
+            walked.push_str(segment);
+            node = node.get(segment.as_str()).unwrap_or(ABSENT);
+        }
+    }
+    Ok(())
+}
+
 /// The argument `name` as a string, or why the binding cannot be accepted.
 fn text<'a>(arguments: &'a Map<String, Value>, name: &str) -> Result<&'a str, String> {
     match arguments.get(name) {
@@ -657,7 +695,11 @@ async fn annotate(client: Client, input: AnnotateIn) -> Result<Value, String> {
 
 async fn set_fields(client: Client, input: SetFieldsIn) -> Result<Value, String> {
     let patch = fields_patch(&input.fields)?;
-    request(client, input.reviewed(), false, |_| Ok(patch)).await
+    request(client, input.reviewed(), false, |current| {
+        check_object_parents(current, &input.fields)?;
+        Ok(patch)
+    })
+    .await
 }
 
 async fn set_merge_patch(client: Client, input: MergePatchIn) -> Result<Value, String> {
@@ -1036,6 +1078,74 @@ mod tests {
                 "metadata": {"uid": "u", "resourceVersion": "2"},
                 "spec": {"suspend": true, "chart": {"spec": {"version": "1.2.3"}}}
             })
+        );
+    }
+
+    /// A merge patch REPLACES a value whose shape differs rather than merging
+    /// into it (RFC 7386), and `fields_patch` nests one object per segment. So
+    /// `/spec/containers/0/image` over a list would rewrite the whole list as
+    /// `{"0": …}` wherever the CRD's schema does not refuse it — a field the
+    /// action never named, silently replaced.
+    #[tokio::test]
+    async fn a_pointer_that_reaches_through_a_list_is_refused_before_the_patch() {
+        let (client, requests) = mock(object(
+            json!({"spec": {"containers": [{"image": "registry.example/app:1"}]}}),
+        ));
+        let err = set_fields(
+            client,
+            set_fields_in(
+                json!({"fields": {"/spec/containers/0/image": "registry.example/app:2"}}),
+            ),
+        )
+        .await
+        .expect_err("a pointer into a list is refused");
+        assert!(err.contains("/spec/containers"), "{err}");
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "the GET happened, the PATCH must not"
+        );
+    }
+
+    /// What a declared action does instead: name the list itself and write it
+    /// whole, which is an ordinary merge patch.
+    #[tokio::test]
+    async fn a_list_is_written_whole_at_its_own_pointer() {
+        let (client, requests) = mock(object(json!({"spec": {"ignore": ["a"]}})));
+        set_fields(
+            client,
+            set_fields_in(json!({"fields": {"/spec/ignore": ["b", "c"]}})),
+        )
+        .await
+        .expect("set fields");
+        assert_eq!(
+            requests.lock().unwrap()[1].1["spec"]["ignore"],
+            json!(["b", "c"])
+        );
+    }
+
+    /// A numeric segment is a legal object key, and the host has no schema at
+    /// install time to tell one from a list index — so the pointer rules keep
+    /// accepting it and the object on the server decides.
+    #[tokio::test]
+    async fn a_numeric_segment_over_an_object_is_an_ordinary_field() {
+        let (client, requests) = mock(object(json!({"spec": {"weights": {"0": 1}}})));
+        set_fields(
+            client,
+            set_fields_in(json!({"fields": {"/spec/weights/0": 2}})),
+        )
+        .await
+        .expect("set fields");
+        assert_eq!(requests.lock().unwrap()[1].1["spec"]["weights"]["0"], 2);
+        assert_eq!(
+            check_bound_arguments(
+                SET_FIELDS,
+                json!({"fields": {"/spec/weights/0": 2}})
+                    .as_object()
+                    .expect("object")
+            ),
+            Ok(()),
+            "a numeric segment is not rejected at install"
         );
     }
 
