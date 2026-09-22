@@ -1,10 +1,13 @@
+import fluxManifest from "../../../../examples/extensions/flux.json";
+import argoManifest from "../../../../examples/extensions/argocd.json";
+const declaredMeta = Object.fromEntries([...fluxManifest.actions.filter(action=>action.resource==="helmreleases").map(action=>({...action,name:action.name.replace("helmreleases-","")})),...argoManifest.actions].map(action=>[action.name,{title:action.title,availableWhen:("availableWhen" in action?action.availableWhen:[]) as import("@srelens/core").ActionPredicate[],impact:"medium" as const,confirm:null}]));
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn()}));
 import { inspectExtensionResource, actOnExtensionResource, listExtensions, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 const selection = {id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"cluster/a",namespace:"team",name:"apps"};
-const detail = {resource:{apiVersion:"kustomize.toolkit.fluxcd.io/v1",kind:"Kustomization",metadata:{name:"apps",namespace:"team",uid:"uid-a",resourceVersion:"12"},spec:{suspend:false,path:"./apps",sourceRef:{kind:"GitRepository",name:"platform-config"}},status:{conditions:[{type:"Ready",status:"False",reason:"BuildFailed",message:"Missing source"}],lastAppliedRevision:"main@sha1:abcdef"}},actions:["suspend","resume","reconcile"]};
+const detail = {resource:{apiVersion:"kustomize.toolkit.fluxcd.io/v1",kind:"Kustomization",metadata:{name:"apps",namespace:"team",uid:"uid-a",resourceVersion:"12"},spec:{suspend:false,path:"./apps",sourceRef:{kind:"GitRepository",name:"platform-config"}},status:{conditions:[{type:"Ready",status:"False",reason:"BuildFailed",message:"Missing source"}],lastAppliedRevision:"main@sha1:abcdef"}},actions:["suspend","resume","reconcile"],actionMeta:declaredMeta};
 beforeEach(()=>{vi.resetAllMocks();vi.mocked(inspectExtensionResource).mockResolvedValue(detail);vi.mocked(actOnExtensionResource).mockResolvedValue({requested:true});});
 it("shows overview and conditions, then confirms the exact pinned resource before requesting an action",async()=>{
  render(<ExtensionResourceDetails selection={selection} onClose={vi.fn()}/>);
@@ -42,8 +45,9 @@ it("shows the manifest and events, offers Resume for a suspended resource, and r
   render(<ExtensionResourceDetails selection={selection} onClose={vi.fn()}/>);
   expect(await screen.findByText("Source unavailable")).toBeTruthy();
   expect(screen.queryByText(/Showing the latest/)).toBeNull();
-  expect(screen.queryByRole("button",{name:"Suspend"})).toBeNull();
-  expect((screen.getByRole("button",{name:"Reconcile"}) as HTMLButtonElement).disabled).toBe(true);
+  // Both stay on screen and say why they do not apply here (#550).
+  expect(screen.getByRole("button",{name:"Suspend"}).getAttribute("aria-disabled")).toBe("true");
+  expect(screen.getByRole("button",{name:"Reconcile"}).getAttribute("aria-disabled")).toBe("true");
   fireEvent.click(screen.getByRole("tab",{name:"Manifest"}));expect(screen.getByRole("textbox",{name:"apps manifest"}).getAttribute("contenteditable")).toBe("false");
   expect(screen.getByRole("textbox",{name:"apps manifest"}).textContent).toContain("kind: Kustomization");
   // A read-only manifest a reader opens in order to take it away. (#656 review)
@@ -113,6 +117,95 @@ it("promotes a peek to its own tab while keeping the list's close control separa
  expect(screen.queryByRole("button",{name:"Open tab"})).toBeNull();expect(screen.queryByRole("button",{name:"Close inspector"})).toBeNull();
 });
 
+// #550: an action's availability is a declared predicate over the resource,
+// evaluated by the same rules the host applies before it writes. A control the
+// rules exclude stays on screen, disabled, saying why — a button that vanishes
+// teaches nothing, and a button that is merely grey teaches no more.
+/** The description a screen reader reads for `control`, as the tree resolves it. */
+function describedBy(control:HTMLElement) {
+  const ids=(control.getAttribute("aria-describedby")??"").split(/\s+/).filter(Boolean);
+  return ids.map(id=>document.getElementById(id)?.textContent??"").join(" ");
+}
+it("disables an action its availability rules exclude and gives the reason as its tooltip",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,spec:{suspend:true}}});
+  render(<ExtensionResourceDetails selection={selection}/>);
+  const reconcile=await screen.findByRole("button",{name:"Reconcile"});
+  expect(reconcile.getAttribute("aria-disabled")).toBe("true");
+  expect(reconcile.getAttribute("title")).toBe("Resume this resource before requesting reconciliation");
+  // Excluded means no review opens, so nothing can be confirmed into a write.
+  fireEvent.click(reconcile);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  const suspend=screen.getByRole("button",{name:"Suspend"});
+  expect(suspend.getAttribute("aria-disabled")).toBe("true");
+  expect(suspend.getAttribute("title")).toBe("This resource is already suspended");
+  // Resume is the one that applies, and carries no excuse.
+  const resume=screen.getByRole("button",{name:"Resume"});
+  expect(resume.getAttribute("aria-disabled")).toBeNull();
+  expect(resume.getAttribute("title")).toBeNull();
+  fireEvent.click(resume);
+  expect(screen.getByRole("dialog")).toBeTruthy();
+});
+// `title` draws a tooltip on hover and is only a *fallback* description, so a
+// sighted keyboard user reaches the dimmed control and is told nothing. The
+// reason is an element the control names, which is what a focus ring can
+// reveal and a screen reader always reads. (#668 review)
+it("names the reason from the control, so focus reaches it without a pointer",async()=>{
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,spec:{suspend:true}},actions:["suspend","resume","reconcile","force","reset"]});
+  render(<ExtensionResourceDetails selection={selection}/>);
+  const reconcile=await screen.findByRole("button",{name:"Reconcile"});
+  expect(describedBy(reconcile)).toBe("Resume this resource before requesting reconciliation");
+  expect(describedBy(screen.getByRole("button",{name:"Suspend"}))).toBe("This resource is already suspended");
+  // The reason is in the accessibility tree, not hidden from it.
+  const note=document.getElementById(reconcile.getAttribute("aria-describedby")!)!;
+  expect(note.getAttribute("aria-hidden")).toBeNull();
+  expect(note.hasAttribute("hidden")).toBe(false);
+  // A control that applies describes nothing: there is nothing to say.
+  const resume=screen.getByRole("button",{name:"Resume"});
+  expect(resume.getAttribute("aria-describedby")).toBeNull();
+  // Each unavailable control names its own reason, never a shared one.
+  const ids=["Reconcile","Force reconcile","Reset retries"].map(name=>screen.getByRole("button",{name}).getAttribute("aria-describedby"));
+  expect(new Set(ids).size).toBe(3);
+});
+// Where the revealed reason is drawn is a layout property jsdom cannot measure,
+// so the contract is pinned in the stylesheet it lives in. Anchored to its own
+// button, the reason ran off the right edge of a 375px screen and, from a
+// button on a wrapped second line, covered the three buttons above it
+// (measured in Chromium, #668 review). Anchored to the row, across its full
+// width and above it, it can do neither.
+it("anchors a revealed reason to the action row, not to its own button",async()=>{
+  const {readFileSync}=await import("node:fs");
+  const {join}=await import("node:path");
+  const css=readFileSync(join(__dirname,"extensions.css"),"utf8");
+  const rule=(selector:string)=>{
+    const at=css.indexOf(`${selector} {`);
+    expect(at,`${selector} has a rule`).toBeGreaterThanOrEqual(0);
+    return css.slice(at,css.indexOf("}",at));
+  };
+  // The button's wrapper is not a containing block, so it cannot anchor.
+  expect(rule(".extension-action")).not.toMatch(/position\s*:/);
+  // The row is, and the revealed reason spans it rather than sizing to itself.
+  expect(rule(".extension-actions")).toMatch(/position\s*:\s*relative/);
+  const shown=rule(".extension-action:focus-within .extension-action-reason");
+  expect(shown).toMatch(/left\s*:\s*0/);
+  expect(shown).toMatch(/right\s*:\s*0/);
+  expect(shown).not.toMatch(/max-content|max-width/);
+  // And the rendered row is the element that carries it.
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,spec:{suspend:true}}});
+  render(<ExtensionResourceDetails selection={selection}/>);
+  const reconcile=await screen.findByRole("button",{name:"Reconcile"});
+  expect(reconcile.closest(".extension-action")?.parentElement?.classList.contains("extension-actions")).toBe(true);
+});
+it("does not offer an Argo CD sync while an operation is already running",async()=>{
+  // The host refuses this (`gitops.rs`); stating it as a predicate is what
+  // lets the surface say so before a person asks for the write.
+  const application={apiVersion:"argoproj.io/v1alpha1",kind:"Application",metadata:{name:"apps",namespace:"team",uid:"uid-a",resourceVersion:"12"},spec:{},status:{},operation:{sync:{revision:"HEAD"}}};
+  vi.mocked(inspectExtensionResource).mockResolvedValue({resource:application,actions:["sync","refresh"],actionMeta:declaredMeta});
+  render(<ExtensionResourceDetails selection={selection}/>);
+  const sync=await screen.findByRole("button",{name:"Sync"});
+  expect(sync.getAttribute("aria-disabled")).toBe("true");
+  expect(sync.getAttribute("title")).toBe("An Argo CD operation is already in progress");
+  expect(screen.getByRole("button",{name:"Refresh status"}).getAttribute("aria-disabled")).toBeNull();
+});
 it("renders inventory entries as a full-width table instead of a JSON block",async()=>{
  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,status:{inventory:{entries:[{id:"team_service__Service",v:"v1"},{id:"team_api_apps_Deployment",v:"v1"}]}}}});
  render(<ExtensionResourceDetails selection={selection}/>);
@@ -136,7 +229,7 @@ function installedApps(plugins:unknown[]) {
  vi.mocked(listExtensions).mockResolvedValue({schemaVersion:1,nextRevision:1,plugins} as never);
 }
 const fluxApp={manifest:{id:"org.srelens.flux",name:"Flux Tools",version:"1.0.0",srelensApiVersion:"1",kind:"declarative",permissions:[],capabilities:[],contributions:{pages:[],detailTabs:[],detailLinks:[]}},enabled:true,revision:1,grants:[],settings:{},source:"local",installedAt:0,history:[]};
-const withMeta={...detail,actionMeta:{suspend:{impact:"high" as const,confirm:"Suspend[ {resource}][ in cluster {cluster}]?"}}};
+const withMeta={...detail,actionMeta:{...declaredMeta,suspend:{...declaredMeta.suspend,impact:"high" as const,confirm:"Suspend[ {resource}][ in cluster {cluster}]?"}}};
 afterEach(()=>{delete (window as unknown as Record<string,unknown>).__TAURI_INTERNALS__;});
 
 it("asks the host's own sentence and level, not a description written in the UI",async()=>{
@@ -214,4 +307,14 @@ it("names no app once it has been replaced under an open review",async()=>{
  await waitFor(()=>expect(listExtensions).toHaveBeenCalled());
  expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
  expect(dialog.textContent).not.toContain("Flux Tools");
+});
+
+it("offers a newly declared action title and predicates without a host GitOps name table", async () => {
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail, actions:["request-review"], actionMeta:{"request-review":{title:"Request review", impact:"medium", confirm:"Request review[ of {resource}]?", availableWhen:[{jsonPath:".spec.suspend", equals:true, reason:"Suspend before requesting review"}]}}} as any);
+  render(<ExtensionResourceDetails selection={selection}/>);
+  const action = await screen.findByRole("button", {name:"Request review"});
+  expect(action.getAttribute("aria-disabled")).toBe("true");
+  fireEvent.click(action);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(action.getAttribute("title")).toBe("Suspend before requesting review");
 });

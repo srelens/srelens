@@ -34,9 +34,7 @@ import { confirmSubject } from "./confirmRequest";
  *
  * **The seam for the patch.** {@link HostConfirmation} draws the exact patch
  * through the same collapsing diff renderer the Edit screen uses, and nothing
- * is passed here because no capability produces one yet: the writes behind
- * `k8s.gitOpsAction` are a closed `match` in core, not the declared
- * primitives of #549. When a request carries the patch it is about to apply,
+ * is passed here because no capability produces one yet: the declared action endpoint currently returns acceptance only. When a request carries the patch it is about to apply,
  * it arrives as `DiffRow[]` on `ConfirmRequest` and is handed straight to
  * `patch` — the component, its collapsing and its tests are already here.
  */

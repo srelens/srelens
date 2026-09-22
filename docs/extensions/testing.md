@@ -45,7 +45,7 @@ handler's consent gate.
 
 | Suite | Covers |
 |---|---|
-| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, and that `schemas/extension-manifest.v0.1.json` equals the generated schema |
+| `cargo test -p srelens-plugin-host` | Manifest parsing and validation, API version negotiation, broker registration, revocation, consent, and that `schemas/extension-manifest.v0.3.json` equals the generated schema |
 | `cargo test -p srelens-plugin-host --lib fuzzing` | Manifest decoding, validation and parsing on arbitrary bytes and on edits of the example manifests: no panic, a value or a coded problem, the 256 KiB limit to the byte, and an accepted manifest re-serializes to an equal one |
 | `cargo test -p srelens-registry` | Inventory lifecycle, quarantine, catalog parsing and caching, signing, app capabilities |
 | `cargo test -p srelens-registry --lib fuzzing` | The same properties for catalog parsing, publisher signature verification and the inventory reader with its legacy migration, starting from `crates/registry/tests/fixtures` |
@@ -54,7 +54,7 @@ handler's consent gate.
 | `packages/core/src/lib/extensionManifestSchema.test.ts` | Every example manifest validates against the committed schema and names it in `$schema` |
 | `packages/core/src/lib/extensionTypes.test.ts` | The TypeScript manifest and inventory types have the Rust field names and optionality, from `extension-inventory.schema.json` |
 | `packages/ui-next/src/extensions/*.test.tsx` | Settings → Apps, catalog, workspace, resource details |
-| `cargo test -p srelens-desktop --test e2e -- --ignored` (kind) | Every `extensions.*` capability, `k8s.getCustomResource` and `k8s.gitOpsAction` against a live cluster: the example Flux and Argo CD apps and the signed Argo CD release are validated, installed, listed, read and inspected; suspend, resume and refresh land on the object; a stale `resourceVersion` is refused; a disabled app stops reading |
+| `cargo test -p srelens-desktop --test e2e -- --ignored` (kind) | Every `extensions.*` capability, `k8s.getCustomResource` and the action primitives against a live cluster: the example Flux and Argo CD apps are validated, installed, listed, read and inspected; the historical signed API 0.1 release is refused as incompatible; suspend, resume and refresh land on the object; a stale `resourceVersion` is refused; a disabled app stops reading |
 | `.github/workflows/extension-catalog.yml` (daily) | The ignored `public_catalog_release_smoke`: every release in the live public catalog downloads, matches its checksum and publisher signature, and validates on this host |
 
 ### Live cluster

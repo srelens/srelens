@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 fn manifest() -> Value {
     json!({
-        "id":"org.example.gitops", "name":"GitOps", "version":"0.1.0", "srelensApiVersion":"^0.1",
+        "id":"org.example.gitops", "name":"GitOps", "version":"0.1.0", "srelensApiVersion":"^0.3",
         "kind":"declarative",
         "permissions":["k8s.listCustomResource","k8s.annotate"],
         "capabilities":[{
@@ -238,4 +238,94 @@ fn a_manifest_with_no_actions_is_unchanged() {
     // was signed before this field existed still round-trips to its own bytes.
     let stored = serde_json::to_value(&manifest).expect("serializes");
     assert!(stored.get("actions").is_none(), "{stored}");
+}
+
+#[tokio::test]
+async fn builtin_bindings_keep_host_identity_safety_and_revocation() {
+    for (reader, target, kind, arguments, impact) in [
+        (
+            "k8s.listDeployments",
+            "k8s.requestRolloutRestart",
+            "Deployment",
+            json!({}),
+            Impact::High,
+        ),
+        (
+            "k8s.listStatefulSets",
+            "k8s.requestRolloutRestart",
+            "StatefulSet",
+            json!({}),
+            Impact::High,
+        ),
+        (
+            "k8s.listDaemonSets",
+            "k8s.requestRolloutRestart",
+            "DaemonSet",
+            json!({}),
+            Impact::High,
+        ),
+        (
+            "k8s.listNodes",
+            "k8s.requestCordonNode",
+            "Node",
+            json!({"unschedulable":true}),
+            Impact::Medium,
+        ),
+    ] {
+        let mut value = manifest();
+        value["permissions"] = json!([reader, target]);
+        value["capabilities"][0]["target"] = json!(reader);
+        value["capabilities"][0]["arguments"] = json!({});
+        value["capabilities"][0]["inputs"] = if kind == "Node" {
+            json!(["context"])
+        } else {
+            json!(["context", "namespace"])
+        };
+        value["actions"][0]["target"] = json!(target);
+        value["actions"][0]["arguments"] = arguments;
+        value["contributions"]["pages"] = json!([]);
+        let parsed = parse(&value).unwrap();
+        let mut core = srelens_registry::build_registry();
+        let mut primitive = core.get(target).unwrap().clone();
+        primitive.handler = Arc::new(|input| Box::pin(async move { Ok(input) }));
+        core.register(primitive);
+        let host = PluginHost::new(Arc::new(core));
+        let mut registry = Registry::new();
+        let registration = host
+            .register(&mut registry, parsed.clone(), &parsed.permissions)
+            .unwrap();
+        let id = "plugin/org.example.gitops/refresh";
+        let cap = registry.get(id).unwrap();
+        assert_eq!(cap.annotations.impact, impact);
+        assert!(cap.annotations.requires_confirm);
+        let input = json!({"context":"srelens-context:/config#prod","namespace":if kind=="Node" {""} else {"team"},"name":"api","uid":"u","resourceVersion":"2"});
+        let result = registry.invoke(id, input.clone()).await.unwrap();
+        assert_eq!(result["kind"], kind);
+        assert_eq!(result["group"], if kind == "Node" { "" } else { "apps" });
+        assert_eq!(result["context"], input["context"]);
+        assert_eq!(result["resourceVersion"], "2");
+        for field in ["group", "kind", "plural", "unschedulable", "preconditions"] {
+            let mut forged = input.clone();
+            forged[field] = json!("forged");
+            assert!(registry.invoke(id, forged).await.is_err());
+        }
+        let mcp = srelens_mcp::McpServer::new(Arc::new(registry.clone()));
+        let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":id,"arguments":input.clone()}});
+        let response =
+            srelens_mcp::stdio::handle_request(&mcp, &request, srelens_mcp::Transport::Stdio)
+                .await
+                .unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        let snapshot = registry.clone();
+        registration.unregister(&mut registry);
+        assert!(snapshot.invoke(id, input).await.is_err());
+
+        value["actions"][0]["target"] = json!("k8s.setFields");
+        value["actions"][0]["arguments"] = json!({"fields":{"/spec/replicas":0}});
+        value["permissions"] = json!([reader, "k8s.setFields"]);
+        assert!(
+            install(&value).is_err(),
+            "a built-in reader must not unlock general writes"
+        );
+    }
 }

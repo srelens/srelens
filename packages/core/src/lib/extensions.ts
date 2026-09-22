@@ -1,4 +1,5 @@
 import { invokeCapability } from "../transport/transport";
+import type { ActionPredicate } from "./actionPredicates";
 import type { CapabilityImpact } from "./capabilities";
 // These mirror crates/plugin-host/src/manifest.rs and crates/registry/src/extensions.rs;
 // extensionTypes.test.ts fails when a field name or its optionality differs.
@@ -56,6 +57,18 @@ export interface ExtensionManifest {
     resource: string;
     /** What the action writes, fixed at install time. */
     arguments: Record<string, unknown>;
+    /**
+     * What must be true of the resource for the host to send the write
+     * (#550). Checked by the host against its own fresh read, so nothing
+     * here is a check the surface is trusted to have made.
+     */
+    preconditions?: ActionPredicate[];
+    /**
+     * What must be true of the resource for the control to be offered. The
+     * same predicates, asked here rather than of the cluster; a condition
+     * that must be *enforced* belongs in `preconditions`.
+     */
+    availableWhen?: ActionPredicate[];
   }>;
   contributions: {
     pages: ExtensionPage[];
@@ -243,18 +256,9 @@ export interface ExtensionResourceSelection {
 export interface ExtensionResourceDetail {
   resource: { apiVersion?: string; kind?: string; metadata: { name: string; namespace?: string; uid: string; resourceVersion: string; creationTimestamp?: string; labels?: Record<string,string>; annotations?: Record<string,string>; [key:string]: unknown }; spec?: Record<string, any>; status?: Record<string, any>; [key:string]: unknown };
   actions: string[];
-  /**
-   * The host's level and confirmation wording for each entry in `actions`.
-   *
-   * Per action, not per capability, because the actions behind
-   * `k8s.gitOpsAction` do not share a level: `refresh` makes Argo CD re-read a
-   * status, and `sync` applies the application's manifests and runs its hooks.
-   * The capability's own row is the ceiling of the two.
-   *
-   * `confirm` is a template in the scheme {@link renderConfirmTemplate}
-   * documents. Written in the host; an app never supplies it.
-   */
-  actionMeta?: Record<string, { impact: CapabilityImpact; confirm: string }>;
+  /** Titles and display predicates come from the installed manifest; impact
+   * and confirmation wording come exclusively from the host primitive. */
+  actionMeta?: Record<string, { title: string; availableWhen?: ActionPredicate[]; impact: CapabilityImpact; confirm: string | null }>;
   /** Newest first. */
   events?: Array<{type?:string;reason?:string;message?:string;count?:number;time?:string|null}>;
   /** True when the host returned only the newest events. */

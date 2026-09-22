@@ -16,7 +16,7 @@ mitigation and the risk that remains.
   host-owned review.
 - **Reviews cannot go stale.** The review keeps the UID and resourceVersion the reader
   saw, and the backend's conditional PATCH rejects the write if the resource changed
-  ([capabilities.md](capabilities.md#host-gitops-actions)).
+  ([capabilities.md](capabilities.md#declared-gitops-actions)).
 - **Official identities are reserved.** IDs under `org.srelens.` install only with the
   srelens publisher signature, so a pasted manifest cannot take an official app's ID
   or logo ([distribution.md](distribution.md#signed-official-releases)).

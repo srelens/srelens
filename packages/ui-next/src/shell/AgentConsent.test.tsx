@@ -1093,7 +1093,7 @@ describe("the host's own words", () => {
     await mount();
     askWith({
       id: "t1",
-      tool: "k8s.gitOpsAction",
+      tool: "extensions.action",
       args: { resource: { context: "prod", namespace: "team", name: "api" } },
       prompt: "Suspend HelmRelease team/api?",
       impact: "high",

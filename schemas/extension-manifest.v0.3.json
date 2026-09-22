@@ -4,7 +4,7 @@
   "definitions": {
     "ActionBinding": {
       "additionalProperties": false,
-      "description": "One declared mutation: a host action primitive, the reader binding whose kind it acts on, the arguments that fix what it writes, and what must be true of the object before it is written.\n\n#551 is what moves the Flux and Argo CD actions in core into manifests that use these.",
+      "description": "One declared mutation: a host action primitive, the reader binding whose kind it acts on, the arguments that fix what it writes, and what must be true of the object before it is written.\n\nFlux and Argo CD declare their actions using this contract in API 0.3.",
       "properties": {
         "arguments": {
           "additionalProperties": true,

@@ -5,7 +5,7 @@
 
 Everything this server exposes over MCP, generated from the live registry so it cannot drift. Written for someone wiring an agent to srelens; the narrative reference is [MCP.md](MCP.md).
 
-## Tools (112)
+## Tools (113)
 
 Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
@@ -20,7 +20,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.clusterFacts` | low | report a cluster's provider, region and metrics-server availability |
 | `k8s.clusterInfo` | low | connect to a kube context and report server version and reachability |
 | `k8s.diffManifest` | low | diff a manifest against the cluster via server dry-run apply (per document) |
-| `k8s.getCustomResource` | low | Inspect one custom resource and its supported host actions |
+| `k8s.getCustomResource` | low | Inspect one custom resource and its events |
 | `k8s.getManifest` | low | fetch a resource's manifest as YAML (any supported kind) |
 | `k8s.getObject` | low | fetch a resource as a structured JSON object (any supported kind) |
 | `k8s.listCRDs` | low | list installed CustomResourceDefinitions (group, kind, plural, scope) |
@@ -82,7 +82,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.podConnections` | medium | read the established TCP connections of pods, from their own /proc/net/tcp |
 | `k8s.topologyProbe` | medium | the topology graph, plus each pod's open connections read over pods/exec (one exec per pod) |
 
-### Kubernetes — needs confirmation (12)
+### Kubernetes — needs confirmation (13)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -91,8 +91,9 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.cordonNode` | medium | cordon or uncordon a node (set spec.unschedulable) |
 | `k8s.cronjobSetSuspend` | medium | suspend or resume a CronJob (set spec.suspend) |
 | `k8s.cronjobTriggerNow` | medium | run a CronJob immediately by creating a Job from its jobTemplate |
-| `k8s.gitOpsAction` | high | Request a supported Flux or Argo CD operation on the reviewed resource; requires confirmation |
 | `k8s.mergePatch` | high | Send the fixed merge patch an app's action declares, past the host deny-list, to the reviewed resource; requires confirmation |
+| `k8s.requestCordonNode` | medium | Request cordon or uncordon of the reviewed Node without eviction; requires confirmation |
+| `k8s.requestRolloutRestart` | high | Request a rolling restart of the reviewed built-in workload; requires confirmation |
 | `k8s.rolloutRestart` | medium | trigger a rolling restart of a workload |
 | `k8s.scale` | medium | set the replica count of a workload (Deployment/StatefulSet/ReplicaSet) |
 | `k8s.setFields` | medium | Set fixed spec fields on the reviewed resource, as an app's action declares them; requires confirmation |
@@ -174,7 +175,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
-| `extensions.action` | high | Request a host-owned GitOps action on an app resource; requires explicit confirmation |
+| `extensions.action` | high | Run a declared action on an app resource; requires explicit confirmation |
 | `extensions.configure` | medium | Install, enable, remove or configure local extensions; requires approval |
 | `settings.set` | medium | atomically write or remove durable desktop settings |
 

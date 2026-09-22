@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import inventorySchema from "./extension-inventory.schema.json";
+import type { ActionPredicate } from "./actionPredicates";
 import type { ExtensionInventory, ExtensionManifest, InstalledExtension } from "./extensions";
 
 // extension-inventory.schema.json is generated from the Rust inventory and manifest
@@ -69,7 +70,17 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     target: "required",
     resource: "required",
     arguments: "required",
+    preconditions: "optional",
+    availableWhen: "optional",
   } satisfies Presence<NonNullable<ExtensionManifest["actions"]>[number]>,
+  Predicate: {
+    jsonPath: "required",
+    equals: "optional",
+    notEquals: "optional",
+    present: "optional",
+    absent: "optional",
+    reason: "required",
+  } satisfies Presence<ActionPredicate>,
   Contributions: {
     pages: "required",
     detailTabs: "required",

@@ -256,10 +256,11 @@ mod tests {
     }
 
     #[test]
-    fn the_fixtures_pass_every_check() {
+    fn historic_fixtures_keep_authentic_signatures_but_require_a_retired_api() {
         assert!(parse_catalog(CATALOG).is_ok());
         catalog(CATALOG);
-        assert!(signing::verify(SIGNED, SIGNATURE).is_ok());
+        assert!(signing::verify_for("org.srelens.argocd", SIGNED, SIGNATURE).is_ok());
+        assert!(signing::verify(SIGNED, SIGNATURE).unwrap_err().contains("requires API ^0.1"));
         signed_manifest(&signed_input(SIGNATURE, SIGNED));
 
         let state = read_bytes(INVENTORY).unwrap();
@@ -268,7 +269,7 @@ mod tests {
         assert!(state
             .plugins
             .iter()
-            .all(|plugin| plugin.enabled && plugin.quarantined.is_none()));
+            .all(|plugin| !plugin.enabled && plugin.quarantined.as_deref().is_some_and(|reason| reason.contains("requires API ^0.1"))));
         inventory(INVENTORY);
 
         // Migrated: the retired archive is dropped, and with developer mode off nothing that
@@ -278,7 +279,7 @@ mod tests {
         assert!(legacy
             .plugins
             .iter()
-            .all(|plugin| !plugin.enabled && plugin.quarantined.is_none()));
+            .all(|plugin| !plugin.enabled && plugin.quarantined.as_deref().is_some_and(|reason| reason.contains("requires API ^0.1"))));
         inventory(LEGACY_INVENTORY);
     }
 

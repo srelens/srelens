@@ -42,7 +42,6 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     // and there is no consent prompt (#374), so a caller could name any allowlisted
     // kind directly. `k8s.getCustomResource` stays allowed: it is a read under the
     // user's own kubeconfig and RBAC, like every other custom-resource read.
-    "k8s.gitOpsAction",
     // The host action primitives (#549), for the same reason: what makes one
     // of them safe is an installed app's manifest fixing the kind and the
     // template and a person confirming the request. The web host has neither,
@@ -51,6 +50,8 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     "k8s.setFields",
     "k8s.setStatusCondition",
     "k8s.mergePatch",
+    "k8s.requestRolloutRestart",
+    "k8s.requestCordonNode",
     "k8s.deleteContext",
     "k8s.helmRepoAdd",
     "k8s.helmRepoUpdate",
@@ -465,12 +466,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gitops_writes_are_denied_on_web_but_custom_resource_reads_are_not() {
-        // No app binding scopes the host GitOps write on the web and there is no
-        // web consent prompt, so it is denied outright.
-        let (status, body) = post("/api/capability/k8s.gitOpsAction", Body::empty()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], json!("capability not available in web mode"));
+    async fn removed_gitops_endpoint_is_absent_and_custom_resource_reads_are_not_denied() {
+        // The retired endpoint has no handler and no compatibility shim.
+        let (status, _) = post("/api/capability/k8s.gitOpsAction", Body::empty()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
         // A read under the user's own kubeconfig and RBAC stays available: it reaches
         // dispatch (404 in the test registry) instead of being denied.
         let (status, _) = post("/api/capability/k8s.getCustomResource", Body::empty()).await;

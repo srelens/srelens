@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 fn manifest() -> Value {
     json!({
-        "id":"org.example.gitops", "name":"GitOps", "version":"0.1.0", "srelensApiVersion":"^0.1",
+        "id":"org.example.gitops", "name":"GitOps", "version":"0.1.0", "srelensApiVersion":"^0.3",
         "kind":"declarative", "permissions":["k8s.listCustomResource"],
         "capabilities":[{"name":"applications","title":"List applications", "target":"k8s.listCustomResource",
             "arguments":{"group":"argoproj.io"},"inputs":["context","namespace"]}],
@@ -235,13 +235,15 @@ fn gitops_examples_bind_to_the_real_host_contract() {
         include_str!("../../../examples/extensions/flux.json"),
     ] {
         let manifest = Manifest::parse(source).unwrap();
-        let count = manifest.capabilities.len();
+        let readers: std::collections::BTreeSet<_> = manifest.capabilities.iter().map(|binding| format!("plugin/{}/{}", manifest.id, binding.name)).collect();
+        let count = manifest.capabilities.len() + manifest.actions.len();
         let grants = manifest.permissions.clone();
         let mut reg = Registry::new();
         let _installed = host.register(&mut reg, manifest, &grants).unwrap();
         assert_eq!(reg.ids().len(), count);
         for cap in reg.entries() {
-            assert!(cap.annotations.read_only);
+            assert_eq!(cap.annotations.read_only, readers.contains(&cap.id));
+            if !cap.annotations.read_only { assert!(cap.annotations.requires_confirm); }
             assert!(cap.input_schema["properties"].get("group").is_none());
             assert!(cap.input_schema["properties"].get("context").is_some());
         }
@@ -347,6 +349,19 @@ fn manifest_wire_contract_and_contribution_identity_are_strict() {
 }
 
 #[test]
+fn host_accepts_api_03_and_rejects_retired_api_lines() {
+    let mut value = manifest();
+    value["srelensApiVersion"] = json!("^0.3");
+    Manifest::parse(&value.to_string()).unwrap();
+    for retired in ["^0.1", "^0.2"] {
+        value["srelensApiVersion"] = json!(retired);
+        let error = Manifest::parse(&value.to_string()).unwrap_err().to_string();
+        assert!(error.contains(&format!("requires API {retired}")), "{error}");
+        assert!(error.contains("host supports 0.3.0"), "{error}");
+    }
+}
+
+#[test]
 fn api_ranges_negotiate_against_every_supported_version() {
     use srelens_plugin_host::{negotiate_api_version_in, SUPPORTED_API_VERSIONS};
     let req = |range: &str| semver::VersionReq::parse(range).unwrap();
@@ -382,7 +397,7 @@ fn a_manifest_for_a_newer_api_is_told_the_version_it_needs_not_an_unknown_field(
         "{error}"
     );
     // A supported range still gets the strict schema.
-    newer["srelensApiVersion"] = json!("^0.1");
+    newer["srelensApiVersion"] = json!("^0.3");
     assert!(Manifest::parse(&newer.to_string())
         .unwrap_err()
         .to_string()

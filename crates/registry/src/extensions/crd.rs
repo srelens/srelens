@@ -156,10 +156,12 @@ mod tests {
         for source in [
             include_str!("../../../../examples/extensions/argocd.json"),
             include_str!("../../../../examples/extensions/flux.json"),
-            include_str!("../../tests/fixtures/argocd-manifest.json"),
         ] {
             let manifest = Manifest::parse(source).unwrap();
             assert!(group_problems(&manifest).0.is_empty());
         }
+        let historic = include_str!("../../tests/fixtures/argocd-manifest.json");
+        assert!(Manifest::parse(historic).unwrap_err().to_string().contains("requires API ^0.1"));
+        assert!(group_problems(&Manifest::decode(historic).unwrap()).0.is_empty());
     }
 }

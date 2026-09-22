@@ -7,13 +7,13 @@ and [flux.json](../../examples/extensions/flux.json).
 
 ## JSON Schema
 
-The schema for API 0.1 is committed at
-[`schemas/extension-manifest.v0.1.json`](../../schemas/extension-manifest.v0.1.json).
+The schema for API 0.3 is committed at
+[`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json).
 Point your editor at it by naming it in the manifest:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.3.json",
   "id": "io.example.cert-manager"
 }
 ```
@@ -80,7 +80,7 @@ the request:
 |---|---|
 | `name` | Local action name, unique across `capabilities` and `actions`. Addressed as `plugin/<id>/<name>`. |
 | `title` | Display title, held to the same rules as a binding's. |
-| `target` | A host action primitive: `k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition` or `k8s.mergePatch`. |
+| `target` | A host action primitive: `k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition`, `k8s.mergePatch`, `k8s.requestRolloutRestart` or `k8s.requestCordonNode`. |
 | `resource` | The `name` of a reader binding in `capabilities`. The action acts on that binding's kind and on no other. |
 | `arguments` | What the action writes, fixed here. |
 
@@ -133,11 +133,99 @@ not write a Secret's `data` or `stringData`, and may not target an RBAC kind (`R
 `rbac.authorization.k8s.io`). The host applies the same rules when the manifest is
 installed, when a stored app is reverified, and on the way to the cluster.
 
-Preconditions ([#550](https://github.com/srelens/srelens/issues/550)) and the host-owned
-confirmation dialog ([#552](https://github.com/srelens/srelens/issues/552)) are not part
-of this API version yet, and the Flux and Argo CD actions in core still come from the
-host's own table until [#551](https://github.com/srelens/srelens/issues/551) moves them
-into manifests.
+### Preconditions and availability
+
+An action may declare what must be true of the object, as predicates the host
+evaluates rather than words in a description:
+
+| Field | Meaning |
+|---|---|
+| `preconditions` | Checked by the host against its own fresh read of the object, before the patch. One that does not hold refuses the request, and the operator is told its `reason`. |
+| `availableWhen` | Checked by the surface, against the object it is already showing, to decide whether the control is offered. The `reason` is the disabled control's tooltip. |
+
+Each list holds at most 8 predicates, and each predicate is one question about one
+value:
+
+```json
+"preconditions": [
+  { "jsonPath": ".spec.suspend", "notEquals": true,
+    "reason": "Resume this resource before requesting reconciliation" }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `jsonPath` | The value to ask about. An optional leading `$`, then `.key`, `['key']`, `["key"]` and `[0]`, at most 8 segments and 256 characters. No wildcard, filter, recursive descent or function — each addresses a *set* of values, and "does this hold" over a set is a different question. |
+| `equals` / `notEquals` | The value must (not) be this string, number or boolean **literal**. An object or a list is not a comparand. A field nobody set is not equal to anything, so `notEquals` holds when it is absent. |
+| `present` / `absent` | Written `true`. The value must be set, or unset. `null` counts as unset, which is also why `null` is not a comparand: write `absent: true`. |
+| `reason` | Required, at most 200 characters. Shown to the operator, so it says what to do next. |
+
+Exactly one operator per predicate. Both lists are checked when the app is installed
+and each time a stored app is reverified, and `preconditions` are checked again on the
+way to the cluster — one statement of each rule, in
+`crates/capability/src/predicate.rs`, run from both ends.
+
+Two things these cannot do:
+
+- **They cannot remove a host guard.** An object that is being deleted, and a `uid` or
+  `resourceVersion` that has moved on since the operator reviewed it, are refused
+  before any declared predicate is evaluated. A predicate can only add a refusal.
+- **`availableWhen` does not enforce.** A surface can be seconds out of date; the
+  host's own read cannot. A condition that must hold when the write lands belongs in
+  `preconditions`, and an app that means both writes both.
+
+The `reason` is an app's text shown in the host's UI, so the host escapes it before
+drawing it and frames its own refusal around it.
+
+The host-owned confirmation dialog
+([#552](https://github.com/srelens/srelens/issues/552)) is not part of this API version
+yet, and the Flux and Argo CD actions in core still come from the host's own table
+until [#551](https://github.com/srelens/srelens/issues/551) moves them into manifests.
+
+## Built-in operational action bindings
+
+Four existing summary readers can scope operational actions. Their `arguments`
+must be empty: the host derives the exact API group, version, plural, kind and
+scope from the reader target.
+
+| Reader | Inputs | Allowed action | Fixed action arguments | Impact |
+|---|---|---|---|---|
+| `k8s.listDeployments` | `context`, `namespace` | `k8s.requestRolloutRestart` | `{}` | High |
+| `k8s.listStatefulSets` | `context`, `namespace` | `k8s.requestRolloutRestart` | `{}` | High |
+| `k8s.listDaemonSets` | `context`, `namespace` | `k8s.requestRolloutRestart` | `{}` | High |
+| `k8s.listNodes` | `context` | `k8s.requestCordonNode` | `{"unschedulable": true}` to cordon, `false` to uncordon | Medium |
+
+Grant both the reader and action target. For example:
+
+```json
+"capabilities": [{
+  "name": "deployments", "title": "Deployments", "target": "k8s.listDeployments",
+  "arguments": {}, "inputs": ["context", "namespace"]
+}],
+"actions": [{
+  "name": "restart", "title": "Restart", "target": "k8s.requestRolloutRestart",
+  "resource": "deployments", "arguments": {}
+}]
+```
+
+The reviewing host supplies `context`, `namespace`, `name`, `uid` and
+`resourceVersion`; use an empty namespace for Nodes. Each request freshly reads
+the object, refuses a changed or deleting object and unmet `preconditions`, and
+pins its patch to the reviewed UID and resource version. Success means
+`{"requested": true}`, not that rollout has finished. Host confirmation and
+impact annotations are inherited by the registered app action.
+
+These adapters share patch construction with `k8s.rolloutRestart` and
+`k8s.cordonNode`. They have separate capability IDs because those interactive
+operations do not accept a reviewed object identity. Apps cannot bind the
+interactive operations. General annotation, field, status and merge-patch writes
+remain unavailable on built-in reader bindings. Drain remains deferred: cordon
+never evicts pods.
+
+Built-in readers return their existing summary formats. They do not provide
+whole objects, and cannot back the custom-resource table or detail contributions.
+This contract adds action bindings, not a built-in resource screen. Custom-resource
+bindings still require a real CRD; an app cannot disguise a built-in kind as one.
 
 ## Contributions
 

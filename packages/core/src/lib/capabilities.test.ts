@@ -110,7 +110,7 @@ describe("capability metadata v2", () => {
    */
   it("publishes the ceiling for the capability that carries several actions", () => {
     const action = rows.find((c) => c.id === "k8s.gitOpsAction");
-    expect(action?.impact).toBe("high");
+    expect(action).toBeUndefined();
     expect(rows.find((c) => c.id === "extensions.action")?.impact).toBe("high");
   });
 

@@ -7,7 +7,7 @@
 //! and everything else is fixed in the manifest at install time.
 //!
 //! Every primitive does the same three things, because each one is a rule that
-//! was written once for `k8s.gitOpsAction` (#511) and must not be re-derived
+//! applies to every declared action and must not be re-derived
 //! per primitive:
 //!
 //! - a fresh GET, then a PATCH pinned to the reviewed `uid` and
@@ -31,7 +31,9 @@ use kube::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use srelens_capability::{Annotations, Capability, CapabilityError, Impact};
+use srelens_capability::{
+    check_predicates, unmet, Annotations, Capability, CapabilityError, Impact, Predicate,
+};
 use std::sync::Arc;
 
 /// Writes one fixed annotation key. Covers Flux's reconcile, force and reset
@@ -49,8 +51,20 @@ pub const SET_STATUS_CONDITION: &str = "k8s.setStatusCondition";
 /// CD's `operation.sync`, which no narrower primitive can express.
 pub const MERGE_PATCH: &str = "k8s.mergePatch";
 
+/// Restart a reviewed Deployment, StatefulSet or DaemonSet through the host rollout operation.
+pub const REQUEST_RESTART: &str = "k8s.requestRolloutRestart";
+/// Change scheduling on a reviewed Node without evicting pods.
+pub const REQUEST_CORDON: &str = "k8s.requestCordonNode";
+
 /// Every host action primitive, in the order they are documented.
-pub const PRIMITIVES: &[&str] = &[ANNOTATE, SET_FIELDS, SET_STATUS_CONDITION, MERGE_PATCH];
+pub const PRIMITIVES: &[&str] = &[
+    ANNOTATE,
+    SET_FIELDS,
+    SET_STATUS_CONDITION,
+    MERGE_PATCH,
+    REQUEST_RESTART,
+    REQUEST_CORDON,
+];
 
 /// The value tokens a binding may write instead of a literal.
 const NOW: &str = "$now";
@@ -87,6 +101,11 @@ macro_rules! action_input {
             /// The `resourceVersion` of the object the operator reviewed.
             #[serde(rename = "resourceVersion")]
             pub resource_version: String,
+            /// What the manifest declared must be true of the object before
+            /// this write is sent (#550). Bound by the host out of the
+            /// action's own `preconditions`, never supplied by a caller.
+            #[serde(default)]
+            pub preconditions: Vec<Predicate>,
             $($(#[$inner])* pub $field: $ty,)*
         }
         impl $name {
@@ -155,6 +174,11 @@ action_input!(
     }
 );
 
+action_input!(RequestRestartIn {});
+action_input!(RequestCordonIn {
+    unschedulable: bool
+});
+
 /// The object a request is pinned to: its identity, and the version the
 /// operator reviewed.
 struct Reviewed<'a> {
@@ -166,7 +190,7 @@ struct Reviewed<'a> {
 /// Refuses a request the operator's review no longer describes.
 ///
 /// The two refusals every write in this host makes, wherever it comes from:
-/// `gitops::guard_action` calls this before its action-specific checks. A UID
+/// declared preconditions run after these checks. A UID
 /// or `resourceVersion` that has moved means the object on the server is not
 /// the object that was reviewed, and an object with a `deletionTimestamp` is
 /// on its way out — a write to it either does nothing or overwrites what a
@@ -189,17 +213,44 @@ pub(crate) fn guard_reviewed(
     Ok(())
 }
 
-/// GET the object, refuse anything the review no longer covers, then send the
-/// patch `build` makes from what the server actually holds.
+/// What the operator is told when a declared precondition does not hold.
+///
+/// The host's words first, the app's after: `reason` is a manifest's text,
+/// escaped by [`Predicate::reason`], and a refusal has to read as a refusal
+/// whatever sentence an app put in it.
+fn unmet_reason(predicate: &Predicate) -> String {
+    format!("This action is not available: {}", predicate.reason())
+}
+
+/// GET the object, refuse anything the review no longer covers or the declared
+/// preconditions do not admit, then send the patch `build` makes from what the
+/// server actually holds.
+///
+/// The order is the point. The host's guards run first and unconditionally, so
+/// no manifest can reach past them; the declared preconditions run next and
+/// can only add refusals; the patch is built last, from the same fresh read
+/// every check was made against.
 ///
 /// `status` sends it to the status subresource instead of the object itself.
 async fn request(
     client: Client,
     reviewed: Reviewed<'_>,
+    preconditions: &[Predicate],
     status: bool,
     build: impl FnOnce(&Value) -> Result<Value, String>,
 ) -> Result<Value, String> {
     reviewed.resource.validate()?;
+    request_validated(client, reviewed, preconditions, status, build).await
+}
+
+/// Shared GET, guards and pinned PATCH after the caller validates its resource identity.
+async fn request_validated(
+    client: Client,
+    reviewed: Reviewed<'_>,
+    preconditions: &[Predicate],
+    status: bool,
+    build: impl FnOnce(&Value) -> Result<Value, String>,
+) -> Result<Value, String> {
     let api = reviewed.resource.api(client);
     let current = serde_json::to_value(
         api.get(&reviewed.resource.name)
@@ -208,6 +259,9 @@ async fn request(
     )
     .map_err(|e| e.to_string())?;
     guard_reviewed(&current, reviewed.uid, reviewed.resource_version)?;
+    if let Some(unheld) = unmet(preconditions, &current) {
+        return Err(unmet_reason(unheld));
+    }
     let mut patch = build(&current)?;
     pin_to_reviewed(&mut patch, reviewed.uid, reviewed.resource_version);
     let params = PatchParams::default();
@@ -296,18 +350,23 @@ const MAX_TEMPLATE_BYTES: usize = 8 * 1024;
 /// Recursive over the template an app bound, which is why the template is
 /// size-bounded before it gets here: depth is bounded by length.
 fn resolve_tokens(value: &Value) -> Result<Value, String> {
+    resolve_tokens_at(value, &resolve_value(NOW)?)
+}
+
+fn resolve_tokens_at(value: &Value, now: &str) -> Result<Value, String> {
     Ok(match value {
+        Value::String(text) if text == NOW => Value::String(now.to_owned()),
         Value::String(text) => Value::String(resolve_value(text)?),
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(resolve_tokens)
+                .map(|value| resolve_tokens_at(value, now))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         Value::Object(fields) => Value::Object(
             fields
                 .iter()
-                .map(|(key, value)| Ok((key.clone(), resolve_tokens(value)?)))
+                .map(|(key, value)| Ok((key.clone(), resolve_tokens_at(value, now)?)))
                 .collect::<Result<Map<_, _>, String>>()?,
         ),
         other => other.clone(),
@@ -368,6 +427,7 @@ fn fields_patch(fields: &Map<String, Value>) -> Result<Value, String> {
         ));
     }
     bounded(fields)?;
+    let now = resolve_value(NOW)?;
     let mut parsed = Vec::with_capacity(fields.len());
     for (pointer, value) in fields {
         let segments = pointer_segments(pointer)?;
@@ -376,7 +436,7 @@ fn fields_patch(fields: &Map<String, Value>) -> Result<Value, String> {
                 "`{pointer}` is not a field under `/spec`; a setFields action writes only spec fields"
             ));
         }
-        parsed.push((segments, resolve_tokens(value)?));
+        parsed.push((segments, resolve_tokens_at(value, &now)?));
     }
     // Two pointers where one contains the other would make the result depend
     // on the order this host happened to apply them in.
@@ -651,6 +711,21 @@ fn text<'a>(arguments: &'a Map<String, Value>, name: &str) -> Result<&'a str, St
     }
 }
 
+/// The declared preconditions in a binding's arguments, held to the same rules
+/// the handler holds them to.
+///
+/// The host binds these out of the action's own `preconditions` field, so a
+/// value here that is not a list of predicates is a binding built by something
+/// other than this host — refused rather than ignored.
+fn check_bound_preconditions(arguments: &Map<String, Value>) -> Result<(), String> {
+    let Some(declared) = arguments.get("preconditions") else {
+        return Ok(());
+    };
+    let predicates: Vec<Predicate> = serde_json::from_value(declared.clone())
+        .map_err(|e| format!("`preconditions` must be a list of predicates: {e}"))?;
+    check_predicates(&predicates)
+}
+
 /// Every rule a manifest's bound arguments must satisfy that the input schema
 /// cannot express.
 ///
@@ -662,7 +737,37 @@ pub fn check_bound_arguments(
     capability: &str,
     arguments: &Map<String, Value>,
 ) -> Result<(), String> {
+    // Every primitive takes the same declared preconditions (#550), so they
+    // are checked once here rather than in each arm — and by the same
+    // `check_predicates` each handler runs before it reads the object, so a
+    // predicate this refuses cannot be reached from the cluster side either.
+    check_bound_preconditions(arguments)?;
     match capability {
+        REQUEST_RESTART | REQUEST_CORDON => {
+            let resource = ResourceIn {
+                context: "binding".into(),
+                namespace: String::new(),
+                name: "binding".into(),
+                group: text(arguments, "group")?.into(),
+                version: text(arguments, "version")?.into(),
+                plural: text(arguments, "plural")?.into(),
+                kind: text(arguments, "kind")?.into(),
+                namespaced: arguments
+                    .get("namespaced")
+                    .and_then(Value::as_bool)
+                    .ok_or("`namespaced` must be a boolean")?,
+            };
+            check_builtin_identity(capability, &resource)?;
+            if capability == REQUEST_CORDON
+                && arguments
+                    .get("unschedulable")
+                    .and_then(Value::as_bool)
+                    .is_none()
+            {
+                return Err("`unschedulable` must be bound as a boolean".into());
+            }
+            Ok(())
+        }
         ANNOTATE => {
             check_annotation_key(text(arguments, "key")?)?;
             resolve_value(text(arguments, "value")?)?;
@@ -700,27 +805,106 @@ pub fn check_bound_arguments(
     }
 }
 
+fn check_builtin_identity(capability: &str, resource: &ResourceIn) -> Result<(), String> {
+    let valid = match capability {
+        REQUEST_RESTART => {
+            resource.group == "apps"
+                && resource.version == "v1"
+                && resource.namespaced
+                && matches!(
+                    (resource.kind.as_str(), resource.plural.as_str()),
+                    ("Deployment", "deployments")
+                        | ("StatefulSet", "statefulsets")
+                        | ("DaemonSet", "daemonsets")
+                )
+        }
+        REQUEST_CORDON => {
+            resource.group.is_empty()
+                && resource.version == "v1"
+                && !resource.namespaced
+                && resource.kind == "Node"
+                && resource.plural == "nodes"
+        }
+        _ => false,
+    };
+    if !valid {
+        return Err("This action requires its exact built-in workload or Node identity".into());
+    }
+    Ok(())
+}
+
+fn validate_builtin(capability: &str, reviewed: &Reviewed<'_>) -> Result<(), String> {
+    check_builtin_identity(capability, &reviewed.resource)?;
+    // Reuse the strict path/scope validation; only this already-checked Node may
+    // use the core API group. Generic primitives keep their nonempty-group rule.
+    let mut identity = reviewed.resource.clone();
+    if identity.group.is_empty() {
+        identity.group = "core".into();
+    }
+    identity.validate()
+}
+
+async fn request_restart(client: Client, input: RequestRestartIn) -> Result<Value, String> {
+    let reviewed = input.reviewed();
+    validate_builtin(REQUEST_RESTART, &reviewed)?;
+    check_predicates(&input.preconditions)?;
+    request_validated(client, reviewed, &input.preconditions, false, |_| {
+        Ok(crate::actions::restart_patch())
+    })
+    .await
+}
+
+async fn request_cordon(client: Client, input: RequestCordonIn) -> Result<Value, String> {
+    let reviewed = input.reviewed();
+    validate_builtin(REQUEST_CORDON, &reviewed)?;
+    check_predicates(&input.preconditions)?;
+    request_validated(client, reviewed, &input.preconditions, false, |_| {
+        Ok(crate::actions::cordon_patch(input.unschedulable))
+    })
+    .await
+}
+
 async fn annotate(client: Client, input: AnnotateIn) -> Result<Value, String> {
     check_annotation_key(&input.key)?;
+    check_predicates(&input.preconditions)?;
     let value = resolve_value(&input.value)?;
-    request(client, input.reviewed(), false, |_| {
-        Ok(json!({"metadata": {"annotations": {&input.key: value}}}))
-    })
+    request(
+        client,
+        input.reviewed(),
+        &input.preconditions,
+        false,
+        |_| Ok(json!({"metadata": {"annotations": {&input.key: value}}})),
+    )
     .await
 }
 
 async fn set_fields(client: Client, input: SetFieldsIn) -> Result<Value, String> {
     let patch = fields_patch(&input.fields)?;
-    request(client, input.reviewed(), false, |current| {
-        check_object_parents(current, &input.fields)?;
-        Ok(patch)
-    })
+    check_predicates(&input.preconditions)?;
+    request(
+        client,
+        input.reviewed(),
+        &input.preconditions,
+        false,
+        |current| {
+            check_object_parents(current, &input.fields)?;
+            Ok(patch)
+        },
+    )
     .await
 }
 
 async fn set_merge_patch(client: Client, input: MergePatchIn) -> Result<Value, String> {
     let patch = check_merge_patch(&input.group, &input.kind, &input.patch)?;
-    request(client, input.reviewed(), false, |_| Ok(patch)).await
+    check_predicates(&input.preconditions)?;
+    request(
+        client,
+        input.reviewed(),
+        &input.preconditions,
+        false,
+        |_| Ok(patch),
+    )
+    .await
 }
 
 async fn set_status_condition(
@@ -733,9 +917,14 @@ async fn set_status_condition(
         &input.reason,
         &input.message,
     )?;
-    request(client, input.reviewed(), true, |current| {
-        Ok(condition_patch(current, &input))
-    })
+    check_predicates(&input.preconditions)?;
+    request(
+        client,
+        input.reviewed(),
+        &input.preconditions,
+        true,
+        |current| Ok(condition_patch(current, &input)),
+    )
     .await
 }
 
@@ -751,12 +940,14 @@ async fn set_status_condition(
 /// manifests and runs hooks, so it is `high`.
 ///
 /// This is the floor for every binding, never a ceiling on one:
-/// [`Annotations::for_binding`] only ever raises. When #550's preconditions
-/// and #551's migrated Flux and Argo CD actions give the host more to go on
-/// per action, a `force` binding can be published above its primitive's row
-/// without any of these rows moving.
+/// [`Annotations::for_binding`] only ever raises. #550's preconditions narrow
+/// *when* a primitive runs, not what it can disturb when it does, so none of
+/// these rows move for them. Migrated Flux force/reset actions use mergePatch
+/// to write both annotations atomically, inheriting its high impact.
 fn metadata(primitive: &str) -> (Impact, &'static str) {
     match primitive {
+        REQUEST_RESTART => (Impact::High, "Request a rolling restart[ of {resource}][ in cluster {cluster}]? Running pods will be replaced."),
+        REQUEST_CORDON => (Impact::Medium, "Change scheduling[ on {resource}][ in cluster {cluster}]? Running pods are not evicted."),
         ANNOTATE => (
             Impact::Medium,
             "Set the action's annotation[ on {resource}][ in cluster {cluster}]? What the controller does next is up to it.",
@@ -842,8 +1033,10 @@ pub fn capabilities(cache: Arc<ClientCache>) -> Vec<Capability> {
             "Send the fixed merge patch an app's action declares, past the host deny-list, to the reviewed resource; requires confirmation",
             MergePatchIn,
             set_merge_patch,
-            cache
+            cache.clone()
         ),
+        primitive!(REQUEST_RESTART, "Request a rolling restart of the reviewed built-in workload; requires confirmation", RequestRestartIn, request_restart, cache.clone()),
+        primitive!(REQUEST_CORDON, "Request cordon or uncordon of the reviewed Node without eviction; requires confirmation", RequestCordonIn, request_cordon, cache),
     ]
 }
 
@@ -933,8 +1126,231 @@ mod tests {
         input
     }
 
+    #[tokio::test]
+    async fn every_migrated_action_enforces_fresh_preconditions_and_pins_its_patch() {
+        for source in [
+            include_str!("../../../examples/extensions/flux.json"),
+            include_str!("../../../examples/extensions/argocd.json"),
+        ] {
+            let manifest: Value = serde_json::from_str(source).unwrap();
+            for action in manifest["actions"].as_array().unwrap() {
+                let reader = manifest["capabilities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["name"] == action["resource"])
+                    .unwrap();
+                for suspended in [false, true] {
+                    for operation in [Value::Null, json!({"sync":{}})] {
+                        let mut input = action["arguments"].clone();
+                        for field in ["group", "version", "plural", "kind", "namespaced"] {
+                            input[field] = reader["arguments"][field].clone();
+                        }
+                        merge(
+                            &mut input,
+                            &json!({"context":"cluster/a","namespace":"team","name":"api","uid":"u","resourceVersion":"2","preconditions":action.get("preconditions").cloned().unwrap_or(json!([]))}),
+                        );
+                        let current =
+                            object(json!({"spec":{"suspend":suspended},"operation":operation}));
+                        let (client, requests) = mock(current);
+                        let result = match action["target"].as_str().unwrap() {
+                            ANNOTATE => {
+                                annotate(client, serde_json::from_value(input).unwrap()).await
+                            }
+                            SET_FIELDS => {
+                                set_fields(client, serde_json::from_value(input).unwrap()).await
+                            }
+                            MERGE_PATCH => {
+                                set_merge_patch(client, serde_json::from_value(input).unwrap())
+                                    .await
+                            }
+                            target => panic!("unexpected target {target}"),
+                        };
+                        let name = action["name"].as_str().unwrap();
+                        let allowed = if name == "sync" {
+                            operation.is_null()
+                        } else if name.ends_with("-resume") {
+                            suspended
+                        } else if name == "refresh" || name == "hard-refresh" {
+                            true
+                        } else {
+                            !suspended
+                        };
+                        assert_eq!(
+                            result.is_ok(),
+                            allowed,
+                            "{name}, suspended={suspended}, operation={operation}: {result:?}"
+                        );
+                        let requests = requests.lock().unwrap();
+                        assert_eq!(requests.len(), if allowed { 2 } else { 1 });
+                        if allowed {
+                            assert_eq!(requests[1].1["metadata"]["uid"], "u");
+                            assert_eq!(requests[1].1["metadata"]["resourceVersion"], "2");
+                            if name.ends_with("-force") || name.ends_with("-reset") {
+                                let annotations = &requests[1].1["metadata"]["annotations"];
+                                let key = if name.ends_with("-force") {
+                                    "forceAt"
+                                } else {
+                                    "resetAt"
+                                };
+                                assert_eq!(
+                                    annotations["reconcile.fluxcd.io/requestedAt"],
+                                    annotations[format!("reconcile.fluxcd.io/{key}")]
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn annotate_in(extra: Value) -> AnnotateIn {
         serde_json::from_value(helmrelease(extra)).expect("input deserializes")
+    }
+
+    fn builtin(kind: &str, plural: &str, node: bool) -> Value {
+        json!({"context":"cluster/a","group":if node {""} else {"apps"},"version":"v1",
+            "plural":plural,"kind":kind,"namespaced":!node,"namespace":if node {""} else {"team"},
+            "name":"api","uid":"u","resourceVersion":"2"})
+    }
+
+    #[tokio::test]
+    async fn builtin_requests_share_the_guarded_get_and_pinned_patch() {
+        for (kind, plural) in [
+            ("Deployment", "deployments"),
+            ("StatefulSet", "statefulsets"),
+            ("DaemonSet", "daemonsets"),
+        ] {
+            let current = json!({"apiVersion":"apps/v1","kind":kind,"metadata":{"name":"api","namespace":"team","uid":"u","resourceVersion":"2"}});
+            let (client, requests) = mock(current);
+            let out = request_restart(
+                client,
+                serde_json::from_value(builtin(kind, plural, false)).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(out, json!({"requested":true}));
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len(), 2);
+            assert_eq!(
+                captured[0].0,
+                format!("GET /apis/apps/v1/namespaces/team/{plural}/api")
+            );
+            assert_eq!(
+                captured[1].0,
+                format!("PATCH /apis/apps/v1/namespaces/team/{plural}/api?")
+            );
+            assert_eq!(
+                captured[1].1["metadata"],
+                json!({"uid":"u","resourceVersion":"2"})
+            );
+            assert!(captured[1].1["spec"]["template"]["metadata"]["annotations"]
+                ["kubectl.kubernetes.io/restartedAt"]
+                .as_str()
+                .is_some());
+        }
+        for unschedulable in [true, false] {
+            let (client, requests) = mock(
+                json!({"apiVersion":"v1","kind":"Node","metadata":{"name":"api","uid":"u","resourceVersion":"2"}}),
+            );
+            let mut input = builtin("Node", "nodes", true);
+            input["unschedulable"] = json!(unschedulable);
+            assert_eq!(
+                request_cordon(client, serde_json::from_value(input).unwrap())
+                    .await
+                    .unwrap(),
+                json!({"requested":true})
+            );
+            let captured = requests.lock().unwrap();
+            assert_eq!(captured.len(), 2);
+            assert_eq!(captured[0].0, "GET /api/v1/nodes/api");
+            assert_eq!(captured[1].0, "PATCH /api/v1/nodes/api?");
+            assert_eq!(
+                captured[1].1,
+                json!({"metadata":{"uid":"u","resourceVersion":"2"},"spec":{"unschedulable":unschedulable}})
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_requests_refuse_stale_deleted_and_unmet_reviews_without_patching() {
+        for node in [false, true] {
+            for extra in [
+                json!({"uid":"replacement"}),
+                json!({"resourceVersion":"3"}),
+                json!({"deletionTimestamp":"2026-01-01T00:00:00Z"}),
+                json!({}),
+            ] {
+                let mut current = json!({"apiVersion":if node {"v1"} else {"apps/v1"},"kind":if node {"Node"} else {"Deployment"},"metadata":{"name":"api","uid":"u","resourceVersion":"2"}});
+                merge(&mut current["metadata"], &extra);
+                let (client, requests) = mock(current);
+                let mut input = if node {
+                    builtin("Node", "nodes", true)
+                } else {
+                    builtin("Deployment", "deployments", false)
+                };
+                input["preconditions"] = json!([{"jsonPath":".metadata.labels.allowed","equals":"yes","reason":"Needs approval"}]);
+                let result = if node {
+                    input["unschedulable"] = json!(true);
+                    request_cordon(client, serde_json::from_value(input).unwrap()).await
+                } else {
+                    request_restart(client, serde_json::from_value(input).unwrap()).await
+                };
+                assert!(result.is_err());
+                assert_eq!(requests.lock().unwrap().len(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_identity_and_wire_contract_fail_closed() {
+        for change in [
+            json!({"group":"evil.io"}),
+            json!({"version":"v2"}),
+            json!({"kind":"ReplicaSet"}),
+            json!({"plural":"secrets"}),
+            json!({"namespaced":false}),
+            json!({"namespace":""}),
+        ] {
+            let (client, requests) = mock(object(json!({})));
+            let mut input = builtin("Deployment", "deployments", false);
+            merge(&mut input, &change);
+            assert!(
+                request_restart(client, serde_json::from_value(input).unwrap())
+                    .await
+                    .is_err()
+            );
+            assert!(requests.lock().unwrap().is_empty());
+        }
+        let input = builtin("Deployment", "deployments", false);
+        assert!(serde_json::from_value::<RequestRestartIn>(input.clone()).is_ok());
+        for field in ["uid", "resourceVersion"] {
+            let mut wrong = input.clone();
+            wrong.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<RequestRestartIn>(wrong).is_err());
+        }
+        let mut wrong = input.clone();
+        wrong.as_object_mut().unwrap().remove("resourceVersion");
+        wrong["resource_version"] = json!("2");
+        assert!(serde_json::from_value::<RequestRestartIn>(wrong).is_err());
+        let caps = capabilities(ClientCache::new_many(vec![]));
+        assert_eq!(
+            caps.iter()
+                .find(|c| c.id == REQUEST_RESTART)
+                .unwrap()
+                .annotations
+                .impact,
+            Impact::High
+        );
+        assert_eq!(
+            caps.iter()
+                .find(|c| c.id == REQUEST_CORDON)
+                .unwrap()
+                .annotations
+                .impact,
+            Impact::Medium
+        );
     }
 
     #[tokio::test]
@@ -1550,6 +1966,214 @@ mod tests {
         assert!(
             check(json!({"key": "a.example.io/b"})).is_some(),
             "no value bound at all"
+        );
+    }
+
+    // -- declared preconditions (#550) -------------------------------------
+
+    /// `.spec.suspend notEquals true`, with the reason #550 names.
+    fn not_suspended() -> Value {
+        json!([{
+            "jsonPath": ".spec.suspend", "notEquals": true,
+            "reason": "Resume this resource before requesting reconciliation"
+        }])
+    }
+
+    fn reconcile() -> Value {
+        json!({"key": "reconcile.fluxcd.io/requestedAt", "value": "$now"})
+    }
+
+    #[tokio::test]
+    async fn a_precondition_that_does_not_hold_refuses_before_the_patch() {
+        let (client, requests) = mock(object(json!({"spec": {"suspend": true}})));
+        let refused = annotate(
+            client,
+            annotate_in(
+                json!({"key": "reconcile.fluxcd.io/requestedAt", "value": "$now",
+                "preconditions": not_suspended()}),
+            ),
+        )
+        .await
+        .expect_err("a suspended resource is not reconciled");
+        assert!(
+            refused.contains("Resume this resource before requesting reconciliation"),
+            "the operator is told what the app declared: {refused}"
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "the fresh GET, and nothing written: {requests:?}"
+        );
+        assert!(requests[0].0.starts_with("GET "), "{:?}", requests[0].0);
+    }
+
+    #[tokio::test]
+    async fn a_precondition_that_holds_lets_the_write_through() {
+        let (client, requests) = mock(object(json!({"spec": {"suspend": false}})));
+        annotate(
+            client,
+            annotate_in(
+                json!({"key": "reconcile.fluxcd.io/requestedAt", "value": "$now",
+                "preconditions": not_suspended()}),
+            ),
+        )
+        .await
+        .expect("a live resource reconciles");
+        assert_eq!(requests.lock().unwrap().len(), 2, "the GET and the PATCH");
+    }
+
+    /// The two refusals every write makes are the host's, so a manifest that
+    /// declares nothing still gets them — and one that declares a predicate
+    /// which *holds* on a deleted object does not get past them either.
+    #[tokio::test]
+    async fn a_host_guard_refuses_whatever_the_manifest_declares() {
+        let deleting = object(json!({"metadata": {"deletionTimestamp": "2026-01-01T00:00:00Z"}}));
+        let waved_through = json!([{
+            "jsonPath": ".metadata.deletionTimestamp", "present": true,
+            "reason": "This app says a deletion is fine"
+        }]);
+        for declared in [json!([]), waved_through] {
+            let (client, requests) = mock(deleting.clone());
+            let mut input = reconcile();
+            input["preconditions"] = declared.clone();
+            let refused = annotate(client, annotate_in(input))
+                .await
+                .expect_err("an object being deleted is not written");
+            assert_eq!(
+                refused, "Resource is being deleted",
+                "the host's guard, in the host's words, with {declared}"
+            );
+            assert_eq!(requests.lock().unwrap().len(), 1, "nothing was written");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_precondition_cannot_relax_the_review_pin() {
+        let (client, requests) = mock(object(json!({"metadata": {"resourceVersion": "9"}})));
+        let mut input = reconcile();
+        input["preconditions"] = json!([{
+            "jsonPath": ".metadata.resourceVersion", "present": true,
+            "reason": "This app says any version will do"
+        }]);
+        let refused = annotate(client, annotate_in(input))
+            .await
+            .expect_err("a version nobody reviewed is not written");
+        assert!(refused.contains("refresh and review"), "{refused}");
+        assert_eq!(requests.lock().unwrap().len(), 1, "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn a_predicate_the_host_cannot_evaluate_never_reaches_the_cluster() {
+        let (client, requests) = mock(object(json!({})));
+        let mut input = reconcile();
+        input["preconditions"] = json!([{
+            "jsonPath": ".status.conditions[?(@.type=='Ready')].status",
+            "equals": "True", "reason": "Wait for readiness"
+        }]);
+        let refused = annotate(client, annotate_in(input))
+            .await
+            .expect_err("a path the host does not evaluate is refused");
+        assert!(refused.contains("not a resource path"), "{refused}");
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "the object was not even read"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_declared_reason_cannot_reorder_the_host_words_around_it() {
+        let (client, _) = mock(object(json!({"spec": {"suspend": true}})));
+        let mut input = reconcile();
+        input["preconditions"] = json!([{
+            "jsonPath": ".spec.suspend", "notEquals": true,
+            "reason": "Resume first\u{202e}\u{200b}"
+        }]);
+        let refused = annotate(client, annotate_in(input))
+            .await
+            .expect_err("suspended");
+        assert!(
+            !refused.contains('\u{202e}') && refused.contains("\\u{202e}"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn every_primitive_refuses_a_predicate_it_would_not_evaluate() {
+        let bad = json!([{"jsonPath": "spec.suspend", "present": true, "reason": "r"}]);
+        let good = json!([{"jsonPath": ".spec.suspend", "absent": true, "reason": "r"}]);
+        let arguments = |primitive: &str, predicates: &Value| {
+            let mut args = match primitive {
+                REQUEST_RESTART => builtin("Deployment", "deployments", false),
+                REQUEST_CORDON => {
+                    let mut input = builtin("Node", "nodes", true);
+                    input["unschedulable"] = json!(true);
+                    input
+                }
+                ANNOTATE => json!({"key": "a.example.io/b", "value": "normal"}),
+                SET_FIELDS => json!({"fields": {"/spec/suspend": true}}),
+                SET_STATUS_CONDITION => json!({
+                    "conditionType": "Issuing", "conditionStatus": "True",
+                    "reason": "ManuallyTriggered", "message": ""
+                }),
+                _ => json!({"patch": {"spec": {"suspend": true}}}),
+            };
+            args["preconditions"] = predicates.clone();
+            args
+        };
+        for primitive in PRIMITIVES {
+            let refused = check_bound_arguments(
+                primitive,
+                arguments(primitive, &bad).as_object().expect("object"),
+            )
+            .expect_err("a path the host cannot evaluate is refused at install");
+            assert!(
+                refused.contains("not a resource path"),
+                "{primitive}: {refused}"
+            );
+            check_bound_arguments(
+                primitive,
+                arguments(primitive, &good).as_object().expect("object"),
+            )
+            .unwrap_or_else(|why| panic!("{primitive}: {why}"));
+        }
+    }
+
+    #[test]
+    fn preconditions_are_bound_in_number() {
+        let one = json!({"jsonPath": ".spec.x", "present": true, "reason": "r"});
+        let many: Vec<Value> =
+            std::iter::repeat_n(one, srelens_capability::MAX_PREDICATES + 1).collect();
+        let refused = check_bound_arguments(
+            ANNOTATE,
+            json!({"key": "a.example.io/b", "value": "normal", "preconditions": many})
+                .as_object()
+                .expect("object"),
+        )
+        .expect_err("a bound list");
+        assert!(refused.contains("at most"), "{refused}");
+    }
+}
+
+#[cfg(test)]
+mod request_token_tests {
+    use super::*;
+    #[test]
+    fn repeated_now_tokens_in_separate_spec_fields_share_one_request_timestamp() {
+        let patch = fields_patch(
+            json!({"/spec/requestedAt":"$now","/spec/forceAt":"$now"})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(patch["spec"]["requestedAt"], patch["spec"]["forceAt"]);
+    }
+    #[test]
+    fn repeated_now_tokens_share_one_request_timestamp() {
+        let patch = resolve_tokens(&json!({"metadata":{"annotations":{"reconcile.fluxcd.io/requestedAt":"$now","reconcile.fluxcd.io/forceAt":"$now"}}})).unwrap();
+        assert_eq!(
+            patch["metadata"]["annotations"]["reconcile.fluxcd.io/requestedAt"],
+            patch["metadata"]["annotations"]["reconcile.fluxcd.io/forceAt"]
         );
     }
 }
