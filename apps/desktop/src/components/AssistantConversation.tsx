@@ -21,6 +21,7 @@ import {
 } from "@srelens/core";
 import { relativeTime } from "@srelens/core";
 import { settingsStorage } from "@srelens/core";
+import { RequestConfirmation } from "@srelens/ui-next/confirm";
 import { AssistantMarkdown } from "./AssistantMarkdown";
 import { TitleTooltip } from "@/components/ui/tooltip";
 
@@ -366,25 +367,34 @@ function ConfirmCard({
   const summary = summarizeArgs(request.args);
   return (
     <div className="mt-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-mono font-medium">{request.tool}</span>
-        <span className="text-muted-foreground">
-          {request.impact ? `wants to run · ${request.impact} impact` : "wants to run"}
-        </span>
-      </div>
-      {/* The host's sentence for this call, the same one the modal shows — the
-          card is the same question in a smaller frame, so it must not be a
-          different question. Absent when the host authored no template. */}
-      {request.prompt && <div className="mt-1">{request.prompt}</div>}
-      {summary && <div className="mt-1 truncate font-mono text-muted-foreground">{summary}</div>}
-      <div className="mt-2 flex justify-end gap-2">
-        <Button variant="secondary" size="xs" onClick={() => onAnswer(request.id, false)}>
-          Deny
-        </Button>
-        <Button size="xs" onClick={() => onAnswer(request.id, true)}>
-          Approve
-        </Button>
-      </div>
+      {/*
+        The ONE host confirmation (#552), in the transcript's `card` frame.
+        The frame is smaller than the modal's; the question is not. This card
+        used to draw its own version — the level as `· high impact` beside the
+        tool id, no cluster named at all — so the reader who answered here was
+        answering with less than the reader who answered on the modal, about
+        the identical call.
+      */}
+      <RequestConfirmation
+        request={request}
+        frame="card"
+        details={
+          <>
+            <div className="font-mono font-medium">{request.tool}</div>
+            {summary && <div className="truncate font-mono text-muted-foreground">{summary}</div>}
+          </>
+        }
+        actions={
+          <>
+            <Button variant="secondary" size="xs" onClick={() => onAnswer(request.id, false)}>
+              Deny
+            </Button>
+            <Button size="xs" onClick={() => onAnswer(request.id, true)}>
+              Approve
+            </Button>
+          </>
+        }
+      />
     </div>
   );
 }

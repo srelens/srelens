@@ -12,6 +12,8 @@ import { getRun, noteGate, noteGateIn, runKeyHoldingGate } from "../lib/agentRun
 import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 import { useWorkspaceSealed } from "./LockGate";
+import { RequestConfirmation } from "../confirm/RequestConfirmation";
+import { asConfirmTarget } from "../confirm/confirmRequest";
 
 /**
  * The consent prompt for an MCP tool call: this design's port of classic's
@@ -206,12 +208,16 @@ import { useWorkspaceSealed } from "./LockGate";
  */
 function asRequest(payload: unknown): ConfirmRequest | null {
   if (typeof payload !== "object" || payload === null) return null;
-  const { id, tool, args, prompt, impact } = payload as Partial<ConfirmRequest>;
+  const { id, tool, args, prompt, impact, target } = payload as Partial<ConfirmRequest>;
   if (typeof id !== "string" || id === "" || typeof tool !== "string") return null;
   return {
     id,
     tool,
     args: typeof args === "object" && args !== null ? args : {},
+    // Narrowed field by field for the same reason `prompt` is: these are the
+    // facts drawn under the question, and one of them arriving as `undefined`
+    // is the hole a malformed — or hostile — payload would aim for.
+    target: asConfirmTarget(target),
     // Narrowed like everything else that crosses the boundary. A `prompt` that
     // is not a non-empty string is dropped rather than rendered: this is the
     // sentence over an Approve button, and `undefined` drawn there is exactly
@@ -223,29 +229,13 @@ function asRequest(payload: unknown): ConfirmRequest | null {
 
 const IMPACTS: readonly string[] = CAPABILITY_IMPACT_ORDER;
 
-/** What the level is called in front of a reader, and how loudly it is drawn. */
-const IMPACT_LABEL: Record<CapabilityImpact, string> = {
-  low: "Low impact",
-  medium: "Medium impact",
-  high: "High impact",
-};
-
 /**
- * The level as a badge beside the question.
- *
- * A word, not only a colour — colour is never the only signal in this app, and
- * this is the one place where a reader deciding in a hurry most needs to be
- * told which of two identical-looking prompts is the dangerous one.
+ * The level's badge, the sentence and the facts beneath it now belong to
+ * `HostConfirmation` (#552). The copy that stood here — and the near-identical
+ * copies in classic's modal and the transcript's card — are gone: three
+ * renderings of one question are three chances for two of them to disagree,
+ * and one of them already did.
  */
-function ImpactBadge({ impact }: { impact: CapabilityImpact }) {
-  const tone =
-    impact === "high" ? "text-sev" : impact === "medium" ? "text-warn" : "text-muted";
-  return (
-    <span className={`text-[0.6875rem] font-medium uppercase tracking-wide ${tone}`}>
-      {IMPACT_LABEL[impact]}
-    </span>
-  );
-}
 
 /** The id out of a `mcp://confirm-resolved` payload, or null. */
 function resolvedId(payload: unknown): string | null {
@@ -543,51 +533,48 @@ export function AgentConsent() {
       <ConfirmDialog
         title="An agent wants to run a cluster action"
         message={
-          <div className="flex flex-col gap-2">
-            {/*
-              The HOST's sentence, when it has one — see `ConfirmRequest.prompt`.
-              It leads, because it is the only line here written for a person:
-              the tool id and the argument payload say which call, and this says
-              what it does. When the capability carries no template, or the
-              template names something this call has no value for, the backend
-              sends nothing and the two lines below are the whole prompt, as
-              they were before. It never draws half a sentence.
-            */}
-            {(current.prompt || current.impact) && (
-              <div className="flex flex-col gap-1">
-                {current.impact && <ImpactBadge impact={current.impact} />}
-                {current.prompt && <p className="m-0 font-medium">{current.prompt}</p>}
-              </div>
-            )}
-            <p className="m-0">
-              Tool: <code className="code rounded px-1.5 py-0.5">{current.tool}</code>
-            </p>
-            <pre className="code max-h-64 overflow-auto rounded p-3 text-[0.6875rem]">
-              <code>{JSON.stringify(current.args, null, 2)}</code>
-            </pre>
-            {queue.length > 1 && (
-              <p className="m-0 text-[0.6875rem] text-muted">
-                {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
-              </p>
-            )}
-            {/*
-              Only for the request it happened on — see {@link FailedAnswer}.
-              `role="alert"` for the reason `NextApp`'s own inline failure has
-              one: the reader pressed a button and the visible result is that
-              nothing happened, so this has to be announced rather than merely
-              drawn. It is safe to announce inside the card because the card is
-              where focus already is.
-            */}
-            {failed?.id === current.id && (
-              <div role="alert" className="text-sev">
+          /*
+            The ONE host confirmation (#552). The question, the level, the
+            cluster, the object and the requester are its words and its layout,
+            identical to what the same write is confirmed with when it is
+            clicked in an app's own resource view — this surface supplies only
+            the frame and what goes under it.
+          */
+          <RequestConfirmation
+            request={current}
+            details={
+              <div className="flex flex-col gap-2">
                 <p className="m-0">
-                  This request was not answered by you: your answer did not take effect. Try
-                  again — if the call is no longer waiting, this prompt goes away on its own.
+                  Tool: <code className="code rounded px-1.5 py-0.5">{current.tool}</code>
                 </p>
-                <FailureLine error={failed.error} className="mt-1" />
+                <pre className="code max-h-64 overflow-auto rounded p-3 text-[0.6875rem]">
+                  <code>{JSON.stringify(current.args, null, 2)}</code>
+                </pre>
+                {queue.length > 1 && (
+                  <p className="m-0 text-[0.6875rem] text-muted">
+                    {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
+                  </p>
+                )}
+                {/*
+                  Only for the request it happened on — see {@link FailedAnswer}.
+                  `role="alert"` for the reason `NextApp`'s own inline failure has
+                  one: the reader pressed a button and the visible result is that
+                  nothing happened, so this has to be announced rather than merely
+                  drawn. It is safe to announce inside the card because the card is
+                  where focus already is.
+                */}
+                {failed?.id === current.id && (
+                  <div role="alert" className="text-sev">
+                    <p className="m-0">
+                      This request was not answered by you: your answer did not take effect. Try
+                      again — if the call is no longer waiting, this prompt goes away on its own.
+                    </p>
+                    <FailureLine error={failed.error} className="mt-1" />
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            }
+          />
         }
         confirmLabel="Approve"
         cancelLabel="Deny"

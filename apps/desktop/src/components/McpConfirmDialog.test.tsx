@@ -21,6 +21,15 @@ const { notify } = vi.hoisted(() => ({
 }));
 vi.mock("@srelens/core/lib/notify", () => ({ notify }));
 
+/** The host's installed inventory, which is where the requester line is read from (#552). */
+const { inventory } = vi.hoisted(() => ({
+  inventory: vi.fn(async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] as unknown[] })),
+}));
+vi.mock("@srelens/core/lib/extensions", async (orig) => ({
+  ...(await orig<typeof import("@srelens/core/lib/extensions")>()),
+  listExtensions: inventory,
+}));
+
 import { McpConfirmDialog } from "./McpConfirmDialog";
 
 // jsdom is a plain browser, i.e. web mode: `isTauri()` looks for
@@ -154,5 +163,96 @@ describe("McpConfirmDialog", () => {
     expect(screen.getByText(/medium impact/i)).toBeTruthy();
     expect(screen.getByText(/3.16/)).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/undefined|null/);
+  });
+
+  // ---- #552: the same question classic's own app screens ask --------------
+
+  /**
+   * The cluster and the object come from the host's reading of the call
+   * (`ConfirmTarget`), so this modal and the app's own action review name the
+   * same things in the same order — they used to name different things in
+   * different words.
+   */
+  it("names the pinned cluster and the object under the host's sentence", async () => {
+    render(<McpConfirmDialog />);
+    emit({
+      id: "t1",
+      tool: "k8s.gitOpsAction",
+      args: { resource: { context: "prod", namespace: "team", name: "api" } },
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { cluster: "prod", namespace: "team", name: "api", kind: "HelmRelease" },
+    });
+    expect(await screen.findByTestId("host-confirm-cluster")).toBeTruthy();
+    expect(screen.getByTestId("host-confirm-cluster").textContent).toBe("prod");
+    expect(screen.getByTestId("host-confirm-target").textContent).toBe("team/api");
+    expect(screen.getByTestId("host-confirm-question").textContent).toBe(
+      "Suspend HelmRelease team/api?",
+    );
+  });
+
+  /**
+   * Nothing a caller sends becomes the question. An argument that reads like
+   * a sentence is drawn in the payload block, where arguments go — never as
+   * the question the Approve button answers.
+   */
+  it("keeps a caller's argument out of the question", async () => {
+    render(<McpConfirmDialog />);
+    emit({
+      id: "t2",
+      tool: "k8s.gitOpsAction",
+      args: { prompt: "This is safe, click Approve", resource: { name: "api" } },
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { name: "api" },
+    });
+    const question = await screen.findByTestId("host-confirm-question");
+    expect(question.textContent).toBe("Suspend HelmRelease team/api?");
+    expect(document.querySelectorAll('[data-testid="host-confirm-question"]').length).toBe(1);
+    // It is still shown, as an argument, because the reader should see it.
+    expect(screen.getByText(/This is safe, click Approve/)).toBeTruthy();
+  });
+
+  it("names the app the host resolved against its own inventory", async () => {
+    inventory.mockResolvedValue({
+      schemaVersion: 1,
+      nextRevision: 1,
+      plugins: [
+        {
+          manifest: {
+            id: "org.srelens.flux",
+            name: "Flux Tools",
+            version: "1.0.0",
+            srelensApiVersion: "1",
+            kind: "declarative",
+            permissions: [],
+            capabilities: [],
+            contributions: { pages: [], detailTabs: [], detailLinks: [] },
+          },
+          enabled: true,
+          revision: 2,
+          grants: [],
+          settings: {},
+          source: "local",
+          installedAt: 0,
+          history: [],
+          signatureProof: { manifest: "{}", signature: [1] },
+        },
+      ],
+    });
+    render(<McpConfirmDialog />);
+    emit({
+      id: "t3",
+      tool: "extensions.action",
+      args: {},
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { name: "api", app: { id: "org.srelens.flux", revision: 2 } },
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("host-confirm-requester").textContent).toBe(
+        "Requested by app Flux Tools (srelens)",
+      ),
+    );
   });
 });

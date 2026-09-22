@@ -176,12 +176,18 @@ describe("AgentAccess", () => {
         // as having none.
         const source = readFileSync(path, "utf8").replace(/\/\*[\s\S]*?\*\/|(?<!:)\/\/.*/g, "");
         // Both halves of a wiring, so half of one is caught too: the event a
-        // listener subscribes to, and the call and type any answer needs.
-        if (
-          /mcp:\/\/confirm-request|mcp:\/\/confirm-resolved|respondToConfirm|ConfirmRequest/.test(
-            source,
-          )
-        ) {
+        // listener subscribes to, and the call any answer needs.
+        //
+        // `ConfirmRequest` used to be a fourth token and is deliberately not
+        // one now. Since #552 the one host confirmation's adapter
+        // (`confirm/RequestConfirmation.tsx`) takes a request as a PROP and
+        // draws it — it subscribes to nothing and can answer nothing — so
+        // counting the type name would report two consumers where there is
+        // still exactly one, and this test would stop asserting the thing it
+        // is for. The three tokens below are the wiring itself: a file that
+        // hears the event, or one that answers it, matches whichever half it
+        // has.
+        if (/mcp:\/\/confirm-request|mcp:\/\/confirm-resolved|respondToConfirm/.test(source)) {
           consumers.push(relative(root, path));
         }
       }

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri, respondToConfirm, type ConfirmRequest } from "@srelens/core";
 import { notify } from "@srelens/core";
+import { RequestConfirmation } from "@srelens/ui-next/confirm";
 import { ConfirmDialog } from "../ui";
 
 /**
@@ -69,46 +70,31 @@ export function McpConfirmDialog() {
     <ConfirmDialog
       title="An agent wants to run a cluster action"
       message={
-        <div className="flex flex-col gap-2">
-          {/*
-            The host's own sentence and impact level for this call
-            (`ConfirmRequest.prompt`), rendered in the backend from a template
-            compiled into it. It leads because it is the only line here written
-            for a person. Absent when the capability carries no template or the
-            template names something this call has no value for — the tool id
-            and the payload below are then the whole prompt, as they were
-            before. Half a sentence is never drawn.
-          */}
-          {(current.prompt || current.impact) && (
-            <div className="flex flex-col gap-1">
-              {current.impact && (
-                <span
-                  className={`text-[0.6875rem] font-medium uppercase tracking-wide ${
-                    current.impact === "high"
-                      ? "text-destructive"
-                      : current.impact === "medium"
-                        ? "text-amber-600 dark:text-amber-500"
-                        : "text-muted-foreground"
-                  }`}
-                >
-                  {current.impact} impact
-                </span>
+        /*
+          The ONE host confirmation (#552). This modal's own rendering of the
+          sentence and the level is gone: it was a third copy of the question,
+          and a third copy is a third chance for two of them to disagree. What
+          stays here is this frame's own detail — the tool id, the argument
+          payload and the queue count.
+        */
+        <RequestConfirmation
+          request={current}
+          details={
+            <div className="flex flex-col gap-2">
+              <p className="m-0">
+                Tool: <code>{current.tool}</code>
+              </p>
+              <pre className="max-h-64 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-xs">
+                <code>{JSON.stringify(current.args, null, 2)}</code>
+              </pre>
+              {queue.length > 1 && (
+                <p className="m-0 text-xs text-muted-foreground">
+                  {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
+                </p>
               )}
-              {current.prompt && <p className="m-0 font-medium">{current.prompt}</p>}
             </div>
-          )}
-          <p className="m-0">
-            Tool: <code>{current.tool}</code>
-          </p>
-          <pre className="max-h-64 overflow-auto rounded-md border border-border bg-muted/40 p-3 text-xs">
-            <code>{JSON.stringify(current.args, null, 2)}</code>
-          </pre>
-          {queue.length > 1 && (
-            <p className="m-0 text-xs text-muted-foreground">
-              {queue.length - 1} more request{queue.length - 1 === 1 ? "" : "s"} waiting
-            </p>
-          )}
-        </div>
+          }
+        />
       }
       confirmLabel="Approve"
       cancelLabel="Deny"

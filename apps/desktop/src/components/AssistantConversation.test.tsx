@@ -23,6 +23,14 @@ const tauriEvent = vi.hoisted(() => ({
   listen: vi.fn((_channel: string, _handler: unknown) => Promise.resolve(() => {})),
 }));
 vi.mock("@tauri-apps/api/event", () => tauriEvent);
+/** The host's installed inventory, which is where the requester line is read from (#552). */
+const { inventory } = vi.hoisted(() => ({
+  inventory: vi.fn(async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] as unknown[] })),
+}));
+vi.mock("@srelens/core/lib/extensions", async (orig) => ({
+  ...(await orig<typeof import("@srelens/core/lib/extensions")>()),
+  listExtensions: inventory,
+}));
 
 // jsdom is a plain browser, i.e. web mode: `isTauri()` looks for
 // `window.__TAURI_INTERNALS__` and finds nothing. The consent subscriptions
@@ -1728,5 +1736,69 @@ describe("the inline confirmation card's host metadata (#548)", () => {
     expect(within(card).getByText(/medium impact/i)).toBeTruthy();
     expect(within(card).getByText("toolbox.installHelm")).toBeTruthy();
     expect(card.textContent).not.toMatch(/undefined|null/);
+  });
+
+  // ---- #552: a smaller frame, not a smaller question ---------------------
+
+  /**
+   * The card is the modal's question in the transcript's width. Before #552
+   * it was a different question: it drew the level as `· high impact` beside
+   * the tool id rather than as a badge, and it named no cluster at all — so a
+   * reader answering on the card was answering with less than a reader
+   * answering on the modal.
+   */
+  it("names the cluster, the object and the app, exactly as the modal does", async () => {
+    inventory.mockResolvedValue({
+      schemaVersion: 1,
+      nextRevision: 1,
+      plugins: [
+        {
+          manifest: {
+            id: "org.srelens.flux",
+            name: "Flux Tools",
+            version: "1.0.0",
+            srelensApiVersion: "1",
+            kind: "declarative",
+            permissions: [],
+            capabilities: [],
+            contributions: { pages: [], detailTabs: [], detailLinks: [] },
+          },
+          enabled: true,
+          revision: 2,
+          grants: [],
+          settings: {},
+          source: "local",
+          installedAt: 0,
+          history: [],
+        },
+      ],
+    });
+    marker.__TAURI_INTERNALS__ = {};
+    render(<AssistantConversation />);
+    await ask({
+      id: "c3",
+      tool: "extensions.action",
+      args: { resource: { context: "prod", namespace: "team", name: "api" } },
+      prompt: "Suspend HelmRelease team/api in cluster prod?",
+      impact: "high",
+      target: {
+        cluster: "prod",
+        namespace: "team",
+        name: "api",
+        kind: "HelmRelease",
+        app: { id: "org.srelens.flux", revision: 2 },
+      },
+    });
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api in cluster prod?",
+    );
+    expect(screen.getByTestId("host-confirm-impact").textContent).toBe("High impact");
+    expect(screen.getByTestId("host-confirm-cluster").textContent).toBe("prod");
+    expect(screen.getByTestId("host-confirm-target").textContent).toBe("team/api");
+    await waitFor(() =>
+      expect(screen.getByTestId("host-confirm-requester").textContent).toBe(
+        "Requested by app Flux Tools (unsigned)",
+      ),
+    );
   });
 });

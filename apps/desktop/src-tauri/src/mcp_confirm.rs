@@ -62,6 +62,53 @@ pub struct PendingRequest {
     /// Shown beside the question, because "an agent wants to run a cluster
     /// action" is the same sentence for a status refresh and a node drain.
     pub impact: String,
+    /// What the HOST read out of the call: the cluster it is pinned to, the
+    /// object it names, and the app it was made through. See [`ConfirmTarget`].
+    pub target: ConfirmTarget,
+}
+
+/// The facts the one confirmation names under its question (#552), as the host
+/// reads them — not as the window parses them.
+///
+/// **Why the host and not the window.** The same question is asked for a write
+/// clicked in an app's resource view and for the same write asked for by an
+/// agent, and the app path knows its cluster and object directly. Leaving the
+/// MCP path to dig them out of `args` would be a second reading of a
+/// caller-controlled payload, in TypeScript, drifting from the one the
+/// sentence is rendered from. So both come from
+/// [`srelens_capability::confirm_fields`]: one vocabulary, one escaping, one
+/// 80-character bound, already applied here.
+///
+/// Every field is optional and an absent one stays `None`: a call that names
+/// no namespace and one that names the empty namespace are different facts,
+/// and the surface draws them apart.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ConfirmTarget {
+    /// The kubeconfig context, escaped and bounded.
+    pub cluster: Option<String>,
+    pub namespace: Option<String>,
+    pub name: Option<String>,
+    pub kind: Option<String>,
+    /// The app this call was made through, when it was made through one.
+    pub app: Option<ConfirmApp>,
+}
+
+/// Which app asked — **only** its ID and the revision it was installed at.
+///
+/// The NAME and the PUBLISHER are deliberately not here. They are read on the
+/// other side from the host's own installed inventory, so a caller cannot name
+/// itself in the sentence a person is asked to approve and cannot claim a
+/// publisher. An ID that resolves to no installed app draws no requester line
+/// at all rather than a line built out of the ID.
+///
+/// The ID travels UNESCAPED, and that is the point: it is a lookup key, not
+/// text. An ID carrying anything a manifest's validation would have refused
+/// simply matches nothing in the inventory, which fails closed — whereas an
+/// escaped key would fail to match a perfectly good app.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ConfirmApp {
+    pub id: String,
+    pub revision: u64,
 }
 
 impl PendingRequest {
@@ -69,12 +116,30 @@ impl PendingRequest {
     /// call. Pure, so the three cases that matter — a sentence, no template,
     /// and a template that cannot render — are testable without a window.
     pub fn from_consent(id: String, request: &srelens_mcp::policy::ConsentRequest) -> Self {
+        // The same read the sentence is rendered from: one closed vocabulary,
+        // escaped and bounded once, so the facts under the question cannot
+        // disagree with the question.
+        let fields = srelens_capability::confirm_fields(&request.args);
+        let field = |key: &str| fields.get(key).cloned();
+        // And the same read the audit trail makes of "which app was this
+        // through" (`describe_target`), rather than a third one here.
+        let (app, _, _) = srelens_capability::audit::describe_target(&request.args);
         Self {
             id,
             tool: request.tool.clone(),
             args: request.args.clone(),
             prompt: request.confirm_text.clone(),
             impact: request.impact.as_str().to_string(),
+            target: ConfirmTarget {
+                cluster: field("cluster"),
+                namespace: field("namespace"),
+                name: field("name"),
+                kind: field("kind"),
+                app: app.map(|a| ConfirmApp {
+                    id: a.id,
+                    revision: a.revision,
+                }),
+            },
         }
     }
 }
@@ -253,6 +318,10 @@ mod tests {
             args: json!({ "name": id }),
             prompt: None,
             impact: "medium".into(),
+            target: ConfirmTarget {
+                name: Some(id.into()),
+                ..ConfirmTarget::default()
+            },
         }
     }
 
@@ -424,6 +493,121 @@ mod tests {
             );
             assert_eq!(got.impact, word);
         }
+    }
+
+    // ---- What the host itself read out of the call (#552) ------------------
+
+    /// The one confirmation names the pinned cluster and the object, and the
+    /// window must not have to parse the caller's arguments to find them: it
+    /// is handed what the HOST read, through the same escaped, bounded
+    /// vocabulary the sentence is rendered from.
+    #[test]
+    fn the_window_is_told_the_cluster_and_the_object_the_host_read() {
+        let got = PendingRequest::from_consent(
+            "id-6".into(),
+            &consent(
+                "k8s.gitOpsAction",
+                Annotations::DESTRUCTIVE.with_confirm("Suspend[ {resource}]?"),
+                json!({
+                    "resource": { "context": "prod", "namespace": "team", "name": "api" },
+                    "kind": "HelmRelease",
+                    "action": "suspend",
+                }),
+            ),
+        );
+        assert_eq!(got.target.cluster.as_deref(), Some("prod"));
+        assert_eq!(got.target.namespace.as_deref(), Some("team"));
+        assert_eq!(got.target.name.as_deref(), Some("api"));
+        assert_eq!(got.target.kind.as_deref(), Some("HelmRelease"));
+    }
+
+    /// "Requested by app …" must be the host's claim, not the caller's. Only
+    /// the app's ID and revision travel — the name and the publisher are read
+    /// from the host's own installed inventory on the other side — and they
+    /// are derived from the call's own selection, so an argument that looks
+    /// like an app identity is not one.
+    #[test]
+    fn the_app_on_the_prompt_is_the_one_the_host_derived() {
+        let got = PendingRequest::from_consent(
+            "id-7".into(),
+            &consent(
+                "extensions.action",
+                Annotations::DESTRUCTIVE.with_confirm("Suspend[ {resource}]?"),
+                json!({
+                    "resource": { "id": "flux", "revision": 4, "context": "prod", "name": "api" },
+                    "action": "suspend",
+                    "app": { "id": "srelens-core", "revision": 1 },
+                }),
+            ),
+        );
+        let app = got
+            .target
+            .app
+            .expect("the host reads the app off the selection");
+        assert_eq!(app.id, "flux");
+        assert_eq!(app.revision, 4);
+    }
+
+    /// A call that names no app draws no requester line rather than an empty
+    /// one: an agent's own call is not made through an app, and saying it was
+    /// would be the one claim on that surface nothing backs.
+    #[test]
+    fn a_call_made_through_no_app_names_none() {
+        let got = PendingRequest::from_consent(
+            "id-8".into(),
+            &consent(
+                "k8s.drainNode",
+                Annotations::DESTRUCTIVE,
+                json!({ "name": "node-7" }),
+            ),
+        );
+        assert!(got.target.app.is_none());
+    }
+
+    /// The target travels through the same escaping and the same 80-character
+    /// bound as the sentence: a name carrying a right-to-left override must
+    /// not reorder the facts under the question, and one long enough to push
+    /// the tail out of the frame is cut.
+    #[test]
+    fn a_hostile_name_reaches_the_window_escaped_and_bounded() {
+        let got = PendingRequest::from_consent(
+            "id-9".into(),
+            &consent(
+                "k8s.drainNode",
+                Annotations::DESTRUCTIVE,
+                json!({ "context": "pr\u{202e}od", "name": "n".repeat(400) }),
+            ),
+        );
+        let cluster = got.target.cluster.expect("the cluster is carried");
+        assert!(
+            !cluster.contains('\u{202e}'),
+            "an override reached the window drawn"
+        );
+        assert!(cluster.contains("\\u{202e}"));
+        let name = got.target.name.expect("the name is carried");
+        assert_eq!(
+            name.chars().count(),
+            srelens_capability::CONFIRM_FIELD_MAX_CHARS
+        );
+        assert!(name.ends_with('…'));
+    }
+
+    /// A replayed request and a live one are the same question, target
+    /// included — the emit sends this value and the snapshot returns it.
+    #[tokio::test]
+    async fn the_snapshot_replays_the_target() {
+        let p = Pending::default();
+        let sent = PendingRequest::from_consent(
+            "id-10".into(),
+            &consent(
+                "k8s.gitOpsAction",
+                Annotations::DESTRUCTIVE.with_confirm("Suspend[ {resource}]?"),
+                json!({ "resource": { "context": "prod", "namespace": "team", "name": "api" } }),
+            ),
+        );
+        let (tx, _rx) = oneshot::channel();
+        p.register(sent.clone(), tx);
+        assert_eq!(p.snapshot(), vec![sent]);
     }
 
     #[test]

@@ -83,6 +83,9 @@ const core = vi.hoisted(() => ({
   listAgents: vi.fn(async () => [
     { kind: "claude", label: "Claude", available: true, path: "/c", version: "1", installUrl: "", gated: false },
   ]),
+  // The installed inventory the requester line is read from (#552). Empty by
+  // default: a prompt with no app behind it names none.
+  listExtensions: vi.fn(async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] })),
 }));
 
 vi.mock("@srelens/core", async (orig) => ({
@@ -95,6 +98,7 @@ vi.mock("@srelens/core", async (orig) => ({
   startChat: core.startChat,
   sendChat: core.sendChat,
   listAgents: core.listAgents,
+  listExtensions: core.listExtensions,
   // Resolves once the registration has landed — the real one's contract.
   subscribe: (channel: string, handler: (payload: unknown) => void) => {
     core.subscribe(channel, handler);
@@ -1075,5 +1079,103 @@ describe("the host's own words", () => {
     await mount();
     expect(await screen.findByText("Drain node-7?")).toBeTruthy();
     expect(screen.getByText(/high impact/i)).toBeTruthy();
+  });
+
+  // ---- #552: the same question as the app's own confirmation --------------
+
+  /**
+   * The cluster and the object are named under the question, and they come
+   * from the HOST's reading of the call (`ConfirmTarget`) rather than from
+   * this component digging through `args` — the second parse the one
+   * confirmation exists to remove.
+   */
+  it("names the pinned cluster and the object the host read", async () => {
+    await mount();
+    askWith({
+      id: "t1",
+      tool: "k8s.gitOpsAction",
+      args: { resource: { context: "prod", namespace: "team", name: "api" } },
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { cluster: "prod", namespace: "team", name: "api", kind: "HelmRelease", app: null },
+    });
+    expect(await screen.findByTestId("host-confirm-cluster")).toBeTruthy();
+    expect(screen.getByTestId("host-confirm-cluster").textContent).toBe("prod");
+    expect(screen.getByTestId("host-confirm-target").textContent).toBe("team/api");
+  });
+
+  /** A malformed target is dropped, not drawn: no `undefined` under Approve. */
+  it("draws no fact it was not sent", async () => {
+    await mount();
+    askWith({
+      id: "t2",
+      tool: "toolbox.installHelm",
+      args: {},
+      prompt: "Install Helm?",
+      impact: "medium",
+      target: { cluster: 7, name: null },
+    });
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).not.toMatch(/undefined|null/);
+    expect(screen.queryByTestId("host-confirm-cluster")).toBeNull();
+    expect(screen.queryByTestId("host-confirm-target")).toBeNull();
+  });
+
+  /**
+   * The app is named from the host's own installed inventory, keyed by the ID
+   * the host derived. Nothing the caller sent names the app — so an ID that
+   * matches nothing installed draws no requester line at all.
+   */
+  it("names the app the host resolved, and nothing when it resolves to none", async () => {
+    core.listExtensions.mockResolvedValue({
+      schemaVersion: 1,
+      nextRevision: 1,
+      plugins: [
+        {
+          manifest: {
+            id: "org.srelens.flux",
+            name: "Flux Tools",
+            version: "1.0.0",
+            srelensApiVersion: "1",
+            kind: "declarative",
+            permissions: [],
+            capabilities: [],
+            contributions: { pages: [], detailTabs: [], detailLinks: [] },
+          },
+          enabled: true,
+          revision: 2,
+          grants: [],
+          settings: {},
+          source: "local",
+          installedAt: 0,
+          history: [],
+        },
+      ],
+    } as never);
+    await mount();
+    askWith({
+      id: "t3",
+      tool: "extensions.action",
+      args: {},
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { name: "api", app: { id: "org.srelens.flux", revision: 2 } },
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("host-confirm-requester").textContent).toBe(
+        "Requested by app Flux Tools (unsigned)",
+      ),
+    );
+    act(() => emit(RESOLVED, { id: "t3" }));
+    askWith({
+      id: "t4",
+      tool: "extensions.action",
+      args: {},
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { name: "api", app: { id: "not.installed", revision: 1 } },
+    });
+    await screen.findByRole("dialog");
+    expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
   });
 });

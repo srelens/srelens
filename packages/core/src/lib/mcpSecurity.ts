@@ -2,6 +2,45 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { CapabilityImpact } from "./capabilities";
 
+/**
+ * Which app a call was made through — its ID and the revision it was installed
+ * at, and nothing else.
+ *
+ * The app's NAME and PUBLISHER are deliberately absent and never cross this
+ * boundary. The one confirmation reads them from the host's own installed
+ * inventory, so a caller cannot name itself in the sentence a person is asked
+ * to approve, cannot claim a publisher, and cannot claim to be an app at all:
+ * an ID that resolves to nothing installed draws no requester line.
+ */
+export interface ConfirmAppRef {
+  id: string;
+  revision: number;
+}
+
+/**
+ * What the HOST read out of a gated call: the cluster it is pinned to, the
+ * object it names, and the app it came through.
+ *
+ * Every value here is derived in the backend by
+ * `srelens_capability::confirm_fields` — the same closed vocabulary the
+ * confirmation sentence is rendered from, escaped and bounded to 80 characters
+ * there. It is on the wire so that a write clicked in the app and the same
+ * write asked for by an agent name their target through one reading of the
+ * arguments rather than two: the alternative is a second parse, in TypeScript,
+ * of a payload the caller controls.
+ *
+ * Each field is independently optional, and an absent one is `null` rather
+ * than an empty string: "this call named no namespace" and "this call named
+ * the empty namespace" are different facts.
+ */
+export interface ConfirmTarget {
+  cluster?: string | null;
+  namespace?: string | null;
+  name?: string | null;
+  kind?: string | null;
+  app?: ConfirmAppRef | null;
+}
+
 export interface ConfirmRequest {
   id: string;
   tool: string;
@@ -33,6 +72,15 @@ export interface ConfirmRequest {
    * narrows rather than casts; the backend always sends it.
    */
   impact?: CapabilityImpact;
+  /**
+   * The cluster, the object and the app, as the host read them. See
+   * {@link ConfirmTarget}.
+   *
+   * Optional for the same reason `impact` is: it crosses a process boundary
+   * and consumers narrow rather than cast. The backend always sends it, empty
+   * when the call named nothing.
+   */
+  target?: ConfirmTarget | null;
 }
 
 /**

@@ -1,0 +1,113 @@
+/* The one host-owned confirmation, drawn the same in both desktop designs.
+
+   Plain classes and dual-token fallbacks, the rule `extensions.css` already
+   follows: this component is mounted inside the new design's shell AND inside
+   classic's modal and assistant transcript, and the two trees do not share a
+   token set. Styling it with either design's utilities would leave it
+   unreadable in the other — and "the confirmation looked wrong in one design"
+   is the failure this whole component exists to make impossible.
+
+   There is deliberately no class an app can reach: no `className` prop, no
+   inline style, and every hook below is the host's own. */
+
+.host-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The level, as a word. Colour is never the only signal — a reader deciding in
+   a hurry most needs to be told which of two identical-looking prompts is the
+   dangerous one, and they may not see the colour at all. */
+.host-confirm-impact {
+  margin: 0;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted, var(--fl-color-text-muted));
+}
+.host-confirm-impact[data-impact="medium"] {
+  color: var(--warn, var(--fl-color-warning));
+}
+.host-confirm-impact[data-impact="high"] {
+  color: var(--sev, var(--fl-color-danger));
+}
+
+/* The host's sentence. The only line here written for a person, so it leads
+   and it is the largest thing in the frame. */
+.host-confirm-question {
+  margin: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.host-confirm-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 10px;
+  margin: 0;
+  font-size: 0.75rem;
+}
+.host-confirm-facts dt {
+  color: var(--ink-muted, var(--fl-color-text-muted));
+}
+.host-confirm-facts dd {
+  margin: 0;
+  min-width: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  /* Bounded in the component as well; this is what keeps a name that is long
+     but legal from widening the frame instead of wrapping inside it. */
+  overflow-wrap: anywhere;
+}
+
+.host-confirm-requester {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  overflow-wrap: anywhere;
+}
+
+.host-confirm-patch {
+  border: 1px solid var(--rule, var(--fl-color-border));
+  border-radius: 4px;
+  overflow-x: auto;
+  max-height: 16rem;
+  overflow-y: auto;
+}
+.host-confirm-gap {
+  position: sticky;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 8px;
+  border: 0;
+  text-align: left;
+  font-size: 0.625rem;
+  cursor: pointer;
+  background: var(--surface-sunk, var(--fl-color-surface-alt));
+  color: var(--ink-muted, var(--fl-color-text-muted));
+}
+.host-confirm-gap:hover {
+  color: inherit;
+}
+
+.host-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* The transcript's inline card is small. It gets tighter type and a shorter
+   patch — never fewer facts, and never a different sentence. */
+.host-confirm-card {
+  gap: 6px;
+  font-size: 0.75rem;
+}
+.host-confirm-card .host-confirm-patch {
+  max-height: 9rem;
+}

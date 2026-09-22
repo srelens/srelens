@@ -1,7 +1,7 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
-vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn()}));
-import { inspectExtensionResource, actOnExtensionResource, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn()}));
+import { inspectExtensionResource, actOnExtensionResource, listExtensions, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 const selection = {id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"cluster/a",namespace:"team",name:"apps"};
 const detail = {resource:{apiVersion:"kustomize.toolkit.fluxcd.io/v1",kind:"Kustomization",metadata:{name:"apps",namespace:"team",uid:"uid-a",resourceVersion:"12"},spec:{suspend:false,path:"./apps",sourceRef:{kind:"GitRepository",name:"platform-config"}},status:{conditions:[{type:"Ready",status:"False",reason:"BuildFailed",message:"Missing source"}],lastAppliedRevision:"main@sha1:abcdef"}},actions:["suspend","resume","reconcile"]};
@@ -123,4 +123,68 @@ it("renders inventory entries as a full-width table instead of a JSON block",asy
  expect(screen.getByRole("columnheader",{name:"Version"})).toBeTruthy();
  expect(screen.getByRole("cell",{name:"team_service__Service"})).toBeTruthy();
  expect(screen.getByRole("cell",{name:"team_api_apps_Deployment"})).toBeTruthy();
+});
+
+// ---- #552: one host-owned confirmation, for this write and the agent's -----
+
+/**
+ * The inventory the requester line is read from. `useExtensions` polls the
+ * host only under a Tauri runtime, so the marker goes up with the stub.
+ */
+function installedApps(plugins:unknown[]) {
+ (window as unknown as Record<string,unknown>).__TAURI_INTERNALS__={};
+ vi.mocked(listExtensions).mockResolvedValue({schemaVersion:1,nextRevision:1,plugins} as never);
+}
+const fluxApp={manifest:{id:"org.srelens.flux",name:"Flux Tools",version:"1.0.0",srelensApiVersion:"1",kind:"declarative",permissions:[],capabilities:[],contributions:{pages:[],detailTabs:[],detailLinks:[]}},enabled:true,revision:1,grants:[],settings:{},source:"local",installedAt:0,history:[]};
+const withMeta={...detail,actionMeta:{suspend:{impact:"high" as const,confirm:"Suspend[ {resource}][ in cluster {cluster}]?"}}};
+afterEach(()=>{delete (window as unknown as Record<string,unknown>).__TAURI_INTERNALS__;});
+
+it("asks the host's own sentence and level, not a description written in the UI",async()=>{
+ vi.mocked(inspectExtensionResource).mockResolvedValue(withMeta);
+ render(<ExtensionResourceDetails selection={selection}/>);
+ fireEvent.click(await screen.findByRole("button",{name:"Suspend"}));
+ const dialog=screen.getByRole("dialog");
+ expect(dialog.textContent).toContain("Suspend Kustomization team/apps in cluster cluster/a?");
+ expect(dialog.textContent).toContain("High impact");
+ // The words the UI used to keep in a constant beside the buttons are gone.
+ expect(dialog.textContent).not.toContain("Pause future reconciliation");
+});
+
+it("names the pinned cluster and the resource under the question",async()=>{
+ vi.mocked(inspectExtensionResource).mockResolvedValue(withMeta);
+ render(<ExtensionResourceDetails selection={selection}/>);
+ fireEvent.click(await screen.findByRole("button",{name:"Suspend"}));
+ expect(screen.getByTestId("host-confirm-cluster").textContent).toBe("cluster/a");
+ expect(screen.getByTestId("host-confirm-target").textContent).toBe("team/apps");
+});
+
+it("says which app asked and that it carries no signature",async()=>{
+ installedApps([fluxApp]);
+ vi.mocked(inspectExtensionResource).mockResolvedValue(withMeta);
+ render(<ExtensionResourceDetails selection={selection}/>);
+ fireEvent.click(await screen.findByRole("button",{name:"Suspend"}));
+ await waitFor(()=>expect(screen.getByTestId("host-confirm-requester").textContent)
+   .toBe("Requested by app Flux Tools (unsigned)"));
+});
+
+it("will not let an app's own name reorder or overflow the question",async()=>{
+ installedApps([{...fluxApp,manifest:{...fluxApp.manifest,name:`Flux‮${"x".repeat(300)}`}}]);
+ vi.mocked(inspectExtensionResource).mockResolvedValue(withMeta);
+ render(<ExtensionResourceDetails selection={selection}/>);
+ fireEvent.click(await screen.findByRole("button",{name:"Suspend"}));
+ await waitFor(()=>expect(screen.queryByTestId("host-confirm-app-name")).toBeTruthy());
+ const drawn=screen.getByTestId("host-confirm-app-name").textContent ?? "";
+ expect(drawn).not.toContain("‮");
+ expect([...drawn].length).toBe(80);
+ expect(screen.getByRole("dialog").textContent).toContain("Suspend Kustomization team/apps in cluster cluster/a?");
+});
+
+it("falls back to no sentence rather than half of one when the host authored none",async()=>{
+ render(<ExtensionResourceDetails selection={selection}/>);
+ fireEvent.click(await screen.findByRole("button",{name:"Suspend"}));
+ const dialog=screen.getByRole("dialog");
+ expect(screen.queryByTestId("host-confirm-question")).toBeNull();
+ // The facts and the level are still named: they do not depend on a template.
+ expect(dialog.textContent).toContain("cluster/a");
+ expect(dialog.textContent).not.toMatch(/undefined|null/);
 });
