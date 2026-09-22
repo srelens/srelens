@@ -431,11 +431,19 @@ reviews:
         Node Web Storage to make a test pass (see vitest.shared.ts).
 
     # ------------------------------------------------------- contracts & docs
-    - path: "schemas/**"
+    - path: "schemas/extension-manifest.*.json"
       instructions: |
         Generated from Rust (`Manifest::schema()`). Hand edits are a finding;
         the PR must change the Rust type and regenerate. A breaking change to a
         published schema version needs a new version, not an edit in place.
+
+    - path: "schemas/native-component.*.json"
+      instructions: |
+        Canonical frontend-owned component contract, compiled directly by Ajv
+        in packages/core/src/lib/nativeComponents.ts. It is not generated from
+        a Rust type or part of Manifest::schema(). Check closed data-only shapes,
+        bounds, and alignment with the frontend types and contract/renderer tests.
+        Breaking changes to a published version require a new schema version.
 
     - path: "examples/extensions/**"
       instructions: |
