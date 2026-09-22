@@ -1,12 +1,14 @@
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.3.json",
   "id": "org.srelens.argocd",
   "name": "Argo CD",
-  "version": "0.2.0",
-  "srelensApiVersion": "^0.1",
+  "version": "0.3.0",
+  "srelensApiVersion": "^0.3",
   "kind": "declarative",
   "permissions": [
-    "k8s.listCustomResource"
+    "k8s.listCustomResource",
+    "k8s.annotate",
+    "k8s.mergePatch"
   ],
   "capabilities": [
     {
@@ -66,5 +68,62 @@
         ]
       }
     ]
-  }
+  },
+  "actions": [
+    {
+      "name": "refresh",
+      "title": "Refresh status",
+      "target": "k8s.annotate",
+      "resource": "applications",
+      "arguments": {
+        "key": "argocd.argoproj.io/refresh",
+        "value": "normal"
+      }
+    },
+    {
+      "name": "hard-refresh",
+      "title": "Hard refresh",
+      "target": "k8s.annotate",
+      "resource": "applications",
+      "arguments": {
+        "key": "argocd.argoproj.io/refresh",
+        "value": "hard"
+      }
+    },
+    {
+      "name": "sync",
+      "title": "Sync",
+      "target": "k8s.mergePatch",
+      "resource": "applications",
+      "arguments": {
+        "patch": {
+          "operation": {
+            "initiatedBy": {
+              "username": "srelens"
+            },
+            "sync": {
+              "prune": false,
+              "syncStrategy": {
+                "hook": {}
+              }
+            }
+          }
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".operation",
+          "absent": true,
+          "reason": "An Argo CD operation is already in progress"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".operation",
+          "absent": true,
+          "reason": "An Argo CD operation is already in progress"
+        }
+      ]
+    }
+  ]
 }

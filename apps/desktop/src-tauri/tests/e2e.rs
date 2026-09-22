@@ -182,6 +182,48 @@ impl Harness {
         }
     }
 
+    /// Controllers and node heartbeats can invalidate a review between the GET
+    /// and PATCH. Only this live-test helper re-reads and reviews on an explicit
+    /// stale-review refusal or API conflict. Production still refuses the write.
+    /// Return the accepted payload so the old review can be checked afterwards.
+    async fn reviewed_request(
+        &mut self,
+        id: &str,
+        mut input: Value,
+    ) -> Result<(Value, Value), srelens_capability::CapabilityError> {
+        for attempt in 0..8 {
+            let current = self
+                .reg
+                .invoke(
+                    "k8s.getObject",
+                    json!({
+                        "context":input["context"],"kind":input["kind"],
+                        "namespace":input["namespace"],"name":input["name"]
+                    }),
+                )
+                .await?;
+            input["uid"] = current["object"]["metadata"]["uid"].clone();
+            input["resourceVersion"] = current["object"]["metadata"]["resourceVersion"].clone();
+            match self.reg.invoke(id, input.clone()).await {
+                Ok(out) => {
+                    self.mark(id);
+                    return Ok((out, input));
+                }
+                Err(error) => {
+                    let review_race = matches!(&error, srelens_capability::CapabilityError::Handler(message)
+                        if message == "Resource changed or was replaced; refresh and review the action again"
+                            || (message.starts_with("ApiError:") && message.contains(": Conflict (Status {")
+                                && message.contains("code: 409,")));
+                    if !review_race || attempt == 7 {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        unreachable!("the final attempt returns its result")
+    }
+
     /// Invoke `id`, recording it covered; asserts the call returns Err (for
     /// negative paths) and returns the error message.
     async fn err(&mut self, id: &str, input: Value) -> String {
@@ -1911,23 +1953,23 @@ async fn run_suite() {
         .await;
     assert_eq!(out["ok"], true);
 
-    // The extension adapter uses the same rollout operation, with a reviewed identity.
-    let current = h
-        .reg
-        .invoke(
-            "k8s.getObject",
-            json!({"context":ctx,"kind":"Deployment","namespace":NS,"name":DEPLOY}),
+    // Review afresh only if a controller races this live fixture's pinned write.
+    let (out, reviewed) = h
+        .reviewed_request(
+            "k8s.requestRolloutRestart",
+            json!({
+                "context":ctx,"group":"apps","version":"v1","kind":"Deployment",
+                "plural":"deployments","namespaced":true,"namespace":NS,"name":DEPLOY
+            }),
         )
         .await
-        .unwrap();
-    let reviewed = json!({"context":ctx,"group":"apps","version":"v1","kind":"Deployment",
-        "plural":"deployments","namespaced":true,"namespace":NS,"name":DEPLOY,
-        "uid":current["object"]["metadata"]["uid"],"resourceVersion":current["object"]["metadata"]["resourceVersion"]});
-    assert_eq!(
-        h.ok("k8s.requestRolloutRestart", reviewed.clone()).await["requested"],
-        true
+        .expect("reviewed rollout restart");
+    assert_eq!(out["requested"], true);
+    let stale = h.err("k8s.requestRolloutRestart", reviewed).await;
+    assert!(
+        stale.contains("Resource changed or was replaced"),
+        "{stale}"
     );
-    h.err("k8s.requestRolloutRestart", reviewed).await;
 
     let out = h
         .ok(
@@ -2272,22 +2314,24 @@ async fn run_suite() {
         .unwrap()
         .to_string();
 
-    // Both scheduling directions are reviewed and never evict pods.
+    // Both scheduling directions are reviewed and never evict pods. A heartbeat
+    // can invalidate either review, just as a workload controller can above.
     for unschedulable in [true, false] {
-        let current = h
-            .reg
-            .invoke(
-                "k8s.getObject",
-                json!({"context":ctx,"kind":"Node","namespace":"","name":node_name}),
+        let (out, reviewed) = h
+            .reviewed_request(
+                "k8s.requestCordonNode",
+                json!({
+                    "context":ctx,"group":"","version":"v1","kind":"Node","plural":"nodes",
+                    "namespaced":false,"namespace":"","name":node_name,"unschedulable":unschedulable
+                }),
             )
             .await
-            .unwrap();
-        let reviewed = json!({"context":ctx,"group":"","version":"v1","kind":"Node","plural":"nodes",
-            "namespaced":false,"namespace":"","name":node_name,"unschedulable":unschedulable,
-            "uid":current["object"]["metadata"]["uid"],"resourceVersion":current["object"]["metadata"]["resourceVersion"]});
-        assert_eq!(
-            h.ok("k8s.requestCordonNode", reviewed).await["requested"],
-            true
+            .expect("reviewed node scheduling request");
+        assert_eq!(out["requested"], true);
+        let stale = h.err("k8s.requestCordonNode", reviewed).await;
+        assert!(
+            stale.contains("Resource changed or was replaced"),
+            "{stale}"
         );
     }
 
@@ -2521,11 +2565,6 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     let apps = [
         json!({ "manifest": flux, "grants": declared_permissions(&flux) }),
         json!({ "manifest": argocd, "grants": declared_permissions(&argocd) }),
-        json!({
-            "manifest": SIGNED_ARGOCD,
-            "grants": declared_permissions(SIGNED_ARGOCD),
-            "signature": SIGNED_ARGOCD_SIG,
-        }),
     ];
     for app in &apps {
         let out = h.ok("extensions.validate", app.clone()).await;
@@ -2570,24 +2609,12 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         )
         .await;
     assert!(err.contains("Catalog release changed"), "{err}");
-    // The listed release, downloaded and verified for review. That needs GitHub,
-    // so a failure is reported, not failed on; a review that does come back must
-    // be exactly the signed bytes.
-    match h
-        .try_call(
-            "extensions.catalogManifest",
-            json!({ "id": "org.srelens.argocd", "sha256": sha256 }),
-        )
-        .await
-    {
-        Ok(review) => {
-            assert_eq!(review["manifest"], SIGNED_ARGOCD, "{review}");
-            assert_eq!(review["signature"], json!(SIGNED_ARGOCD_SIG), "{review}");
-        }
-        Err(e) => {
-            println!("  extensions.catalogManifest: live release not verified (needs GitHub): {e}")
-        }
-    }
+    // Authentic historical bytes still verify cryptographically, but API 0.1
+    // cannot be installed on this API 0.3 host.
+    let old = h.ok("extensions.validate", json!({"manifest":SIGNED_ARGOCD,"grants":declared_permissions(SIGNED_ARGOCD),"signature":SIGNED_ARGOCD_SIG})).await;
+    assert!(old["errors"].as_array().unwrap().iter().any(|e| e["code"] == "EXTENSION_API_INCOMPATIBLE"), "{old}");
+    let err = h.err("extensions.catalogManifest", json!({"id":"org.srelens.argocd","sha256":sha256})).await;
+    assert!(err.contains("different host API version"), "{err}");
 
     for app in &apps {
         let mut install = app.clone();
@@ -2606,17 +2633,10 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     };
     let flux_app = installed("org.example.flux");
     let argocd_app = installed("org.example.argocd");
-    let signed_app = installed("org.srelens.argocd");
     for app in [&flux_app, &argocd_app] {
         assert_eq!(app["enabled"], true, "{app}");
         assert_eq!(app["source"], "local", "{app}");
     }
-    // The signed bytes are the release the cached catalog lists: the host records
-    // where they came from, keeps the proof, and still trusts it on reading back.
-    assert_eq!(signed_app["enabled"], true, "{signed_app}");
-    assert_eq!(signed_app["source"], "catalog", "{signed_app}");
-    assert!(signed_app["signatureProof"].is_object(), "{signed_app}");
-    assert!(signed_app.get("quarantined").is_none(), "{signed_app}");
     let revision = |app: &Value| app["revision"].as_u64().expect("revision");
 
     println!("=== extensions: read ===");
@@ -2630,7 +2650,7 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         )
         .await;
     assert!(item_names(&out).contains(&KUSTOMIZATION), "{out}");
-    for app in [&argocd_app, &signed_app] {
+    for app in [&argocd_app] {
         let out = h
             .ok(
                 "extensions.read",
@@ -2655,7 +2675,7 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     );
     assert_eq!(
         detail["actions"],
-        json!(["suspend", "resume", "reconcile"]),
+        json!(["kustomizations-suspend", "kustomizations-resume", "kustomizations-reconcile"]),
         "{detail}"
     );
     assert!(
@@ -2667,7 +2687,7 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         .expect("uid")
         .to_owned();
     let reviewed = resource_version(&detail);
-    let act = |action: &str, version: &str| json!({ "resource": flux_selection, "action": action, "uid": uid, "resourceVersion": version });
+    let act = |action: &str, version: &str| json!({ "resource": flux_selection, "action": format!("kustomizations-{action}"), "uid": uid, "resourceVersion": version });
     let out = h.ok("extensions.action", act("suspend", &reviewed)).await;
     assert_eq!(out, json!({ "requested": true }));
     // Read back through the host capability itself, not the app, to see what landed.
@@ -2738,7 +2758,7 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         "namespace": NS, "name": ARGO_APP
     });
     let before = h.ok("k8s.getCustomResource", argo_object.clone()).await;
-    assert_eq!(before["actions"], argo_detail["actions"], "{before}");
+    assert!(before.get("actions").is_none(), "Ungated readers never invent actions: {before}");
     let argo_uid = before["resource"]["metadata"]["uid"]
         .as_str()
         .expect("uid")
@@ -2746,8 +2766,8 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     let reviewed = resource_version(&before);
     let out = h
         .ok(
-            "k8s.gitOpsAction",
-            json!({ "resource": argo_object, "action": "refresh", "uid": argo_uid, "resourceVersion": reviewed }),
+            "extensions.action",
+            json!({ "resource": {"id":"org.example.argocd","revision":revision(&argocd_app),"capability":"applications","context":ctx,"namespace":NS,"name":ARGO_APP}, "action": "refresh", "uid": argo_uid, "resourceVersion": reviewed }),
         )
         .await;
     assert_eq!(out, json!({ "requested": true }));
@@ -2758,8 +2778,8 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     );
     let err = h
         .err(
-            "k8s.gitOpsAction",
-            json!({ "resource": argo_object, "action": "hard-refresh", "uid": argo_uid, "resourceVersion": reviewed }),
+            "extensions.action",
+            json!({ "resource": {"id":"org.example.argocd","revision":revision(&argocd_app),"capability":"applications","context":ctx,"namespace":NS,"name":ARGO_APP}, "action": "hard-refresh", "uid": argo_uid, "resourceVersion": reviewed }),
         )
         .await;
     assert!(err.contains("Resource changed or was replaced"), "{err}");
@@ -2892,7 +2912,6 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     for id in [
         "org.example.flux",
         "org.example.argocd",
-        "org.srelens.argocd",
     ] {
         h.ok(
             "extensions.configure",
@@ -3311,6 +3330,73 @@ async fn mcp_prompts_name_only_real_capabilities() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[tokio::test]
+async fn reviewed_request_refreshes_only_explicit_review_races_and_bounds_retries() {
+    use srelens_capability::{Annotations, Capability, CapabilityError};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
+    const STALE: &str = "Resource changed or was replaced; refresh and review the action again";
+    const CONFLICT: &str = "ApiError: the object has been modified: Conflict (Status { status: Some(Failure), code: 409, message: modified })";
+    for (errors, expected_reads, succeeds) in [
+        (vec![STALE, CONFLICT], 3, true),
+        (vec!["Resource is being deleted"], 1, false),
+        (vec!["Action request timed out"], 1, false),
+        (vec!["Forbidden"], 1, false),
+        (vec!["This action is not available: wait"], 1, false),
+        (vec!["409 unrelated error"], 1, false),
+        (vec![STALE; 20], 8, false),
+    ] {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let mut reg = Registry::new();
+        let count = reads.clone();
+        reg.register(Capability::typed::<Value, Value, _, _>("k8s.getObject", "read", Annotations::READ_ONLY, move |_| {
+            let version = count.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {Ok(json!({"object":{"metadata":{"uid":"u","resourceVersion":version.to_string()}}}))}
+        }));
+        let captured = seen.clone();
+        reg.register(Capability::typed::<Value, Value, _, _>(
+            "reviewed",
+            "write",
+            Annotations::MUTATING,
+            move |input| {
+                let mut seen = captured.lock().unwrap();
+                let error = errors.get(seen.len()).copied();
+                seen.push(input);
+                async move {
+                    match error {
+                        Some(error) => Err(CapabilityError::Handler(error.into())),
+                        None => Ok(json!({"requested":true})),
+                    }
+                }
+            },
+        ));
+        let mut h = Harness::new(reg);
+        let result = h
+            .reviewed_request(
+                "reviewed",
+                json!({"context":"c","kind":"Node","namespace":"","name":"n","unschedulable":true}),
+            )
+            .await;
+        assert_eq!(result.is_ok(), succeeds, "{result:?}");
+        assert_eq!(reads.load(Ordering::SeqCst), expected_reads);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), expected_reads);
+        for (index, input) in seen.iter().enumerate() {
+            assert_eq!(input["resourceVersion"], (index + 1).to_string());
+            assert_eq!(input["uid"], "u");
+            assert_eq!(input["unschedulable"], true);
+        }
+        assert_eq!(h.covered.contains("reviewed"), succeeds);
+        if let Ok((out, review)) = result {
+            assert_eq!(out["requested"], true);
+            assert_eq!(review, *seen.last().unwrap());
         }
     }
 }

@@ -319,9 +319,9 @@ tool "mutates the cluster".
 
 One caveat, for a tool that takes a named operation: the published level is
 the **highest** any operation it accepts can reach, because `tools/list`
-carries one row per tool. `k8s.gitOpsAction` is `high` because one of its
-eight actions is an Argo CD sync, although its `refresh` action is `low`.
-The per-action level comes back with the resource, on `extensions.resource`.
+carries one row per tool. `extensions.action` is `high` because a declared
+merge-patch action can apply an Argo CD sync. The selected primitive's level
+comes back with the resource on `extensions.resource`.
 
 The host action primitives an extension binds as declared actions —
 `k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition` and

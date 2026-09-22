@@ -9,11 +9,6 @@ import { useResource } from "../lib/useResource";
 import { HostConfirmation } from "../confirm/HostConfirmation";
 import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
-// What each button says, shared with the bulk bar (#553): one copy, so the
-// two surfaces cannot drift into two names for one action. See
-// `actionLabels.ts` for why the descriptions that used to live here are gone.
-import { ACTION_LABELS, isKnownAction } from "./actionLabels";
-import { ACTION_AVAILABILITY } from "./actionAvailability";
 const fieldLabels: Record<string,string> = {sourceRef:"Source reference",suspend:"Suspended",prune:"Prune",wait:"Wait for readiness",force:"Force",apiVersion:"API version"};
 function fieldLabel(key:string) {
   const words=key.replace(/([a-z0-9])([A-Z])/g,"$1 $2").replace(/_/g," ");
@@ -122,12 +117,13 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
   // The same resource can be open in a peek and in its own tab, so the reason
   // elements need ids that are this view's and no other's.
   const reasons=useId();
-  const supported=(data.data?.actions??[]).filter(isKnownAction);
+  const supported=(data.data?.actions??[]).filter(action=>!!data.data?.actionMeta?.[action]?.title);
+  const label=(action:string)=>plainText(data.data?.actionMeta?.[action]?.title??action);
   // The declared reason is drawn through `plainText` because #551 makes these
   // predicates a manifest's, and an app's sentence must not be able to reorder
   // or hide the host's words around it.
   const excuse=(action:string)=>{
-    const unmet=resource&&unmetPredicate(ACTION_AVAILABILITY[action],resource);
+    const unmet=resource&&unmetPredicate(data.data?.actionMeta?.[action]?.availableWhen??[],resource);
     return unmet?plainText(unmet.reason):undefined;
   };
   const OpenIcon=Icons.openTab;
@@ -160,7 +156,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
             <Button variant="outline" size="xs"
               disabled={busy || !!pending || !resource.metadata.uid || !resource.metadata.resourceVersion}
               aria-disabled={unavailable?true:undefined} aria-describedby={reasonId} title={unavailable}
-              onClick={()=>{if(unavailable)return;trigger.current=document.activeElement as HTMLElement;setError("");setMessage("");setPending({action,uid:resource.metadata.uid,resourceVersion:resource.metadata.resourceVersion});}}>{ACTION_LABELS[action]}</Button>
+              onClick={()=>{if(unavailable)return;trigger.current=document.activeElement as HTMLElement;setError("");setMessage("");setPending({action,uid:resource.metadata.uid,resourceVersion:resource.metadata.resourceVersion});}}>{label(action)}</Button>
             {unavailable&&<span id={reasonId} className="extension-action-reason">{unavailable}</span>}
           </span>;
         })}
@@ -169,7 +165,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
     {error&&<p role="alert" className="extension-error">{error}</p>}
     {message&&<p role="status" className="extension-message">{message}</p>}
     {data.status==="error"?<ErrorNotice cluster message={data.error} retry={data.reload}/>:data.status==="loading"?<p className="extension-message">Loading resource details…</p>:resource&&<>
-      {pending&&<div className="extension-action-review" role="dialog" aria-label={`Review ${ACTION_LABELS[pending.action]}`} tabIndex={-1} ref={review}>
+      {pending&&<div className="extension-action-review" role="dialog" aria-label={`Review ${label(pending.action)}`} tabIndex={-1} ref={review}>
         {/* The one host confirmation (#552), in this screen's own frame. The
             frame is all this surface supplies: the sentence, the level, the
             cluster, the resource and the requester are the component's, and
@@ -182,7 +178,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
           subject={{kind:"object",namespace:selection.namespace||null,name:selection.name}}
           app={app}
           actions={<>
-            <Button disabled={busy} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${ACTION_LABELS[pending.action]}`}</Button>
+            <Button disabled={busy} onClick={()=>void confirm()}>{busy?"Requesting…":`Confirm ${label(pending.action)}`}</Button>
             <Button variant="outline" disabled={busy} onClick={cancel}>Cancel</Button>
           </>}
         />

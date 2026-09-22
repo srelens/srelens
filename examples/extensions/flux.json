@@ -1,13 +1,16 @@
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.3.json",
   "id": "org.srelens.flux",
   "name": "Flux",
-  "version": "0.3.0",
-  "srelensApiVersion": "^0.1",
+  "version": "0.4.0",
+  "srelensApiVersion": "^0.3",
   "kind": "declarative",
   "permissions": [
     "k8s.listCustomResource",
-    "k8s.listEvents"
+    "k8s.listEvents",
+    "k8s.setFields",
+    "k8s.annotate",
+    "k8s.mergePatch"
   ],
   "capabilities": [
     {
@@ -704,5 +707,733 @@
         ]
       }
     ]
-  }
+  },
+  "actions": [
+    {
+      "name": "kustomizations-suspend",
+      "title": "Suspend",
+      "target": "k8s.setFields",
+      "resource": "kustomizations",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": true
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ]
+    },
+    {
+      "name": "kustomizations-resume",
+      "title": "Resume",
+      "target": "k8s.setFields",
+      "resource": "kustomizations",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": false
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ]
+    },
+    {
+      "name": "kustomizations-reconcile",
+      "title": "Reconcile",
+      "target": "k8s.annotate",
+      "resource": "kustomizations",
+      "arguments": {
+        "key": "reconcile.fluxcd.io/requestedAt",
+        "value": "$now"
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ]
+    },
+    {
+      "name": "helmreleases-suspend",
+      "title": "Suspend",
+      "target": "k8s.setFields",
+      "resource": "helmreleases",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": true
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ]
+    },
+    {
+      "name": "helmreleases-resume",
+      "title": "Resume",
+      "target": "k8s.setFields",
+      "resource": "helmreleases",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": false
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ]
+    },
+    {
+      "name": "helmreleases-reconcile",
+      "title": "Reconcile",
+      "target": "k8s.annotate",
+      "resource": "helmreleases",
+      "arguments": {
+        "key": "reconcile.fluxcd.io/requestedAt",
+        "value": "$now"
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ]
+    },
+    {
+      "name": "helmreleases-force",
+      "title": "Force reconcile",
+      "target": "k8s.mergePatch",
+      "resource": "helmreleases",
+      "arguments": {
+        "patch": {
+          "metadata": {
+            "annotations": {
+              "reconcile.fluxcd.io/requestedAt": "$now",
+              "reconcile.fluxcd.io/forceAt": "$now"
+            }
+          }
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ]
+    },
+    {
+      "name": "helmreleases-reset",
+      "title": "Reset retries",
+      "target": "k8s.mergePatch",
+      "resource": "helmreleases",
+      "arguments": {
+        "patch": {
+          "metadata": {
+            "annotations": {
+              "reconcile.fluxcd.io/requestedAt": "$now",
+              "reconcile.fluxcd.io/resetAt": "$now"
+            }
+          }
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ]
+    },
+    {
+      "name": "gitrepositories-suspend",
+      "title": "Suspend",
+      "target": "k8s.setFields",
+      "resource": "gitrepositories",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": true
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ]
+    },
+    {
+      "name": "gitrepositories-resume",
+      "title": "Resume",
+      "target": "k8s.setFields",
+      "resource": "gitrepositories",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": false
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ]
+    },
+    {
+      "name": "gitrepositories-reconcile",
+      "title": "Reconcile",
+      "target": "k8s.annotate",
+      "resource": "gitrepositories",
+      "arguments": {
+        "key": "reconcile.fluxcd.io/requestedAt",
+        "value": "$now"
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ]
+    },
+    {
+      "name": "helmrepositories-suspend",
+      "title": "Suspend",
+      "target": "k8s.setFields",
+      "resource": "helmrepositories",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": true
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ]
+    },
+    {
+      "name": "helmrepositories-resume",
+      "title": "Resume",
+      "target": "k8s.setFields",
+      "resource": "helmrepositories",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": false
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ]
+    },
+    {
+      "name": "helmrepositories-reconcile",
+      "title": "Reconcile",
+      "target": "k8s.annotate",
+      "resource": "helmrepositories",
+      "arguments": {
+        "key": "reconcile.fluxcd.io/requestedAt",
+        "value": "$now"
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ]
+    },
+    {
+      "name": "helmcharts-suspend",
+      "title": "Suspend",
+      "target": "k8s.setFields",
+      "resource": "helmcharts",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": true
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ]
+    },
+    {
+      "name": "helmcharts-resume",
+      "title": "Resume",
+      "target": "k8s.setFields",
+      "resource": "helmcharts",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": false
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ]
+    },
+    {
+      "name": "helmcharts-reconcile",
+      "title": "Reconcile",
+      "target": "k8s.annotate",
+      "resource": "helmcharts",
+      "arguments": {
+        "key": "reconcile.fluxcd.io/requestedAt",
+        "value": "$now"
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ]
+    },
+    {
+      "name": "buckets-suspend",
+      "title": "Suspend",
+      "target": "k8s.setFields",
+      "resource": "buckets",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": true
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ]
+    },
+    {
+      "name": "buckets-resume",
+      "title": "Resume",
+      "target": "k8s.setFields",
+      "resource": "buckets",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": false
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ]
+    },
+    {
+      "name": "buckets-reconcile",
+      "title": "Reconcile",
+      "target": "k8s.annotate",
+      "resource": "buckets",
+      "arguments": {
+        "key": "reconcile.fluxcd.io/requestedAt",
+        "value": "$now"
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ]
+    },
+    {
+      "name": "ocirepositories-suspend",
+      "title": "Suspend",
+      "target": "k8s.setFields",
+      "resource": "ocirepositories",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": true
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ]
+    },
+    {
+      "name": "ocirepositories-resume",
+      "title": "Resume",
+      "target": "k8s.setFields",
+      "resource": "ocirepositories",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": false
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ]
+    },
+    {
+      "name": "ocirepositories-reconcile",
+      "title": "Reconcile",
+      "target": "k8s.annotate",
+      "resource": "ocirepositories",
+      "arguments": {
+        "key": "reconcile.fluxcd.io/requestedAt",
+        "value": "$now"
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ]
+    },
+    {
+      "name": "imagerepositories-suspend",
+      "title": "Suspend",
+      "target": "k8s.setFields",
+      "resource": "imagerepositories",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": true
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ]
+    },
+    {
+      "name": "imagerepositories-resume",
+      "title": "Resume",
+      "target": "k8s.setFields",
+      "resource": "imagerepositories",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": false
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ]
+    },
+    {
+      "name": "imagerepositories-reconcile",
+      "title": "Reconcile",
+      "target": "k8s.annotate",
+      "resource": "imagerepositories",
+      "arguments": {
+        "key": "reconcile.fluxcd.io/requestedAt",
+        "value": "$now"
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ]
+    },
+    {
+      "name": "imageupdateautomations-suspend",
+      "title": "Suspend",
+      "target": "k8s.setFields",
+      "resource": "imageupdateautomations",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": true
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "This resource is already suspended"
+        }
+      ]
+    },
+    {
+      "name": "imageupdateautomations-resume",
+      "title": "Resume",
+      "target": "k8s.setFields",
+      "resource": "imageupdateautomations",
+      "arguments": {
+        "fields": {
+          "/spec/suspend": false
+        }
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "equals": true,
+          "reason": "This resource is not suspended"
+        }
+      ]
+    },
+    {
+      "name": "imageupdateautomations-reconcile",
+      "title": "Reconcile",
+      "target": "k8s.annotate",
+      "resource": "imageupdateautomations",
+      "arguments": {
+        "key": "reconcile.fluxcd.io/requestedAt",
+        "value": "$now"
+      },
+      "preconditions": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ],
+      "availableWhen": [
+        {
+          "jsonPath": ".spec.suspend",
+          "notEquals": true,
+          "reason": "Resume this resource before requesting reconciliation"
+        }
+      ]
+    }
+  ]
 }

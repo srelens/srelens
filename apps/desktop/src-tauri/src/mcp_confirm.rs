@@ -495,7 +495,7 @@ mod tests {
         let got = PendingRequest::from_consent(
             "id-6".into(),
             &consent(
-                "k8s.gitOpsAction",
+                "extensions.action",
                 Annotations::DESTRUCTIVE.with_confirm("Suspend[ {resource}]?"),
                 json!({
                     "resource": { "context": "prod", "namespace": "team", "name": "api" },
@@ -586,7 +586,7 @@ mod tests {
         let sent = PendingRequest::from_consent(
             "id-10".into(),
             &consent(
-                "k8s.gitOpsAction",
+                "extensions.action",
                 Annotations::DESTRUCTIVE.with_confirm("Suspend[ {resource}]?"),
                 json!({ "resource": { "context": "prod", "namespace": "team", "name": "api" } }),
             ),

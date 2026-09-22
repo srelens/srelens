@@ -6,7 +6,6 @@ import { paletteActionCapabilityIds } from "./paletteActions";
 // list small and justified — the whole point is that new mutating capabilities
 // fail CI until they are either palette-registered or excluded here.
 const EXCLUDED: Record<string, string> = {
-  "k8s.gitOpsAction": "requires a selected resource and reviewed UID/resourceVersion in the Apps inspector",
   "k8s.annotate": "a host action primitive: reached only through an app's declared action, on a reviewed resource",
   "k8s.setFields": "a host action primitive: reached only through an app's declared action, on a reviewed resource",
   "k8s.setStatusCondition": "a host action primitive: reached only through an app's declared action, on a reviewed resource",

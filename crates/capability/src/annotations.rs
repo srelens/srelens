@@ -222,7 +222,7 @@ fn substitute(segment: &str, fields: &ConfirmFields) -> Option<String> {
 /// Read the [`CONFIRM_FIELDS`] a capability's arguments carry.
 ///
 /// Looks at the top level and, one level down, at a nested `resource` object —
-/// the shape `k8s.gitOpsAction` and `extensions.action` use, where the object
+/// the shape `extensions.action` and `extensions.action` use, where the object
 /// being acted on is a field rather than the whole input. Nothing deeper: this
 /// reads arguments a caller controls, so it walks a fixed path rather than
 /// searching for a key that looks right.
@@ -529,7 +529,7 @@ mod template_tests {
         assert_eq!(got["resource"], "HelmRelease team/api");
     }
 
-    /// `k8s.gitOpsAction` nests the object under `resource`; the fields still
+    /// `extensions.action` nests the object under `resource`; the fields still
     /// have to be found, or every GitOps confirmation falls back to the summary.
     #[test]
     fn reads_fields_from_a_nested_resource_object() {

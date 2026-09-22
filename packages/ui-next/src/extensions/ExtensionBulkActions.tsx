@@ -14,8 +14,6 @@ import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
 import { useResource } from "../lib/useResource";
 import { plainText } from "./displayText";
-import { ACTION_AVAILABILITY } from "./actionAvailability";
-import { ACTION_LABELS, isKnownAction } from "./actionLabels";
 import {
   bulkActionResult,
   bulkApplicability,
@@ -175,18 +173,19 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
     };
   }, []);
 
-  const offered = (menu.data?.first?.actions ?? []).filter(isKnownAction);
+  const offered = (menu.data?.first?.actions ?? []).filter(action => !!menu.data?.first?.actionMeta?.[action]?.title);
+  const actionTitle = (action: string) => plainText(menu.data?.first?.actionMeta?.[action]?.title ?? action);
   const applicability = useMemo(
     () => bulkApplicability(selection, (resource) => {
       if (!pending) return true;
       if (available) return available(pending, resource);
       const detail = menu.data?.details.get(bulkResourceKey(resource));
-      return !!detail && !!detail.actions?.includes(pending) && !unmetPredicate(ACTION_AVAILABILITY[pending], detail.resource);
+      return !!detail && !!detail.actions?.includes(pending) && !unmetPredicate(detail.actionMeta?.[pending]?.availableWhen ?? [], detail.resource);
     }),
     [selection, pending, available, menu.data],
   );
 
-  const label = pending ? ACTION_LABELS[pending] : "";
+  const label = pending ? actionTitle(pending) : "";
   const meta = pending ? menu.data?.first?.actionMeta?.[pending] : undefined;
   /**
    * The host's sentence, where the host's template can be rendered without an
@@ -199,7 +198,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
    * bulk template exists; nothing is composed locally to fill the gap.
    */
   const question = meta
-    ? renderConfirmTemplate(
+    && meta.confirm ? renderConfirmTemplate(
         meta.confirm,
         confirmFields({ action: pending ?? undefined, cluster: target.context, kind: menu.data?.first?.resource?.kind }),
       )
@@ -214,7 +213,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
       const { uid, resourceVersion } = detail.resource.metadata;
       if (!uid || !resourceVersion) return { error: "The host returned no version to pin the write to." };
       if (!detail.actions?.includes(action))
-        return { error: `The host does not offer ${ACTION_LABELS[action] ?? action} on this resource.` };
+        return { error: `The host does not offer ${actionTitle(action)} on this resource.` };
       const acted = await actOnExtensionResource(ref, action, uid, resourceVersion);
       return acted.requested
         ? { ok: true }
@@ -266,7 +265,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
                 setPending(action);
               }}
             >
-              {ACTION_LABELS[action]}
+              {actionTitle(action)}
             </Button>
           ))}
         <Button variant="outline" size="xs" disabled={busy} onClick={onClear}>

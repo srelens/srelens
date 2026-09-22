@@ -1130,7 +1130,7 @@ const threeRows = {
 const menuDetail = {
   resource: { kind: "Kustomization", metadata: { name: "apps", namespace: "team", uid: "u", resourceVersion: "1" } },
   actions: ["reconcile"],
-  actionMeta: { reconcile: { impact: "medium", confirm: "Reconcile [{kind} ]in cluster {cluster}?" } },
+  actionMeta: { reconcile: { title: "Reconcile", availableWhen: [{jsonPath:".spec.suspend",notEquals:true,reason:"Resume this resource before requesting reconciliation"}], impact: "medium", confirm: "Reconcile [{kind} ]in cluster {cluster}?" } },
 };
 
 it("selects rows one by one and all at once, and says how many are selected", async () => {

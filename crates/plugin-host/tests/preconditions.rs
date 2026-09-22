@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// A Flux app whose reconcile action is declared with both predicate lists.
 fn manifest() -> Value {
     json!({
-        "id":"org.example.flux", "name":"Flux", "version":"0.1.0", "srelensApiVersion":"^0.1",
+        "id":"org.example.flux", "name":"Flux", "version":"0.1.0", "srelensApiVersion":"^0.3",
         "kind":"declarative",
         "permissions":["k8s.listCustomResource","k8s.annotate"],
         "capabilities":[{

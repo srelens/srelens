@@ -7,7 +7,7 @@
 //! and everything else is fixed in the manifest at install time.
 //!
 //! Every primitive does the same three things, because each one is a rule that
-//! was written once for `k8s.gitOpsAction` (#511) and must not be re-derived
+//! applies to every declared action and must not be re-derived
 //! per primitive:
 //!
 //! - a fresh GET, then a PATCH pinned to the reviewed `uid` and
@@ -190,7 +190,7 @@ struct Reviewed<'a> {
 /// Refuses a request the operator's review no longer describes.
 ///
 /// The two refusals every write in this host makes, wherever it comes from:
-/// `gitops::guard_action` calls this before its action-specific checks. A UID
+/// declared preconditions run after these checks. A UID
 /// or `resourceVersion` that has moved means the object on the server is not
 /// the object that was reviewed, and an object with a `deletionTimestamp` is
 /// on its way out — a write to it either does nothing or overwrites what a
@@ -350,18 +350,23 @@ const MAX_TEMPLATE_BYTES: usize = 8 * 1024;
 /// Recursive over the template an app bound, which is why the template is
 /// size-bounded before it gets here: depth is bounded by length.
 fn resolve_tokens(value: &Value) -> Result<Value, String> {
+    resolve_tokens_at(value, &resolve_value(NOW)?)
+}
+
+fn resolve_tokens_at(value: &Value, now: &str) -> Result<Value, String> {
     Ok(match value {
+        Value::String(text) if text == NOW => Value::String(now.to_owned()),
         Value::String(text) => Value::String(resolve_value(text)?),
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(resolve_tokens)
+                .map(|value| resolve_tokens_at(value, now))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         Value::Object(fields) => Value::Object(
             fields
                 .iter()
-                .map(|(key, value)| Ok((key.clone(), resolve_tokens(value)?)))
+                .map(|(key, value)| Ok((key.clone(), resolve_tokens_at(value, now)?)))
                 .collect::<Result<Map<_, _>, String>>()?,
         ),
         other => other.clone(),
@@ -422,6 +427,7 @@ fn fields_patch(fields: &Map<String, Value>) -> Result<Value, String> {
         ));
     }
     bounded(fields)?;
+    let now = resolve_value(NOW)?;
     let mut parsed = Vec::with_capacity(fields.len());
     for (pointer, value) in fields {
         let segments = pointer_segments(pointer)?;
@@ -430,7 +436,7 @@ fn fields_patch(fields: &Map<String, Value>) -> Result<Value, String> {
                 "`{pointer}` is not a field under `/spec`; a setFields action writes only spec fields"
             ));
         }
-        parsed.push((segments, resolve_tokens(value)?));
+        parsed.push((segments, resolve_tokens_at(value, &now)?));
     }
     // Two pointers where one contains the other would make the result depend
     // on the order this host happened to apply them in.
@@ -936,9 +942,8 @@ async fn set_status_condition(
 /// This is the floor for every binding, never a ceiling on one:
 /// [`Annotations::for_binding`] only ever raises. #550's preconditions narrow
 /// *when* a primitive runs, not what it can disturb when it does, so none of
-/// these rows move for them; when #551's migrated Flux and Argo CD actions
-/// give the host more to go on per action, a `force` binding can be published
-/// above its primitive's row without any of them moving either.
+/// these rows move for them. Migrated Flux force/reset actions use mergePatch
+/// to write both annotations atomically, inheriting its high impact.
 fn metadata(primitive: &str) -> (Impact, &'static str) {
     match primitive {
         REQUEST_RESTART => (Impact::High, "Request a rolling restart[ of {resource}][ in cluster {cluster}]? Running pods will be replaced."),
@@ -1119,6 +1124,85 @@ mod tests {
         });
         merge(&mut input, &extra);
         input
+    }
+
+    #[tokio::test]
+    async fn every_migrated_action_enforces_fresh_preconditions_and_pins_its_patch() {
+        for source in [
+            include_str!("../../../examples/extensions/flux.json"),
+            include_str!("../../../examples/extensions/argocd.json"),
+        ] {
+            let manifest: Value = serde_json::from_str(source).unwrap();
+            for action in manifest["actions"].as_array().unwrap() {
+                let reader = manifest["capabilities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["name"] == action["resource"])
+                    .unwrap();
+                for suspended in [false, true] {
+                    for operation in [Value::Null, json!({"sync":{}})] {
+                        let mut input = action["arguments"].clone();
+                        for field in ["group", "version", "plural", "kind", "namespaced"] {
+                            input[field] = reader["arguments"][field].clone();
+                        }
+                        merge(
+                            &mut input,
+                            &json!({"context":"cluster/a","namespace":"team","name":"api","uid":"u","resourceVersion":"2","preconditions":action.get("preconditions").cloned().unwrap_or(json!([]))}),
+                        );
+                        let current =
+                            object(json!({"spec":{"suspend":suspended},"operation":operation}));
+                        let (client, requests) = mock(current);
+                        let result = match action["target"].as_str().unwrap() {
+                            ANNOTATE => {
+                                annotate(client, serde_json::from_value(input).unwrap()).await
+                            }
+                            SET_FIELDS => {
+                                set_fields(client, serde_json::from_value(input).unwrap()).await
+                            }
+                            MERGE_PATCH => {
+                                set_merge_patch(client, serde_json::from_value(input).unwrap())
+                                    .await
+                            }
+                            target => panic!("unexpected target {target}"),
+                        };
+                        let name = action["name"].as_str().unwrap();
+                        let allowed = if name == "sync" {
+                            operation.is_null()
+                        } else if name.ends_with("-resume") {
+                            suspended
+                        } else if name == "refresh" || name == "hard-refresh" {
+                            true
+                        } else {
+                            !suspended
+                        };
+                        assert_eq!(
+                            result.is_ok(),
+                            allowed,
+                            "{name}, suspended={suspended}, operation={operation}: {result:?}"
+                        );
+                        let requests = requests.lock().unwrap();
+                        assert_eq!(requests.len(), if allowed { 2 } else { 1 });
+                        if allowed {
+                            assert_eq!(requests[1].1["metadata"]["uid"], "u");
+                            assert_eq!(requests[1].1["metadata"]["resourceVersion"], "2");
+                            if name.ends_with("-force") || name.ends_with("-reset") {
+                                let annotations = &requests[1].1["metadata"]["annotations"];
+                                let key = if name.ends_with("-force") {
+                                    "forceAt"
+                                } else {
+                                    "resetAt"
+                                };
+                                assert_eq!(
+                                    annotations["reconcile.fluxcd.io/requestedAt"],
+                                    annotations[format!("reconcile.fluxcd.io/{key}")]
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn annotate_in(extra: Value) -> AnnotateIn {
@@ -2068,5 +2152,28 @@ mod tests {
         )
         .expect_err("a bound list");
         assert!(refused.contains("at most"), "{refused}");
+    }
+}
+
+#[cfg(test)]
+mod request_token_tests {
+    use super::*;
+    #[test]
+    fn repeated_now_tokens_in_separate_spec_fields_share_one_request_timestamp() {
+        let patch = fields_patch(
+            json!({"/spec/requestedAt":"$now","/spec/forceAt":"$now"})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(patch["spec"]["requestedAt"], patch["spec"]["forceAt"]);
+    }
+    #[test]
+    fn repeated_now_tokens_share_one_request_timestamp() {
+        let patch = resolve_tokens(&json!({"metadata":{"annotations":{"reconcile.fluxcd.io/requestedAt":"$now","reconcile.fluxcd.io/forceAt":"$now"}}})).unwrap();
+        assert_eq!(
+            patch["metadata"]["annotations"]["reconcile.fluxcd.io/requestedAt"],
+            patch["metadata"]["annotations"]["reconcile.fluxcd.io/forceAt"]
+        );
     }
 }

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 fn manifest() -> Value {
     json!({
-        "id":"org.example.gitops", "name":"GitOps", "version":"0.1.0", "srelensApiVersion":"^0.1",
+        "id":"org.example.gitops", "name":"GitOps", "version":"0.1.0", "srelensApiVersion":"^0.3",
         "kind":"declarative",
         "permissions":["k8s.listCustomResource","k8s.annotate"],
         "capabilities":[{

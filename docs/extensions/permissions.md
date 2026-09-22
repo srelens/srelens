@@ -71,8 +71,8 @@ The app-level operations follow the normal MCP consent gate:
 - `extensions.configure` (install, enable, remove, settings, rollback, clusters) is mutating,
   `medium` impact. A rollback takes the grants explicitly, like an install, because it
   grants the restored version's permissions again.
-- `extensions.action` (host GitOps actions) is mutating and `high` impact, because it
-  forwards to `k8s.gitOpsAction` and so reaches an Argo CD sync. The per-action level
+- `extensions.action` (declared app actions) is mutating and `high` impact, because it
+  can dispatch `k8s.mergePatch`, including an Argo CD sync. The per-action level
   is lower for most actions and travels with the resource; in the UI every action opens
   a review naming the cluster and resource first.
 

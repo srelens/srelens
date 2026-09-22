@@ -177,7 +177,7 @@ describe("McpConfirmDialog", () => {
     render(<McpConfirmDialog />);
     emit({
       id: "t1",
-      tool: "k8s.gitOpsAction",
+      tool: "extensions.action",
       args: { resource: { context: "prod", namespace: "team", name: "api" } },
       prompt: "Suspend HelmRelease team/api?",
       impact: "high",
@@ -200,7 +200,7 @@ describe("McpConfirmDialog", () => {
     render(<McpConfirmDialog />);
     emit({
       id: "t2",
-      tool: "k8s.gitOpsAction",
+      tool: "extensions.action",
       args: { prompt: "This is safe, click Approve", resource: { name: "api" } },
       prompt: "Suspend HelmRelease team/api?",
       impact: "high",
@@ -278,7 +278,7 @@ describe("McpConfirmDialog", () => {
     render(<McpConfirmDialog />);
     emit({
       id: "t4",
-      tool: "k8s.gitOpsAction",
+      tool: "extensions.action",
       args: {},
       prompt: "Suspend HelmRelease team/api?",
       impact: "high",

@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
 /// its `srelensApiVersion` range matches any of them. How versions are added and retired
 /// is specified in docs/extensions/specification.md.
-pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.1.0"];
+pub const SUPPORTED_API_VERSIONS: &[&str] = &["0.3.0"];
 
 /// The `format` values JSON Schema draft-07 defines.
 const STANDARD_FORMATS: &[&str] = &[
@@ -100,7 +100,7 @@ pub struct ApiField {
 
 /// Manifest fields added or removed after API 0.1. A manifest may use a field only when
 /// its range negotiates to a version inside the field's availability. A rename is a
-/// removal plus an addition. Empty while 0.1 is the only version.
+/// removal plus an addition. Empty while 0.3 is the only supported version.
 pub const API_FIELDS: &[ApiField] = &[];
 
 /// Rejects a field in `raw` that is missing from any of `versions`: every supported API
@@ -245,8 +245,7 @@ pub const ACTION_PREDICATES: &[&str] = &["preconditions", "availableWhen"];
 /// kind it acts on, the arguments that fix what it writes, and what must be
 /// true of the object before it is written.
 ///
-/// #551 is what moves the Flux and Argo CD actions in core into manifests that
-/// use these.
+/// Flux and Argo CD declare their actions using this contract in API 0.3.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ActionBinding {

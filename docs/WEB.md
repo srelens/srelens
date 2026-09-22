@@ -232,10 +232,7 @@ URI, pin a fixed port with `SRELENS_CLUSTER_LOGIN_PORT` and register
   share repository config, cache, or plugins across users.
 - **Apps are desktop-only for now.** Every `extensions.*` capability is refused
   until app inventories are kept per user
-  ([#515](https://github.com/srelens/srelens/issues/515)). The host GitOps write
-  `k8s.gitOpsAction` is refused as well. On the web no installed app scopes it to
-  a resource, and the web has no consent prompt, so a caller could otherwise name
-  any supported Flux or Argo CD resource directly. `k8s.getCustomResource` stays
+  ([#515](https://github.com/srelens/srelens/issues/515)). The four host action primitives are refused too: the web has no installed app to scope their writes or consent prompt. `k8s.getCustomResource` stays
   available: it is a read under your own kubeconfig and RBAC, like every other
   custom-resource read.
 

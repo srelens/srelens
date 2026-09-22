@@ -7,13 +7,13 @@ and [flux.json](../../examples/extensions/flux.json).
 
 ## JSON Schema
 
-The schema for API 0.1 is committed at
-[`schemas/extension-manifest.v0.1.json`](../../schemas/extension-manifest.v0.1.json).
+The schema for API 0.3 is committed at
+[`schemas/extension-manifest.v0.3.json`](../../schemas/extension-manifest.v0.3.json).
 Point your editor at it by naming it in the manifest:
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json",
+  "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.3.json",
   "id": "io.example.cert-manager"
 }
 ```

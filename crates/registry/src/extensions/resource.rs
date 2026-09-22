@@ -25,7 +25,7 @@ async fn resolve(
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
     selection: Selection,
-) -> Result<ResourceIn, CapabilityError> {
+) -> Result<(ResourceIn, Installed), CapabilityError> {
     let resolved = request_context(&cache, &selection.context).await;
     let state = tokio::task::spawn_blocking(move || read(&path))
         .await
@@ -72,10 +72,10 @@ async fn resolve(
         namespaced: binding.arguments["namespaced"] == true,
     };
     resource.validate().map_err(CapabilityError::InvalidInput)?;
-    // Before `k8s.getCustomResource` or `k8s.gitOpsAction` sees it: a whole built-in object,
+    // Before `k8s.getCustomResource` or a declared action sees it: a whole built-in object,
     // such as a Deployment with its environment, must not come back through an app (#601).
     crd::require(&core, &resource.context, binding).await?;
-    Ok(resource)
+    Ok((resource, plugin.clone()))
 }
 pub(super) fn register(
     reg: &mut Registry,
@@ -95,23 +95,35 @@ pub(super) fn register(
             let c = c.clone();
             let k = k.clone();
             async move {
-                let resource = resolve(p, c.clone(), k, selection).await?;
-                c.invoke(
-                    "k8s.getCustomResource",
-                    serde_json::to_value(resource).unwrap(),
-                )
-                .await
+                let binding_name = selection.capability.clone();
+                let (resource, plugin) = resolve(p, c.clone(), k, selection).await?;
+                let mut detail = c.invoke("k8s.getCustomResource", serde_json::to_value(resource).unwrap()).await?;
+                let mut meta = serde_json::Map::new();
+                let mut actions = Vec::new();
+                for action in plugin.manifest.actions.iter().filter(|a| a.resource == binding_name) {
+                    let annotations = c.get(&action.target).ok_or_else(|| CapabilityError::Handler("Action primitive unavailable".into()))?.annotations;
+                    actions.push(action.name.clone());
+                    meta.insert(action.name.clone(), json!({"title":action.title,"availableWhen":action.available_when,"impact":annotations.impact,"confirm":annotations.confirm}));
+                }
+                detail["actions"] = json!(actions);
+                detail["actionMeta"] = Value::Object(meta);
+                Ok(detail)
             }
         },
     ));
-    // A thin wrapper over `k8s.gitOpsAction`, so it carries that capability's
-    // ceiling and not its own, gentler-looking one: this reaches every action
-    // that does, `sync` included. The honest per-action level is `actionMeta`
-    // on the resource the user is looking at.
-    reg.register(Capability::typed::<Action, Value, _, _>("extensions.action", "Request a host-owned GitOps action on an app resource; requires explicit confirmation", Annotations::MUTATING.with_impact(srelens_capability::Impact::High).with_confirm("Run the requested GitOps operation[ ({action})][ on {resource}][ in cluster {cluster}]?"), move |input| {
+    // The generic endpoint carries the highest primitive impact. Per-action
+    // wording and impact come exclusively from the host primitive metadata.
+    reg.register(Capability::typed::<Action, Value, _, _>("extensions.action", "Run a declared action on an app resource; requires explicit confirmation", Annotations::MUTATING.with_impact(srelens_capability::Impact::High).with_confirm("Run the declared action[ ({action})][ on {resource}][ in cluster {cluster}]?"), move |input| {
         let p = path.clone(); let c = core.clone(); let k = cache.clone(); async move {
-            let resource = resolve(p,c.clone(),k,input.resource).await?;
-            c.invoke("k8s.gitOpsAction", json!({"resource":resource,"action":input.action,"uid":input.uid,"resourceVersion":input.resource_version})).await
+            let binding_name = input.resource.capability.clone();
+            let (resource, plugin) = resolve(p,c.clone(),k,input.resource).await?;
+            if !plugin.manifest.actions.iter().any(|a| a.name == input.action && a.resource == binding_name) {
+                return Err(CapabilityError::InvalidInput("This action is not declared for the selected resource".into()));
+            }
+            let id = format!("plugin/{}/{}", plugin.manifest.id, input.action);
+            let mut registry = Registry::new();
+            let _registration = PluginHost::new(c).register(&mut registry, plugin.manifest, &plugin.grants).map_err(CapabilityError::Handler)?;
+            registry.invoke(&id, json!({"context":resource.context,"namespace":resource.namespace,"name":resource.name,"uid":input.uid,"resourceVersion":input.resource_version})).await
         }
     }));
 }
@@ -137,9 +149,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(resolved.context, "cluster/a");
-        assert_eq!(resolved.namespace, "team");
-        assert_eq!(resolved.group, "argoproj.io");
+        assert_eq!(resolved.0.context, "cluster/a");
+        assert_eq!(resolved.0.namespace, "team");
+        assert_eq!(resolved.0.group, "argoproj.io");
         let mut forged = payload.clone();
         forged["group"] = json!("other.io");
         assert!(serde_json::from_value::<Selection>(forged).is_err());
@@ -183,11 +195,11 @@ mod tests {
         // Inspection and actions go out under the ID scope was checked as, so the capability
         // cannot resolve the name again to a cluster that took it since.
         assert_eq!(
-            resolved.context,
+            resolved.0.context,
             format!("srelens-context:{}#default", config.display())
         );
     }
-    /// Neither `k8s.getCustomResource` nor `k8s.gitOpsAction` is reached for a binding that
+    /// Neither `k8s.getCustomResource` nor a declared action is reached for a binding that
     /// is not a CustomResourceDefinition on the cluster, stored or installed (#601).
     #[tokio::test]
     async fn resources_and_actions_are_refused_without_a_matching_crd() {
@@ -195,7 +207,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("apps.json");
         let mut core = (*super::super::tests::fake_core()).clone();
-        for id in ["k8s.getCustomResource", "k8s.gitOpsAction"] {
+        for id in ["k8s.getCustomResource", "k8s.mergePatch"] {
             let mut cap = core.get(id).unwrap().clone();
             cap.handler = Arc::new(|args| {
                 CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -264,14 +276,32 @@ mod tests {
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
             vec![],
         );
-        for id in ["k8s.getCustomResource", "k8s.gitOpsAction"] {
+        for id in ["k8s.getCustomResource", "k8s.mergePatch"] {
             let mut cap = core.get(id).unwrap().clone();
             cap.handler = Arc::new(|args| Box::pin(async move { Ok(args) }));
             core.register(cap);
         }
         super::super::tests::serve_crds(&mut core, &["applications.argoproj.io/v1alpha1"]);
         let core = Arc::new(core);
-        let revision = super::super::tests::install(&path, core.clone());
+        let mut manifest: Value =
+            serde_json::from_str(include_str!("../../../../examples/extensions/argocd.json"))
+                .unwrap();
+        manifest["id"] = json!("org.example.argocd");
+        mutate(
+            &path,
+            core.clone(),
+            Configure::Install {
+                signature: None,
+                manifest: manifest.to_string(),
+                grants: vec![
+                    "k8s.listCustomResource".into(),
+                    "k8s.annotate".into(),
+                    "k8s.mergePatch".into(),
+                ],
+            },
+        )
+        .unwrap();
+        let revision = read(&path).unwrap().plugins[0].revision;
         let binding = read(&path).unwrap().plugins[0].manifest.capabilities[0]
             .name
             .clone();
@@ -283,13 +313,30 @@ mod tests {
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
         );
         let selected = json!({"id":"org.example.argocd","revision":revision,"capability":binding,"context":"cluster/a","namespace":"team","name":"app"});
+        let detail = reg
+            .invoke("extensions.resource", selected.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            detail["actions"],
+            json!(["refresh", "hard-refresh", "sync"])
+        );
+        assert_eq!(detail["actionMeta"]["sync"]["title"], "Sync");
+        assert_eq!(detail["actionMeta"]["sync"]["impact"], "high");
+        assert_eq!(
+            detail["actionMeta"]["sync"]["availableWhen"][0]["jsonPath"],
+            ".operation"
+        );
+        let forged =
+            json!({"resource":selected,"action":"sync","uid":"u","resourceVersion":"2","patch":{}});
+        assert!(reg.invoke("extensions.action", forged).await.is_err());
         let payload = json!({"resource":selected,"action":"sync","uid":"u","resourceVersion":"2"});
         let result = reg
             .invoke("extensions.action", payload.clone())
             .await
             .unwrap();
-        assert_eq!(result["resource"]["group"], "argoproj.io");
-        assert_eq!(result["resource"]["name"], "app");
+        assert_eq!(result["group"], "argoproj.io");
+        assert_eq!(result["name"], "app");
         assert_eq!(result["resourceVersion"], "2");
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
         let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.action","arguments":payload}});
@@ -314,5 +361,159 @@ mod tests {
         )
         .await
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    #[test]
+    fn gitops_examples_declare_writes_and_core_has_no_implicit_action() {
+        let core = super::super::tests::fake_core();
+        assert!(
+            core.get("k8s.gitOpsAction").is_none(),
+            "GitOps writes must only use declared primitives"
+        );
+        for source in [
+            include_str!("../../../../examples/extensions/flux.json"),
+            include_str!("../../../../examples/extensions/argocd.json"),
+        ] {
+            let manifest = Manifest::parse(source).unwrap();
+            assert!(
+                !manifest.actions.is_empty(),
+                "{} must declare its actions",
+                manifest.id
+            );
+            validate_app(&manifest, &manifest.permissions, core.clone()).unwrap();
+            assert!(
+                validate_app(&manifest, &["k8s.listCustomResource".into()], core.clone()).is_err()
+            );
+        }
+    }
+    #[tokio::test]
+    async fn reader_only_app_cannot_inherit_gitops_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let mut core = (*super::super::tests::fake_core()).clone();
+        if let Some(mut cap) = core.get("k8s.gitOpsAction").cloned() {
+            cap.handler = Arc::new(|_| Box::pin(async { Ok(json!({"requested":true})) }));
+            core.register(cap);
+        }
+        let core = Arc::new(core);
+        let revision = super::super::tests::install(&path, core.clone());
+        let binding = read(&path).unwrap().plugins[0].manifest.capabilities[0]
+            .name
+            .clone();
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        let result = reg.invoke("extensions.action", json!({"resource":{"id":"org.example.argocd","revision":revision,"capability":binding,"context":"cluster/a","namespace":"team","name":"app"},"action":"sync","uid":"u","resourceVersion":"2"})).await;
+        assert!(result.is_err(), "A reader grant must never grant a write");
+    }
+}
+
+#[cfg(test)]
+mod declaration_tests {
+    use super::*;
+    #[test]
+    fn flux_and_argo_actions_preserve_existing_patches_and_preconditions() {
+        let flux =
+            Manifest::parse(include_str!("../../../../examples/extensions/flux.json")).unwrap();
+        assert_eq!(flux.actions.len(), 29);
+        for reader in &flux.capabilities {
+            let actions: Vec<_> = flux
+                .actions
+                .iter()
+                .filter(|a| a.resource == reader.name)
+                .collect();
+            let kind = reader
+                .arguments
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let count = match kind {
+                "HelmRelease" => 5,
+                "Kustomization"
+                | "GitRepository"
+                | "HelmRepository"
+                | "HelmChart"
+                | "Bucket"
+                | "OCIRepository"
+                | "ImageRepository"
+                | "ImageUpdateAutomation" => 3,
+                _ => 0,
+            };
+            assert_eq!(actions.len(), count, "{kind}");
+            for action in actions {
+                let verb = action
+                    .name
+                    .strip_prefix(&format!("{}-", reader.name))
+                    .unwrap();
+                let suspended = json!({"spec":{"suspend":true}});
+                let active = json!({"spec":{"suspend":false}});
+                let absent = json!({});
+                let allowed = |resource: &Value| {
+                    srelens_capability::unmet(&action.preconditions, resource).is_none()
+                };
+                assert_eq!(allowed(&suspended), verb == "resume", "{}", action.name);
+                assert_eq!(allowed(&active), verb != "resume", "{}", action.name);
+                assert_eq!(allowed(&absent), verb != "resume", "{}", action.name);
+                assert_eq!(
+                    serde_json::to_value(&action.preconditions).unwrap(),
+                    serde_json::to_value(&action.available_when).unwrap()
+                );
+                let binding = flux.action_binding(action).unwrap();
+                for field in ["group", "version", "plural", "kind", "namespaced"] {
+                    assert_eq!(binding.arguments[field], reader.arguments[field]);
+                }
+                match verb {
+                    "suspend" | "resume" => assert_eq!(
+                        action.arguments["fields"],
+                        json!({"/spec/suspend":verb == "suspend"})
+                    ),
+                    "reconcile" => assert_eq!(
+                        action.arguments,
+                        serde_json::from_value(
+                            json!({"key":"reconcile.fluxcd.io/requestedAt","value":"$now"})
+                        )
+                        .unwrap()
+                    ),
+                    "force" | "reset" => assert_eq!(
+                        action.arguments["patch"],
+                        json!({"metadata":{"annotations":{"reconcile.fluxcd.io/requestedAt":"$now",format!("reconcile.fluxcd.io/{verb}At"):"$now"}}})
+                    ),
+                    _ => panic!("Unexpected action {verb}"),
+                }
+            }
+        }
+        let argo =
+            Manifest::parse(include_str!("../../../../examples/extensions/argocd.json")).unwrap();
+        assert_eq!(argo.actions.len(), 3);
+        let sync = argo.actions.iter().find(|a| a.name == "sync").unwrap();
+        assert_eq!(
+            sync.arguments["patch"],
+            json!({"operation":{"initiatedBy":{"username":"srelens"},"sync":{"prune":false,"syncStrategy":{"hook":{}}}}})
+        );
+        assert!(srelens_capability::unmet(&sync.preconditions, &json!({"operation":{}})).is_some());
+        assert!(
+            srelens_capability::unmet(&sync.preconditions, &json!({"operation":null})).is_none()
+        );
+        assert!(srelens_capability::unmet(&sync.preconditions, &json!({})).is_none());
+        for action in &argo.actions[..2] {
+            assert!(action.preconditions.is_empty());
+            assert_eq!(action.arguments["key"], "argocd.argoproj.io/refresh");
+            assert_eq!(
+                action.arguments["value"],
+                if action.name == "refresh" {
+                    "normal"
+                } else {
+                    "hard"
+                }
+            );
+        }
     }
 }

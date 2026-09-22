@@ -3,7 +3,7 @@
 # Each one serves the group, version, kind, plural and scope upstream serves:
 # Flux's kustomize-controller (kustomize.toolkit.fluxcd.io/v1) and Argo CD
 # (argoproj.io/v1alpha1). Those are what the example apps bind and what
-# `k8s.gitOpsAction` allowlists, so they must match. The schemas do not copy
+# `extensions.action` reader bindings, so they must match. The schemas do not copy
 # upstream's: no controller runs here, and reads and conditional patches need
 # only a served API that keeps the fields the actions write (`spec.suspend`,
 # annotations, Argo CD's top-level `operation`).
