@@ -158,13 +158,18 @@ pub async fn handle_request(
                     server.confirm_policy().confirm(&request).await
                 {
                     let redacted_args = crate::audit::redact(&args, sensitive);
+                    let (app, cluster, resource) = crate::audit::describe_target(&redacted_args);
                     server.audit().record(crate::audit::AuditRecord {
-                        transport,
+                        source: transport.into(),
                         tool: name.to_string(),
+                        app,
+                        cluster,
+                        resource,
                         error: Some(crate::audit::redact_error(&reason, &args, &redacted_args)),
                         args: redacted_args,
                         decision: "denied",
-                        outcome: "error",
+                        // Nothing ran: the refusal is the whole event.
+                        outcome: crate::audit::OUTCOME_REJECTED,
                     });
                     // A result, not a transport error, so the agent can adapt.
                     // `_meta` (reserved by MCP for exactly this) marks the
@@ -185,22 +190,14 @@ pub async fn handle_request(
                 decision = "approved";
             }
 
-            let called = server.call_tool(name, args.clone()).await;
-            // The error is scrubbed against the same redaction: a refused
+            // The registry records it: redaction, the error scrub (a refused
             // argument is echoed by the refusal, and the log must not learn
-            // from the message what it was denied from the arguments.
-            let redacted_args = crate::audit::redact(&args, sensitive);
-            server.audit().record(crate::audit::AuditRecord {
-                transport,
-                tool: name.to_string(),
-                error: called
-                    .as_ref()
-                    .err()
-                    .map(|e| crate::audit::redact_error(&e.to_string(), &args, &redacted_args)),
-                args: redacted_args,
-                decision,
-                outcome: if called.is_ok() { "ok" } else { "error" },
-            });
+            // from the message what it was denied from the arguments) and the
+            // outcome all live there, so a UI-sourced call of the same
+            // capability lands in the trail in the identical shape (#555).
+            let called = server
+                .call_tool_audited(name, args, transport, decision)
+                .await;
             let result = match called {
                 Ok(v) => json!({
                     "content": [{ "type": "text", "text": v.to_string() }],
@@ -322,11 +319,10 @@ pub async fn handle_request(
             } else {
                 let capability_id =
                     read.capability.capability_id().expect("the None arm returned above");
-                // `McpServer::call_tool` is a bare registry invocation with no
-                // gating or auditing of its own — that lives in the
-                // `tools/call` arm, wrapped around the same call. This arm
-                // reproduces both here so a resource read leaves the same
-                // audit trail as the identical read via `tools/call`.
+                // The gate is reproduced here so a resource read leaves the
+                // same audit trail as the identical read via `tools/call`;
+                // the recording of the call itself is the registry's, through
+                // `call_tool_audited`.
                 if server.consent_kind(capability_id).is_some() {
                     // Unreachable today: `plan_read` only ever names the
                     // unconditionally-read-only capabilities in the
@@ -339,33 +335,26 @@ pub async fn handle_request(
                     let message = format!(
                         "{capability_id} is consent-gated and must be called as a tool, not read as a resource"
                     );
+                    let redacted_args =
+                        crate::audit::redact(&read.args, server.is_sensitive(capability_id));
+                    let (app, cluster, resource) = crate::audit::describe_target(&redacted_args);
                     server.audit().record(crate::audit::AuditRecord {
-                        transport,
+                        source: transport.into(),
                         tool: capability_id.to_string(),
-                        args: crate::audit::redact(
-                            &read.args,
-                            server.is_sensitive(capability_id),
-                        ),
+                        app,
+                        cluster,
+                        resource,
+                        args: redacted_args,
                         decision: "denied",
-                        outcome: "error",
+                        outcome: crate::audit::OUTCOME_REJECTED,
                         error: Some(message.clone()),
                     });
                     return Some(err(id?, -32602, &message));
                 }
 
-                let sensitive = server.is_sensitive(capability_id);
-                let redacted_args = crate::audit::redact(&read.args, sensitive);
-                let called = server.call_tool(capability_id, read.args.clone()).await;
-                server.audit().record(crate::audit::AuditRecord {
-                    transport,
-                    tool: capability_id.to_string(),
-                    error: called.as_ref().err().map(|e| {
-                        crate::audit::redact_error(&e.to_string(), &read.args, &redacted_args)
-                    }),
-                    args: redacted_args,
-                    decision: "auto",
-                    outcome: if called.is_ok() { "ok" } else { "error" },
-                });
+                let called = server
+                    .call_tool_audited(capability_id, read.args, transport, "auto")
+                    .await;
 
                 match called {
                     Ok(v) => match &v {
@@ -427,11 +416,14 @@ pub(crate) fn handle_subscription(
         Ok(u) => u,
         Err(message) => {
             server.audit().record(crate::audit::AuditRecord {
-                transport,
+                source: transport.into(),
+                app: None,
+                cluster: None,
+                resource: None,
                 tool: method.to_string(),
                 args: crate::audit::redact(&json!({"uri": uri_str}), false),
                 decision: "auto",
-                outcome: "error",
+                outcome: crate::audit::OUTCOME_REJECTED,
                 error: Some(message.clone()),
             });
             return Some(err(id, -32602, &message));
@@ -443,11 +435,14 @@ pub(crate) fn handle_subscription(
     if method == "resources/unsubscribe" {
         subs.remove(&canonical);
         server.audit().record(crate::audit::AuditRecord {
-            transport,
+            source: transport.into(),
+            app: None,
+            cluster: None,
+            resource: None,
             tool: method.to_string(),
             args: crate::audit::redact(&json!({"uri": uri_str}), false),
             decision: "auto",
-            outcome: "ok",
+            outcome: crate::audit::OUTCOME_OK,
             error: None,
         });
         return Some(ok(id, json!({})));
@@ -455,11 +450,14 @@ pub(crate) fn handle_subscription(
 
     if let Err(message) = crate::resources::is_subscribable(&uri) {
         server.audit().record(crate::audit::AuditRecord {
-            transport,
+            source: transport.into(),
+            app: None,
+            cluster: None,
+            resource: None,
             tool: method.to_string(),
             args: crate::audit::redact(&json!({"uri": uri_str}), false),
             decision: "auto",
-            outcome: "error",
+            outcome: crate::audit::OUTCOME_REJECTED,
             error: Some(message.clone()),
         });
         return Some(err(id, -32602, &message));
@@ -474,11 +472,14 @@ pub(crate) fn handle_subscription(
     // eventual read agree on what's addressable.
     if let Err(message) = crate::resources::plan_read(&uri, server.kind_resolver().as_ref()) {
         server.audit().record(crate::audit::AuditRecord {
-            transport,
+            source: transport.into(),
+            app: None,
+            cluster: None,
+            resource: None,
             tool: method.to_string(),
             args: crate::audit::redact(&json!({"uri": uri_str}), false),
             decision: "auto",
-            outcome: "error",
+            outcome: crate::audit::OUTCOME_REJECTED,
             error: Some(message.clone()),
         });
         return Some(err(id, -32602, &message));
@@ -552,11 +553,14 @@ pub(crate) fn handle_subscription(
         Ok(h) => h,
         Err(message) => {
             server.audit().record(crate::audit::AuditRecord {
-                transport,
+                source: transport.into(),
+                app: None,
+                cluster: None,
+                resource: None,
                 tool: method.to_string(),
                 args: crate::audit::redact(&json!({"uri": uri_str}), false),
                 decision: "auto",
-                outcome: "error",
+                outcome: crate::audit::OUTCOME_REJECTED,
                 error: Some(message.clone()),
             });
             return Some(err(id, -32602, &message));
@@ -572,11 +576,15 @@ pub(crate) fn handle_subscription(
         handle.abort();
         let message = format!("the watch ended immediately: {reason}");
         server.audit().record(crate::audit::AuditRecord {
-            transport,
+            source: transport.into(),
+            app: None,
+            cluster: None,
+            resource: None,
             tool: method.to_string(),
             args: crate::audit::redact(&json!({"uri": uri_str}), false),
             decision: "auto",
-            outcome: "error",
+            // The subscribe was accepted; the watch behind it died.
+            outcome: crate::audit::OUTCOME_FAILED,
             error: Some(message.clone()),
         });
         return Some(err(id, -32603, &message));
@@ -585,11 +593,14 @@ pub(crate) fn handle_subscription(
         Ok(generation) => generation,
         Err(message) => {
             server.audit().record(crate::audit::AuditRecord {
-                transport,
+                source: transport.into(),
+                app: None,
+                cluster: None,
+                resource: None,
                 tool: method.to_string(),
                 args: crate::audit::redact(&json!({"uri": uri_str}), false),
                 decision: "auto",
-                outcome: "error",
+                outcome: crate::audit::OUTCOME_REJECTED,
                 error: Some(message.clone()),
             });
             return Some(err(id, -32602, &message));
@@ -607,21 +618,28 @@ pub(crate) fn handle_subscription(
         subs.remove_if(&canonical, generation);
         let message = format!("the watch ended immediately: {reason}");
         server.audit().record(crate::audit::AuditRecord {
-            transport,
+            source: transport.into(),
+            app: None,
+            cluster: None,
+            resource: None,
             tool: method.to_string(),
             args: crate::audit::redact(&json!({"uri": uri_str}), false),
             decision: "auto",
-            outcome: "error",
+            // The subscribe was accepted; the watch behind it died.
+            outcome: crate::audit::OUTCOME_FAILED,
             error: Some(message.clone()),
         });
         return Some(err(id, -32603, &message));
     }
     server.audit().record(crate::audit::AuditRecord {
-        transport,
+        source: transport.into(),
+        app: None,
+        cluster: None,
+        resource: None,
         tool: method.to_string(),
         args: crate::audit::redact(&json!({"uri": uri_str}), false),
         decision: "auto",
-        outcome: "ok",
+        outcome: crate::audit::OUTCOME_OK,
         error: None,
     });
     Some(ok(id, json!({})))
@@ -1288,7 +1306,7 @@ mod tests {
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
         let rec = &seen[0];
         assert_eq!(rec.decision, "approved");
-        assert_eq!(rec.outcome, "error");
+        assert_eq!(rec.outcome, crate::audit::OUTCOME_REJECTED);
         let error = rec.error.as_deref().expect("the refusal is recorded");
         assert!(
             error.contains("expected a map"),
@@ -2753,10 +2771,10 @@ mod tests {
 
         let seen = spy.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
-        assert_eq!(seen[0].transport, crate::Transport::Stdio);
+        assert_eq!(seen[0].source, crate::audit::Source::McpStdio);
         assert_eq!(seen[0].tool, "resources/subscribe");
         assert_eq!(seen[0].decision, "auto");
-        assert_eq!(seen[0].outcome, "ok");
+        assert_eq!(seen[0].outcome, crate::audit::OUTCOME_OK);
         assert_eq!(seen[0].args, json!({"uri": "k8s://c/ns/Pod/web-0"}));
         assert!(seen[0].error.is_none(), "a success carries no error");
     }
@@ -2783,7 +2801,7 @@ mod tests {
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
         assert_eq!(seen[0].tool, "resources/subscribe");
         assert_eq!(seen[0].decision, "auto");
-        assert_eq!(seen[0].outcome, "error");
+        assert_eq!(seen[0].outcome, crate::audit::OUTCOME_REJECTED);
         assert_eq!(seen[0].args, json!({"uri": "k8s://catalog"}));
         let message = seen[0].error.as_deref().unwrap_or_default();
         assert!(message.contains("static"), "the reason must survive, got: {message}");
@@ -2808,7 +2826,7 @@ mod tests {
 
         let seen = spy.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
-        assert_eq!(seen[0].outcome, "error");
+        assert_eq!(seen[0].outcome, crate::audit::OUTCOME_REJECTED);
         let message = seen[0].error.as_deref().unwrap_or_default();
         assert!(
             message.contains("not addressable"),
@@ -2857,7 +2875,7 @@ mod tests {
 
         let seen = spy.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
-        assert_eq!(seen[0].outcome, "error");
+        assert_eq!(seen[0].outcome, crate::audit::OUTCOME_REJECTED);
         let message = seen[0].error.as_deref().unwrap_or_default();
         assert!(message.contains("refused"), "the reason must survive, got: {message}");
     }
@@ -2885,7 +2903,7 @@ mod tests {
 
         let seen = spy.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
-        assert_eq!(seen[0].outcome, "error");
+        assert_eq!(seen[0].outcome, crate::audit::OUTCOME_REJECTED);
         let message = seen[0].error.as_deref().unwrap_or_default();
         assert!(message.contains("too many"), "the reason must survive, got: {message}");
     }
@@ -2907,10 +2925,10 @@ mod tests {
 
         let seen = spy.0.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "expected one audit record, got {seen:?}");
-        assert_eq!(seen[0].transport, crate::Transport::Stdio);
+        assert_eq!(seen[0].source, crate::audit::Source::McpStdio);
         assert_eq!(seen[0].tool, "resources/unsubscribe");
         assert_eq!(seen[0].decision, "auto");
-        assert_eq!(seen[0].outcome, "ok");
+        assert_eq!(seen[0].outcome, crate::audit::OUTCOME_OK);
         assert_eq!(seen[0].args, json!({"uri": "k8s://c/ns/Pod/web-0"}));
         assert!(seen[0].error.is_none(), "an unsubscribe carries no error");
     }

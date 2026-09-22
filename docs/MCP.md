@@ -161,9 +161,43 @@ limits do.
   surface.
 - Every call is recorded to an **audit log** at
   `<app config dir>/mcp/audit.jsonl` (mode `0600`, rotated once to `.1` past
-  5 MB), viewable in Settings → MCP under recent agent activity. Argument
-  values are redacted before they're written, so the log records the shape
-  of a call without its contents:
+  5 MB), viewable in Settings → MCP under recent capability activity.
+
+  **It is not only MCP's log.** A capability invoked from srelens's own
+  windows is recorded in the same file, in the same format — an Argo CD sync
+  or a Flux reconcile you click leaves a record, not just the identical call
+  made by an agent. The sink sits beside the capability registry
+  (`crates/capability/src/audit.rs`), which is the one place the two callers
+  meet, so `Registry::invoke_audited` writes the record whichever side asked.
+  Each line carries the time, the `source` (`ui` or `mcp`) and the
+  `transport` under it (`ui`, `stdio`, `http`), the capability, the app `id`
+  and `revision` when the call went through an installed app, the `cluster`
+  and `resource` it named, the consent `decision`, and an `outcome` of `ok`,
+  `rejected` (it never ran — consent refused, arguments refused, no such
+  capability) or `failed` (it ran and did not finish).
+
+  **Records written by an older srelens are still readable.** Lines from
+  before these fields existed carry no `source` and an `outcome` of `error`;
+  they are upgraded as the log is read — `source` becomes `mcp`, since
+  nothing else could have written them, and `error` becomes `rejected` or
+  `failed` according to the decision beside it. `app`, `cluster` and
+  `resource` read as absent on those rows, which is what they are.
+
+  **What is recorded differs by source, on purpose.** MCP records every call
+  an agent makes, reads included, because that is the question the trail
+  answers about a third party. From srelens itself only mutating and
+  sensitive capabilities are recorded — the safety classes below, minus plain
+  read-only — because a single screen makes dozens of reads a minute and
+  burying the writes under them would cost the log its use. Your own reads
+  are therefore absent from the trail; their absence is not evidence.
+
+  **The log never leaves your machine.** It is a file in your app config
+  directory, read by the Settings pane on the same host. Nothing uploads it,
+  and there is no export yet
+  ([#371](https://github.com/srelens/srelens/issues/371)).
+
+  Argument values are redacted before they're written, so the log records the
+  shape of a call without its contents:
   - sensitive capabilities redact every value;
   - keys that look like credentials (`token`, `secret`, `password`, `key`)
     are redacted at any nesting depth;
@@ -176,6 +210,18 @@ limits do.
     every value. An app's settings are free-form and nothing marks one as
     secret, so a value under `credential` or `certificate` would otherwise be
     written verbatim — for a denied call too;
+  - a URL loses its credentials and keeps the rest. `helm repo add` documents
+    `https://user:token@host/charts` for a private repository, and
+    `k8s.helmRepoAdd` is audited because it mutates, so the userinfo and any
+    credential-bearing query parameter (`token`, `sig`, `access_key`, …) are
+    blanked while the scheme, host and path stay — the record still says
+    which repository was added. Parameter names are matched after decoding,
+    so `?to%6ben=` is caught as `token`, and the fragment is dropped whole:
+    it never reaches the server, so it names no repository, and `#hunter2`
+    has no `name=value` shape for a credential rule to read. This follows the
+    value, not the key name, so an `oci://user:pass@registry/chart` passed as
+    `chart` to `k8s.helmInstall` is scrubbed too. A value under a field that
+    promises a URL and does not parse as one is dropped whole;
   - a recorded error message is scrubbed of every value the rules above
     removed, because a capability that refuses an argument tends to echo it
     (`invalid type: string "…", expected a map`).

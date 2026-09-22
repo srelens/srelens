@@ -11,7 +11,11 @@ const DECISION_VARIANT: Record<AuditEntry["decision"], BadgeVariant> = {
 
 const OUTCOME_VARIANT: Record<AuditEntry["outcome"], BadgeVariant> = {
   ok: "success",
-  error: "danger",
+  // Two different answers to "did it happen?": srelens would not do it, or the
+  // cluster would not. The backend tells them apart (#555), so neither the
+  // word nor the colour collapses them back together.
+  rejected: "warning",
+  failed: "danger",
 };
 
 // Table rows need a stable key that survives sorting; the fetch-order index
@@ -44,15 +48,20 @@ interface McpAuditListProps {
 }
 
 /**
- * Recent MCP tool calls — what an agent actually did, and whether it was
- * allowed.
+ * Recent capability calls — what an agent did over MCP, what was changed in
+ * srelens itself, and whether each was allowed.
+ *
+ * **Not only agents, since #555.** The UI path reaches the same trail now, so
+ * every label here names *capability* activity rather than agent activity. A
+ * reader who saw "No agent activity yet" over an Argo CD sync they had just
+ * clicked would draw exactly the wrong conclusion from a true sentence.
  *
  * **Loading, unreadable and empty are three states here.** `auditTail` used to
  * swallow every refusal and resolve to `[]`, so this panel could only ever say
- * "No agent activity yet." — the same words for a quiet cluster and for a
- * trail srelens could not read at all. It rejects now, and the refusal gets a
- * surface of its own: on the panel whose subject is what an agent did, "we do
- * not know" must not be printed as "nothing happened".
+ * it had no activity — the same words for a quiet cluster and for a trail
+ * srelens could not read at all. It rejects now, and the refusal gets a
+ * surface of its own: on the panel whose subject is what was done, "we do not
+ * know" must not be printed as "nothing happened".
  */
 export function McpAuditList({ onRefresh }: McpAuditListProps = {}) {
   const [entries, setEntries] = useState<AuditEntry[] | null>(null);
@@ -96,7 +105,7 @@ export function McpAuditList({ onRefresh }: McpAuditListProps = {}) {
           size="sm"
           className="ml-auto"
           onClick={refresh}
-          aria-label="Refresh agent activity"
+          aria-label="Refresh capability activity"
         >
           <RefreshCw data-icon="inline-start" />
           Refresh
@@ -104,18 +113,18 @@ export function McpAuditList({ onRefresh }: McpAuditListProps = {}) {
       </div>
       {error !== null ? (
         <ErrorState
-          title="The agent activity log could not be read"
+          title="The capability activity log could not be read"
           detail={describeError(error).detail}
           onRetry={refresh}
         />
       ) : entries === null ? (
-        <Spinner label="Loading agent activity" />
+        <Spinner label="Loading capability activity" />
       ) : (
         <Table
           columns={columns}
           data={entries.map((entry, id) => ({ ...entry, id }))}
           getRowKey={(row) => String(row.id)}
-          emptyText="No agent activity yet."
+          emptyText="No capability activity yet."
         />
       )}
     </div>

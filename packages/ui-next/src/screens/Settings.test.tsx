@@ -212,7 +212,7 @@ describe("Settings", () => {
     paint();
     expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
     expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
-    expect(screen.getByText(/every capability call/i)).toBeTruthy();
+    expect(screen.getByText(/every change made here/i)).toBeTruthy();
     const nested = screen.getByText("Providers").closest(".card")?.parentElement;
     expect(nested?.className).toContain("settings-agent-groups");
     expect(nested?.className).not.toContain("gap-4");
@@ -366,7 +366,7 @@ describe("Settings", () => {
         await user.click(screen.getByRole("tab", { name: label }));
       }
       expect(screen.queryByText(/drops in-flight requests/i)).toBeNull();
-      expect(screen.queryByText(/every capability call/i)).toBeNull();
+      expect(screen.queryByText(/every change made here/i)).toBeNull();
       expect(screen.queryByRole("button", { name: /start server/i })).toBeNull();
       expect(core.getMcpToken).not.toHaveBeenCalled();
       expect(core.mcpHttpStatus).not.toHaveBeenCalled();
@@ -437,7 +437,7 @@ describe("Settings", () => {
       paint();
       expect(await screen.findByText(/never without confirmation/i)).toBeTruthy();
       expect(screen.getByText(/drops in-flight requests/i)).toBeTruthy();
-      expect(screen.getByText(/every capability call/i)).toBeTruthy();
+      expect(screen.getByText(/every change made here/i)).toBeTruthy();
       expect(screen.queryByTestId("no-agent-server")).toBeNull();
     });
   });
