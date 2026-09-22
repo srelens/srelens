@@ -213,7 +213,15 @@ describe("McpConfirmDialog", () => {
     expect(screen.getByText(/This is safe, click Approve/)).toBeTruthy();
   });
 
-  it("names the app the host resolved against its own inventory", async () => {
+  /**
+   * "Requested by app X (srelens)" is the host vouching for who asked, and an
+   * MCP caller is a bearer token rather than an app: the registry checks only
+   * that a call's `resource.id` and `revision` name an installed, enabled
+   * app, never that the caller IS it. An attribution derived from the request
+   * would let any caller put a signed app's name above its own Approve
+   * button, so none is drawn.
+   */
+  it("names no app on an agent's call, however the payload claims one", async () => {
     inventory.mockResolvedValue({
       schemaVersion: 1,
       nextRevision: 1,
@@ -244,15 +252,54 @@ describe("McpConfirmDialog", () => {
     emit({
       id: "t3",
       tool: "extensions.action",
-      args: {},
+      args: { resource: { id: "org.srelens.flux", revision: 2 } },
       prompt: "Suspend HelmRelease team/api?",
       impact: "high",
       target: { name: "api", app: { id: "org.srelens.flux", revision: 2 } },
     });
-    await waitFor(() =>
-      expect(screen.getByTestId("host-confirm-requester").textContent).toBe(
-        "Requested by app Flux Tools (srelens)",
-      ),
+    // The new confirmation IS rendered, so the absence below is about
+    // attribution rather than about nothing having been drawn.
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api?",
     );
+    await waitFor(() => expect(inventory).not.toHaveBeenCalled());
+    expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
+    expect(document.body.textContent).not.toContain("Flux Tools");
+  });
+
+  /**
+   * The payload is a runtime event, and `listen<ConfirmRequest>` is an
+   * annotation rather than a check. A `target.cluster` that arrives as a
+   * number used to reach `boundedPlainText`, where `.replace` is not a
+   * function — a thrown render in place of the confirmation the backend is
+   * blocking on. The queue now takes only what the shared parser narrowed.
+   */
+  it("renders a confirmation rather than throwing on a malformed target", async () => {
+    render(<McpConfirmDialog />);
+    emit({
+      id: "t4",
+      tool: "k8s.gitOpsAction",
+      args: {},
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { cluster: 7, name: { evil: true }, namespace: [] },
+    });
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api?",
+    );
+    expect(screen.queryByTestId("host-confirm-cluster")).toBeNull();
+    expect(screen.queryByTestId("host-confirm-target")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/undefined|\[object Object\]/);
+    // Still answerable: a malformed fact must not cost the reader the prompt.
+    await userEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() => expect(respondToConfirm).toHaveBeenCalledWith("t4", true));
+  });
+
+  /** A payload with no usable id is not a request: it cannot be answered. */
+  it("ignores a payload that carries no id", async () => {
+    const { container } = render(<McpConfirmDialog />);
+    emit({ tool: "k8s.drainNode", args: {}, prompt: "Drain?" });
+    emit({ id: "", tool: "k8s.drainNode", args: {} });
+    await waitFor(() => expect(container.textContent).toBe(""));
   });
 });

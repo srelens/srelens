@@ -3,7 +3,7 @@ import { extensionLabel, useExtensions } from "../extensions/inventoryStore";
 import type { ConfirmationApp } from "./HostConfirmation";
 
 /**
- * Which app a call was made through, as the host derives it — an ID and the
+ * Which app a call was made through, as the HOST knows it — an ID and the
  * revision it was installed at, and nothing else.
  *
  * The NAME and the PUBLISHER are deliberately not here and never cross a wire.
@@ -11,6 +11,13 @@ import type { ConfirmationApp } from "./HostConfirmation";
  * {@link appIdentity}, so a caller cannot name itself in the sentence a person
  * is asked to approve, cannot claim a publisher, and cannot claim to be an app
  * at all — an ID that resolves to nothing draws no requester line.
+ *
+ * **This comes from host context, never from a request.** An app's own screen
+ * is rendered by the host from its own inventory, so the selection there names
+ * the app authentically. A `mcp://confirm-request` does not: an MCP client is
+ * a bearer token and nothing authenticates it as the app its arguments name,
+ * which is why `ConfirmTarget` carries no app and `RequestConfirmation` never
+ * builds one of these.
  */
 export interface ConfirmationAppRef {
   id: string;
@@ -32,13 +39,24 @@ export interface ConfirmationAppRef {
  * `extensionLabel` already applies in the app list, applied here because a
  * confirmation is where being taken for another app pays best — and its
  * signature is precisely what failed to re-verify.
+ *
+ * **The REVISION is part of the identity**, not decoration carried for its own
+ * sake. A review raised under revision 4 and answered after the app was
+ * replaced by revision 5 is not a review of revision 5: its name and its
+ * signature state may both differ, and vouching for the installed one would
+ * name an app that is not the one that asked. `resolve`
+ * (`crates/registry/src/extensions/resource.rs`) matches on `id` AND
+ * `revision` before it will run anything, so an action whose revision has
+ * moved on is one the host would refuse in any case — the line is dropped for
+ * the same reason an unknown ID drops it, and the reader is not told a name
+ * the host is about to disown.
  */
 export function appIdentity(
   plugins: readonly InstalledExtension[],
   ref: ConfirmationAppRef | null | undefined,
 ): ConfirmationApp | null {
   if (!ref) return null;
-  const plugin = plugins.find((p) => p.manifest.id === ref.id);
+  const plugin = plugins.find((p) => p.manifest.id === ref.id && p.revision === ref.revision);
   if (!plugin) return null;
   return {
     name: extensionLabel(plugin),

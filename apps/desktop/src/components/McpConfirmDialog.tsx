@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri, respondToConfirm, type ConfirmRequest } from "@srelens/core";
 import { notify } from "@srelens/core";
-import { RequestConfirmation } from "@srelens/ui-next/confirm";
+import { asConfirmRequest, RequestConfirmation } from "@srelens/ui-next/confirm";
 import { ConfirmDialog } from "../ui";
 
 /**
@@ -26,8 +26,15 @@ export function McpConfirmDialog() {
     // every web page load (#512). There is no consent flow to subscribe to on
     // the web anyway: the server denies every capability that would need one.
     if (!isTauri()) return;
-    const unlisten = listen<ConfirmRequest>("mcp://confirm-request", (event) => {
-      setQueue((q) => [...q, event.payload]);
+    // Narrowed, not cast. `listen<ConfirmRequest>` is an annotation: the
+    // payload crosses a process boundary and is `unknown` at runtime, and a
+    // `target.cluster` arriving as a number used to reach the text helpers and
+    // throw — a blank screen in place of the confirmation the backend is
+    // blocking on. One parser for this event, shared with the other two
+    // listeners (#552).
+    const unlisten = listen<unknown>("mcp://confirm-request", (event) => {
+      const request = asConfirmRequest(event.payload);
+      if (request) setQueue((q) => [...q, request]);
     });
     // The backend announces every resolution (answered here, answered on the
     // assistant's inline card, or timed out) — drop the request however it

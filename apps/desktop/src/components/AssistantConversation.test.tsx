@@ -1747,7 +1747,32 @@ describe("the inline confirmation card's host metadata (#548)", () => {
    * reader answering on the card was answering with less than a reader
    * answering on the modal.
    */
-  it("names the cluster, the object and the app, exactly as the modal does", async () => {
+  it("names the cluster and the object, exactly as the modal does", async () => {
+    marker.__TAURI_INTERNALS__ = {};
+    render(<AssistantConversation />);
+    await ask({
+      id: "c3",
+      tool: "extensions.action",
+      args: { resource: { context: "prod", namespace: "team", name: "api" } },
+      prompt: "Suspend HelmRelease team/api in cluster prod?",
+      impact: "high",
+      target: { cluster: "prod", namespace: "team", name: "api", kind: "HelmRelease" },
+    });
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api in cluster prod?",
+    );
+    expect(screen.getByTestId("host-confirm-impact").textContent).toBe("High impact");
+    expect(screen.getByTestId("host-confirm-cluster").textContent).toBe("prod");
+    expect(screen.getByTestId("host-confirm-target").textContent).toBe("team/api");
+  });
+
+  /**
+   * An MCP caller is a bearer token, not an app: nothing authenticates it as
+   * the app its arguments name, so the card vouches for no requester however
+   * the payload claims one — and does not go looking in the inventory for a
+   * name to print.
+   */
+  it("names no app on an agent's call, however the payload claims one", async () => {
     inventory.mockResolvedValue({
       schemaVersion: 1,
       nextRevision: 1,
@@ -1770,35 +1795,51 @@ describe("the inline confirmation card's host metadata (#548)", () => {
           source: "local",
           installedAt: 0,
           history: [],
+          signatureProof: { manifest: "{}", signature: [1] },
         },
       ],
     });
     marker.__TAURI_INTERNALS__ = {};
     render(<AssistantConversation />);
     await ask({
-      id: "c3",
+      id: "c4",
       tool: "extensions.action",
-      args: { resource: { context: "prod", namespace: "team", name: "api" } },
-      prompt: "Suspend HelmRelease team/api in cluster prod?",
+      args: { resource: { id: "org.srelens.flux", revision: 2 } },
+      prompt: "Suspend HelmRelease team/api?",
       impact: "high",
-      target: {
-        cluster: "prod",
-        namespace: "team",
-        name: "api",
-        kind: "HelmRelease",
-        app: { id: "org.srelens.flux", revision: 2 },
-      },
+      target: { name: "api", app: { id: "org.srelens.flux", revision: 2 } },
     });
     expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
-      "Suspend HelmRelease team/api in cluster prod?",
+      "Suspend HelmRelease team/api?",
     );
-    expect(screen.getByTestId("host-confirm-impact").textContent).toBe("High impact");
-    expect(screen.getByTestId("host-confirm-cluster").textContent).toBe("prod");
-    expect(screen.getByTestId("host-confirm-target").textContent).toBe("team/api");
-    await waitFor(() =>
-      expect(screen.getByTestId("host-confirm-requester").textContent).toBe(
-        "Requested by app Flux Tools (unsigned)",
-      ),
+    await waitFor(() => expect(inventory).not.toHaveBeenCalled());
+    expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
+    expect(document.body.textContent).not.toContain("Flux Tools");
+  });
+
+  /**
+   * `listen<ConfirmRequest>` is an annotation, not a check. A `target.cluster`
+   * arriving as a number used to reach `boundedPlainText`, where `.replace` is
+   * not a function — the transcript threw instead of drawing the card the
+   * backend is blocking on.
+   */
+  it("renders a card rather than throwing on a malformed target", async () => {
+    marker.__TAURI_INTERNALS__ = {};
+    render(<AssistantConversation />);
+    await ask({
+      id: "c5",
+      tool: "k8s.gitOpsAction",
+      args: {},
+      prompt: "Suspend HelmRelease team/api?",
+      impact: "high",
+      target: { cluster: 7, name: { evil: true } },
+    });
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api?",
     );
+    expect(screen.queryByTestId("host-confirm-cluster")).toBeNull();
+    expect(screen.queryByTestId("host-confirm-target")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/\[object Object\]/);
+    expect(screen.getByRole("button", { name: /^approve$/i })).toBeTruthy();
   });
 });

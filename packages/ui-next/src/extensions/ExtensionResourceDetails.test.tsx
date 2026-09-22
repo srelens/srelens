@@ -184,7 +184,34 @@ it("falls back to no sentence rather than half of one when the host authored non
  fireEvent.click(await screen.findByRole("button",{name:"Suspend"}));
  const dialog=screen.getByRole("dialog");
  expect(screen.queryByTestId("host-confirm-question")).toBeNull();
- // The facts and the level are still named: they do not depend on a template.
- expect(dialog.textContent).toContain("cluster/a");
+ // Absences alone would pass against the OLD review too — it had no
+ // `host-confirm-question` either, and it also printed the context. So the
+ // test is anchored on what only the new one does: the facts are drawn as
+ // the one confirmation's own rows, and the description the UI used to keep
+ // in a constant beside the buttons is gone.
+ expect(screen.getByTestId("host-confirm-cluster").textContent).toBe("cluster/a");
+ expect(screen.getByTestId("host-confirm-target").textContent).toBe("team/apps");
+ expect(dialog.textContent).not.toContain("Pause future reconciliation");
  expect(dialog.textContent).not.toMatch(/undefined|null/);
+});
+
+/**
+ * The app the reader is told asked must be the one the host will actually run
+ * the action as. An update while this review is open moves the installed
+ * revision past the one the selection pinned, and `resolve`
+ * (`crates/registry/src/extensions/resource.rs`) would refuse that action —
+ * so the line is dropped rather than naming a version that did not ask.
+ */
+it("names no app once it has been replaced under an open review",async()=>{
+ installedApps([{...fluxApp,revision:9}]);
+ vi.mocked(inspectExtensionResource).mockResolvedValue(withMeta);
+ render(<ExtensionResourceDetails selection={selection}/>);
+ fireEvent.click(await screen.findByRole("button",{name:"Suspend"}));
+ const dialog=screen.getByRole("dialog");
+ // The new confirmation IS drawn, so this is about attribution and not about
+ // the review failing to render.
+ expect(dialog.textContent).toContain("Suspend Kustomization team/apps in cluster cluster/a?");
+ await waitFor(()=>expect(listExtensions).toHaveBeenCalled());
+ expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
+ expect(dialog.textContent).not.toContain("Flux Tools");
 });

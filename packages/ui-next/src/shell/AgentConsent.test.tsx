@@ -1104,7 +1104,14 @@ describe("the host's own words", () => {
     expect(screen.getByTestId("host-confirm-target").textContent).toBe("team/api");
   });
 
-  /** A malformed target is dropped, not drawn: no `undefined` under Approve. */
+  /**
+   * A malformed target is dropped, not drawn: no `undefined` under Approve,
+   * and no crash from handing a number to the text helpers.
+   *
+   * The absences below only mean something beside the presence above them —
+   * the old dialog had no fact rows either, so a test of absences alone would
+   * pass against it and prove nothing.
+   */
   it("draws no fact it was not sent", async () => {
     await mount();
     askWith({
@@ -1116,17 +1123,26 @@ describe("the host's own words", () => {
       target: { cluster: 7, name: null },
     });
     const dialog = await screen.findByRole("dialog");
+    expect(screen.getByTestId("host-confirm-question").textContent).toBe("Install Helm?");
+    expect(screen.getByTestId("host-confirm-impact").textContent).toBe("Medium impact");
     expect(dialog.textContent).not.toMatch(/undefined|null/);
+    expect(dialog.textContent).not.toContain("7");
     expect(screen.queryByTestId("host-confirm-cluster")).toBeNull();
     expect(screen.queryByTestId("host-confirm-target")).toBeNull();
   });
 
   /**
-   * The app is named from the host's own installed inventory, keyed by the ID
-   * the host derived. Nothing the caller sent names the app — so an ID that
-   * matches nothing installed draws no requester line at all.
+   * **An agent's call is attributed to no app, whatever it claims.**
+   *
+   * "Requested by app X (srelens)" is the host vouching for who asked.
+   * `extensions.action` is reachable over MCP and the registry only checks
+   * that the ID and revision name an installed, enabled app — nothing
+   * authenticates the caller AS that app. So an attribution derived from the
+   * request would be provenance chosen by the party being vouched for, and
+   * it is not drawn: not from a `target.app` the payload invents, and not
+   * from a real installed app named in one.
    */
-  it("names the app the host resolved, and nothing when it resolves to none", async () => {
+  it("names no app on an agent's call, however the payload claims one", async () => {
     core.listExtensions.mockResolvedValue({
       schemaVersion: 1,
       nextRevision: 1,
@@ -1149,6 +1165,7 @@ describe("the host's own words", () => {
           source: "local",
           installedAt: 0,
           history: [],
+          signatureProof: { manifest: "{}", signature: [1] },
         },
       ],
     } as never);
@@ -1156,26 +1173,20 @@ describe("the host's own words", () => {
     askWith({
       id: "t3",
       tool: "extensions.action",
-      args: {},
+      args: { resource: { id: "org.srelens.flux", revision: 2 } },
       prompt: "Suspend HelmRelease team/api?",
       impact: "high",
       target: { name: "api", app: { id: "org.srelens.flux", revision: 2 } },
     });
-    await waitFor(() =>
-      expect(screen.getByTestId("host-confirm-requester").textContent).toBe(
-        "Requested by app Flux Tools (unsigned)",
-      ),
+    // The question IS drawn — this is the new confirmation, not the old
+    // dialog, so the absence below is about attribution and not about the
+    // component failing to render.
+    expect((await screen.findByTestId("host-confirm-question")).textContent).toBe(
+      "Suspend HelmRelease team/api?",
     );
-    act(() => emit(RESOLVED, { id: "t3" }));
-    askWith({
-      id: "t4",
-      tool: "extensions.action",
-      args: {},
-      prompt: "Suspend HelmRelease team/api?",
-      impact: "high",
-      target: { name: "api", app: { id: "not.installed", revision: 1 } },
-    });
-    await screen.findByRole("dialog");
+    expect(screen.getByTestId("host-confirm-target").textContent).toBe("api");
+    await waitFor(() => expect(core.listExtensions).not.toHaveBeenCalled());
     expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
+    expect(screen.getByRole("dialog").textContent).not.toContain("Flux Tools");
   });
 });

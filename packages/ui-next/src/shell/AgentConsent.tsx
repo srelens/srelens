@@ -1,11 +1,9 @@
 import { useEffect, useState } from "react";
 import {
-  CAPABILITY_IMPACT_ORDER,
   isTauri,
   pendingConfirms,
   respondToConfirm,
   subscribe,
-  type CapabilityImpact,
   type ConfirmRequest,
 } from "@srelens/core";
 import { getRun, noteGate, noteGateIn, runKeyHoldingGate } from "../lib/agentRun";
@@ -13,7 +11,7 @@ import { Alert, ConfirmDialog } from "@srelens/ui-kit";
 import { FailureLine } from "../lib/errorCopy";
 import { useWorkspaceSealed } from "./LockGate";
 import { RequestConfirmation } from "../confirm/RequestConfirmation";
-import { asConfirmTarget } from "../confirm/confirmRequest";
+import { asConfirmRequest } from "../confirm/confirmRequest";
 
 /**
  * The consent prompt for an MCP tool call: this design's port of classic's
@@ -49,7 +47,7 @@ import { asConfirmTarget } from "../confirm/confirmRequest";
  *   `@tauri-apps/api/event`. This package depends on `@srelens/core` and
  *   `@srelens/ui-kit` and nothing else, and core's bus is the abstraction every
  *   other backend event in srelens goes through. It hands the payload as
- *   `unknown`, so {@link asRequest} narrows it instead of casting — a malformed
+ *   `unknown`, so {@link asConfirmRequest} narrows it instead of casting — a malformed
  *   payload is ignored rather than rendered as a question with `undefined` in
  *   it. It is `subscribe` and not `on` for a reason the replay paragraph below
  *   gives.
@@ -198,36 +196,13 @@ import { asConfirmTarget } from "../confirm/confirmRequest";
  */
 
 /**
- * The payload the backend emits, narrowed rather than cast.
- *
- * `subscribe` types a payload as `unknown` — correctly, it crosses a process
- * boundary — so this is the one place that decides a message is a request. A shape that
- * does not match is ignored: there is no id to answer with, and drawing a card
- * headed `undefined` over a call that will time out anyway tells the reader
- * nothing they can act on.
+ * The narrowing that used to live here is now `asConfirmRequest`
+ * (`confirm/confirmRequest.ts`), because this was never the only listener:
+ * classic's `McpConfirmDialog` and the assistant transcript hear the same
+ * event and used to push `event.payload` straight into state on a
+ * `listen<ConfirmRequest>` annotation, which checks nothing at runtime. One
+ * parser for one event, beside the component that draws what it produces.
  */
-function asRequest(payload: unknown): ConfirmRequest | null {
-  if (typeof payload !== "object" || payload === null) return null;
-  const { id, tool, args, prompt, impact, target } = payload as Partial<ConfirmRequest>;
-  if (typeof id !== "string" || id === "" || typeof tool !== "string") return null;
-  return {
-    id,
-    tool,
-    args: typeof args === "object" && args !== null ? args : {},
-    // Narrowed field by field for the same reason `prompt` is: these are the
-    // facts drawn under the question, and one of them arriving as `undefined`
-    // is the hole a malformed — or hostile — payload would aim for.
-    target: asConfirmTarget(target),
-    // Narrowed like everything else that crosses the boundary. A `prompt` that
-    // is not a non-empty string is dropped rather than rendered: this is the
-    // sentence over an Approve button, and `undefined` drawn there is exactly
-    // the hole the backend's own fallback exists to avoid.
-    prompt: typeof prompt === "string" && prompt !== "" ? prompt : null,
-    impact: IMPACTS.includes(impact as CapabilityImpact) ? (impact as CapabilityImpact) : undefined,
-  };
-}
-
-const IMPACTS: readonly string[] = CAPABILITY_IMPACT_ORDER;
 
 /**
  * The level's badge, the sentence and the facts beneath it now belong to
@@ -346,7 +321,7 @@ export function AgentConsent() {
       });
       if (!hearingResolutions) return;
       const hearingRequests = await listen("mcp://confirm-request", (payload) => {
-        const request = asRequest(payload);
+        const request = asConfirmRequest(payload);
         if (request) setQueue((q) => [...q, request]);
       });
       if (!hearingRequests) return;
@@ -363,7 +338,7 @@ export function AgentConsent() {
       const settled = resolvedMeanwhile ?? new Set<string>();
       resolvedMeanwhile = null;
       const requests = waiting
-        .map(asRequest)
+        .map(asConfirmRequest)
         .filter((r): r is ConfirmRequest => r !== null && !settled.has(r.id));
       if (requests.length > 0) setQueue((q) => mergeById(q, requests));
     })();

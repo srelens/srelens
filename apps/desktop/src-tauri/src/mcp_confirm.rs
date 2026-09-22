@@ -82,6 +82,22 @@ pub struct PendingRequest {
 /// Every field is optional and an absent one stays `None`: a call that names
 /// no namespace and one that names the empty namespace are different facts,
 /// and the surface draws them apart.
+///
+/// **There is deliberately no `app` here**, and that is a decision rather than
+/// an omission. The confirmation's "Requested by app … (signed by …)" is the
+/// host vouching for who asked, and on this path the host has no grounds for
+/// it. `extensions.action` is reachable over MCP; the registry checks that
+/// `resource.id` and `revision` name an installed, enabled app, but nothing
+/// authenticates the CALLER as that app — an MCP client is a bearer token, not
+/// an app. Reading the attribution out of `args` would therefore let any
+/// caller put a signed app's name above its own Approve button: provenance
+/// chosen by the party being vouched for, which is the spoof #552 exists to
+/// prevent. Saying nothing is the honest answer and is what the window draws.
+///
+/// The line comes back when an authenticated, host-owned execution context
+/// carries the app — a declared action the host runs on an app's behalf
+/// (#549) — and not before. An app's own screens already have that context,
+/// and already draw the line (`ExtensionResourceDetails`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct ConfirmTarget {
     /// The kubeconfig context, escaped and bounded.
@@ -89,26 +105,6 @@ pub struct ConfirmTarget {
     pub namespace: Option<String>,
     pub name: Option<String>,
     pub kind: Option<String>,
-    /// The app this call was made through, when it was made through one.
-    pub app: Option<ConfirmApp>,
-}
-
-/// Which app asked — **only** its ID and the revision it was installed at.
-///
-/// The NAME and the PUBLISHER are deliberately not here. They are read on the
-/// other side from the host's own installed inventory, so a caller cannot name
-/// itself in the sentence a person is asked to approve and cannot claim a
-/// publisher. An ID that resolves to no installed app draws no requester line
-/// at all rather than a line built out of the ID.
-///
-/// The ID travels UNESCAPED, and that is the point: it is a lookup key, not
-/// text. An ID carrying anything a manifest's validation would have refused
-/// simply matches nothing in the inventory, which fails closed — whereas an
-/// escaped key would fail to match a perfectly good app.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct ConfirmApp {
-    pub id: String,
-    pub revision: u64,
 }
 
 impl PendingRequest {
@@ -121,9 +117,6 @@ impl PendingRequest {
         // disagree with the question.
         let fields = srelens_capability::confirm_fields(&request.args);
         let field = |key: &str| fields.get(key).cloned();
-        // And the same read the audit trail makes of "which app was this
-        // through" (`describe_target`), rather than a third one here.
-        let (app, _, _) = srelens_capability::audit::describe_target(&request.args);
         Self {
             id,
             tool: request.tool.clone(),
@@ -135,10 +128,6 @@ impl PendingRequest {
                 namespace: field("namespace"),
                 name: field("name"),
                 kind: field("kind"),
-                app: app.map(|a| ConfirmApp {
-                    id: a.id,
-                    revision: a.revision,
-                }),
             },
         }
     }
@@ -521,47 +510,44 @@ mod tests {
         assert_eq!(got.target.kind.as_deref(), Some("HelmRelease"));
     }
 
-    /// "Requested by app …" must be the host's claim, not the caller's. Only
-    /// the app's ID and revision travel — the name and the publisher are read
-    /// from the host's own installed inventory on the other side — and they
-    /// are derived from the call's own selection, so an argument that looks
-    /// like an app identity is not one.
+    /// **An MCP call attributes itself to no app, whatever its arguments say.**
+    ///
+    /// The confirmation's "Requested by app … (signed by …)" is the host
+    /// vouching for who asked, and on this path the host has no grounds for
+    /// it. `extensions.action` is reachable over MCP; the registry checks
+    /// that `resource.id`/`revision` name an installed, enabled app, but
+    /// nothing authenticates the CALLER as that app — an MCP client is a
+    /// bearer token, not an app. Deriving the line from `args` would let any
+    /// caller put a signed app's name on its own prompt, which is the exact
+    /// spoof #552 exists to prevent. It is better to say nothing than to say
+    /// something an attacker chose.
+    ///
+    /// The line comes back when an authenticated, host-owned execution
+    /// context carries the app — a declared action the host runs on an app's
+    /// behalf (#549) — and not before.
     #[test]
-    fn the_app_on_the_prompt_is_the_one_the_host_derived() {
+    fn an_mcp_call_is_attributed_to_no_app_whatever_its_arguments_claim() {
         let got = PendingRequest::from_consent(
             "id-7".into(),
             &consent(
                 "extensions.action",
                 Annotations::DESTRUCTIVE.with_confirm("Suspend[ {resource}]?"),
                 json!({
-                    "resource": { "id": "flux", "revision": 4, "context": "prod", "name": "api" },
+                    "resource": { "id": "org.srelens.flux", "revision": 4, "context": "prod", "name": "api" },
                     "action": "suspend",
                     "app": { "id": "srelens-core", "revision": 1 },
                 }),
             ),
         );
-        let app = got
-            .target
-            .app
-            .expect("the host reads the app off the selection");
-        assert_eq!(app.id, "flux");
-        assert_eq!(app.revision, 4);
-    }
-
-    /// A call that names no app draws no requester line rather than an empty
-    /// one: an agent's own call is not made through an app, and saying it was
-    /// would be the one claim on that surface nothing backs.
-    #[test]
-    fn a_call_made_through_no_app_names_none() {
-        let got = PendingRequest::from_consent(
-            "id-8".into(),
-            &consent(
-                "k8s.drainNode",
-                Annotations::DESTRUCTIVE,
-                json!({ "name": "node-7" }),
-            ),
+        let payload = serde_json::to_value(&got).unwrap();
+        assert!(
+            payload.get("app").is_none() && payload["target"].get("app").is_none(),
+            "no app identity may cross this wire: {payload}"
         );
-        assert!(got.target.app.is_none());
+        // What the host DID read is still carried, because none of it is a
+        // claim about who asked.
+        assert_eq!(got.target.cluster.as_deref(), Some("prod"));
+        assert_eq!(got.target.name.as_deref(), Some("api"));
     }
 
     /// The target travels through the same escaping and the same 80-character

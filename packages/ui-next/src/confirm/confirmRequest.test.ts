@@ -81,18 +81,19 @@ describe("what a confirmation request says it is about", () => {
       namespace: "team",
       name: null,
       kind: "HelmRelease",
-      app: null,
     });
   });
 
-  it("takes an app only when it carries both halves of its identity", () => {
-    expect(asConfirmTarget({ app: { id: "flux", revision: 4 } })?.app).toEqual({
-      id: "flux",
-      revision: 4,
-    });
-    expect(asConfirmTarget({ app: { id: "flux" } })?.app).toBeNull();
-    expect(asConfirmTarget({ app: { revision: 4 } })?.app).toBeNull();
-    expect(asConfirmTarget({ app: "flux" })?.app).toBeNull();
+  /**
+   * An app identity in the payload is not read, not narrowed and not passed
+   * on. Nothing authenticates an MCP caller as the app its arguments name, so
+   * an attribution taken from here would be provenance chosen by whoever is
+   * being vouched for. The confirmation names no requester on this path.
+   */
+  it("never carries an app identity out of the payload", () => {
+    const narrowed = asConfirmTarget({ name: "api", app: { id: "org.srelens.flux", revision: 4 } });
+    expect(narrowed).toEqual({ cluster: null, namespace: null, name: "api", kind: null });
+    expect(JSON.stringify(narrowed)).not.toContain("flux");
   });
 
   it("is null for a payload that is not a target at all", () => {

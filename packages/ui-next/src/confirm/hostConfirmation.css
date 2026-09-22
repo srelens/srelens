@@ -57,9 +57,14 @@
   margin: 0;
   min-width: 0;
   font-family: var(--font-mono, ui-monospace, monospace);
-  /* Bounded in the component as well; this is what keeps a name that is long
-     but legal from widening the frame instead of wrapping inside it. */
-  overflow-wrap: anywhere;
+  /* Machine text: a kubeconfig context and `namespace/name` are identifiers,
+     so they run and the row scrolls rather than breaking mid-token. A reader
+     told to compare `prod` with `prod-eu` on a narrow dialog must not be
+     handed either of them split across two lines — that is the house rule in
+     AGENTS.md, and a confirmation is the worst place to break it. The 80
+     character bound in the component keeps the scroll short. */
+  white-space: nowrap;
+  overflow-x: auto;
 }
 
 .host-confirm-requester {

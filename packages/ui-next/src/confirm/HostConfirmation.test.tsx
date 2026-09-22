@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -187,6 +190,25 @@ describe("the one host-owned confirmation", () => {
     render(<HostConfirmation question={null} impact="medium" cluster="prod" />);
     expect(screen.queryByTestId("host-confirm-question")).toBeNull();
     expect(screen.getByTestId("host-confirm-cluster").textContent).toBe("prod");
+  });
+
+  /**
+   * A context name and `namespace/name` are machine text: a reader comparing
+   * `prod` against `prod-eu` on a narrow dialog must not be handed either of
+   * them broken across two lines. AGENTS.md's rule — machine text does not
+   * wrap, it scrolls — applies to these rows, and this pins the declaration
+   * rather than trusting the stylesheet to keep it.
+   */
+  it("lets a machine identifier scroll rather than break mid-token", async () => {
+    const css = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "hostConfirmation.css"),
+      "utf8",
+    );
+    const rule = css.slice(css.indexOf(".host-confirm-facts dd"));
+    const body = rule.slice(0, rule.indexOf("}"));
+    expect(body).toContain("white-space: nowrap");
+    expect(body).toContain("overflow-x: auto");
+    expect(body).not.toContain("overflow-wrap");
   });
 
   it("takes no styling from its caller", () => {

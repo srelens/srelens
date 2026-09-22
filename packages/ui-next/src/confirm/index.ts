@@ -19,6 +19,7 @@ export {
 export { RequestConfirmation } from "./RequestConfirmation";
 export { appIdentity, useConfirmationApp, type ConfirmationAppRef } from "./confirmationApp";
 export {
+  asConfirmRequest,
   asConfirmTarget,
   confirmFields,
   confirmSubject,

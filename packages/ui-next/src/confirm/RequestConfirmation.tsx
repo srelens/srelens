@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import type { ConfirmRequest } from "@srelens/core";
 import { HostConfirmation } from "./HostConfirmation";
-import { useConfirmationApp } from "./confirmationApp";
 import { confirmSubject } from "./confirmRequest";
 
 /**
@@ -20,9 +19,18 @@ import { confirmSubject } from "./confirmRequest";
  * answer) and `actions` its own buttons, for a frame whose chrome has none.
  * Neither can change the question.
  *
- * The app is resolved HERE and not by the surfaces, and this component renders
- * only while a request is being asked — so the host's installed inventory is
- * polled while a prompt is on screen and not for the life of the window.
+ * **It names no app, deliberately.** "Requested by app X (signed by Y)" is
+ * the host vouching for who asked, and for a request that arrived over MCP
+ * the host has no grounds for it: `extensions.action` is reachable there, the
+ * registry checks only that the call's `resource.id` and `revision` name an
+ * installed, enabled app, and nothing authenticates the caller AS that app.
+ * Attribution read off the request would be provenance chosen by the party
+ * being vouched for — the spoof this whole component exists to prevent — so
+ * the requester line is left off rather than filled in from the payload. An
+ * app's own screens pass a real `app` to {@link HostConfirmation} because
+ * they have host context for it; this adapter never does, and the line
+ * returns here only when an authenticated host-owned execution context
+ * carries the app (#549).
  *
  * **The seam for the patch.** {@link HostConfirmation} draws the exact patch
  * through the same collapsing diff renderer the Edit screen uses, and nothing
@@ -43,14 +51,12 @@ export function RequestConfirmation({
   details?: ReactNode;
   actions?: ReactNode;
 }) {
-  const app = useConfirmationApp(request.target?.app);
   return (
     <HostConfirmation
       question={request.prompt ?? null}
       impact={request.impact ?? null}
       cluster={request.target?.cluster ?? null}
       subject={confirmSubject(request.target)}
-      app={app}
       frame={frame}
       details={details}
       actions={actions}

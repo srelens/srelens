@@ -21,7 +21,7 @@ import {
 } from "@srelens/core";
 import { relativeTime } from "@srelens/core";
 import { settingsStorage } from "@srelens/core";
-import { RequestConfirmation } from "@srelens/ui-next/confirm";
+import { asConfirmRequest, RequestConfirmation } from "@srelens/ui-next/confirm";
 import { AssistantMarkdown } from "./AssistantMarkdown";
 import { TitleTooltip } from "@/components/ui/tooltip";
 
@@ -861,8 +861,15 @@ export const AssistantConversation = forwardRef<
     // host -- so the guard covers the subscriptions and nothing else.
     const desktop = isTauri();
     const unlisten = desktop
-      ? listen<ConfirmRequest>("mcp://confirm-request", (event) => {
-          setPendingConfirms((q) => [...q, event.payload]);
+      ? // Narrowed, not cast. `listen<ConfirmRequest>` is an annotation: the
+        // payload crosses a process boundary and is `unknown` at runtime, and
+        // a `target.cluster` arriving as a number used to reach the text
+        // helpers and throw — a blank transcript in place of the card the
+        // backend is blocking on. One parser for this event, shared with the
+        // other two listeners (#552).
+        listen<unknown>("mcp://confirm-request", (event) => {
+          const request = asConfirmRequest(event.payload);
+          if (request) setPendingConfirms((q) => [...q, request]);
         })
       : null;
     // Answered anywhere (this card, the app-wide modal) or timed out — the
