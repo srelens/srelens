@@ -43,6 +43,14 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     // kind directly. `k8s.getCustomResource` stays allowed: it is a read under the
     // user's own kubeconfig and RBAC, like every other custom-resource read.
     "k8s.gitOpsAction",
+    // The host action primitives (#549), for the same reason: what makes one
+    // of them safe is an installed app's manifest fixing the kind and the
+    // template and a person confirming the request. The web host has neither,
+    // so a caller would be naming the kind and the patch itself.
+    "k8s.annotate",
+    "k8s.setFields",
+    "k8s.setStatusCondition",
+    "k8s.mergePatch",
     "k8s.deleteContext",
     "k8s.helmRepoAdd",
     "k8s.helmRepoUpdate",
@@ -467,6 +475,22 @@ mod tests {
         // dispatch (404 in the test registry) instead of being denied.
         let (status, _) = post("/api/capability/k8s.getCustomResource", Body::empty()).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// The same reasoning covers #549's action primitives: on the web no
+    /// installed app scopes one to a kind and there is no consent prompt, so a
+    /// caller could name any kind and any template directly.
+    #[tokio::test]
+    async fn host_action_primitives_are_denied_on_web() {
+        for id in srelens_kube::action_primitives::PRIMITIVES {
+            let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
+            assert_eq!(
+                body["error"],
+                json!("capability not available in web mode"),
+                "{id}"
+            );
+        }
     }
 
     #[tokio::test]

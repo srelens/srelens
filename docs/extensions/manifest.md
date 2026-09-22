@@ -42,6 +42,7 @@ before publishing.
 | `kind` | Yes | `declarative`. No other kind is accepted. |
 | `permissions` | Yes | The exact host capability IDs the bindings use. |
 | `capabilities` | Yes | 1–32 bindings, below. |
+| `actions` | No | Up to 32 declared mutations, below. |
 | `contributions` | Yes | `pages`, `detailTabs` and `detailLinks`, below. |
 
 Unknown fields are errors at every level. A manifest is at most 256 KiB.
@@ -68,6 +69,75 @@ cannot lose their confirmation requirement, and neither the impact level nor the
 confirmation wording can be lowered or replaced — see
 [Host-defined capability metadata](capabilities.md#host-defined-capability-metadata).
 Fixed arguments are excluded from the public input schema.
+
+## Declared actions
+
+An app never sends a Kubernetes request. Each entry in `actions` names one **host
+action primitive** and the reader binding whose kind it acts on, and the host builds
+the request:
+
+| Field | Meaning |
+|---|---|
+| `name` | Local action name, unique across `capabilities` and `actions`. Addressed as `plugin/<id>/<name>`. |
+| `title` | Display title, held to the same rules as a binding's. |
+| `target` | A host action primitive: `k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition` or `k8s.mergePatch`. |
+| `resource` | The `name` of a reader binding in `capabilities`. The action acts on that binding's kind and on no other. |
+| `arguments` | What the action writes, fixed here. |
+
+```json
+"actions": [{
+  "name": "reconcile",
+  "title": "Reconcile",
+  "target": "k8s.annotate",
+  "resource": "helmreleases",
+  "arguments": { "key": "reconcile.fluxcd.io/requestedAt", "value": "$now" }
+}]
+```
+
+The host fills in `group`, `version`, `plural`, `kind` and `namespaced` from the reader
+binding `resource` names, and fixes the inputs to `context`, `namespace`, `name`, `uid`
+and `resourceVersion` — the object the operator reviewed. An action that binds any of
+those itself is rejected, and so is one whose reader does not fix its kind: there is no
+field in which an app can name a kind it holds no granted reader for. `permissions`
+names the primitive like any other host capability, and the user grants it.
+
+Every primitive re-reads the object, refuses a UID or `resourceVersion` that has moved
+on and an object that is being deleted, pins its patch to both, and reports
+`{"requested": true}` — the API server accepted the request, which is not a claim that
+the controller has done anything.
+
+| Primitive | Arguments | Writes |
+|---|---|---|
+| `k8s.annotate` | `key`, `value` | One annotation. |
+| `k8s.setFields` | `fields` | RFC 6901 pointers under `/spec` (at most 16, at most 8 segments deep, none inside another), each set to a fixed value. |
+| `k8s.setStatusCondition` | `conditionType`, `conditionStatus`, `reason`, `message?` | One condition, through the **status subresource**, carrying over the conditions it does not own. `conditionStatus` is `True`, `False` or `Unknown`, and `lastTransitionTime` moves only when the status changes. |
+| `k8s.mergePatch` | `patch` | A fixed JSON merge patch, past the deny-list below. |
+
+`k8s.setFields` writes **object fields**, and writes a list by naming the list
+(`"/spec/ignore": ["a", "b"]`). A pointer that reaches *through* a list —
+`/spec/containers/0/image` — is refused against the object the host just read,
+because a merge patch replaces a value of a different shape rather than merging into
+it, and on a field with no schema that would rewrite the whole list as an object. A
+numeric or `-` segment is still a legal object key and is accepted as one; only the
+live object decides.
+
+A string value is a **literal**, except for the two tokens the host substitutes per
+request: `$now` (RFC 3339, nanoseconds, UTC) and `$uuid`. Any other `$`-prefixed string
+is rejected rather than written through, because an app that asked for `$timestamp`
+meant a timestamp. A bound template is at most 8 KiB.
+
+`k8s.mergePatch` may not write `metadata.finalizers`, `metadata.ownerReferences`,
+`metadata.managedFields`, `metadata.uid`, `metadata.resourceVersion` or `status`, may
+not write a Secret's `data` or `stringData`, and may not target an RBAC kind (`Role`,
+`ClusterRole`, `RoleBinding`, `ClusterRoleBinding`, or anything in
+`rbac.authorization.k8s.io`). The host applies the same rules when the manifest is
+installed, when a stored app is reverified, and on the way to the cluster.
+
+Preconditions ([#550](https://github.com/srelens/srelens/issues/550)) and the host-owned
+confirmation dialog ([#552](https://github.com/srelens/srelens/issues/552)) are not part
+of this API version yet, and the Flux and Argo CD actions in core still come from the
+host's own table until [#551](https://github.com/srelens/srelens/issues/551) moves them
+into manifests.
 
 ## Contributions
 

@@ -39,6 +39,25 @@ version, plural, kind and scope, plus explicitly granted `k8s.listEvents` reader
 - Reads remain subject to the selected cluster's RBAC. RBAC and discovery failures are
   shown as errors, never as empty results.
 
+## What an app may write
+
+Only through a declared action ([manifest.md](manifest.md#declared-actions)), and only
+one of the four host action primitives, each a separate permission the user grants:
+`k8s.annotate`, `k8s.setFields`, `k8s.setStatusCondition` and `k8s.mergePatch`.
+
+- A reader grant buys no write, and an action grant buys no read.
+- An action reaches only the kind of a reader binding in the same manifest, because
+  the host copies that binding's group, version, plural, kind and scope into the
+  request. The app cannot name a kind, and the only inputs are the object the operator
+  reviewed: `context`, `namespace`, `name`, `uid` and `resourceVersion`.
+- What is written is fixed in the manifest and shown at install time. The only values
+  the host substitutes are `$now` and `$uuid`.
+- The host refuses writes to `metadata.finalizers`, `ownerReferences`, `managedFields`,
+  the pin fields and `status` through `k8s.mergePatch`, along with a Secret's values
+  and RBAC kinds.
+- Every write re-reads the object, refuses one that has changed or is being deleted,
+  and is still subject to the cluster's RBAC.
+
 ## Consent
 
 Annotations come from the host capability and cannot be weakened by a binding —

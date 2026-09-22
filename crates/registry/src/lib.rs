@@ -443,6 +443,12 @@ pub fn build_registry_with_paths_and_settings(
     ));
     reg.register(srelens_kube::gitops::resource_capability(cache.clone()));
     reg.register(srelens_kube::gitops::action_capability(cache.clone()));
+    // The host action primitives an app's manifest binds as `actions` (#549).
+    // They are host capabilities like any other — one MCP tool and one catalog
+    // row each — and `supported_actions` above is what they replace.
+    for primitive in srelens_kube::action_primitives::capabilities(cache.clone()) {
+        reg.register(primitive);
+    }
     reg.register(srelens_kube::crds::list_crds_capability(cache.clone()));
     reg.register(srelens_kube::crds::list_custom_resource_capability(
         cache.clone(),

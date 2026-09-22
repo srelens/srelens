@@ -40,6 +40,23 @@ export interface ExtensionManifest {
     arguments: Record<string, unknown>;
     inputs: string[];
   }>;
+  /**
+   * Declared mutations (#549). Absent in a manifest that only reads, and left
+   * out of the stored form when empty. Each entry names a host action
+   * primitive and the reader binding whose kind it acts on; the host fills in
+   * that kind and fixes the inputs, so nothing here names a resource the app
+   * does not already hold a granted reader for.
+   */
+  actions?: Array<{
+    name: string;
+    title: string;
+    /** A host action primitive, e.g. `k8s.annotate`. */
+    target: string;
+    /** The `name` of a reader binding in `capabilities`. */
+    resource: string;
+    /** What the action writes, fixed at install time. */
+    arguments: Record<string, unknown>;
+  }>;
   contributions: {
     pages: ExtensionPage[];
     detailTabs: ExtensionDetailTab[];

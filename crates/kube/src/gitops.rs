@@ -65,7 +65,7 @@ impl ResourceIn {
         }
         Ok(())
     }
-    fn api(&self, client: Client) -> Api<DynamicObject> {
+    pub(crate) fn api(&self, client: Client) -> Api<DynamicObject> {
         let mut ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
             &self.group,
             &self.version,
@@ -253,13 +253,9 @@ fn action_patch(r: &ResourceIn, action: &str, token: &str) -> Result<Value, Stri
     })
 }
 fn guard_action(current: &Value, uid: &str, version: &str, action: &str) -> Result<(), String> {
-    if uid.is_empty()
-        || version.is_empty()
-        || current["metadata"]["uid"] != uid
-        || current["metadata"]["resourceVersion"] != version
-    {
-        return Err("Resource changed or was replaced; refresh and review the action again".into());
-    }
+    // The review and the deletion checks are every write's, not this table's,
+    // and #549's primitives make the same two: one statement of each.
+    crate::action_primitives::guard_reviewed(current, uid, version)?;
     if action == "sync" && !current["operation"].is_null() {
         return Err("An Argo CD operation is already in progress".into());
     }
@@ -272,9 +268,6 @@ fn guard_action(current: &Value, uid: &str, version: &str, action: &str) -> Resu
     }
     if matches!(action, "reconcile" | "force" | "reset") && current["spec"]["suspend"] == true {
         return Err("Resume this resource before requesting reconciliation".into());
-    }
-    if !current["metadata"]["deletionTimestamp"].is_null() {
-        return Err("Resource is being deleted".into());
     }
     Ok(())
 }

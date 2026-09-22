@@ -50,7 +50,31 @@ impl PluginHost {
     /// a target the host lacks, an argument or input the target does not take, or a
     /// required one left unbound.
     pub fn binding_problems(&self, index: usize, binding: &Binding) -> Vec<ValidationError> {
-        let at = format!("capabilities[{index}]");
+        self.problems_at(&format!("capabilities[{index}]"), binding)
+    }
+
+    /// The same, for the `index`th declared action: the binding the host would
+    /// build for it, checked against the primitive it names.
+    pub fn action_problems(
+        &self,
+        index: usize,
+        manifest: &Manifest,
+        action: &ActionBinding,
+    ) -> Vec<ValidationError> {
+        let at = format!("actions[{index}]");
+        match manifest.action_binding(action) {
+            // The reader this action names cannot scope it. Reported at
+            // `resource`, which is the field that would have to change.
+            Err(why) => vec![ValidationError::new(
+                ValidationCode::InvalidBinding,
+                format!("{at}.resource"),
+                why,
+            )],
+            Ok(binding) => self.problems_at(&at, &binding),
+        }
+    }
+
+    fn problems_at(&self, at: &str, binding: &Binding) -> Vec<ValidationError> {
         let mut problems = ValidationErrors::default();
         let Some(target) = self.core.get(&binding.target) else {
             problems.push(
@@ -102,6 +126,19 @@ impl PluginHost {
                 );
             }
         }
+        // The target's own rules for what may be bound to it: the ones a JSON
+        // schema cannot state, such as an action primitive's token vocabulary
+        // and its deny-list. The handler enforces the same closure, so an app
+        // gains nothing by getting a manifest past this.
+        if let Some(check) = &target.bound_arguments {
+            if let Err(why) = check(&binding.arguments) {
+                problems.push(
+                    ValidationCode::InvalidBinding,
+                    format!("{at}.arguments"),
+                    why,
+                );
+            }
+        }
         problems.0
     }
 
@@ -132,12 +169,30 @@ impl PluginHost {
         }
         let active = Arc::new(AtomicBool::new(true));
         let mut capabilities = Vec::new();
-        for (index, binding) in manifest.capabilities.iter().enumerate() {
+        // Readers as written, then one binding per declared action, which the
+        // manifest builds from the reader it names (#549). From here on the
+        // two are the same thing: a bound host capability.
+        let mut bindings: Vec<(Vec<ValidationError>, Binding)> = manifest
+            .capabilities
+            .iter()
+            .enumerate()
+            .map(|(index, binding)| (self.binding_problems(index, binding), binding.clone()))
+            .collect();
+        for (index, action) in manifest.actions.iter().enumerate() {
+            let problems = self.action_problems(index, &manifest, action);
+            // A reader that cannot scope the action leaves no binding to
+            // check; `action_problems` has already said why.
+            let binding = manifest
+                .action_binding(action)
+                .map_err(|why| format!("actions[{index}]: {why}"))?;
+            bindings.push((problems, binding));
+        }
+        for (problems, binding) in &bindings {
             let id = format!("plugin/{}/{}", manifest.id, binding.name);
             if registry.get(&id).is_some() {
                 return Err(format!("capability already registered: {id}"));
             }
-            if let Some(problem) = self.binding_problems(index, binding).into_iter().next() {
+            if let Some(problem) = problems.first() {
                 return Err(problem.to_string());
             }
             let target = self
@@ -183,6 +238,10 @@ impl PluginHost {
             capabilities.push(Capability {
                 id, summary: format!("{}: {}", manifest.name, binding.title), annotations,
                 input_schema: schema, output_schema: target.output_schema.clone(),
+                // The binding's arguments were checked against the target's
+                // own rule above; a registered binding takes no further
+                // arguments, so it carries no rule of its own.
+                bound_arguments: None,
                 handler: Arc::new(move |input| {
                     let handler = handler.clone();
                     let enabled = enabled.clone();

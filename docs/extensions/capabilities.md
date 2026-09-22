@@ -160,11 +160,41 @@ and [Argo CD operations through Kubernetes](https://argo-cd.readthedocs.io/en/st
 Declared, app-defined actions will replace this built-in list
 ([#518](https://github.com/srelens/srelens/issues/518)).
 
+## Host action primitives
+
+The four capabilities a manifest binds as `actions`
+([#549](https://github.com/srelens/srelens/issues/549), written up in
+[manifest.md](manifest.md#declared-actions)). They are what the table above becomes:
+a write the *app* declares, against a kind it already holds a granted reader for,
+with every rule enforced by the host.
+
+| Primitive | Impact | Because |
+|---|---|---|
+| `k8s.annotate` | `medium` | Sets one annotation key. It changes no spec and stops nothing; what the controller does next is the controller's. |
+| `k8s.setFields` | `medium` | Sets fixed fields under `spec`. Workloads already running are not stopped. |
+| `k8s.setStatusCondition` | `medium` | Writes one condition through the status subresource, which a controller then acts on. |
+| `k8s.mergePatch` | `high` | The one that can express an Argo CD sync: applying manifests and running hooks. |
+
+The level is the ceiling of what the *primitive's shape* can do, not of what a
+controller may do afterwards — an app is free to bind Flux's `forceAt` key through
+`k8s.annotate`, and a host that called every annotation `high` for that reason would
+be telling every Argo CD refresh the same thing. A binding never comes out below its
+primitive's row ([`Annotations::for_binding`](#host-defined-capability-metadata) only
+raises), so #550 and #551 can publish a specific action above it without moving these.
+
+Each primitive re-reads the object, refuses a review that no longer matches and an
+object being deleted, pins its patch to the reviewed UID and `resourceVersion`, and
+reports the request as accepted rather than as complete — the same guarantees as the
+built-in actions above, reached through `pin_to_reviewed`, which they share.
+
 ## Web host
 
 - Every `extensions.*` capability is refused on the multi-user web host until app
   state is kept per user ([#515](https://github.com/srelens/srelens/issues/515)).
 - `k8s.gitOpsAction` is refused as well. On the web no installed app scopes it to a
   resource, and there is no consent prompt.
+- The four host action primitives are refused for the same reason: what bounds one is
+  an installed manifest fixing the kind and the template, which the web host has none
+  of, so a caller would be naming both itself.
 - `k8s.getCustomResource` stays available: it is a read under the user's own
   kubeconfig and RBAC, like every other custom-resource read.
