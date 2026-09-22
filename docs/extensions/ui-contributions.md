@@ -78,8 +78,7 @@ failures are shown separately and keep the rest of the overview.
 
 ## Actions and refresh
 
-For supported Flux and Argo CD kinds, the details footer offers the host's GitOps
-actions (see [capabilities.md](capabilities.md#host-gitops-actions)). Each opens a
+The details footer offers the installed manifest's explicitly granted actions (see [capabilities.md](capabilities.md#declared-gitops-actions)). Each opens a
 review naming the cluster and resource. The review keeps the UID and resourceVersion
 the reader saw, even if another view refreshes the resource while it is open.
 

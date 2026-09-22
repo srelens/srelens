@@ -420,9 +420,9 @@ mod tests {
     fn validates_catalog_and_reports_api_compatibility() {
         let catalog = parse_catalog(&fixture()).unwrap();
         assert_eq!(catalog.extensions.len(), 2);
-        assert!(compatible(
-            &catalog.extensions[0].release.srelens_api_version
-        ));
+        assert!(!compatible(&catalog.extensions[0].release.srelens_api_version));
+        assert!(compatible("^0.3"));
+        assert!(!compatible("^0.2"));
         assert!(!compatible("^99"));
         let mut value: serde_json::Value = serde_json::from_slice(&fixture()).unwrap();
         value["extensions"][1] = value["extensions"][0].clone();
@@ -433,7 +433,10 @@ mod tests {
     #[test]
     fn verifies_exact_bytes_identity_and_api_before_review() {
         let mut entry = parse_catalog(&fixture()).unwrap().extensions.remove(0);
-        let raw = include_bytes!("../../tests/fixtures/argocd-manifest.json");
+        let source = super::super::tests::manifest();
+        let raw = source.as_bytes();
+        entry.id = "org.example.argocd".into();
+        entry.release.srelens_api_version = "^0.3".into();
         entry.release.sha256 = format!("{:x}", Sha256::digest(raw));
         assert!(verify_manifest(&entry, raw).is_ok());
         assert!(verify_manifest(&entry, b"{}")
@@ -450,7 +453,14 @@ mod tests {
         let raw = include_bytes!("../../tests/fixtures/argocd-manifest.json");
         let sig = include_bytes!("../../tests/fixtures/argocd-manifest.sig").to_vec();
         entry.release.sha256 = format!("{:x}", Sha256::digest(raw));
-        assert!(verify_release(&entry, raw, Some(sig.clone())).is_ok());
+        assert!(super::super::signing::verify_for(&entry.id, raw, &sig).is_ok());
+        assert!(verify_release(&entry, raw, Some(sig.clone())).unwrap_err().contains("requires API ^0.1"));
+        // A current manifest still requires a signature. Reusing the old signature after
+        // upgrading its API range is tampering, never a newly signed release.
+        let current = std::str::from_utf8(raw).unwrap().replace("^0.1", "^0.3");
+        let raw = current.as_bytes();
+        entry.release.srelens_api_version = "^0.3".into();
+        entry.release.sha256 = format!("{:x}", Sha256::digest(raw));
         assert!(verify_release(&entry, raw, None)
             .unwrap_err()
             .contains("missing"));
@@ -486,10 +496,12 @@ mod tests {
             signature_url(&entry).unwrap(),
             Some(format!("{}.sig", entry.release.manifest_url))
         );
-        assert!(verify_release(&entry, raw, None)
-            .unwrap_err()
-            .contains("missing"));
-        assert!(verify_release(&entry, raw, Some(sig)).is_ok());
+        assert!(super::super::signing::verify_for(&entry.id, raw, &sig).is_ok());
+        assert!(verify_release(&entry, raw, Some(sig)).unwrap_err().contains("requires API ^0.1"));
+        let current = std::str::from_utf8(raw).unwrap().replace("^0.1", "^0.3");
+        entry.release.srelens_api_version = "^0.3".into();
+        entry.release.sha256 = format!("{:x}", Sha256::digest(current.as_bytes()));
+        assert!(verify_release(&entry, current.as_bytes(), None).unwrap_err().contains("missing"));
         // An owner that only looks like the trusted one stays an unsigned third party.
         entry.id = "org.srelensx.argocd".into();
         entry.repository = "https://github.com/SRELENSX/extension-argocd".into();
@@ -514,9 +526,11 @@ mod tests {
             serde_json::from_slice(include_bytes!("../../tests/fixtures/argocd-manifest.json"))
                 .unwrap();
         manifest_val["id"] = json!("org.thirdparty.app");
+        manifest_val["srelensApiVersion"] = json!("^0.3");
         let raw = serde_json::to_vec(&manifest_val).unwrap();
         let mut entry = parse_catalog(&fixture()).unwrap().extensions.remove(0);
         entry.id = "org.thirdparty.app".into();
+        entry.release.srelens_api_version = "^0.3".into();
         entry.repository = "https://github.com/thirdparty/app".into();
         entry.release.sha256 = format!("{:x}", Sha256::digest(&raw));
         assert!(verify_release(&entry, &raw, Some(vec![1, 2, 3]))

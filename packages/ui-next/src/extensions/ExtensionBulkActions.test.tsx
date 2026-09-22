@@ -1,3 +1,6 @@
+import fluxManifest from "../../../../examples/extensions/flux.json";
+import argoManifest from "../../../../examples/extensions/argocd.json";
+const declaredMeta = Object.fromEntries([...fluxManifest.actions.filter(action=>action.resource==="helmreleases").map(action=>({...action,name:action.name.replace("helmreleases-","")})),...argoManifest.actions].map(action=>[action.name,{title:action.title,availableWhen:("availableWhen" in action?action.availableWhen:[]) as import("@srelens/core").ActionPredicate[],impact:"medium" as const,confirm:null}]));
 import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,9 +33,9 @@ const detailFor = (name: string) => ({
   },
   actions: ["suspend", "resume", "reconcile"],
   actionMeta: {
-    reconcile: { impact: "medium" as const, confirm: "Reconcile {kind} {namespace}/{name} in cluster {cluster}?" },
-    suspend: { impact: "high" as const, confirm: "Suspend {kind} {namespace}/{name} in cluster {cluster}?" },
-    resume: { impact: "medium" as const, confirm: "Resume {kind} {namespace}/{name} in cluster {cluster}?" },
+    reconcile: { ...declaredMeta.reconcile, impact: "medium" as const, confirm: "Reconcile {kind} {namespace}/{name} in cluster {cluster}?" },
+    suspend: { ...declaredMeta.suspend, impact: "high" as const, confirm: "Suspend {kind} {namespace}/{name} in cluster {cluster}?" },
+    resume: { ...declaredMeta.resume, impact: "medium" as const, confirm: "Resume {kind} {namespace}/{name} in cluster {cluster}?" },
   },
 });
 

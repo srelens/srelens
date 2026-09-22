@@ -66,10 +66,10 @@ build over the whole registry otherwise.
 A capability that accepts several named operations publishes **the highest level
 any of them reaches**, because `tools/list` and the catalog carry one row per
 capability and a row that understated the worst case would mislead every reader
-of it. `k8s.gitOpsAction` is `high` for that reason — one of its eight actions is
+of it. `extensions.action` is `high` for that reason — a declared action can be
 an Argo CD sync — and the per-action level travels with the resource instead, as
 `actionMeta` on `extensions.resource`'s reply. See
-[Host GitOps actions](#host-gitops-actions).
+[Declared GitOps actions](#declared-gitops-actions).
 
 ### Confirmation templates
 
@@ -104,68 +104,45 @@ sentence in an MCP denial and the sentence in a dialog are one string, written
 once. A host-owned confirmation UI built on this is
 [#552](https://github.com/srelens/srelens/issues/552).
 
-## Host GitOps actions
+## Declared GitOps actions
 
-The host derives the API group, kind, plural, version and scope from the enabled app's
-declared reader. An app cannot rebind a reader to a write, and installation does not
-give the app patch access: these are host operations.
+Flux and Argo CD declare their actions in the API 0.3 manifests under
+`examples/extensions`. Reading a kind grants no write access. Installation or
+update must explicitly grant every action primitive in `permissions`.
 
-Actions are offered only for the API versions whose schema carries the fields they
-write:
+`extensions.action` resolves the installed app revision, cluster scope, reader,
+and action declaration before dispatching its bound primitive. The caller supplies
+only the selection, action ID, reviewed UID and `resourceVersion`; it cannot
+replace the kind, patch or preconditions. Every call rechecks app lifecycle and grants.
 
-- **Flux Kustomization, GitRepository, HelmRepository, HelmChart, Bucket,
-  ImageRepository and ImageUpdateAutomation** (`v1`, `v1beta2`, `v1beta1`) and
-  **OCIRepository** (`v1`, `v1beta2`): Suspend, Resume, Reconcile.
-- **Flux HelmRelease** `v2` and `v2beta2`: Suspend, Resume, Reconcile, Force reconcile
-  and Reset retries. On `v2beta1` only Suspend, Resume and Reconcile, because force and
-  reset arrived with `v2beta2`.
-- **Argo CD Application** (`v1alpha1`): Refresh status, Hard refresh, Sync. Sync does
-  not enable pruning; configured sync options and hooks still apply.
-- **Other resources and API versions** remain inspectable without invented or
-  unsupported actions.
+The Flux manifest declares Suspend, Resume and Reconcile for its nine supported
+controller kinds, plus Force reconcile and Reset retries for HelmRelease. ImagePolicy,
+notification resources and all other readers have no implicit actions. Argo CD declares
+Refresh status, Hard refresh and Sync; Sync preserves `prune: false` and hook strategy.
+The reader binding fixes the exact API version for each action.
 
-`extensions.resource` returns an `actionMeta` entry for every action it offers,
-carrying the host's level and confirmation wording for that action. The levels
-are not uniform, which is the reason they are per action:
+`extensions.resource` returns action IDs and `actionMeta`, whose `title` and
+`availableWhen` predicates come from the installed declaration. The host primitive
+supplies `impact` and `confirm`; an app cannot soften those. Inspector and bulk
+controls render these fields without a GitOps label or availability table.
 
-| Action | Impact | Because |
-|---|---|---|
-| Refresh status | `low` | Argo CD re-reads the application's status. No manifest is applied. |
-| Hard refresh | `medium` | Also drops Argo CD's manifest cache. |
-| Sync | `high` | Applies the application's desired resources and runs its sync hooks. |
-| Suspend, Resume, Reconcile, Reset retries | `medium` | Change what a controller does next; workloads already running are not stopped. |
-| Force reconcile | `high` | Re-runs the Helm install or upgrade even when chart and values are unchanged. |
+Declared preconditions reject reconciliation while suspended, redundant Suspend or
+Resume requests, and Sync while an Argo CD operation exists. The primitives enforce
+these against a fresh GET after their unconditional UID/resourceVersion and deletion
+checks, then pin the PATCH. Display predicates only explain availability and never
+authorize a write. Force/reset write both Flux annotations in one patch, with the
+same request timestamp. API failures remain errors; accepted requests do not claim
+that controller work has completed.
 
-The `k8s.gitOpsAction` capability itself is published as `high` — the ceiling of
-that table — and was deliberately **not** split into one capability per action.
-The host, not the app, decides which actions a resource offers, so separate IDs
-would not narrow what an installed app can reach; and
-[#549](https://github.com/srelens/srelens/issues/549) replaces this table with
-action primitives that derive the same two fields from the primitive and its
-target fields.
-
-The backend fetches the resource again, checks the reviewed UID and resourceVersion,
-and includes both in a conditional PATCH, rejecting stale or replaced resources. It
-also rejects:
-
-- a second Argo CD sync while an operation is already present
-- reconciliation while suspended
-- a Suspend of a suspended resource, or a Resume of one that is not suspended
-- writes to a resource being deleted
-
-API failures remain errors with no success message. Kubernetes RBAC still governs the
-GET, event list and PATCH. The implementation follows
-[Flux reconciliation and Helm actions](https://fluxcd.io/flux/components/helm/helmreleases/)
-and [Argo CD operations through Kubernetes](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-kubectl/).
-Declared, app-defined actions will replace this built-in list
-([#518](https://github.com/srelens/srelens/issues/518)).
+`k8s.gitOpsAction` has been removed. There is no compatibility endpoint or inherited
+write permission. API 0.1 releases must be replaced by signed API 0.3 releases and
+reviewed with their new grants before they can be enabled.
 
 ## Host action primitives
 
 The four capabilities a manifest binds as `actions`
 ([#549](https://github.com/srelens/srelens/issues/549), written up in
-[manifest.md](manifest.md#declared-actions)). They are what the table above becomes:
-a write the *app* declares, against a kind it already holds a granted reader for,
+[manifest.md](manifest.md#declared-actions)). They execute a write the *app* declares, against a kind it already holds a granted reader for,
 with every rule enforced by the host.
 
 | Primitive | Impact | Because |
@@ -184,15 +161,12 @@ raises), so #550 and #551 can publish a specific action above it without moving 
 
 Each primitive re-reads the object, refuses a review that no longer matches and an
 object being deleted, pins its patch to the reviewed UID and `resourceVersion`, and
-reports the request as accepted rather than as complete — the same guarantees as the
-built-in actions above, reached through `pin_to_reviewed`, which they share.
+reports the request as accepted rather than as complete.
 
 ## Web host
 
 - Every `extensions.*` capability is refused on the multi-user web host until app
   state is kept per user ([#515](https://github.com/srelens/srelens/issues/515)).
-- `k8s.gitOpsAction` is refused as well. On the web no installed app scopes it to a
-  resource, and there is no consent prompt.
 - The four host action primitives are refused for the same reason: what bounds one is
   an installed manifest fixing the kind and the template, which the web host has none
   of, so a caller would be naming both itself.

@@ -210,146 +210,6 @@
       ],
       "type": "object"
     },
-    "Installed": {
-      "additionalProperties": false,
-      "properties": {
-        "contexts": {
-          "description": "The keys of the kubeconfig contexts the app is enabled for (`ResolvedContext::key`: `{file}#{name}` with `#` and `%` encoded in each part, as `k8s.listContexts` reports under `key`); `None` is every cluster. A context's display name is not identity: it changes when another kubeconfig declares the same name (#265). A stable ID is not either: `a` + `b#c` and `a#b` + `c` share one (#623).",
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "enabled": {
-          "type": "boolean"
-        },
-        "grants": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "history": {
-          "description": "The versions this one replaced, newest first, at most [`KEPT_VERSIONS`].",
-          "items": {
-            "$ref": "#/definitions/PreviousVersion"
-          },
-          "type": "array"
-        },
-        "installedAt": {
-          "description": "When this version was installed, in seconds since the Unix epoch.",
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "manifest": {
-          "$ref": "#/definitions/Manifest"
-        },
-        "quarantined": {
-          "description": "Why this host refused to trust the stored entry when loading it. Recomputed on every read, reported to the UI, and never written to disk.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "revision": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "settings": {
-          "additionalProperties": true,
-          "type": "object"
-        },
-        "signatureProof": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SignatureProof"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "source": {
-          "$ref": "#/definitions/Source"
-        }
-      },
-      "required": [
-        "enabled",
-        "grants",
-        "history",
-        "installedAt",
-        "manifest",
-        "revision",
-        "settings",
-        "source"
-      ],
-      "type": "object"
-    },
-    "Manifest": {
-      "additionalProperties": false,
-      "properties": {
-        "$schema": {
-          "description": "Editor metadata: the JSON Schema the manifest is written against. The host ignores it; it is the one key allowed that is not part of the contract.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "actions": {
-          "description": "Declared mutations (#549). Absent in a manifest that only reads, and left out of the serialized form when empty so a manifest stored and signed without it still round-trips to its own bytes.",
-          "items": {
-            "$ref": "#/definitions/ActionBinding"
-          },
-          "type": "array"
-        },
-        "capabilities": {
-          "items": {
-            "$ref": "#/definitions/Binding"
-          },
-          "type": "array"
-        },
-        "contributions": {
-          "$ref": "#/definitions/Contributions"
-        },
-        "id": {
-          "type": "string"
-        },
-        "kind": {
-          "$ref": "#/definitions/ManifestKind"
-        },
-        "name": {
-          "type": "string"
-        },
-        "permissions": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "srelensApiVersion": {
-          "type": "string"
-        },
-        "version": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "capabilities",
-        "contributions",
-        "id",
-        "kind",
-        "name",
-        "permissions",
-        "srelensApiVersion",
-        "version"
-      ],
-      "type": "object"
-    },
     "ManifestKind": {
       "description": "Only data is executable in this first host. Code-bearing manifests must go through the future sandboxed runtime, never through a permissive fallback.",
       "enum": [
@@ -442,86 +302,10 @@
       ],
       "type": "object"
     },
-    "PreviousVersion": {
-      "additionalProperties": false,
-      "description": "A version an update replaced, kept so it can be restored.",
-      "properties": {
-        "grants": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "installedAt": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "manifest": {
-          "$ref": "#/definitions/Manifest"
-        },
-        "revision": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "signatureProof": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SignatureProof"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "source": {
-          "$ref": "#/definitions/Source"
-        }
-      },
-      "required": [
-        "grants",
-        "installedAt",
-        "manifest",
-        "revision",
-        "source"
-      ],
-      "type": "object"
-    },
-    "SignatureProof": {
-      "additionalProperties": false,
-      "properties": {
-        "manifest": {
-          "type": "string"
-        },
-        "signature": {
-          "items": {
-            "format": "uint8",
-            "minimum": 0.0,
-            "type": "integer"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "manifest",
-        "signature"
-      ],
-      "type": "object"
-    },
-    "Source": {
-      "description": "Where an installed version came from. The host decides: `catalog` means the exact bytes of a release listed in the cached catalog, whoever submitted them.",
-      "enum": [
-        "local",
-        "catalog"
-      ],
-      "type": "string"
-    },
     "StatusColumns": {
       "additionalProperties": false,
       "properties": {
         "progressing": {
-          "format": "uint",
           "minimum": 0.0,
           "type": [
             "integer",
@@ -529,12 +313,10 @@
           ]
         },
         "ready": {
-          "format": "uint",
           "minimum": 0.0,
           "type": "integer"
         },
         "suspended": {
-          "format": "uint",
           "minimum": 0.0,
           "type": [
             "integer",
@@ -549,28 +331,61 @@
     }
   },
   "properties": {
-    "nextRevision": {
-      "format": "uint64",
-      "minimum": 0.0,
-      "type": "integer"
+    "$schema": {
+      "description": "Editor metadata: the JSON Schema the manifest is written against. The host ignores it; it is the one key allowed that is not part of the contract.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
-    "plugins": {
+    "actions": {
+      "description": "Declared mutations (#549). Absent in a manifest that only reads, and left out of the serialized form when empty so a manifest stored and signed without it still round-trips to its own bytes.",
       "items": {
-        "$ref": "#/definitions/Installed"
+        "$ref": "#/definitions/ActionBinding"
       },
       "type": "array"
     },
-    "schemaVersion": {
-      "format": "uint32",
-      "minimum": 0.0,
-      "type": "integer"
+    "capabilities": {
+      "items": {
+        "$ref": "#/definitions/Binding"
+      },
+      "type": "array"
+    },
+    "contributions": {
+      "$ref": "#/definitions/Contributions"
+    },
+    "id": {
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/definitions/ManifestKind"
+    },
+    "name": {
+      "type": "string"
+    },
+    "permissions": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "srelensApiVersion": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
     }
   },
   "required": [
-    "nextRevision",
-    "plugins",
-    "schemaVersion"
+    "capabilities",
+    "contributions",
+    "id",
+    "kind",
+    "name",
+    "permissions",
+    "srelensApiVersion",
+    "version"
   ],
-  "title": "Inventory",
+  "title": "Manifest",
   "type": "object"
 }

@@ -442,10 +442,9 @@ pub fn build_registry_with_paths_and_settings(
         cache.clone(),
     ));
     reg.register(srelens_kube::gitops::resource_capability(cache.clone()));
-    reg.register(srelens_kube::gitops::action_capability(cache.clone()));
     // The host action primitives an app's manifest binds as `actions` (#549).
     // They are host capabilities like any other — one MCP tool and one catalog
-    // row each — and `supported_actions` above is what they replace.
+    // row each.
     for primitive in srelens_kube::action_primitives::capabilities(cache.clone()) {
         reg.register(primitive);
     }
@@ -588,16 +587,12 @@ mod tests {
         assert!(silent.is_empty(), "gated with no confirmation text: {silent:?}");
     }
 
-    /// `extensions.action` forwards to `k8s.gitOpsAction` and must not look
-    /// calmer than what it forwards to. A wrapper that kept the `MUTATING`
-    /// preset would publish `medium` for a call that can reach an Argo CD sync.
     #[test]
-    fn the_app_facing_action_matches_the_host_action_it_forwards_to() {
+    fn the_app_action_gate_carries_the_primitive_ceiling() {
         let reg = build_registry();
-        let host = reg.get("k8s.gitOpsAction").expect("registered").annotations;
-        let app = reg.get("extensions.action").expect("registered").annotations;
-        assert_eq!(app.impact, host.impact);
-        assert_eq!(app.confirm, host.confirm);
+        let app = reg.get("extensions.action").unwrap().annotations;
+        assert!(app.requires_confirm);
+        assert_eq!(app.impact, reg.get("k8s.mergePatch").unwrap().annotations.impact);
     }
 
     #[test]

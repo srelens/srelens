@@ -256,18 +256,9 @@ export interface ExtensionResourceSelection {
 export interface ExtensionResourceDetail {
   resource: { apiVersion?: string; kind?: string; metadata: { name: string; namespace?: string; uid: string; resourceVersion: string; creationTimestamp?: string; labels?: Record<string,string>; annotations?: Record<string,string>; [key:string]: unknown }; spec?: Record<string, any>; status?: Record<string, any>; [key:string]: unknown };
   actions: string[];
-  /**
-   * The host's level and confirmation wording for each entry in `actions`.
-   *
-   * Per action, not per capability, because the actions behind
-   * `k8s.gitOpsAction` do not share a level: `refresh` makes Argo CD re-read a
-   * status, and `sync` applies the application's manifests and runs its hooks.
-   * The capability's own row is the ceiling of the two.
-   *
-   * `confirm` is a template in the scheme {@link renderConfirmTemplate}
-   * documents. Written in the host; an app never supplies it.
-   */
-  actionMeta?: Record<string, { impact: CapabilityImpact; confirm: string }>;
+  /** Titles and display predicates come from the installed manifest; impact
+   * and confirmation wording come exclusively from the host primitive. */
+  actionMeta?: Record<string, { title: string; availableWhen?: ActionPredicate[]; impact: CapabilityImpact; confirm: string | null }>;
   /** Newest first. */
   events?: Array<{type?:string;reason?:string;message?:string;count?:number;time?:string|null}>;
   /** True when the host returned only the newest events. */

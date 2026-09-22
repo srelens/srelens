@@ -4,9 +4,9 @@ use srelens_plugin_host::{Manifest, SUPPORTED_API_VERSIONS};
 
 /// The published URL manifests name in `$schema`.
 const SCHEMA_URL: &str =
-    "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json";
+    "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.3.json";
 
-/// One file per API line, named after the newest supported version: `v0.1` for 0.1.0.
+/// One file per API line, named after the newest supported version: `v0.3` for 0.3.0.
 fn schema_path() -> String {
     let newest = semver::Version::parse(SUPPORTED_API_VERSIONS.last().unwrap()).unwrap();
     format!(

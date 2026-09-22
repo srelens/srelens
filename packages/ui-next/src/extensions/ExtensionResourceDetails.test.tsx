@@ -1,10 +1,13 @@
+import fluxManifest from "../../../../examples/extensions/flux.json";
+import argoManifest from "../../../../examples/extensions/argocd.json";
+const declaredMeta = Object.fromEntries([...fluxManifest.actions.filter(action=>action.resource==="helmreleases").map(action=>({...action,name:action.name.replace("helmreleases-","")})),...argoManifest.actions].map(action=>[action.name,{title:action.title,availableWhen:("availableWhen" in action?action.availableWhen:[]) as import("@srelens/core").ActionPredicate[],impact:"medium" as const,confirm:null}]));
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn()}));
 import { inspectExtensionResource, actOnExtensionResource, listExtensions, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 const selection = {id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"cluster/a",namespace:"team",name:"apps"};
-const detail = {resource:{apiVersion:"kustomize.toolkit.fluxcd.io/v1",kind:"Kustomization",metadata:{name:"apps",namespace:"team",uid:"uid-a",resourceVersion:"12"},spec:{suspend:false,path:"./apps",sourceRef:{kind:"GitRepository",name:"platform-config"}},status:{conditions:[{type:"Ready",status:"False",reason:"BuildFailed",message:"Missing source"}],lastAppliedRevision:"main@sha1:abcdef"}},actions:["suspend","resume","reconcile"]};
+const detail = {resource:{apiVersion:"kustomize.toolkit.fluxcd.io/v1",kind:"Kustomization",metadata:{name:"apps",namespace:"team",uid:"uid-a",resourceVersion:"12"},spec:{suspend:false,path:"./apps",sourceRef:{kind:"GitRepository",name:"platform-config"}},status:{conditions:[{type:"Ready",status:"False",reason:"BuildFailed",message:"Missing source"}],lastAppliedRevision:"main@sha1:abcdef"}},actions:["suspend","resume","reconcile"],actionMeta:declaredMeta};
 beforeEach(()=>{vi.resetAllMocks();vi.mocked(inspectExtensionResource).mockResolvedValue(detail);vi.mocked(actOnExtensionResource).mockResolvedValue({requested:true});});
 it("shows overview and conditions, then confirms the exact pinned resource before requesting an action",async()=>{
  render(<ExtensionResourceDetails selection={selection} onClose={vi.fn()}/>);
@@ -196,7 +199,7 @@ it("does not offer an Argo CD sync while an operation is already running",async(
   // The host refuses this (`gitops.rs`); stating it as a predicate is what
   // lets the surface say so before a person asks for the write.
   const application={apiVersion:"argoproj.io/v1alpha1",kind:"Application",metadata:{name:"apps",namespace:"team",uid:"uid-a",resourceVersion:"12"},spec:{},status:{},operation:{sync:{revision:"HEAD"}}};
-  vi.mocked(inspectExtensionResource).mockResolvedValue({resource:application,actions:["sync","refresh"]});
+  vi.mocked(inspectExtensionResource).mockResolvedValue({resource:application,actions:["sync","refresh"],actionMeta:declaredMeta});
   render(<ExtensionResourceDetails selection={selection}/>);
   const sync=await screen.findByRole("button",{name:"Sync"});
   expect(sync.getAttribute("aria-disabled")).toBe("true");
@@ -226,7 +229,7 @@ function installedApps(plugins:unknown[]) {
  vi.mocked(listExtensions).mockResolvedValue({schemaVersion:1,nextRevision:1,plugins} as never);
 }
 const fluxApp={manifest:{id:"org.srelens.flux",name:"Flux Tools",version:"1.0.0",srelensApiVersion:"1",kind:"declarative",permissions:[],capabilities:[],contributions:{pages:[],detailTabs:[],detailLinks:[]}},enabled:true,revision:1,grants:[],settings:{},source:"local",installedAt:0,history:[]};
-const withMeta={...detail,actionMeta:{suspend:{impact:"high" as const,confirm:"Suspend[ {resource}][ in cluster {cluster}]?"}}};
+const withMeta={...detail,actionMeta:{...declaredMeta,suspend:{...declaredMeta.suspend,impact:"high" as const,confirm:"Suspend[ {resource}][ in cluster {cluster}]?"}}};
 afterEach(()=>{delete (window as unknown as Record<string,unknown>).__TAURI_INTERNALS__;});
 
 it("asks the host's own sentence and level, not a description written in the UI",async()=>{
@@ -304,4 +307,14 @@ it("names no app once it has been replaced under an open review",async()=>{
  await waitFor(()=>expect(listExtensions).toHaveBeenCalled());
  expect(screen.queryByTestId("host-confirm-requester")).toBeNull();
  expect(dialog.textContent).not.toContain("Flux Tools");
+});
+
+it("offers a newly declared action title and predicates without a host GitOps name table", async () => {
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail, actions:["request-review"], actionMeta:{"request-review":{title:"Request review", impact:"medium", confirm:"Request review[ of {resource}]?", availableWhen:[{jsonPath:".spec.suspend", equals:true, reason:"Suspend before requesting review"}]}}} as any);
+  render(<ExtensionResourceDetails selection={selection}/>);
+  const action = await screen.findByRole("button", {name:"Request review"});
+  expect(action.getAttribute("aria-disabled")).toBe("true");
+  fireEvent.click(action);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(action.getAttribute("title")).toBe("Suspend before requesting review");
 });

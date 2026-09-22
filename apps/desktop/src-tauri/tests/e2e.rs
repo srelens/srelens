@@ -2484,11 +2484,6 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     let apps = [
         json!({ "manifest": flux, "grants": declared_permissions(&flux) }),
         json!({ "manifest": argocd, "grants": declared_permissions(&argocd) }),
-        json!({
-            "manifest": SIGNED_ARGOCD,
-            "grants": declared_permissions(SIGNED_ARGOCD),
-            "signature": SIGNED_ARGOCD_SIG,
-        }),
     ];
     for app in &apps {
         let out = h.ok("extensions.validate", app.clone()).await;
@@ -2533,24 +2528,12 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         )
         .await;
     assert!(err.contains("Catalog release changed"), "{err}");
-    // The listed release, downloaded and verified for review. That needs GitHub,
-    // so a failure is reported, not failed on; a review that does come back must
-    // be exactly the signed bytes.
-    match h
-        .try_call(
-            "extensions.catalogManifest",
-            json!({ "id": "org.srelens.argocd", "sha256": sha256 }),
-        )
-        .await
-    {
-        Ok(review) => {
-            assert_eq!(review["manifest"], SIGNED_ARGOCD, "{review}");
-            assert_eq!(review["signature"], json!(SIGNED_ARGOCD_SIG), "{review}");
-        }
-        Err(e) => {
-            println!("  extensions.catalogManifest: live release not verified (needs GitHub): {e}")
-        }
-    }
+    // Authentic historical bytes still verify cryptographically, but API 0.1
+    // cannot be installed on this API 0.3 host.
+    let old = h.ok("extensions.validate", json!({"manifest":SIGNED_ARGOCD,"grants":declared_permissions(SIGNED_ARGOCD),"signature":SIGNED_ARGOCD_SIG})).await;
+    assert!(old["errors"].as_array().unwrap().iter().any(|e| e["code"] == "EXTENSION_API_INCOMPATIBLE"), "{old}");
+    let err = h.err("extensions.catalogManifest", json!({"id":"org.srelens.argocd","sha256":sha256})).await;
+    assert!(err.contains("different host API version"), "{err}");
 
     for app in &apps {
         let mut install = app.clone();
@@ -2569,17 +2552,10 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     };
     let flux_app = installed("org.example.flux");
     let argocd_app = installed("org.example.argocd");
-    let signed_app = installed("org.srelens.argocd");
     for app in [&flux_app, &argocd_app] {
         assert_eq!(app["enabled"], true, "{app}");
         assert_eq!(app["source"], "local", "{app}");
     }
-    // The signed bytes are the release the cached catalog lists: the host records
-    // where they came from, keeps the proof, and still trusts it on reading back.
-    assert_eq!(signed_app["enabled"], true, "{signed_app}");
-    assert_eq!(signed_app["source"], "catalog", "{signed_app}");
-    assert!(signed_app["signatureProof"].is_object(), "{signed_app}");
-    assert!(signed_app.get("quarantined").is_none(), "{signed_app}");
     let revision = |app: &Value| app["revision"].as_u64().expect("revision");
 
     println!("=== extensions: read ===");
@@ -2593,7 +2569,7 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         )
         .await;
     assert!(item_names(&out).contains(&KUSTOMIZATION), "{out}");
-    for app in [&argocd_app, &signed_app] {
+    for app in [&argocd_app] {
         let out = h
             .ok(
                 "extensions.read",
@@ -2618,7 +2594,7 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     );
     assert_eq!(
         detail["actions"],
-        json!(["suspend", "resume", "reconcile"]),
+        json!(["kustomizations-suspend", "kustomizations-resume", "kustomizations-reconcile"]),
         "{detail}"
     );
     assert!(
@@ -2630,7 +2606,7 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         .expect("uid")
         .to_owned();
     let reviewed = resource_version(&detail);
-    let act = |action: &str, version: &str| json!({ "resource": flux_selection, "action": action, "uid": uid, "resourceVersion": version });
+    let act = |action: &str, version: &str| json!({ "resource": flux_selection, "action": format!("kustomizations-{action}"), "uid": uid, "resourceVersion": version });
     let out = h.ok("extensions.action", act("suspend", &reviewed)).await;
     assert_eq!(out, json!({ "requested": true }));
     // Read back through the host capability itself, not the app, to see what landed.
@@ -2701,7 +2677,7 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         "namespace": NS, "name": ARGO_APP
     });
     let before = h.ok("k8s.getCustomResource", argo_object.clone()).await;
-    assert_eq!(before["actions"], argo_detail["actions"], "{before}");
+    assert!(before.get("actions").is_none(), "Ungated readers never invent actions: {before}");
     let argo_uid = before["resource"]["metadata"]["uid"]
         .as_str()
         .expect("uid")
@@ -2709,8 +2685,8 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     let reviewed = resource_version(&before);
     let out = h
         .ok(
-            "k8s.gitOpsAction",
-            json!({ "resource": argo_object, "action": "refresh", "uid": argo_uid, "resourceVersion": reviewed }),
+            "extensions.action",
+            json!({ "resource": {"id":"org.example.argocd","revision":revision(&argocd_app),"capability":"applications","context":ctx,"namespace":NS,"name":ARGO_APP}, "action": "refresh", "uid": argo_uid, "resourceVersion": reviewed }),
         )
         .await;
     assert_eq!(out, json!({ "requested": true }));
@@ -2721,8 +2697,8 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     );
     let err = h
         .err(
-            "k8s.gitOpsAction",
-            json!({ "resource": argo_object, "action": "hard-refresh", "uid": argo_uid, "resourceVersion": reviewed }),
+            "extensions.action",
+            json!({ "resource": {"id":"org.example.argocd","revision":revision(&argocd_app),"capability":"applications","context":ctx,"namespace":NS,"name":ARGO_APP}, "action": "hard-refresh", "uid": argo_uid, "resourceVersion": reviewed }),
         )
         .await;
     assert!(err.contains("Resource changed or was replaced"), "{err}");
@@ -2855,7 +2831,6 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
     for id in [
         "org.example.flux",
         "org.example.argocd",
-        "org.srelens.argocd",
     ] {
         h.ok(
             "extensions.configure",

@@ -10,8 +10,8 @@ import { describe, expect, it } from "vitest";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const repoFile = (path: string) => readFileSync(resolve(repoRoot, path), "utf8");
 const SCHEMA_URL =
-  "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.1.json";
-const schema = JSON.parse(repoFile("schemas/extension-manifest.v0.1.json"));
+  "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.3.json";
+const schema = JSON.parse(repoFile("schemas/extension-manifest.v0.3.json"));
 // Every example, so a new one cannot skip validation.
 const examples = readdirSync(resolve(repoRoot, "examples/extensions"))
   .filter((name) => name.endsWith(".json"))

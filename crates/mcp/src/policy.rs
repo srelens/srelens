@@ -272,7 +272,7 @@ mod tests {
     /// host's level and the host's own sentence.
     #[tokio::test]
     async fn the_denial_carries_the_level_and_the_hosts_words() {
-        let mut req = request("k8s.gitOpsAction", json!({}), ConsentKind::Destructive);
+        let mut req = request("extensions.action", json!({}), ConsentKind::Destructive);
         req.confirm_text = Some("Apply the desired resources of Application team/api?".into());
         match permissive().confirm(&req).await {
             Decision::Denied(r) => {

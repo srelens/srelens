@@ -22,13 +22,13 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Field reference
 ## Terms
 
 - **Extension API version**: the version of this contract, in SemVer form
-  (`0.1.0`). It is independent of the srelens app version and of each app's own
+  (`0.3.0`). It is independent of the srelens app version and of each app's own
   `version`.
 - **Supported set**: the API versions a host implements, listed oldest first in
   `SUPPORTED_API_VERSIONS` (`crates/plugin-host/src/manifest.rs`). The catalog
   reports it as `hostApiVersions`.
 - **API range**: a manifest's `srelensApiVersion`, a SemVer requirement in Cargo
-  syntax, such as `^0.1` or `>=0.1, <0.3`.
+  syntax, such as `^0.3` or `>=0.3, <0.4`.
 - **Negotiated version**: the highest supported version the range matches. The host
   treats the app as written for that version.
 
@@ -43,7 +43,7 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Field reference
    version is not removed. It is quarantined: disabled, with the reason shown in
    Settings → Apps, until it is updated or removed.
 3. **Choosing a range.** Target the API line you tested against with a caret range:
-   `^0.1` before 1.0, `^1.2` after. Under SemVer caret rules a `0.x` range pins its
+   `^0.3` before 1.0, `^1.2` after. Under SemVer caret rules a `0.x` range pins its
    minor version, so `^0.1` does not match `0.2.0`. That is deliberate: each `0.MINOR`
    is its own compatibility line.
 4. **New API versions.** Before 1.0, any manifest-visible change (a new field, a new
@@ -51,12 +51,11 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Field reference
    `0.MINOR` version. A `0.MINOR.PATCH` bump is for clarifications that do not change
    which manifests validate. From 1.0: MAJOR for breaking changes, MINOR for
    additive ones, PATCH for fixes.
-5. **Keeping old versions.** Adding a version to the supported set never removes an
-   older one. An API version stays supported for **at least two srelens minor
-   releases** after the release that ships its successor. For example, if API 0.2
-   ships in srelens 0.10, API 0.1 remains supported through at least srelens 0.12.
-   Retiring a version is announced in the [API changelog](#api-changelog) at least
-   one srelens release before it happens.
+5. **Current supported line.** This host implements **API 0.3 only**. API 0.1 and
+   API 0.2 are not supported. Existing installations targeting a retired line are
+   quarantined until replaced by a compatible manifest. Official manifests must
+   receive a new version and publisher signature; editing an installed signed
+   manifest invalidates its proof.
 6. **API 1.0.** The API is frozen as 1.0 when the cert-manager declarative milestone
    ([#582](https://github.com/srelens/srelens/issues/582)) passes. After that, the 1.x
    line only grows additively.
@@ -85,8 +84,8 @@ Why a new field needs a new minor even though it is optional: manifests are stri
 turns that into a clear "requires API 0.x" message.
 
 The host enforces this for fields. `API_FIELDS` in `crates/plugin-host/src/manifest.rs`
-lists every manifest field added or removed after API 0.1, with the API versions it is
-available in. A rename is a removal plus an addition.
+lists fields whose availability differs across supported API lines. It is empty while
+0.3 is the only supported line. A rename is a removal plus an addition.
 
 A manifest may use a field only if the field is available in every supported API
 version its range admits, not just the one it negotiates to. Otherwise it is rejected,
@@ -221,6 +220,17 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ## API changelog
 
+### 0.3.0
+
+- The host supports only API 0.3; API 0.1 and 0.2 manifests are incompatible.
+- Flux and Argo CD actions are declared by manifests, with their target reader,
+  primitive write binding, confirmation metadata and availability predicates.
+  The host no longer supplies a controller-specific action menu.
+- Current examples are Flux 0.4.0 and Argo CD 0.3.0, requiring `^0.3` and naming
+  `schemas/extension-manifest.v0.3.json`. Publishing them requires fresh signed
+  external releases and a catalog update; existing signed release bytes stay unchanged.
+
+
 ### 0.1.0
 
 The only supported API version. Apart from one pre-release rename (#537) and one
@@ -243,7 +253,7 @@ update.
   - An app that fails re-verification is quarantined individually.
   - Catalog metadata tolerates unknown fields.
 - **#529:**
-  - GitOps actions are offered only for the API versions listed in [capabilities.md](capabilities.md#host-gitops-actions).
+  - GitOps actions are offered only for the API versions listed in [capabilities.md](capabilities.md#declared-gitops-actions).
   - A Suspend of a suspended resource, or a Resume of one that is not suspended, is refused.
   - Resource events are newest first across every page read (up to 10 pages), ranking a recurring series by its latest occurrence, and capped at 100. `eventsTruncated`, `eventsPartial` and `eventsRead` say what was left out and how much was read.
   - An accepted action refreshes every open list, dashboard and detail view of that resource.

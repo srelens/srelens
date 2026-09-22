@@ -1828,7 +1828,7 @@ describe("the inline confirmation card's host metadata (#548)", () => {
     render(<AssistantConversation />);
     await ask({
       id: "c5",
-      tool: "k8s.gitOpsAction",
+      tool: "extensions.action",
       args: {},
       prompt: "Suspend HelmRelease team/api?",
       impact: "high",

@@ -42,7 +42,7 @@ export interface CapabilityFacts {
    * running; `high` destroys, disrupts or replaces something running.
    *
    * A capability that accepts several named operations carries the highest
-   * level any of them reaches — `k8s.gitOpsAction` is `high` because one of its
+   * level any of them reaches — `extensions.action` is `high` because one of its
    * eight actions is an Argo CD sync. The per-operation level travels with the
    * resource (`ExtensionResourceDetail.actionMeta`).
    */
