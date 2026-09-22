@@ -309,3 +309,49 @@ it("stops obsolete availability queues when the selection changes", async () => 
   await act(async () => held.open());
   expect(inspected).toEqual(["app-0", "app-1", "app-2", "app-3", "new"]);
 });
+
+it("reveals distinct full escaped identities on focus and hover throughout a bulk run", async () => {
+  const prefix = "a".repeat(100);
+  const names = [`${prefix}-east`, `${prefix}-west\u202e`];
+  const selection = names.map(name => ({ namespace: "team", name }));
+  const held = gate();
+  vi.mocked(actOnExtensionResource).mockImplementation(async (s) => {
+    await held.promise;
+    if (s.name === names[1]) throw new Error("Connection lost");
+    return { requested: true };
+  });
+  render(<ExtensionBulkActions target={target} selection={selection} onClear={vi.fn()} />);
+  await openConfirmation();
+  const checkNames = (container: HTMLElement) => {
+    const fields = [...container.querySelectorAll<HTMLElement>(".extension-bulk-name")];
+    for (const [i, field] of fields.entries()) {
+      const full = `team/${prefix}-${i === 0 ? "east" : "west\\u202e"}`;
+      expect(field.textContent).toHaveLength(80);
+      expect(field.tabIndex).toBe(0);
+      expect(field.getAttribute("title")).toBe(full);
+      fireEvent.focus(field);
+      expect(field.textContent).toBe(full);
+      fireEvent.blur(field);
+      expect(field.textContent).toHaveLength(80);
+      fireEvent.mouseEnter(field);
+      expect(field.textContent).toBe(full);
+      fireEvent.mouseLeave(field);
+      expect(field.textContent).toHaveLength(80);
+      expect(field.textContent).not.toContain("\u202e");
+    }
+  };
+  checkNames(screen.getByTestId("bulk-resources"));
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile 2 resources" }));
+  await waitFor(() => expect(actOnExtensionResource).toHaveBeenCalledTimes(2));
+  checkNames(screen.getByTestId("bulk-progress"));
+  await act(async () => held.open());
+  // Final accepted and failed names use the same focusable identity field.
+  const result = await screen.findByTestId("bulk-result");
+  const fields = result.querySelectorAll<HTMLElement>(".extension-bulk-name");
+  expect(fields).toHaveLength(2);
+  for (const field of fields) {
+    fireEvent.focus(field);
+    expect(field.textContent).toBe(field.getAttribute("title"));
+    expect(field.textContent!.length).toBeGreaterThan(100);
+  }
+});

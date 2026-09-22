@@ -33,3 +33,11 @@ Final checks:
 - `cargo test --workspace`: passed, including the TUI suite; live-cluster ignored tests were not run.
 - Independent review identified the obsolete inspection queue and found no other important regressions; its regression passed after cancellation was added.
 - GitNexus refreshed before edits and before final change analysis. Its call graph supports impact analysis; final refresh reported the full-text search index unavailable.
+
+## Full resource identity follow-up
+
+Two identifiers sharing their first 100 characters now keep compact labels but expose the full escaped identity on focus and hover. The same field is used in confirmation, progress and every result list. It stays single-line and scrolls horizontally; its accessible name and native hover title also retain the complete escaped identity.
+
+Chrome at 390×844 verified Tab focus, a visible focus ring, ArrowRight scrolling to the distinguishing `-east` suffix (scrollLeft 495px, clientWidth 366px, scrollWidth 861px), the next resource's `-west` suffix, and hover expansion. Confirmation, progress, failed and accepted lists were exercised. All five themes remained within the document width. [Focused identity after keyboard scrolling](identity-focused.png).
+
+The regression failed before implementation because the identity field was not focusable. It now covers distinct long names, escaped bidi text and focus/hover reveal across the bulk lifecycle. Final verification: 149 extension tests; 6,793 full frontend tests; 91.27% lines, 84.50% branches, 85.73% functions; typecheck and production build passed. No Rust changed in this follow-up. Independent review found no additional issues. GitNexus's mismatched symbol IDs were corrected by a forced rebuild; the refreshed impact result points to the extension component and its eight dependants.

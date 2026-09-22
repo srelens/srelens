@@ -13,6 +13,7 @@ import { HostConfirmation, boundedPlainText } from "../confirm/HostConfirmation"
 import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
 import { useResource } from "../lib/useResource";
+import { plainText } from "./displayText";
 import { ACTION_AVAILABILITY } from "./actionAvailability";
 import { ACTION_LABELS, isKnownAction } from "./actionLabels";
 import {
@@ -82,8 +83,27 @@ const STATE_LABEL: Record<BulkProgress<BulkResource>["state"], string> = {
   cancelled: "Not requested",
 };
 
-/** A resource name, escaped and bounded exactly as the confirmation bounds one. */
-const drawResource = (resource: string) => boundedPlainText(resource);
+/** Keep the compact label, but let every identity be read and scrolled in full. */
+function ResourceName({ resource }: { resource: string }) {
+  const [focused, setFocused] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const full = plainText(resource);
+  return (
+    <span
+      className="extension-bulk-name"
+      tabIndex={0}
+      title={full}
+      aria-label={full}
+      data-expanded={focused || hovered}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {focused || hovered ? full : boundedPlainText(resource)}
+    </span>
+  );
+}
 
 function NameList({ testId, title, items }: { testId: string; title: string; items: readonly string[] }) {
   if (items.length === 0) return null;
@@ -95,7 +115,7 @@ function NameList({ testId, title, items }: { testId: string; title: string; ite
       <ul>
         {items.map((resource) => (
           <li key={resource}>
-            <span className="extension-bulk-name">{drawResource(resource)}</span>
+            <ResourceName resource={resource} />
           </li>
         ))}
       </ul>
@@ -294,7 +314,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
                 <ul className="extension-bulk-list" data-testid="bulk-resources">
                   {applicability.applicable.map((resource) => (
                     <li key={bulkResourceKey(resource)}>
-                      <span className="extension-bulk-name">{drawResource(bulkResourceKey(resource))}</span>
+                      <ResourceName resource={bulkResourceKey(resource)} />
                     </li>
                   ))}
                 </ul>
@@ -337,7 +357,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
               const key = bulkResourceKey(item.item);
               return (
                 <li key={key} data-testid={`bulk-item-${key}`} data-state={item.state}>
-                  <span className="extension-bulk-name">{drawResource(key)}</span>
+                  <ResourceName resource={key} />
                   <span className="extension-bulk-state">{STATE_LABEL[item.state]}</span>
                   {item.error && <span className="extension-bulk-reason">{boundedPlainText(item.error)}</span>}
                 </li>
@@ -366,7 +386,7 @@ export function ExtensionBulkActions({ target, selection, onClear, available }: 
               <ul>
                 {result.failed.map((failure) => (
                   <li key={failure.resource}>
-                    <span className="extension-bulk-name">{drawResource(failure.resource)}</span>
+                    <ResourceName resource={failure.resource} />
                     <span className="extension-bulk-reason">{boundedPlainText(failure.reason)}</span>
                   </li>
                 ))}
