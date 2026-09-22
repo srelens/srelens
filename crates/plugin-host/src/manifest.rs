@@ -2,6 +2,7 @@ use crate::{ValidationCode as Code, ValidationError, ValidationErrors};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use srelens_capability::{Predicate, MAX_PREDICATES};
 use std::collections::BTreeSet;
 
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
@@ -221,11 +222,17 @@ pub const ACTION_INPUTS: &[&str] = &["context", "namespace", "name", "uid", "res
 /// kind, so binding one is refused.
 pub const ACTION_IDENTITY: &[&str] = &["group", "version", "plural", "kind", "namespaced"];
 
+/// The predicate lists an action declares in fields of its own (#550), which
+/// is why binding one as an argument is refused: two spellings of one
+/// declaration would leave the host reading whichever it happened to look at.
+pub const ACTION_PREDICATES: &[&str] = &["preconditions", "availableWhen"];
+
 /// One declared mutation: a host action primitive, the reader binding whose
-/// kind it acts on, and the arguments that fix what it writes.
+/// kind it acts on, the arguments that fix what it writes, and what must be
+/// true of the object before it is written.
 ///
-/// There is no `preconditions` field yet — #550 adds it, and #551 is what
-/// moves the Flux and Argo CD actions in core into manifests that use both.
+/// #551 is what moves the Flux and Argo CD actions in core into manifests that
+/// use these.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ActionBinding {
@@ -238,6 +245,29 @@ pub struct ActionBinding {
     pub resource: String,
     /// What this action writes, fixed at install time.
     pub arguments: Map<String, Value>,
+    /// What must be true of the object for the write to be sent. Evaluated by
+    /// the host against the fresh GET the primitive already performs, before
+    /// the patch; a predicate that does not hold refuses the request and the
+    /// operator is told this predicate's `reason`.
+    ///
+    /// These add refusals. The host's own guards — an object being deleted, a
+    /// UID or `resourceVersion` that has moved — run first and are not
+    /// something a manifest can reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preconditions: Vec<Predicate>,
+    /// What must be true of the object for the control to be offered. The same
+    /// predicates, asked by the surface rather than by the cluster request, so
+    /// a person is not shown a button whose refusal is already known.
+    ///
+    /// Display only, and deliberately so: an app that needs a condition
+    /// *enforced* declares it in `preconditions`, where the host is what
+    /// checks it. A surface can be out of date; the fresh GET cannot.
+    #[serde(
+        default,
+        rename = "availableWhen",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub available_when: Vec<Predicate>,
 }
 
 /// Only data is executable in this first host. Code-bearing manifests must go
@@ -334,6 +364,35 @@ pub struct DetailLink {
     pub capability: String,
     #[serde(rename = "forKinds")]
     pub for_kinds: Vec<String>,
+}
+
+/// Reports every declared predicate the host will not evaluate, at the field
+/// that has to change.
+///
+/// The rule itself is `Predicate::check` in `srelens-capability`, which the
+/// action primitives run again on the way to the cluster. This is the same
+/// rule read at the place a person can fix it, not a second one: a list that
+/// passes here cannot be refused there, and one refused there could not have
+/// been installed.
+fn predicate_problems(
+    problems: &mut ValidationErrors,
+    at: &str,
+    field: &str,
+    declared: &[Predicate],
+) {
+    if declared.len() > MAX_PREDICATES {
+        problems.push(
+            Code::InvalidValue,
+            format!("{at}.{field}"),
+            format!("Declare at most {MAX_PREDICATES} predicates"),
+        );
+        return;
+    }
+    for (index, predicate) in declared.iter().enumerate() {
+        if let Err(why) = predicate.check() {
+            problems.push(Code::InvalidBinding, format!("{at}.{field}[{index}]"), why);
+        }
+    }
 }
 
 fn identifier(value: &str) -> bool {
@@ -544,10 +603,25 @@ impl Manifest {
             arguments.insert((*key).to_owned(), value.clone());
         }
         for (key, value) in &action.arguments {
-            if ACTION_IDENTITY.contains(&key.as_str()) || ACTION_INPUTS.contains(&key.as_str()) {
+            if ACTION_IDENTITY.contains(&key.as_str())
+                || ACTION_INPUTS.contains(&key.as_str())
+                || ACTION_PREDICATES.contains(&key.as_str())
+            {
                 return Err(format!("`{key}` is filled in by the host"));
             }
             arguments.insert(key.clone(), value.clone());
+        }
+        // The checks the host makes before it patches, carried the same way
+        // the kind is: copied out of the declaration into the binding, so the
+        // primitive is handed them rather than trusting a caller to pass them.
+        // `availableWhen` is not here — it decides whether a control is
+        // offered, and no cluster request needs it.
+        if !action.preconditions.is_empty() {
+            arguments.insert(
+                "preconditions".to_owned(),
+                serde_json::to_value(&action.preconditions)
+                    .map_err(|e| format!("preconditions: {e}"))?,
+            );
         }
         Ok(Binding {
             name: action.name.clone(),
@@ -711,8 +785,18 @@ impl Manifest {
                             "`{key}` is filled in by the host, from the reader binding this action names"
                         ),
                     );
+                } else if ACTION_PREDICATES.contains(&key.as_str()) {
+                    problems.push(
+                        Code::InvalidBinding,
+                        format!("{at}.arguments.{key}"),
+                        format!(
+                            "`{key}` is declared in the action's own `{key}`, not as an argument"
+                        ),
+                    );
                 }
             }
+            predicate_problems(&mut problems, &at, "preconditions", &action.preconditions);
+            predicate_problems(&mut problems, &at, "availableWhen", &action.available_when);
             if !names.contains(action.resource.as_str()) {
                 problems.push(
                     Code::UnresolvedCapability,

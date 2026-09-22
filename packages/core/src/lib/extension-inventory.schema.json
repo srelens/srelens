@@ -4,15 +4,29 @@
   "definitions": {
     "ActionBinding": {
       "additionalProperties": false,
-      "description": "One declared mutation: a host action primitive, the reader binding whose kind it acts on, and the arguments that fix what it writes.\n\nThere is no `preconditions` field yet — #550 adds it, and #551 is what moves the Flux and Argo CD actions in core into manifests that use both.",
+      "description": "One declared mutation: a host action primitive, the reader binding whose kind it acts on, the arguments that fix what it writes, and what must be true of the object before it is written.\n\n#551 is what moves the Flux and Argo CD actions in core into manifests that use these.",
       "properties": {
         "arguments": {
           "additionalProperties": true,
           "description": "What this action writes, fixed at install time.",
           "type": "object"
         },
+        "availableWhen": {
+          "description": "What must be true of the object for the control to be offered. The same predicates, asked by the surface rather than by the cluster request, so a person is not shown a button whose refusal is already known.\n\nDisplay only, and deliberately so: an app that needs a condition *enforced* declares it in `preconditions`, where the host is what checks it. A surface can be out of date; the fresh GET cannot.",
+          "items": {
+            "$ref": "#/definitions/Predicate"
+          },
+          "type": "array"
+        },
         "name": {
           "type": "string"
+        },
+        "preconditions": {
+          "description": "What must be true of the object for the write to be sent. Evaluated by the host against the fresh GET the primitive already performs, before the patch; a predicate that does not hold refuses the request and the operator is told this predicate's `reason`.\n\nThese add refusals. The host's own guards — an object being deleted, a UID or `resourceVersion` that has moved — run first and are not something a manifest can reach.",
+          "items": {
+            "$ref": "#/definitions/Predicate"
+          },
+          "type": "array"
         },
         "resource": {
           "description": "The name of a reader binding in `capabilities`. The action acts on that binding's kind and on no other.",
@@ -386,6 +400,45 @@
         "capability",
         "id",
         "title"
+      ],
+      "type": "object"
+    },
+    "Predicate": {
+      "additionalProperties": false,
+      "description": "One declared check about the object an action would write.\n\nExactly one operator per predicate:\n\n```json {\"jsonPath\": \".spec.suspend\", \"notEquals\": true, \"reason\": \"Resume this resource before requesting reconciliation\"} ```",
+      "properties": {
+        "absent": {
+          "description": "`true`: the value at `jsonPath` must be unset or null.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "equals": {
+          "description": "The value at `jsonPath` must equal this literal."
+        },
+        "jsonPath": {
+          "description": "The value this predicate asks about, as a bounded JSONPath subset: `.spec.suspend`, `.metadata.annotations['acme.io/pinned']`, `.status.conditions[0].status`. The grammar is the bounded subset the module documents: no wildcard, filter or recursive descent.",
+          "type": "string"
+        },
+        "notEquals": {
+          "description": "The value at `jsonPath` must not equal this literal. An unset field is not equal to anything, so this holds when it is absent."
+        },
+        "present": {
+          "description": "`true`: the value at `jsonPath` must be set and not null.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "What the operator is told when this predicate does not hold. Untrusted display text: written by the app, and escaped by the host before anything draws it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "jsonPath",
+        "reason"
       ],
       "type": "object"
     },
