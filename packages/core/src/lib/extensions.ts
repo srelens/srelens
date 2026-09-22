@@ -1,4 +1,5 @@
 import { invokeCapability } from "../transport/transport";
+import type { ActionPredicate } from "./actionPredicates";
 import type { CapabilityImpact } from "./capabilities";
 // These mirror crates/plugin-host/src/manifest.rs and crates/registry/src/extensions.rs;
 // extensionTypes.test.ts fails when a field name or its optionality differs.
@@ -56,6 +57,18 @@ export interface ExtensionManifest {
     resource: string;
     /** What the action writes, fixed at install time. */
     arguments: Record<string, unknown>;
+    /**
+     * What must be true of the resource for the host to send the write
+     * (#550). Checked by the host against its own fresh read, so nothing
+     * here is a check the surface is trusted to have made.
+     */
+    preconditions?: ActionPredicate[];
+    /**
+     * What must be true of the resource for the control to be offered. The
+     * same predicates, asked here rather than of the cluster; a condition
+     * that must be *enforced* belongs in `preconditions`.
+     */
+    availableWhen?: ActionPredicate[];
   }>;
   contributions: {
     pages: ExtensionPage[];

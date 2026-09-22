@@ -31,7 +31,9 @@ use kube::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use srelens_capability::{Annotations, Capability, CapabilityError, Impact};
+use srelens_capability::{
+    check_predicates, unmet, Annotations, Capability, CapabilityError, Impact, Predicate,
+};
 use std::sync::Arc;
 
 /// Writes one fixed annotation key. Covers Flux's reconcile, force and reset
@@ -87,6 +89,11 @@ macro_rules! action_input {
             /// The `resourceVersion` of the object the operator reviewed.
             #[serde(rename = "resourceVersion")]
             pub resource_version: String,
+            /// What the manifest declared must be true of the object before
+            /// this write is sent (#550). Bound by the host out of the
+            /// action's own `preconditions`, never supplied by a caller.
+            #[serde(default)]
+            pub preconditions: Vec<Predicate>,
             $($(#[$inner])* pub $field: $ty,)*
         }
         impl $name {
@@ -189,13 +196,29 @@ pub(crate) fn guard_reviewed(
     Ok(())
 }
 
-/// GET the object, refuse anything the review no longer covers, then send the
-/// patch `build` makes from what the server actually holds.
+/// What the operator is told when a declared precondition does not hold.
+///
+/// The host's words first, the app's after: `reason` is a manifest's text,
+/// escaped by [`Predicate::reason`], and a refusal has to read as a refusal
+/// whatever sentence an app put in it.
+fn unmet_reason(predicate: &Predicate) -> String {
+    format!("This action is not available: {}", predicate.reason())
+}
+
+/// GET the object, refuse anything the review no longer covers or the declared
+/// preconditions do not admit, then send the patch `build` makes from what the
+/// server actually holds.
+///
+/// The order is the point. The host's guards run first and unconditionally, so
+/// no manifest can reach past them; the declared preconditions run next and
+/// can only add refusals; the patch is built last, from the same fresh read
+/// every check was made against.
 ///
 /// `status` sends it to the status subresource instead of the object itself.
 async fn request(
     client: Client,
     reviewed: Reviewed<'_>,
+    preconditions: &[Predicate],
     status: bool,
     build: impl FnOnce(&Value) -> Result<Value, String>,
 ) -> Result<Value, String> {
@@ -208,6 +231,9 @@ async fn request(
     )
     .map_err(|e| e.to_string())?;
     guard_reviewed(&current, reviewed.uid, reviewed.resource_version)?;
+    if let Some(unheld) = unmet(preconditions, &current) {
+        return Err(unmet_reason(unheld));
+    }
     let mut patch = build(&current)?;
     pin_to_reviewed(&mut patch, reviewed.uid, reviewed.resource_version);
     let params = PatchParams::default();
@@ -651,6 +677,21 @@ fn text<'a>(arguments: &'a Map<String, Value>, name: &str) -> Result<&'a str, St
     }
 }
 
+/// The declared preconditions in a binding's arguments, held to the same rules
+/// the handler holds them to.
+///
+/// The host binds these out of the action's own `preconditions` field, so a
+/// value here that is not a list of predicates is a binding built by something
+/// other than this host — refused rather than ignored.
+fn check_bound_preconditions(arguments: &Map<String, Value>) -> Result<(), String> {
+    let Some(declared) = arguments.get("preconditions") else {
+        return Ok(());
+    };
+    let predicates: Vec<Predicate> = serde_json::from_value(declared.clone())
+        .map_err(|e| format!("`preconditions` must be a list of predicates: {e}"))?;
+    check_predicates(&predicates)
+}
+
 /// Every rule a manifest's bound arguments must satisfy that the input schema
 /// cannot express.
 ///
@@ -662,6 +703,11 @@ pub fn check_bound_arguments(
     capability: &str,
     arguments: &Map<String, Value>,
 ) -> Result<(), String> {
+    // Every primitive takes the same declared preconditions (#550), so they
+    // are checked once here rather than in each arm — and by the same
+    // `check_predicates` each handler runs before it reads the object, so a
+    // predicate this refuses cannot be reached from the cluster side either.
+    check_bound_preconditions(arguments)?;
     match capability {
         ANNOTATE => {
             check_annotation_key(text(arguments, "key")?)?;
@@ -702,25 +748,45 @@ pub fn check_bound_arguments(
 
 async fn annotate(client: Client, input: AnnotateIn) -> Result<Value, String> {
     check_annotation_key(&input.key)?;
+    check_predicates(&input.preconditions)?;
     let value = resolve_value(&input.value)?;
-    request(client, input.reviewed(), false, |_| {
-        Ok(json!({"metadata": {"annotations": {&input.key: value}}}))
-    })
+    request(
+        client,
+        input.reviewed(),
+        &input.preconditions,
+        false,
+        |_| Ok(json!({"metadata": {"annotations": {&input.key: value}}})),
+    )
     .await
 }
 
 async fn set_fields(client: Client, input: SetFieldsIn) -> Result<Value, String> {
     let patch = fields_patch(&input.fields)?;
-    request(client, input.reviewed(), false, |current| {
-        check_object_parents(current, &input.fields)?;
-        Ok(patch)
-    })
+    check_predicates(&input.preconditions)?;
+    request(
+        client,
+        input.reviewed(),
+        &input.preconditions,
+        false,
+        |current| {
+            check_object_parents(current, &input.fields)?;
+            Ok(patch)
+        },
+    )
     .await
 }
 
 async fn set_merge_patch(client: Client, input: MergePatchIn) -> Result<Value, String> {
     let patch = check_merge_patch(&input.group, &input.kind, &input.patch)?;
-    request(client, input.reviewed(), false, |_| Ok(patch)).await
+    check_predicates(&input.preconditions)?;
+    request(
+        client,
+        input.reviewed(),
+        &input.preconditions,
+        false,
+        |_| Ok(patch),
+    )
+    .await
 }
 
 async fn set_status_condition(
@@ -733,9 +799,14 @@ async fn set_status_condition(
         &input.reason,
         &input.message,
     )?;
-    request(client, input.reviewed(), true, |current| {
-        Ok(condition_patch(current, &input))
-    })
+    check_predicates(&input.preconditions)?;
+    request(
+        client,
+        input.reviewed(),
+        &input.preconditions,
+        true,
+        |current| Ok(condition_patch(current, &input)),
+    )
     .await
 }
 
@@ -751,10 +822,11 @@ async fn set_status_condition(
 /// manifests and runs hooks, so it is `high`.
 ///
 /// This is the floor for every binding, never a ceiling on one:
-/// [`Annotations::for_binding`] only ever raises. When #550's preconditions
-/// and #551's migrated Flux and Argo CD actions give the host more to go on
-/// per action, a `force` binding can be published above its primitive's row
-/// without any of these rows moving.
+/// [`Annotations::for_binding`] only ever raises. #550's preconditions narrow
+/// *when* a primitive runs, not what it can disturb when it does, so none of
+/// these rows move for them; when #551's migrated Flux and Argo CD actions
+/// give the host more to go on per action, a `force` binding can be published
+/// above its primitive's row without any of them moving either.
 fn metadata(primitive: &str) -> (Impact, &'static str) {
     match primitive {
         ANNOTATE => (
@@ -1551,5 +1623,184 @@ mod tests {
             check(json!({"key": "a.example.io/b"})).is_some(),
             "no value bound at all"
         );
+    }
+
+    // -- declared preconditions (#550) -------------------------------------
+
+    /// `.spec.suspend notEquals true`, with the reason #550 names.
+    fn not_suspended() -> Value {
+        json!([{
+            "jsonPath": ".spec.suspend", "notEquals": true,
+            "reason": "Resume this resource before requesting reconciliation"
+        }])
+    }
+
+    fn reconcile() -> Value {
+        json!({"key": "reconcile.fluxcd.io/requestedAt", "value": "$now"})
+    }
+
+    #[tokio::test]
+    async fn a_precondition_that_does_not_hold_refuses_before_the_patch() {
+        let (client, requests) = mock(object(json!({"spec": {"suspend": true}})));
+        let refused = annotate(
+            client,
+            annotate_in(
+                json!({"key": "reconcile.fluxcd.io/requestedAt", "value": "$now",
+                "preconditions": not_suspended()}),
+            ),
+        )
+        .await
+        .expect_err("a suspended resource is not reconciled");
+        assert!(
+            refused.contains("Resume this resource before requesting reconciliation"),
+            "the operator is told what the app declared: {refused}"
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "the fresh GET, and nothing written: {requests:?}"
+        );
+        assert!(requests[0].0.starts_with("GET "), "{:?}", requests[0].0);
+    }
+
+    #[tokio::test]
+    async fn a_precondition_that_holds_lets_the_write_through() {
+        let (client, requests) = mock(object(json!({"spec": {"suspend": false}})));
+        annotate(
+            client,
+            annotate_in(
+                json!({"key": "reconcile.fluxcd.io/requestedAt", "value": "$now",
+                "preconditions": not_suspended()}),
+            ),
+        )
+        .await
+        .expect("a live resource reconciles");
+        assert_eq!(requests.lock().unwrap().len(), 2, "the GET and the PATCH");
+    }
+
+    /// The two refusals every write makes are the host's, so a manifest that
+    /// declares nothing still gets them — and one that declares a predicate
+    /// which *holds* on a deleted object does not get past them either.
+    #[tokio::test]
+    async fn a_host_guard_refuses_whatever_the_manifest_declares() {
+        let deleting = object(json!({"metadata": {"deletionTimestamp": "2026-01-01T00:00:00Z"}}));
+        let waved_through = json!([{
+            "jsonPath": ".metadata.deletionTimestamp", "present": true,
+            "reason": "This app says a deletion is fine"
+        }]);
+        for declared in [json!([]), waved_through] {
+            let (client, requests) = mock(deleting.clone());
+            let mut input = reconcile();
+            input["preconditions"] = declared.clone();
+            let refused = annotate(client, annotate_in(input))
+                .await
+                .expect_err("an object being deleted is not written");
+            assert_eq!(
+                refused, "Resource is being deleted",
+                "the host's guard, in the host's words, with {declared}"
+            );
+            assert_eq!(requests.lock().unwrap().len(), 1, "nothing was written");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_precondition_cannot_relax_the_review_pin() {
+        let (client, requests) = mock(object(json!({"metadata": {"resourceVersion": "9"}})));
+        let mut input = reconcile();
+        input["preconditions"] = json!([{
+            "jsonPath": ".metadata.resourceVersion", "present": true,
+            "reason": "This app says any version will do"
+        }]);
+        let refused = annotate(client, annotate_in(input))
+            .await
+            .expect_err("a version nobody reviewed is not written");
+        assert!(refused.contains("refresh and review"), "{refused}");
+        assert_eq!(requests.lock().unwrap().len(), 1, "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn a_predicate_the_host_cannot_evaluate_never_reaches_the_cluster() {
+        let (client, requests) = mock(object(json!({})));
+        let mut input = reconcile();
+        input["preconditions"] = json!([{
+            "jsonPath": ".status.conditions[?(@.type=='Ready')].status",
+            "equals": "True", "reason": "Wait for readiness"
+        }]);
+        let refused = annotate(client, annotate_in(input))
+            .await
+            .expect_err("a path the host does not evaluate is refused");
+        assert!(refused.contains("not a resource path"), "{refused}");
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "the object was not even read"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_declared_reason_cannot_reorder_the_host_words_around_it() {
+        let (client, _) = mock(object(json!({"spec": {"suspend": true}})));
+        let mut input = reconcile();
+        input["preconditions"] = json!([{
+            "jsonPath": ".spec.suspend", "notEquals": true,
+            "reason": "Resume first\u{202e}\u{200b}"
+        }]);
+        let refused = annotate(client, annotate_in(input))
+            .await
+            .expect_err("suspended");
+        assert!(
+            !refused.contains('\u{202e}') && refused.contains("\\u{202e}"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn every_primitive_refuses_a_predicate_it_would_not_evaluate() {
+        let bad = json!([{"jsonPath": "spec.suspend", "present": true, "reason": "r"}]);
+        let good = json!([{"jsonPath": ".spec.suspend", "absent": true, "reason": "r"}]);
+        let arguments = |primitive: &str, predicates: &Value| {
+            let mut args = match primitive {
+                ANNOTATE => json!({"key": "a.example.io/b", "value": "normal"}),
+                SET_FIELDS => json!({"fields": {"/spec/suspend": true}}),
+                SET_STATUS_CONDITION => json!({
+                    "conditionType": "Issuing", "conditionStatus": "True",
+                    "reason": "ManuallyTriggered", "message": ""
+                }),
+                _ => json!({"patch": {"spec": {"suspend": true}}}),
+            };
+            args["preconditions"] = predicates.clone();
+            args
+        };
+        for primitive in PRIMITIVES {
+            let refused = check_bound_arguments(
+                primitive,
+                arguments(primitive, &bad).as_object().expect("object"),
+            )
+            .expect_err("a path the host cannot evaluate is refused at install");
+            assert!(
+                refused.contains("not a resource path"),
+                "{primitive}: {refused}"
+            );
+            check_bound_arguments(
+                primitive,
+                arguments(primitive, &good).as_object().expect("object"),
+            )
+            .unwrap_or_else(|why| panic!("{primitive}: {why}"));
+        }
+    }
+
+    #[test]
+    fn preconditions_are_bound_in_number() {
+        let one = json!({"jsonPath": ".spec.x", "present": true, "reason": "r"});
+        let many: Vec<Value> =
+            std::iter::repeat_n(one, srelens_capability::MAX_PREDICATES + 1).collect();
+        let refused = check_bound_arguments(
+            ANNOTATE,
+            json!({"key": "a.example.io/b", "value": "normal", "preconditions": many})
+                .as_object()
+                .expect("object"),
+        )
+        .expect_err("a bound list");
+        assert!(refused.contains("at most"), "{refused}");
     }
 }

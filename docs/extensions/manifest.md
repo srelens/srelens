@@ -133,11 +133,54 @@ not write a Secret's `data` or `stringData`, and may not target an RBAC kind (`R
 `rbac.authorization.k8s.io`). The host applies the same rules when the manifest is
 installed, when a stored app is reverified, and on the way to the cluster.
 
-Preconditions ([#550](https://github.com/srelens/srelens/issues/550)) and the host-owned
-confirmation dialog ([#552](https://github.com/srelens/srelens/issues/552)) are not part
-of this API version yet, and the Flux and Argo CD actions in core still come from the
-host's own table until [#551](https://github.com/srelens/srelens/issues/551) moves them
-into manifests.
+### Preconditions and availability
+
+An action may declare what must be true of the object, as predicates the host
+evaluates rather than words in a description:
+
+| Field | Meaning |
+|---|---|
+| `preconditions` | Checked by the host against its own fresh read of the object, before the patch. One that does not hold refuses the request, and the operator is told its `reason`. |
+| `availableWhen` | Checked by the surface, against the object it is already showing, to decide whether the control is offered. The `reason` is the disabled control's tooltip. |
+
+Each list holds at most 8 predicates, and each predicate is one question about one
+value:
+
+```json
+"preconditions": [
+  { "jsonPath": ".spec.suspend", "notEquals": true,
+    "reason": "Resume this resource before requesting reconciliation" }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `jsonPath` | The value to ask about. An optional leading `$`, then `.key`, `['key']`, `["key"]` and `[0]`, at most 8 segments and 256 characters. No wildcard, filter, recursive descent or function — each addresses a *set* of values, and "does this hold" over a set is a different question. |
+| `equals` / `notEquals` | The value must (not) be this string, number or boolean **literal**. An object or a list is not a comparand. A field nobody set is not equal to anything, so `notEquals` holds when it is absent. |
+| `present` / `absent` | Written `true`. The value must be set, or unset. `null` counts as unset, which is also why `null` is not a comparand: write `absent: true`. |
+| `reason` | Required, at most 200 characters. Shown to the operator, so it says what to do next. |
+
+Exactly one operator per predicate. Both lists are checked when the app is installed
+and each time a stored app is reverified, and `preconditions` are checked again on the
+way to the cluster — one statement of each rule, in
+`crates/capability/src/predicate.rs`, run from both ends.
+
+Two things these cannot do:
+
+- **They cannot remove a host guard.** An object that is being deleted, and a `uid` or
+  `resourceVersion` that has moved on since the operator reviewed it, are refused
+  before any declared predicate is evaluated. A predicate can only add a refusal.
+- **`availableWhen` does not enforce.** A surface can be seconds out of date; the
+  host's own read cannot. A condition that must hold when the write lands belongs in
+  `preconditions`, and an app that means both writes both.
+
+The `reason` is an app's text shown in the host's UI, so the host escapes it before
+drawing it and frames its own refusal around it.
+
+The host-owned confirmation dialog
+([#552](https://github.com/srelens/srelens/issues/552)) is not part of this API version
+yet, and the Flux and Argo CD actions in core still come from the host's own table
+until [#551](https://github.com/srelens/srelens/issues/551) moves them into manifests.
 
 ## Contributions
 
