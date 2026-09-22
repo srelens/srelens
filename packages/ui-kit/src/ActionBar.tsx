@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "./Button";
 import { cx } from "./cx";
 import type { IconComponent } from "./IconButton";
@@ -82,10 +82,19 @@ const NO_ACCESS = "No access";
  * focus, so a keyboard user could never reach the explanation, and in several
  * browsers it swallows pointer events too, so the tooltip did not fire reliably
  * for a mouse either. `aria-disabled` says the same thing to assistive
- * technology while leaving the button focusable, the click is refused here, and
- * the reason rides along as the accessible description. In the menu, where
- * there is room for it, the block is also stated in words: the mock dimmed the
- * row to 45% opacity, and opacity is not a message.
+ * technology while leaving the button focusable, and the click is refused here.
+ *
+ * Focusable is only half of it; there has to be something to read once you get
+ * there. The reason is a real element beside the control, which the control
+ * names with `aria-describedby`. It is clipped out of sight, not hidden, so the
+ * accessibility tree keeps it, and it comes on screen while focus is inside the
+ * action. The control keeps a `title` too, for the mouse. That `title` was once
+ * all there was, and it is not enough on its own: it is only a fallback
+ * description, several screen readers never announce it, and its tooltip draws
+ * on hover and never on focus. A sighted keyboard user could tab to the dimmed
+ * button and be told nothing. (#670) In the menu, where there is room for it,
+ * the block is also stated in words: the mock dimmed the row to 45% opacity,
+ * and opacity is not a message.
  *
  * `max` is clamped. It reads like a constant and is written as arithmetic at
  * the call site — how many buttons fit beside a title — and the mock handed the
@@ -190,30 +199,57 @@ function CheckGlyph() {
  */
 function BarButton({ action: a }: { action: ActionBarAction }) {
   const { state, run } = useCopied();
+  const reasonId = useId();
   const blocked = filled(a.disabledReason);
   const Icon = a.icon;
   const confirming = filled(a.confirmLabel) && state === "copied";
 
   return (
-    <Button
-      type="button"
-      variant={a.danger ? "danger" : "secondary"}
-      // Not `disabled`: see the note above — the reason has to stay
-      // reachable, and a disabled button cannot be focused to read it.
-      aria-disabled={blocked || undefined}
-      title={a.disabledReason}
-      className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
-      onClick={() => {
-        if (blocked) return;
-        // Only an action that asked to confirm is awaited for its answer;
-        // every other one keeps the fire-and-forget call it had.
-        if (filled(a.confirmLabel)) void run(a.onSelect);
-        else void a.onSelect();
-      }}
-    >
-      {confirming ? <CheckGlyph /> : Icon && <Icon size={12} aria-hidden="true" />}
-      {actionWord(a, state)}
-    </Button>
+    // The slot is there whether or not the action is blocked. Wrapping only a
+    // blocked button would remount it the moment a verdict arrived, and a
+    // verdict can arrive while the button has focus.
+    <span className="action-slot">
+      <Button
+        type="button"
+        variant={a.danger ? "danger" : "secondary"}
+        // Not `disabled`: see the note above — the reason has to stay
+        // reachable, and a disabled button cannot be focused to read it.
+        aria-disabled={blocked || undefined}
+        aria-describedby={blocked ? reasonId : undefined}
+        title={a.disabledReason}
+        className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+        onClick={() => {
+          if (blocked) return;
+          // Only an action that asked to confirm is awaited for its answer;
+          // every other one keeps the fire-and-forget call it had.
+          if (filled(a.confirmLabel)) void run(a.onSelect);
+          else void a.onSelect();
+        }}
+      >
+        {confirming ? <CheckGlyph /> : Icon && <Icon size={12} aria-hidden="true" />}
+        {actionWord(a, state)}
+      </Button>
+      {blocked && <BlockedReason id={reasonId}>{a.disabledReason}</BlockedReason>}
+    </span>
+  );
+}
+
+/**
+ * Why an action is blocked, as an element the control's `aria-describedby`
+ * points at.
+ *
+ * A sibling of the control, not a child: inside the button it would become part
+ * of the accessible name. It is clipped out of sight rather than hidden, because
+ * `display: none` also takes it out of the accessibility tree, and then the
+ * description points at nothing. `.action-slot:focus-within` brings it back on
+ * screen, which is the part a sighted keyboard user was missing: the `title`
+ * beside it only draws its tooltip on hover. (#670)
+ */
+function BlockedReason({ id, children }: { id: string; children: ReactNode }) {
+  return (
+    <span id={id} className="action-reason">
+      {children}
+    </span>
   );
 }
 
@@ -259,6 +295,7 @@ function actionWord(a: ActionBarAction, state: CopyState): string {
  */
 function MenuRow({ action: a, close }: { action: ActionBarAction; close: () => void }) {
   const { state, run } = useCopied();
+  const reasonId = useId();
   const blocked = filled(a.disabledReason);
   const confirms = filled(a.confirmLabel);
   const confirming = confirms && state === "copied";
@@ -281,37 +318,43 @@ function MenuRow({ action: a, close }: { action: ActionBarAction; close: () => v
   }, [state, close]);
 
   return (
-    <button
-      type="button"
-      // Named explicitly: otherwise the name is computed from everything in the
-      // row, and a blocked action would be called "Delete No access". It
-      // tracks the visible word rather than pinning to `label`, so the name and
-      // the text never disagree — see {@link actionWord}.
-      aria-label={word}
-      aria-disabled={blocked || undefined}
-      title={a.disabledReason}
-      className="ns-row aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
-      // The whole row, not just the glyph the mock tinted: on the bar
-      // `.btn-danger` colours the label too, and a menu that marks the same
-      // action more quietly is the inconsistency.
-      style={a.danger ? { color: toneColor("sev") } : undefined}
-      onClick={() => {
-        // Left open on purpose: a menu that shuts looks like the action was
-        // taken.
-        if (blocked) return;
-        // An action that answers keeps the menu until it has answered; see
-        // above. Everything else closes on the pick, as it always did.
-        if (confirms) {
-          void run(a.onSelect);
-          return;
-        }
-        close();
-        a.onSelect();
-      }}
-    >
-      {confirming ? <CheckGlyph /> : Icon && <Icon size={12} className="shrink-0" aria-hidden="true" />}
-      <span className="flex-1 truncate">{word}</span>
-      {blocked && <span className="path text-faint">{NO_ACCESS}</span>}
-    </button>
+    <div className="action-slot" data-in="menu">
+      <button
+        type="button"
+        // Named explicitly: otherwise the name is computed from everything in
+        // the row, and a blocked action would be called "Delete No access". It
+        // tracks the visible word rather than pinning to `label`, so the name
+        // and the text never disagree — see {@link actionWord}.
+        aria-label={word}
+        aria-disabled={blocked || undefined}
+        // The reason, not the `No access` tag: the tag is a constant, and a
+        // description that says less than the `title` beside it is no fix.
+        aria-describedby={blocked ? reasonId : undefined}
+        title={a.disabledReason}
+        className="ns-row aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+        // The whole row, not just the glyph the mock tinted: on the bar
+        // `.btn-danger` colours the label too, and a menu that marks the same
+        // action more quietly is the inconsistency.
+        style={a.danger ? { color: toneColor("sev") } : undefined}
+        onClick={() => {
+          // Left open on purpose: a menu that shuts looks like the action was
+          // taken.
+          if (blocked) return;
+          // An action that answers keeps the menu until it has answered; see
+          // above. Everything else closes on the pick, as it always did.
+          if (confirms) {
+            void run(a.onSelect);
+            return;
+          }
+          close();
+          a.onSelect();
+        }}
+      >
+        {confirming ? <CheckGlyph /> : Icon && <Icon size={12} className="shrink-0" aria-hidden="true" />}
+        <span className="flex-1 truncate">{word}</span>
+        {blocked && <span className="path text-faint">{NO_ACCESS}</span>}
+      </button>
+      {blocked && <BlockedReason id={reasonId}>{a.disabledReason}</BlockedReason>}
+    </div>
   );
 }
