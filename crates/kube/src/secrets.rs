@@ -20,9 +20,10 @@ use crate::client_cache::ClientCache;
 use crate::connect::request_timeout;
 
 /// Blank the values of a serialized Secret's `data` and `stringData` maps in
-/// place, keeping the keys. `get_object` runs this so the generic
-/// structured-detail path never carries Secret material — values are only
-/// read through the dedicated, consent-gateable `k8s.getSecret`.
+/// place, keeping the keys. Every ungated reader of a Secret runs this —
+/// `k8s.getObject`, `k8s.getManifest` and `k8s.diffManifest` — so no generic
+/// path carries Secret material; values are only read through the dedicated,
+/// consent-gateable `k8s.getSecret`.
 ///
 /// **And every value under `metadata.annotations`, keys kept.** Blanking `data`
 /// while leaving the annotations alone put the same values back two lines
@@ -30,6 +31,12 @@ use crate::connect::request_timeout;
 /// `kubectl.kubernetes.io/last-applied-configuration` holds the entire applied
 /// manifest, base64 `data` map included. Both ungated readers of this path —
 /// `k8s.getManifest` and `k8s.diffManifest` — returned it in the clear.
+///
+/// And `k8s.getManifest` went on doing so for another round (#661), because
+/// the redaction went in beside it, in `k8s.getObject`, while the YAML path
+/// serialized the fetched object straight out. Two doc comments and
+/// `docs/MCP.md` all said it ran this. Nothing checked, so nothing noticed:
+/// `get_manifest_redacts_a_secrets_values_and_annotations` now does.
 ///
 /// The scope rule is **every annotation on a Secret**, not "the one annotation
 /// kubectl writes", and the difference is the point: any controller can echo a

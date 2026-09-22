@@ -403,6 +403,31 @@ pub fn gvk_for(kind: &str) -> Option<(GroupVersionKind, bool)> {
     Some((GroupVersionKind::gvk(group, version, k), namespaced))
 }
 
+/// Serialize a fetched object as the YAML `k8s.getManifest` returns, with a
+/// core-group `Secret`'s values and annotations blanked by
+/// [`crate::secrets::redact_secret_data`] first.
+///
+/// Takes the [`ApiResource`] rather than a `bool` so a caller cannot reach
+/// this without answering "is this a Secret?" — which is the shape the leak
+/// this closes had. `k8s.getObject` redacted; this path, written beside it,
+/// serialized the object straight to YAML and simply never asked, so every
+/// Secret's `data`, `stringData` and annotations reached any MCP client
+/// outside the consent-gated `k8s.getSecret`.
+///
+/// Only a Secret takes the JSON round trip. `serde_json::Value` sorts a map's
+/// keys, so routing every kind through it would reorder every manifest the
+/// editor and the detail pane show, for no gain on a resource that carries
+/// nothing to redact.
+fn manifest_yaml(obj: &DynamicObject, ar: &ApiResource) -> Result<String, CapabilityError> {
+    if ar.kind == "Secret" && ar.group.is_empty() {
+        let mut object =
+            serde_json::to_value(obj).map_err(|e| CapabilityError::Handler(e.to_string()))?;
+        crate::secrets::redact_secret_data(&mut object);
+        return serde_yaml::to_string(&object).map_err(|e| CapabilityError::Handler(e.to_string()));
+    }
+    serde_yaml::to_string(obj).map_err(|e| CapabilityError::Handler(e.to_string()))
+}
+
 /// `k8s.getManifest` — return a resource's manifest as YAML.
 pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
     Capability::typed::<ManifestIn, ManifestOut, _, _>(
@@ -433,9 +458,9 @@ pub fn get_manifest_capability(cache: Arc<ClientCache>) -> Capability {
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?;
                 // Drop noisy server-managed fields for a readable manifest.
                 obj.metadata.managed_fields = None;
-                let yaml = serde_yaml::to_string(&obj)
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?;
-                Ok(ManifestOut { yaml })
+                Ok(ManifestOut {
+                    yaml: manifest_yaml(&obj, &ar)?,
+                })
             }
         },
     )
@@ -1342,6 +1367,65 @@ mod tests {
         let cap = get_manifest_capability(ClientCache::new(PathBuf::from("/x")));
         assert_eq!(cap.id, "k8s.getManifest");
         assert!(cap.annotations.read_only);
+    }
+
+    /// Build a fetched Secret as the API server hands one back: base64 `data`,
+    /// plaintext `stringData`, and the whole applied manifest echoed into the
+    /// annotation `kubectl` writes.
+    fn fetched_secret() -> (ApiResource, DynamicObject) {
+        let (gvk, _) = gvk_for("Secret").expect("Secret is a supported kind");
+        let ar = ApiResource::from_gvk(&gvk);
+        let mut obj = DynamicObject::new("db", &ar).within("team");
+        obj.metadata.annotations = Some(std::collections::BTreeMap::from([(
+            "kubectl.kubernetes.io/last-applied-configuration".to_string(),
+            r#"{"kind":"Secret","data":{"password":"aHVudGVyMg=="}}"#.to_string(),
+        )]));
+        obj.data = serde_json::json!({
+            "type": "Opaque",
+            "data": { "password": "aHVudGVyMg==" },
+            "stringData": { "plain": "hunter2" },
+        });
+        (ar, obj)
+    }
+
+    /// PR #661 review (CodeRabbit, CWE-200). `k8s.getObject` ran
+    /// `redact_secret_data`; `k8s.getManifest` — the *other* ungated reader,
+    /// and the one an MCP client reaches for — serialized the fetched object
+    /// straight to YAML. `docs/MCP.md` and `redact_secret_data`'s own doc
+    /// comment both claimed it ran the redactor. It did not, so every Secret
+    /// value and every annotation came back in the clear outside the
+    /// consent-gated `k8s.getSecret` path.
+    #[test]
+    fn get_manifest_redacts_a_secrets_values_and_annotations() {
+        let (ar, obj) = fetched_secret();
+        let yaml = manifest_yaml(&obj, &ar).expect("serializes");
+        assert!(
+            !yaml.contains("aHVudGVyMg=="),
+            "the base64 `data` value leaked: {yaml}"
+        );
+        assert!(
+            !yaml.contains("hunter2"),
+            "the plaintext `stringData` value leaked: {yaml}"
+        );
+        // Keys survive so the reader still sees which fields a Secret has —
+        // the same trade `k8s.getObject` and the diff path already make.
+        assert!(yaml.contains("password"), "keys must survive: {yaml}");
+        assert!(yaml.contains("plain"), "keys must survive: {yaml}");
+    }
+
+    /// The redactor runs for core-group `Secret` and nothing else: a ConfigMap
+    /// carries no secret material and its manifest must come back byte for
+    /// byte as it always has.
+    #[test]
+    fn get_manifest_leaves_a_non_secret_manifest_exactly_as_serialized() {
+        let (gvk, _) = gvk_for("ConfigMap").expect("ConfigMap is a supported kind");
+        let ar = ApiResource::from_gvk(&gvk);
+        let mut obj = DynamicObject::new("app", &ar).within("team");
+        obj.data = serde_json::json!({ "data": { "greeting": "hello" } });
+        assert_eq!(
+            manifest_yaml(&obj, &ar).expect("serializes"),
+            serde_yaml::to_string(&obj).expect("serializes"),
+        );
     }
 
     #[test]
