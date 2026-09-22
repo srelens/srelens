@@ -449,8 +449,17 @@
    Hidden visually — never with `display: none`, which would take it out of
    the tree the control's `aria-describedby` points into — and brought on
    screen while the control has focus. It is positioned rather than laid out,
-   so revealing it does not reflow the row of buttons around it. */
-.extension-action { position: relative; display: inline-flex; }
+   so revealing it does not reflow the row of buttons around it.
+
+   It is anchored to the ROW, across the row's full width and just above it —
+   not to its own button. Anchored to the button and sized to its text, the
+   reason ran off the right edge of a 375px screen for any button in the right
+   half, and from a button that had wrapped onto a second line it sat on top
+   of the buttons above. Spanning the row, it cannot leave the row's bounds
+   and cannot cover one of its buttons; a long reason wraps, and grows upward
+   over the content the row sits under. (#668 review) */
+.extension-actions { position: relative; }
+.extension-action { display: inline-flex; }
 .extension-action-reason {
   position: absolute;
   width: 1px;
@@ -461,15 +470,16 @@
   white-space: nowrap;
 }
 .extension-action:focus-within .extension-action-reason {
-  width: max-content;
-  max-width: 18rem;
+  width: auto;
   height: auto;
   padding: 5px 8px;
   overflow: visible;
   clip-path: none;
   white-space: normal;
+  overflow-wrap: anywhere;
   bottom: calc(100% + 4px);
   left: 0;
+  right: 0;
   z-index: 3;
   border: 1px solid var(--rule, var(--fl-color-border));
   background: var(--surface, var(--fl-color-surface));

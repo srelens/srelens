@@ -163,6 +163,35 @@ it("names the reason from the control, so focus reaches it without a pointer",as
   const ids=["Reconcile","Force reconcile","Reset retries"].map(name=>screen.getByRole("button",{name}).getAttribute("aria-describedby"));
   expect(new Set(ids).size).toBe(3);
 });
+// Where the revealed reason is drawn is a layout property jsdom cannot measure,
+// so the contract is pinned in the stylesheet it lives in. Anchored to its own
+// button, the reason ran off the right edge of a 375px screen and, from a
+// button on a wrapped second line, covered the three buttons above it
+// (measured in Chromium, #668 review). Anchored to the row, across its full
+// width and above it, it can do neither.
+it("anchors a revealed reason to the action row, not to its own button",async()=>{
+  const {readFileSync}=await import("node:fs");
+  const {join}=await import("node:path");
+  const css=readFileSync(join(__dirname,"extensions.css"),"utf8");
+  const rule=(selector:string)=>{
+    const at=css.indexOf(`${selector} {`);
+    expect(at,`${selector} has a rule`).toBeGreaterThanOrEqual(0);
+    return css.slice(at,css.indexOf("}",at));
+  };
+  // The button's wrapper is not a containing block, so it cannot anchor.
+  expect(rule(".extension-action")).not.toMatch(/position\s*:/);
+  // The row is, and the revealed reason spans it rather than sizing to itself.
+  expect(rule(".extension-actions")).toMatch(/position\s*:\s*relative/);
+  const shown=rule(".extension-action:focus-within .extension-action-reason");
+  expect(shown).toMatch(/left\s*:\s*0/);
+  expect(shown).toMatch(/right\s*:\s*0/);
+  expect(shown).not.toMatch(/max-content|max-width/);
+  // And the rendered row is the element that carries it.
+  vi.mocked(inspectExtensionResource).mockResolvedValue({...detail,resource:{...detail.resource,spec:{suspend:true}}});
+  render(<ExtensionResourceDetails selection={selection}/>);
+  const reconcile=await screen.findByRole("button",{name:"Reconcile"});
+  expect(reconcile.closest(".extension-action")?.parentElement?.classList.contains("extension-actions")).toBe(true);
+});
 it("does not offer an Argo CD sync while an operation is already running",async()=>{
   // The host refuses this (`gitops.rs`); stating it as a predicate is what
   // lets the surface say so before a person asks for the write.

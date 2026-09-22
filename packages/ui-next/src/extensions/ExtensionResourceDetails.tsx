@@ -169,7 +169,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
       actions={!fullPage && openResource ? <Button variant="outline" size="xs" disabled={busy} onClick={()=>openResource(selection)}><OpenIcon size={12} aria-hidden="true"/>Open tab</Button> : undefined}
       tabs={[{id:"overview",label:"Overview"},{id:"manifest",label:"Manifest"}]}
       activeTab={tab} onTabChange={setTab} tabsLabel="Resource views"
-      footer={<div className="flex flex-wrap items-center gap-1.5">
+      footer={<div className="extension-actions flex flex-wrap items-center gap-1.5">
         <Button variant="outline" size="xs" disabled={busy||!!pending} onClick={()=>{setError("");setMessage("");data.reload();}}>Refresh details</Button>
         {data.status==="ready" && resource && supported.map(action=>{
           // `aria-disabled` rather than `disabled`: the control stays
