@@ -1413,6 +1413,58 @@ mod tests {
         assert!(yaml.contains("plain"), "keys must survive: {yaml}");
     }
 
+    /// PR #661 follow-up review. The test above drives `manifest_yaml`, so it
+    /// would still pass if `get_manifest_capability` stopped calling it and
+    /// serialized the fetched object itself — which is the leak this PR
+    /// closes, arriving back by the door it came in. This one drives the
+    /// capability end to end against a fake API server and asserts on what
+    /// `ManifestOut` actually carries.
+    #[tokio::test]
+    async fn the_get_manifest_handler_never_returns_a_secrets_plaintext() {
+        let served = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": "db",
+                "namespace": "team",
+                "annotations": {
+                    "kubectl.kubernetes.io/last-applied-configuration":
+                        r#"{"kind":"Secret","data":{"password":"aHVudGVyMg=="}}"#,
+                },
+            },
+            "type": "Opaque",
+            "data": { "password": "aHVudGVyMg==" },
+            "stringData": { "plain": "hunter2" },
+        });
+        let (client, _uris) =
+            crate::list_cap::test_support::mock_slow_pages(vec![served], std::time::Duration::ZERO);
+        let cache = ClientCache::new(PathBuf::from("/x"));
+        cache.preload("fake", client).await;
+        let capability = get_manifest_capability(cache);
+
+        let out = (capability.handler)(serde_json::json!({
+            "context": "fake", "kind": "Secret", "namespace": "team", "name": "db"
+        }))
+        .await
+        .expect("the fake API server answers");
+        let yaml = out["yaml"].as_str().expect("the capability returns YAML");
+
+        assert!(
+            !yaml.contains("aHVudGVyMg=="),
+            "the base64 `data` value left the handler: {yaml}"
+        );
+        assert!(
+            !yaml.contains("hunter2"),
+            "the plaintext `stringData` value left the handler: {yaml}"
+        );
+        assert!(yaml.contains("password"), "keys must survive: {yaml}");
+        assert!(yaml.contains("plain"), "keys must survive: {yaml}");
+        assert!(
+            yaml.contains("last-applied-configuration"),
+            "the annotation key survives, only its value is blanked: {yaml}"
+        );
+    }
+
     /// The redactor runs for core-group `Secret` and nothing else: a ConfigMap
     /// carries no secret material and its manifest must come back byte for
     /// byte as it always has.
