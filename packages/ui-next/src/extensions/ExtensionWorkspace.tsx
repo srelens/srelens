@@ -7,44 +7,88 @@ import {
   loadKubeconfigFiles,
   onExtensionResourceChanged,
   readExtension,
+  itemStatuses,
   type ExtensionPage,
   type InstalledExtension,
   type EventSummary,
+  type NormalizedStatus,
 } from "@srelens/core";
+import { STATUS_WORD } from "./StatusBadge";
 import { ExtensionControls } from "./ExtensionControls";
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 
-const statuses = [
-  "Ready",
-  "Not ready",
-  "In progress",
-  "Suspended",
-  "Unknown",
-] as const;
-type Status = (typeof statuses)[number];
-export function resourceStatus(
-  values: string[],
-  columns: NonNullable<ExtensionPage["statusColumns"]>,
-): Status {
-  const truth = (index?: number) =>
-    index !== undefined && values[index]?.toLowerCase() === "true";
-  if (truth(columns.suspended)) return "Suspended";
-  if (truth(columns.progressing)) return "In progress";
-  const ready = values[columns.ready]?.toLowerCase();
-  return ready === "true"
-    ? "Ready"
-    : ready === "false"
-      ? "Not ready"
-      : "Unknown";
+// The six normalized statuses (#541), each counted and listed by its word:
+// the legend names every one, zero included, so no colour is the only signal.
+const statuses: NormalizedStatus[] = ["healthy", "warning", "error", "progressing", "suspended", "unknown"];
+// Unknown is a state, drawn in a readable ink (`--ink-faint`, 5.5:1 or better
+// against the surface in every theme) — never `--rule`, the hairline the empty
+// ring below is drawn in, which an all-Unknown ring was indistinguishable from.
+export const DONUT_COLORS: Record<NormalizedStatus, string> = {
+  healthy: "var(--ok, var(--fl-color-success, #388b5d))",
+  warning: "var(--warn, var(--fl-color-warning, #bf8e32))",
+  error: "var(--sev, var(--fl-color-danger, #d15f54))",
+  progressing: "var(--info, var(--fl-color-info, #518dcc))",
+  suspended: "var(--ink-muted, var(--fl-color-text-muted, #85818f))",
+  unknown: "var(--ink-faint, var(--fl-color-text-muted, #696475))",
+};
+/** A ring with nothing in it: the hairline, so "none" never reads as a status. */
+export const EMPTY_DONUT = "var(--rule, #85818f)";
+/** The share of the ring cut from the end of each segment, in percent. */
+const GAP = 1.5;
+/**
+ * The least arc a non-zero status is drawn with, in percent: four gaps, so
+ * its colour (the arc less its gap) is three times as wide as the gap beside
+ * it — about 16° of the ring, a mark the eye finds, not a hairline.
+ */
+const MIN_ARC = 4 * GAP;
+
+/**
+ * Each drawn status's arc, in percent of the ring, summing to 100.
+ *
+ * Proportional, except that a non-zero status never gets less than `MIN_ARC`:
+ * one error among a thousand rows is what an operator scans the ring for,
+ * and a true 0.1% share (smaller than the gap) would not be drawn at all. The
+ * space is taken from the larger statuses in proportion to their size. The
+ * ring may exaggerate a sliver; the legend's counts never do.
+ */
+function arcs(shares: number[]): number[] {
+  let floored = shares.map(() => false);
+  for (;;) {
+    const fixed = floored.filter(Boolean).length * MIN_ARC;
+    const free = shares.reduce((sum, share, i) => (floored[i] ? sum : sum + share), 0);
+    const scaled = shares.map((share, i) => (floored[i] ? MIN_ARC : (share * (100 - fixed)) / free));
+    const next = scaled.map((arc, i) => floored[i] || arc < MIN_ARC);
+    if (next.every((value, i) => value === floored[i])) return scaled;
+    floored = next;
+  }
 }
-const colors = [
-  "var(--ok, var(--fl-color-success, #388b5d))",
-  "var(--sev, var(--fl-color-danger, #d15f54))",
-  "var(--warn, var(--fl-color-warning, #bf8e32))",
-  "var(--info, var(--fl-color-info, #518dcc))",
-  "var(--ink-muted, var(--fl-color-text-muted, #85818f))",
-];
+
+/**
+ * The ring for these counts. Adjacent segments are parted by a sliver of the
+ * surface, inset at each segment's end: Suspended and Unknown are both
+ * neutral inks, too close to tell apart by colour alone, and each reads at
+ * 3:1 or better against the surface. With `MIN_ARC` at four gaps, every
+ * segment keeps a colour three times as wide as its gap.
+ */
+export function donutBackground(counts: Record<NormalizedStatus, number>): string {
+  const total = statuses.reduce((sum, status) => sum + counts[status], 0);
+  if (!total) return EMPTY_DONUT;
+  const drawn = statuses.filter((status) => counts[status] > 0);
+  const gap = drawn.length > 1 ? GAP : 0;
+  const widths = arcs(drawn.map((status) => (counts[status] / total) * 100));
+  let offset = 0;
+  const stops = drawn.flatMap((status, i) => {
+    const start = offset;
+    // The last arc closes the ring exactly, whatever the rounding.
+    offset = i === drawn.length - 1 ? 100 : offset + widths[i];
+    const end = offset - gap;
+    return gap
+      ? [`${DONUT_COLORS[status]} ${start}% ${end}%`, `var(--surface, #ffffff) ${end}% ${offset}%`]
+      : [`${DONUT_COLORS[status]} ${start}% ${offset}%`];
+  });
+  return `conic-gradient(${stops.join(",")})`;
+}
 function Summary({
   plugin,
   page,
@@ -94,21 +138,14 @@ function Summary({
       }),
     [plugin.manifest.id, context, page.capability, namespace, reload],
   );
-  const counts = statuses.map(
-    (status) =>
-      (data.data?.items ?? []).filter(
-        (row) => resourceStatus(row.columns, page.statusColumns!) === status,
-      ).length,
-  );
+  // The host's resolved status per row; a page still on the deprecated
+  // `statusColumns` is read through the same mapping (`itemStatus`).
+  const resolved = itemStatuses(data.data?.items ?? [], page.statusColumns);
+  const counts = statuses.map((status) => resolved.filter((found) => found === status).length);
   const total = counts.reduce((a, b) => a + b, 0);
-  let offset = 0;
-  const gradient = counts
-    .map((count, i) => {
-      const start = offset;
-      offset += total ? (count / total) * 100 : 0;
-      return `${colors[i]} ${start}% ${offset}%`;
-    })
-    .join(",");
+  const ring = donutBackground(
+    Object.fromEntries(statuses.map((status, i) => [status, counts[i]])) as Record<NormalizedStatus, number>,
+  );
   return (
     <section className="extension-summary">
       <Button variant="ghost" onClick={() => onPage(page.id)}>
@@ -122,11 +159,7 @@ function Summary({
         <>
           <div
             className="extension-donut"
-            style={{
-              background: total
-                ? `conic-gradient(${gradient})`
-                : "var(--rule, #85818f)",
-            }}
+            style={{ background: ring }}
             aria-label={`${total} ${page.title}`}
           >
             <span>{total}</span>
@@ -134,8 +167,8 @@ function Summary({
           <ul>
             {statuses.map((status, i) => (
               <li key={status}>
-                <i aria-hidden="true" style={{ background: colors[i] }} />
-                {status}: {counts[i]}
+                <i aria-hidden="true" style={{ background: DONUT_COLORS[status] }} />
+                {STATUS_WORD[status]}: {counts[i]}
               </li>
             ))}
           </ul>

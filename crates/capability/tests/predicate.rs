@@ -2,7 +2,9 @@
 //! the host refuses to accept as one.
 
 use serde_json::{json, Value};
-use srelens_capability::{check_predicates, resolve, unmet, Predicate, MAX_PREDICATES};
+use srelens_capability::{
+    check_path, check_predicates, resolve, unmet, Condition, Predicate, MAX_PREDICATES,
+};
 
 /// A predicate from its JSON, as a manifest writes one.
 fn predicate(value: Value) -> Predicate {
@@ -82,14 +84,20 @@ fn a_path_addresses_quoted_keys_and_list_elements() {
 #[test]
 fn a_path_the_host_does_not_evaluate_is_refused_rather_than_read_as_false() {
     for path in [
-        "spec.suspend",                                  // no leading `.`
-        ".spec..suspend",                                // empty segment
-        ".spec.*",                                       // wildcard
-        ".status.conditions[?(@.type=='Ready')].status", // filter
-        "..suspend",                                     // recursive descent
-        ".metadata.annotations[acme.io/x]",              // unquoted odd key
-        ".spec.a.b.c.d.e.f.g.h.i",                       // deeper than the bound
-        ".spec[01]",                                     // a second spelling of `[1]`
+        "spec.suspend",                                   // no leading `.`
+        ".spec..suspend",                                 // empty segment
+        ".spec.*",                                        // wildcard
+        ".status.conditions[?(@.type!='Ready')].status",  // a filter other than key == string
+        ".status.conditions[?(@.type=='Ready')]x",        // only a segment follows a filter
+        ".status.conditions[?(@.type==Ready)].status",    // an unquoted comparand
+        ".status.conditions[?(@.a.b=='x')].status",       // a nested key inside the filter
+        ".status.conditions[?(@.type=='')].status",       // an empty comparand
+        ".status.conditions[?(@.type=='Re'ady')].status", // a quote inside the comparand
+        ".status.conditions[?(@.type==\"Ready')].status", // mismatched quotes
+        "..suspend",                                      // recursive descent
+        ".metadata.annotations[acme.io/x]",               // unquoted odd key
+        ".spec.a.b.c.d.e.f.g.h.i",                        // deeper than the bound
+        ".spec[01]",                                      // a second spelling of `[1]`
     ] {
         let refused = predicate(json!({"jsonPath": path, "present": true, "reason": "r"}));
         assert!(
@@ -194,4 +202,123 @@ fn a_list_of_predicates_is_bounded() {
     assert!(check_predicates(&many).is_err());
     assert!(check_predicates(&vec![one; MAX_PREDICATES]).is_ok());
     assert!(check_predicates(&[]).is_ok());
+}
+
+/// A Flux resource whose Ready condition is not the first one, which is why an
+/// index cannot stand in for the filter.
+fn reconciling() -> Value {
+    json!({
+        "spec": {},
+        "status": {"conditions": [
+            {"type": "Reconciling", "status": "True", "message": "Applying revision"},
+            {"type": "Ready", "status": "Unknown", "message": "Reconciliation in progress"},
+            {"type": "Ready", "status": "False", "message": "a duplicate the API server would not keep"}
+        ]}
+    })
+}
+
+#[test]
+fn a_filter_selects_the_first_element_whose_key_is_that_string() {
+    // The one filter form: `[?(@.key=="literal")]`, in either quote. It names
+    // ONE element — the first match, as a Kubernetes printer column reads the
+    // same path — so "does this hold" stays a question about one value rather
+    // than a quantifier over a set.
+    for path in [
+        ".status.conditions[?(@.type==\"Ready\")].status",
+        ".status.conditions[?(@.type=='Ready')].status",
+    ] {
+        check_path(path).expect("the narrow filter is a path this host evaluates");
+        assert_eq!(
+            resolve(&reconciling(), path),
+            Some(&json!("Unknown")),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        resolve(
+            &reconciling(),
+            ".status.conditions[?(@.type=='Reconciling')].message"
+        ),
+        Some(&json!("Applying revision"))
+    );
+    let ready = predicate(json!({
+        "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+        "equals": "False",
+        "reason": "r"
+    }));
+    assert!(ready.check().is_ok());
+    assert!(
+        ready.holds(&object()),
+        "object()'s only Ready condition is False"
+    );
+    assert!(
+        !ready.holds(&reconciling()),
+        "the first Ready condition is the one read, not any of them"
+    );
+}
+
+#[test]
+fn a_filter_that_matches_nothing_is_an_unset_field() {
+    let path = ".status.conditions[?(@.type=='Stalled')].status";
+    assert_eq!(resolve(&reconciling(), path), None);
+    // Not an array, or elements that are not objects: nothing is selected.
+    assert_eq!(
+        resolve(
+            &json!({"status": {"conditions": {"type": "Stalled"}}}),
+            path
+        ),
+        None
+    );
+    assert_eq!(
+        resolve(&json!({"status": {"conditions": ["Stalled"]}}), path),
+        None
+    );
+    // The comparand is a string: a key holding another type is not a match
+    // for its spelling.
+    assert_eq!(
+        resolve(
+            &json!({"items": [{"n": 1, "v": "one"}]}),
+            ".items[?(@.n=='1')].v"
+        ),
+        None
+    );
+    let stalled = |operator: Value| {
+        let mut declared = json!({"jsonPath": path, "reason": "r"});
+        declared
+            .as_object_mut()
+            .unwrap()
+            .extend(operator.as_object().unwrap().clone());
+        predicate(declared)
+    };
+    assert!(stalled(json!({"absent": true})).holds(&reconciling()));
+    assert!(!stalled(json!({"present": true})).holds(&reconciling()));
+    assert!(stalled(json!({"notEquals": "True"})).holds(&reconciling()));
+}
+
+#[test]
+fn a_condition_is_a_predicate_without_a_reason() {
+    // Status rules ask "which of these describes the object", not "why was
+    // this refused", so their conditions carry no sentence — but they are the
+    // same operators over the same paths, evaluated by the same code.
+    let suspended: Condition =
+        serde_json::from_value(json!({"jsonPath": ".spec.suspend", "equals": true})).unwrap();
+    suspended.check().expect("well formed");
+    assert!(suspended.holds(&object()));
+    assert!(!suspended.holds(&json!({"spec": {"suspend": false}})));
+    for broken in [
+        json!({"jsonPath": ".spec.suspend"}),
+        json!({"jsonPath": ".spec.suspend", "equals": true, "present": true}),
+        json!({"jsonPath": ".spec.*", "present": true}),
+        json!({"jsonPath": ".spec", "equals": {"suspend": true}}),
+        json!({"jsonPath": ".spec.suspend", "present": false}),
+    ] {
+        let condition: Condition = serde_json::from_value(broken.clone()).unwrap();
+        assert!(condition.check().is_err(), "{broken} is refused");
+        assert!(!condition.holds(&object()), "{broken} fails closed");
+    }
+    // A reason is not part of a condition: unknown fields are refused.
+    assert!(serde_json::from_value::<Condition>(
+        json!({"jsonPath": ".spec.suspend", "equals": true, "reason": "r"})
+    )
+    .is_err());
 }

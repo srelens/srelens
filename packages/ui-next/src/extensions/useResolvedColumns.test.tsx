@@ -86,6 +86,63 @@ it("projects only the root key read by a row column", async () => {
   expect(resolve.mock.calls[0][5][0].row).toEqual({ status: { ready: "True" } });
 });
 
+const flux = {
+  enabled: true, revision: 4, manifest: { id: "org.srelens.flux", name: "Flux", contributions: {
+    badges: [{ id: "flux-managed", forKinds: ["apps/Deployment"], rules: [
+      { when: [{ jsonPath: ".metadata.labels['kustomize.toolkit.fluxcd.io/name']", present: true }],
+        status: "healthy", label: "Flux", reason: ".metadata.labels['kustomize.toolkit.fluxcd.io/name']" }] }],
+  } },
+} as InstalledExtension;
+
+it("puts an app's badges on built-in rows from the same one batch, always as words", async () => {
+  resolve.mockResolvedValue({ columns: [], badges: flux.manifest.contributions.badges, cells: [
+    { uid: null, name: "api", namespace: "team", values: {},
+      badges: [{ id: "flux-managed", status: "healthy", label: "Flux", reason: "apps" }] },
+    { uid: null, name: "plain", namespace: "team", values: {} },
+    { uid: null, name: "gone", namespace: "team", values: {},
+      badgeErrors: { "flux-managed": "row is not in the host's metadata read; refresh" } },
+  ] });
+  const rows = [{ name: "api", namespace: "team" }, { name: "plain", namespace: "team" }, { name: "gone", namespace: "team" }];
+  const view = renderHook(() => useResolvedColumns({ plugins: [flux], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
+  await waitFor(() => expect(view.result.current.columns[0]?.getValue?.(rows[0])).toBe("Flux"));
+  expect(resolve).toHaveBeenCalledTimes(1);
+  const column = view.result.current.columns[0];
+  expect(column.header).toBe("Flux");
+  expect(column.filterable).toBe(true);
+  const html = (row: typeof rows[number]) => renderToStaticMarkup(<>{column.render?.(row)}</>);
+  expect(html(rows[0])).toContain(">Flux<");
+  expect(html(rows[0])).toContain("apps");
+  // No rule held: no badge, which is an answer.
+  expect(html(rows[1])).toContain("—");
+  // The host could not say: that is not "not managed".
+  expect(html(rows[2])).toContain("Couldn’t read");
+  expect(html(rows[2])).not.toContain("—");
+  expect(column.getValue?.(rows[1])).toBe("");
+});
+
+it("keeps an app's badge column apart from a table column whose id is `badges`", async () => {
+  // `badges` is a valid column id; the badge column's key must not be one a
+  // column id can produce, or the table treats the two as one column.
+  const both = { ...flux, manifest: { ...flux.manifest, contributions: { ...flux.manifest.contributions,
+    tableColumns: [{ id: "badges", title: "Badges", forKinds: ["apps/Deployment"], source: { jsonPath: ".name" }, format: "text" }],
+  } } } as InstalledExtension;
+  resolve.mockResolvedValue({ columns: both.manifest.contributions.tableColumns, badges: flux.manifest.contributions.badges, cells: [] });
+  const rows = [{ name: "api", namespace: "team" }];
+  const view = renderHook(() => useResolvedColumns({ plugins: [both], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
+  await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1));
+  const keys = view.result.current.columns.map((column) => column.key);
+  expect(keys).toHaveLength(2);
+  expect(new Set(keys).size).toBe(2);
+});
+
+it("asks for nothing on a kind no badge names", async () => {
+  const rows = [{ name: "db", namespace: "team" }];
+  const view = renderHook(() => useResolvedColumns({ plugins: [flux], context: "prod", namespace: "team", kind: "apps/StatefulSet", rows }));
+  await act(async () => {});
+  expect(resolve).not.toHaveBeenCalled();
+  expect(view.result.current.columns).toHaveLength(0);
+});
+
 it("shows one cell's resolver error without hiding another row's value", async () => {
   resolve.mockResolvedValue({ columns: plugin.manifest.contributions.tableColumns, cells: [
     { uid: null, name: "api", namespace: "team", values: { critical: null },

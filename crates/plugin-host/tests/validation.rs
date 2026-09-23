@@ -78,6 +78,192 @@ fn table_columns_and_joins_require_declared_readers_and_bounded_sources() {
     );
 }
 
+/// The issue's own example (#541), bound to readers that fix `group` and `kind`.
+fn with_status() -> Value {
+    let mut value = manifest();
+    value["capabilities"][0]["arguments"] = json!({"group":"argoproj.io","kind":"Application"});
+    value["contributions"]["statusResolvers"] = json!([{
+        "forKinds":["argoproj.io/Application"],
+        "rules":[
+            {"when":[{"jsonPath":".spec.suspend","equals":true}],"status":"suspended","label":"Suspended"},
+            {"when":[{"jsonPath":".status.conditions[?(@.type==\"Ready\")].status","equals":"True"}],
+             "status":"healthy","label":"Ready","reason":".status.conditions[?(@.type==\"Ready\")].message"},
+            {"when":[],"status":"unknown","label":"Unknown"}
+        ]
+    }]);
+    value["contributions"]["badges"] = json!([{
+        "id":"flux-managed", "forKinds":["apps/Deployment"],
+        "rules":[{"when":[{"jsonPath":".metadata.labels['kustomize.toolkit.fluxcd.io/name']","present":true}],
+            "status":"healthy","label":"Flux","reason":".metadata.labels['kustomize.toolkit.fluxcd.io/name']"}]
+    }]);
+    value
+}
+
+#[test]
+fn status_resolvers_and_badges_parse_and_resolve_by_kind() {
+    let parsed = Manifest::parse(&with_status().to_string())
+        .expect("the issue's statusResolvers and badges example is valid");
+    let rules = parsed
+        .status_rules_for("argoproj.io/Application")
+        .expect("the resolver is found by the reader's qualified kind");
+    assert_eq!(rules.len(), 3);
+    assert!(parsed.status_rules_for("apps/Deployment").is_none());
+    assert_eq!(parsed.contributions.badges[0].id, "flux-managed");
+}
+
+#[test]
+fn status_rules_are_reported_at_the_field_that_has_to_change() {
+    let mut value = with_status();
+    let resolver = &mut value["contributions"]["statusResolvers"][0];
+    resolver["rules"][0]["when"][0]["jsonPath"] = json!(".spec.*");
+    resolver["rules"][1]["label"] = json!(" ");
+    resolver["rules"][1]["reason"] = json!("status.message");
+    resolver["rules"][2]["status"] = json!("unknown");
+    let badge = &mut value["contributions"]["badges"][0];
+    badge["rules"][0]["when"][0]["equals"] = json!("x");
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.statusResolvers[0].rules[0].when[0]"
+            ),
+            (
+                "EXTENSION_INVALID_VALUE",
+                "contributions.statusResolvers[0].rules[1].label"
+            ),
+            (
+                "EXTENSION_INVALID_VALUE",
+                "contributions.statusResolvers[0].rules[1].reason"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.badges[0].rules[0].when[0]"
+            ),
+        ])
+    );
+    // An unknown status is a schema error, not a sixth status.
+    let mut value = with_status();
+    value["contributions"]["statusResolvers"][0]["rules"][0]["status"] = json!("degraded");
+    assert_eq!(errors(&value)[0].code, ValidationCode::InvalidField);
+}
+
+#[test]
+fn a_resolver_names_a_kind_the_app_reads_and_each_kind_has_one_resolver() {
+    let mut value = with_status();
+    let resolvers = value["contributions"]["statusResolvers"]
+        .as_array_mut()
+        .unwrap();
+    let mut second = resolvers[0].clone();
+    second["forKinds"] = json!(["argoproj.io/Application", "argoproj.io/AppProject"]);
+    resolvers.push(second);
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[
+            (
+                "EXTENSION_DUPLICATE_IDENTIFIER",
+                "contributions.statusResolvers[1].forKinds[0]"
+            ),
+            (
+                "EXTENSION_UNRESOLVED_CAPABILITY",
+                "contributions.statusResolvers[1].forKinds[1]"
+            ),
+        ])
+    );
+}
+
+#[test]
+fn a_badge_without_a_join_reads_only_its_rows_metadata() {
+    // The host reads a built-in row's metadata for a direct badge and nothing
+    // else of it: an app with no reader for Deployments does not get their
+    // spec or status by writing a badge.
+    let mut value = with_status();
+    value["contributions"]["badges"][0]["rules"][0]["when"][0]["jsonPath"] = json!(".spec.paused");
+    value["contributions"]["badges"][0]["rules"][0]["reason"] = json!(".status.replicas");
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.badges[0].rules[0].when[0]"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.badges[0].rules[0].reason"
+            ),
+        ])
+    );
+    // Through a join, the rules read the joined resource, which the app was
+    // granted a reader for.
+    value["contributions"]["joins"] = json!([{"id":"apps","capability":"applications",
+        "match":{"annotation":"acme.io/app"}}]);
+    value["contributions"]["badges"][0]["join"] = json!("apps");
+    Manifest::parse(&value.to_string()).expect("a joined badge reads the joined resource");
+    value["contributions"]["badges"][0]["join"] = json!("missing");
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[("EXTENSION_INVALID_BINDING", "contributions.badges[0].join")])
+    );
+}
+
+#[test]
+fn badge_ids_are_identifiers_and_unique() {
+    let mut value = with_status();
+    let badges = value["contributions"]["badges"].as_array_mut().unwrap();
+    badges.push(badges[0].clone());
+    badges.push(badges[0].clone());
+    badges[2]["id"] = json!("not an id");
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[
+            (
+                "EXTENSION_DUPLICATE_IDENTIFIER",
+                "contributions.badges[1].id"
+            ),
+            ("EXTENSION_INVALID_VALUE", "contributions.badges[2].id"),
+        ])
+    );
+    let mut value = with_status();
+    value["contributions"]["badges"] = json!(vec![value["contributions"]["badges"][0].clone(); 17]);
+    for (index, badge) in value["contributions"]["badges"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        badge["id"] = json!(format!("b{index}"));
+    }
+    assert!(problems(&errors(&value)).contains(&(
+        code(ValidationCode::InvalidValue),
+        "contributions.badges".into()
+    )));
+}
+
+#[test]
+fn a_dashboard_counts_a_page_whose_kind_has_a_status_resolver() {
+    let mut value = with_status();
+    value["contributions"]["pages"]
+        .as_array_mut()
+        .unwrap()
+        .push(
+            json!({"id":"overview","title":"Overview","capability":"applications",
+            "dashboard":{"pages":["applications"]}}),
+        );
+    Manifest::parse(&value.to_string())
+        .expect("statusResolvers replace statusColumns as what a dashboard counts");
+    value["contributions"]["statusResolvers"] = json!([]);
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[(
+            "EXTENSION_INVALID_VALUE",
+            "contributions.pages[1].dashboard.pages[0]"
+        )])
+    );
+    // The deprecated spelling is still accepted on the 0.3 line.
+    value["contributions"]["pages"][0]["statusColumns"] = json!({"ready":0});
+    Manifest::parse(&value.to_string()).expect("statusColumns remains accepted in 0.3");
+}
+
 #[test]
 fn table_column_rejects_malformed_json_paths_instead_of_silently_blank_cells() {
     let mut value = manifest();

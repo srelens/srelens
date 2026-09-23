@@ -51,12 +51,41 @@ describe("actionPredicates", () => {
     expect(resolvePath(resource, ".status.conditions[9]")).toBeUndefined();
   });
 
+  it("reads the one filter form as the first element whose key is that string, as the host does", () => {
+    // `crates/capability/src/predicate.rs` admits `[?(@.key=="text")]` (#541);
+    // a surface that refused it would hide a control the host would accept.
+    const conditions = { status: { conditions: [
+      { type: "Reconciling", status: "True" },
+      { type: "Ready", status: "Unknown" },
+      { type: "Ready", status: "False" },
+    ] } };
+    for (const path of [
+      ".status.conditions[?(@.type==\"Ready\")].status",
+      ".status.conditions[?(@.type=='Ready')].status",
+    ]) {
+      expect(resolvePath(conditions, path), path).toBe("Unknown");
+    }
+    expect(resolvePath(conditions, ".status.conditions[?(@.type=='Stalled')].status")).toBeUndefined();
+    expect(resolvePath({ status: { conditions: { type: "Ready" } } }, ".status.conditions[?(@.type=='Ready')]")).toBeUndefined();
+    expect(resolvePath({ items: [{ n: 1, v: "one" }] }, ".items[?(@.n=='1')].v")).toBeUndefined();
+    const notReady = [predicate({ jsonPath: ".status.conditions[?(@.type=='Ready')].status", equals: "False" })];
+    expect(unmetPredicate(notReady, resource)).toBeUndefined();
+    expect(unmetPredicate(notReady, conditions)).toBe(notReady[0]);
+    const stalledAbsent = [predicate({ jsonPath: ".status.conditions[?(@.type=='Stalled')]", absent: true })];
+    expect(unmetPredicate(stalledAbsent, conditions)).toBeUndefined();
+  });
+
   it("fails closed on a predicate the host would not evaluate", () => {
     // The host refuses these at install, so a surface should never see one —
     // and if it does, it must not read it as "the condition is met".
     for (const broken of [
       predicate({ jsonPath: "spec.suspend", present: true }),
-      predicate({ jsonPath: ".status.conditions[?(@.type=='Ready')].status", equals: "True" }),
+      predicate({ jsonPath: ".status.conditions[?(@.type!='Ready')].status", equals: "True" }),
+      predicate({ jsonPath: ".status.conditions[?(@.type==Ready)].status", equals: "True" }),
+      predicate({ jsonPath: ".status.conditions[?(@.a.b=='x')].status", absent: true }),
+      predicate({ jsonPath: ".status.conditions[?(@.type=='')].status", absent: true }),
+      predicate({ jsonPath: ".status.conditions[?(@.type==\"Ready')].status", absent: true }),
+      predicate({ jsonPath: ".status.conditions[?(@.type=='Ready')]x", absent: true }),
       predicate({ jsonPath: ".spec.*", present: true }),
       predicate({ equals: { suspend: true } as unknown as boolean }),
       predicate({}),

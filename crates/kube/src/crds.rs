@@ -384,6 +384,12 @@ pub struct ListCustomIn {
     /// Callers that omit these get just name/namespace/age, as before.
     #[serde(default)]
     pub printer_columns: Vec<PrinterColumn>,
+    /// An app's status rules for this kind (#541), bound by the host from the
+    /// manifest's `statusResolvers`; each row then carries its `status`.
+    /// Evaluated here because this is where the whole object is: the rows
+    /// that leave are summaries.
+    #[serde(default)]
+    pub status_rules: Vec<srelens_capability::status::StatusRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -403,6 +409,9 @@ pub struct CustomRow {
     /// information -- `type: date`, where timestamps 65 and 115 minutes old both
     /// render "1h" and would otherwise tie. Empty where the text sorts fine.
     pub sort_keys: Vec<String>,
+    /// The resolved status, when the request carried status rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<srelens_capability::status::ResolvedStatus>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -516,6 +525,20 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
         move |input: ListCustomIn| {
             let cache = cache.clone();
             async move {
+                // Checked before the cluster is asked: a rule list the host
+                // would refuse at install is a bad request, not a column of
+                // "Unknown" rows that look like an answer.
+                if !input.status_rules.is_empty() {
+                    if let Some((path, why)) =
+                        srelens_capability::status::rule_problems(&input.status_rules)
+                            .into_iter()
+                            .next()
+                    {
+                        return Err(CapabilityError::InvalidInput(format!(
+                            "statusRules: {path}: {why}"
+                        )));
+                    }
+                }
                 let client = cache
                     .get(&input.context)
                     .await
@@ -556,15 +579,24 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                 let items = objects
                     .into_iter()
                     .map(|o| {
-                        let (values, sort_keys) = if columns.is_empty() {
-                            (Vec::new(), Vec::new())
-                        } else {
-                            let object = whole_object(&o);
-                            columns
+                        let object = (!columns.is_empty() || !input.status_rules.is_empty())
+                            .then(|| whole_object(&o));
+                        let (values, sort_keys) = match &object {
+                            Some(object) if !columns.is_empty() => columns
                                 .iter()
-                                .map(|c| (render_column(&object, c), column_sort_key(&object, c)))
-                                .unzip()
+                                .map(|c| (render_column(object, c), column_sort_key(object, c)))
+                                .unzip(),
+                            _ => (Vec::new(), Vec::new()),
                         };
+                        let status = object
+                            .as_ref()
+                            .filter(|_| !input.status_rules.is_empty())
+                            .map(|object| {
+                                srelens_capability::status::resolve_status(
+                                    &input.status_rules,
+                                    object,
+                                )
+                            });
                         CustomRow {
                             name: o.metadata.name.clone().unwrap_or_default(),
                             namespace: o.metadata.namespace.clone().unwrap_or_default(),
@@ -574,6 +606,7 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
                             age: crate::humanize_age(o.metadata.creation_timestamp.as_ref()),
                             columns: values,
                             sort_keys,
+                            status,
                         }
                     })
                     .collect();
@@ -611,6 +644,63 @@ pub async fn list_custom_resource_join_objects(
         .await
         .map_err(|error| error.into_capability_error("list joined custom resources"))?;
     Ok((objects.iter().map(whole_object).collect(), truncated))
+}
+
+/// Host-only read of a built-in kind's row metadata, for app badges (#541).
+///
+/// `kind` is qualified (`apps/Deployment`, `/Pod`) and must be a built-in kind
+/// this host knows in exactly that group. Only identity, labels, annotations
+/// and owner references are kept: a badge without a join reads its row's
+/// metadata and nothing else, so an app never reaches a spec or a status it
+/// holds no reader for. Secrets are refused outright — their annotation values
+/// are redacted on every ungated read, and a badge must not become a way
+/// around that.
+pub async fn list_builtin_metadata(
+    cache: &ClientCache,
+    context: &str,
+    namespace: &str,
+    kind: &str,
+) -> Result<(Vec<serde_json::Value>, bool), CapabilityError> {
+    let refuse = |why: &str| Err(CapabilityError::InvalidInput(format!("{kind}: {why}")));
+    let Some((group, name)) = kind.split_once('/') else {
+        return refuse("qualify a kind with its API group");
+    };
+    if group.is_empty() && name == "Secret" {
+        return refuse("Secret metadata is never read for an app");
+    }
+    let Some((gvk, namespaced)) = crate::manifest::gvk_for(name) else {
+        return refuse("not a built-in kind this host reads");
+    };
+    if gvk.group != group || gvk.kind != name {
+        return refuse("not a built-in kind this host reads");
+    }
+    let client = cache.get(context).await.map_err(CapabilityError::Handler)?;
+    let resource = ApiResource::from_gvk(&gvk);
+    let api: Api<DynamicObject> = if namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, namespace, &resource)
+    } else {
+        Api::all_with(client, &resource)
+    };
+    let (objects, truncated) = crate::list_cap::list_capped(&api, ListParams::default())
+        .await
+        .map_err(|error| error.into_capability_error("list built-in resource metadata"))?;
+    let metadata = objects
+        .iter()
+        .map(|object| {
+            let meta = &object.metadata;
+            // The kind's identity is the host's own, from the GVK it listed,
+            // so a rule can check a reference against the very object.
+            serde_json::json!({"apiVersion": resource.api_version, "kind": resource.kind, "metadata": {
+                "name": meta.name,
+                "namespace": meta.namespace,
+                "uid": meta.uid,
+                "labels": meta.labels,
+                "annotations": meta.annotations,
+                "ownerReferences": meta.owner_references,
+            }})
+        })
+        .collect();
+    Ok((metadata, truncated))
 }
 
 #[cfg(test)]
@@ -1106,6 +1196,150 @@ mod tests {
             assert_eq!(objects[0]["metadata"]["labels"]["target"], "api");
             assert_eq!(objects[0]["report"]["critical"], 3);
             assert!(uris.lock().unwrap()[0].starts_with(expected_path));
+        }
+    }
+
+    /// Three Flux Kustomizations as the API server lists them.
+    fn kustomization_page() -> serde_json::Value {
+        let item = |name: &str, suspend: bool, ready: &str, message: &str| {
+            serde_json::json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"Kustomization",
+                "metadata":{"name":name,"namespace":"flux-system"},
+                "spec":{"suspend":suspend},
+                "status":{"conditions":[{"type":"Ready","status":ready,"message":message}]}})
+        };
+        serde_json::json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"KustomizationList",
+        "metadata":{},"items":[
+            item("apps", false, "True", "Applied revision: main@sha1:abc"),
+            item("infra", true, "True", "Applied"),
+            item("broken", false, "False", "kustomize build failed"),
+        ]})
+    }
+
+    /// The payload `extensions.read` sends once the host has bound a
+    /// resolver's rules: the caller's camelCase spelling.
+    fn kustomizations_with_rules() -> serde_json::Value {
+        serde_json::json!({
+            "context":"fake","group":"kustomize.toolkit.fluxcd.io","version":"v1",
+            "plural":"kustomizations","kind":"Kustomization","namespaced":true,"namespace":"flux-system",
+            "statusRules":[
+                {"when":[{"jsonPath":".spec.suspend","equals":true}],"status":"suspended","label":"Suspended"},
+                {"when":[{"jsonPath":".status.conditions[?(@.type==\"Ready\")].status","equals":"True"}],
+                 "status":"healthy","label":"Ready"},
+                {"when":[{"jsonPath":".status.conditions[?(@.type==\"Ready\")].status","equals":"False"}],
+                 "status":"error","label":"Not ready","reason":".status.conditions[?(@.type==\"Ready\")].message"}
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn a_list_with_status_rules_resolves_each_row_against_the_whole_object() {
+        let (client, _) = crate::list_cap::test_support::mock_slow_pages(
+            vec![kustomization_page()],
+            std::time::Duration::ZERO,
+        );
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let list = list_custom_resource_capability(cache);
+        let out = (list.handler)(kustomizations_with_rules()).await.unwrap();
+        let statuses: Vec<_> = out["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["status"].clone())
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                serde_json::json!({"status":"healthy","label":"Ready"}),
+                serde_json::json!({"status":"suspended","label":"Suspended"}),
+                serde_json::json!({"status":"error","label":"Not ready","reason":"kustomize build failed"}),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_list_without_status_rules_carries_no_status() {
+        let (client, _) = crate::list_cap::test_support::mock_slow_pages(
+            vec![kustomization_page()],
+            std::time::Duration::ZERO,
+        );
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let mut payload = kustomizations_with_rules();
+        payload.as_object_mut().unwrap().remove("statusRules");
+        let out = (list_custom_resource_capability(cache).handler)(payload)
+            .await
+            .unwrap();
+        assert!(out["items"][0].get("status").is_none(), "{out}");
+    }
+
+    #[tokio::test]
+    async fn status_rules_the_host_would_refuse_are_invalid_input_not_unknown_rows() {
+        let cache = ClientCache::new_many(vec![]);
+        let mut payload = kustomizations_with_rules();
+        payload["statusRules"][0]["when"][0]["jsonPath"] = serde_json::json!(".spec.*");
+        let error = (list_custom_resource_capability(cache).handler)(payload)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, CapabilityError::InvalidInput(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn builtin_metadata_is_read_for_a_qualified_kind_and_nothing_else_of_it_is_kept() {
+        let page = serde_json::json!({"apiVersion":"apps/v1","kind":"DeploymentList","metadata":{},
+            "items":[{"apiVersion":"apps/v1","kind":"Deployment",
+                "metadata":{"name":"api","namespace":"team","uid":"u1",
+                    "labels":{"kustomize.toolkit.fluxcd.io/name":"apps"},
+                    "annotations":{"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/api"}},
+                "spec":{"replicas":3,"template":{"spec":{"containers":[{"name":"api","image":"x"}]}}},
+                "status":{"readyReplicas":3}}]});
+        let (client, uris) =
+            crate::list_cap::test_support::mock_slow_pages(vec![page], std::time::Duration::ZERO);
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, truncated) = list_builtin_metadata(&cache, "fake", "team", "apps/Deployment")
+            .await
+            .unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            uris.lock().unwrap()[0].split('?').next(),
+            Some("/apis/apps/v1/namespaces/team/deployments")
+        );
+        assert_eq!(objects.len(), 1);
+        assert_eq!(
+            objects[0]["metadata"]["labels"]["kustomize.toolkit.fluxcd.io/name"],
+            "apps"
+        );
+        assert_eq!(objects[0]["metadata"]["uid"], "u1");
+        // The object's own identity, so a rule can hold a reference against
+        // the resource it sits on (an Argo CD tracking id, #541 review).
+        assert_eq!(objects[0]["apiVersion"], "apps/v1");
+        assert_eq!(objects[0]["kind"], "Deployment");
+        assert!(
+            objects[0].get("spec").is_none() && objects[0].get("status").is_none(),
+            "{}",
+            objects[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_metadata_refuses_secrets_unknown_kinds_and_a_group_that_does_not_match() {
+        let cache = ClientCache::new_many(vec![]);
+        for kind in [
+            "/Secret",
+            "acme.io/Widget",
+            "acme.io/Deployment",
+            "Deployment",
+            "/Nope",
+        ] {
+            let error = list_builtin_metadata(&cache, "fake", "team", kind)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{kind} must be refused"));
+            assert!(
+                matches!(error, CapabilityError::InvalidInput(_)),
+                "{kind}: {error}"
+            );
         }
     }
 
