@@ -6,7 +6,7 @@ use ratatui::backend::TestBackend;
 use ratatui::{Frame, Terminal};
 use srelens_kube::changed::{
     AppDeploymentChange, ChangedTriageReport, FailureCategory, GitOpsReleaseInfo, IncidentStatus,
-    InfraChangeItem, RolloutStatus, TriageSummary,
+    InfraChangeItem, PodIncidentDetail, RolloutStatus, TriageSummary,
 };
 use srelens_kube::events::EventSummary;
 use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
@@ -39,6 +39,8 @@ fn sample_report() -> ChangedTriageReport {
         summary: TriageSummary {
             total_deployments: 3,
             crashing_count: 1,
+            oom_count: 0,
+            error_count: 0,
             pending_count: 1,
             rolling_count: 0,
             healthy_count: 1,
@@ -85,7 +87,13 @@ fn sample_report() -> ChangedTriageReport {
                 probe_failure_count: 0,
                 restart_count: 4,
                 primary_symptoms: vec!["checkout-api-7b89-abcd: CrashLoopBackOff".to_string()],
+                pod_symptoms: vec![PodIncidentDetail {
+                    pod_name: "checkout-api-7b89-abcd".to_string(),
+                    status: "CrashLoopBackOff".to_string(),
+                    detail_message: "exited with code 1".to_string(),
+                }],
                 failing_pod_names: vec!["checkout-api-7b89-abcd".to_string()],
+                argo_rollout_in_window: None,
                 top_events: vec![EventSummary {
                     name: "checkout-api-7b89-abcd.ev1".to_string(),
                     namespace: "prod".to_string(),
@@ -130,7 +138,13 @@ fn sample_report() -> ChangedTriageReport {
                 probe_failure_count: 0,
                 restart_count: 0,
                 primary_symptoms: vec!["Pod unschedulable: Insufficient cpu".to_string()],
+                pod_symptoms: vec![PodIncidentDetail {
+                    pod_name: "payment-worker-9988-xyz".to_string(),
+                    status: "Pending".to_string(),
+                    detail_message: "Insufficient cpu".to_string(),
+                }],
                 failing_pod_names: vec!["payment-worker-9988-xyz".to_string()],
+                argo_rollout_in_window: None,
                 top_events: vec![],
             },
             AppDeploymentChange {
@@ -169,7 +183,9 @@ fn sample_report() -> ChangedTriageReport {
                 probe_failure_count: 0,
                 restart_count: 0,
                 primary_symptoms: vec![],
+                pod_symptoms: vec![],
                 failing_pod_names: vec![],
+                argo_rollout_in_window: None,
                 top_events: vec![],
             },
         ],
@@ -270,6 +286,14 @@ fn changed_view_state_navigation_and_filters() {
     assert_eq!(state.filtered_deployments()[0].app_name, "checkout-api");
 
     state.cycle_filter();
+    assert_eq!(state.incident_filter, IncidentFilter::OomOnly);
+    assert_eq!(state.filtered_deployments().len(), 0);
+
+    state.cycle_filter();
+    assert_eq!(state.incident_filter, IncidentFilter::ErrorOnly);
+    assert_eq!(state.filtered_deployments().len(), 0);
+
+    state.cycle_filter();
     assert_eq!(state.incident_filter, IncidentFilter::PendingOnly);
     assert_eq!(state.filtered_deployments().len(), 1);
     assert_eq!(state.filtered_deployments()[0].app_name, "payment-worker");
@@ -317,9 +341,12 @@ fn renders_changed_view_wide_with_diagnostic_card() {
 
     // Banner checks
     assert!(rendered.contains("POST-PAGE INCIDENT INVESTIGATOR"));
-    assert!(rendered.contains("CRASH/OOM: 1"));
+    assert!(rendered.contains("CRASH: 1"));
+    assert!(rendered.contains("OOM: 0"));
+    assert!(rendered.contains("ERROR: 0"));
     assert!(rendered.contains("PENDING: 1"));
     assert!(rendered.contains("HEALTHY: 1"));
+    assert!(!rendered.contains("Headline:"));
 
     // Table checks
     assert!(rendered.contains("checkout-api"));
@@ -329,14 +356,21 @@ fn renders_changed_view_wide_with_diagnostic_card() {
 
     // Diagnostic Card checks for selected deployment ("checkout-api")
     assert!(rendered.contains("Incident Diagnostic & Root Cause Investigator"));
+    assert!(rendered.contains("Workload: prod/checkout-api (Deployment)"));
     assert!(rendered.contains("GitOps Release: checkout-prod"));
     assert!(rendered.contains("7b89abc"));
     assert!(rendered.contains("Root Cause: [APP]"));
+    assert!(rendered.contains("Symptoms:"));
+    assert!(rendered.contains("checkout-api-7b89-abcd: CrashLoopBackOff | exited with code 1"));
+    assert!(!rendered.contains("Failing Pods:"));
     assert!(rendered.contains("Error Log Snippet (checkout-api-7b89-abcd)"));
     assert!(rendered.contains("Failed to connect to Redis cache"));
     assert!(rendered.contains("panic: initialization failed"));
     assert!(rendered.contains("Back-off restarting failed container"));
     assert!(rendered.contains("[l] Full Logs"));
+    assert!(rendered.contains("[r] Refresh"));
+    assert!(!rendered.contains("[j/k] Navigate"));
+    assert!(!rendered.contains("[r] Rollout Restart"));
 }
 
 #[test]

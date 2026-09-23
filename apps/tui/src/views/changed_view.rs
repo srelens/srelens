@@ -28,6 +28,8 @@ pub type VerdictFilter = IncidentFilter;
 pub enum IncidentFilter {
     All,
     CrashingOnly,
+    OomOnly,
+    ErrorOnly,
     PendingOnly,
     RollingOnly,
     HealthyOnly,
@@ -37,7 +39,9 @@ impl IncidentFilter {
     pub fn label(&self) -> &'static str {
         match self {
             Self::All => "ALL",
-            Self::CrashingOnly => "CRASH / OOM",
+            Self::CrashingOnly => "CRASH",
+            Self::OomOnly => "OOM",
+            Self::ErrorOnly => "ERROR",
             Self::PendingOnly => "PENDING (INFRA)",
             Self::RollingOnly => "ROLLING",
             Self::HealthyOnly => "HEALTHY",
@@ -47,7 +51,9 @@ impl IncidentFilter {
     pub fn next(&self) -> Self {
         match self {
             Self::All => Self::CrashingOnly,
-            Self::CrashingOnly => Self::PendingOnly,
+            Self::CrashingOnly => Self::OomOnly,
+            Self::OomOnly => Self::ErrorOnly,
+            Self::ErrorOnly => Self::PendingOnly,
             Self::PendingOnly => Self::RollingOnly,
             Self::RollingOnly => Self::HealthyOnly,
             Self::HealthyOnly => Self::All,
@@ -176,9 +182,11 @@ impl ChangedViewState {
             .iter()
             .filter(|d| match self.incident_filter {
                 IncidentFilter::All => true,
-                IncidentFilter::CrashingOnly => {
-                    d.incident_status == IncidentStatus::CrashLoop
-                        || d.incident_status == IncidentStatus::OomKilled
+                IncidentFilter::CrashingOnly => d.incident_status == IncidentStatus::CrashLoop,
+                IncidentFilter::OomOnly => d.incident_status == IncidentStatus::OomKilled,
+                IncidentFilter::ErrorOnly => {
+                    d.incident_status == IncidentStatus::ConfigError
+                        || d.incident_status == IncidentStatus::ImageError
                 }
                 IncidentFilter::PendingOnly => d.incident_status == IncidentStatus::Pending,
                 IncidentFilter::RollingOnly => {
@@ -298,7 +306,7 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // Summary banner
+            Constraint::Length(3), // Summary banner
             Constraint::Min(8),    // Main workspace
             Constraint::Length(1), // Footer shortcuts
         ])
@@ -355,16 +363,17 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
 }
 
 fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
-    let (crashing, pending, rolling, healthy, headline) = if let Some(r) = &state.report {
+    let (crashing, oom, error, pending, rolling, healthy) = if let Some(r) = &state.report {
         (
             r.summary.crashing_count,
+            r.summary.oom_count,
+            r.summary.error_count,
             r.summary.pending_count,
             r.summary.rolling_count,
             r.summary.healthy_count,
-            r.summary.headline_message.as_str(),
         )
     } else {
-        (0, 0, 0, 0, "No changes analyzed yet")
+        (0, 0, 0, 0, 0, 0)
     };
 
     let infra_count = state
@@ -373,9 +382,9 @@ fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
         .map(|r| r.infra_changes.len())
         .unwrap_or(0);
 
-    let border_style = if crashing > 0 {
+    let border_style = if crashing > 0 || oom > 0 {
         Theme::status_error()
-    } else if pending > 0 {
+    } else if error > 0 || pending > 0 {
         Theme::status_warn()
     } else if rolling > 0 {
         Style::default().fg(Theme::cyan())
@@ -401,11 +410,35 @@ fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
     let line1 = Line::from(vec![
         Span::styled(" Workload Health: ", Theme::header_label()),
         Span::styled(
-            format!(" 💥 CRASH/OOM: {crashing} "),
+            format!(" 💥 CRASH: {crashing} "),
             if crashing > 0 {
                 Style::default()
                     .bg(Theme::red())
                     .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::dim())
+            },
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!(" 💀 OOM: {oom} "),
+            if oom > 0 {
+                Style::default()
+                    .bg(Theme::red())
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::dim())
+            },
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!(" ⚠️ ERROR: {error} "),
+            if error > 0 {
+                Style::default()
+                    .bg(Theme::yellow())
+                    .fg(Color::Black)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Theme::dim())
@@ -473,32 +506,7 @@ fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
         ),
     ]);
 
-    let headline_style = if crashing > 0 {
-        Style::default()
-            .fg(Theme::red())
-            .add_modifier(Modifier::BOLD)
-    } else if pending > 0 {
-        Style::default()
-            .fg(Theme::yellow())
-            .add_modifier(Modifier::BOLD)
-    } else if rolling > 0 {
-        Style::default()
-            .fg(Theme::cyan())
-            .add_modifier(Modifier::BOLD)
-    } else if healthy > 0 {
-        Style::default()
-            .fg(Theme::green())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Theme::dim())
-    };
-
-    let line2 = Line::from(vec![
-        Span::styled(" Headline: ", Theme::header_label()),
-        Span::styled(sanitize_span_text(headline), headline_style),
-    ]);
-
-    let p = Paragraph::new(vec![line1, line2])
+    let p = Paragraph::new(vec![line1])
         .block(block)
         .wrap(Wrap { trim: true });
     f.render_widget(p, area);
@@ -582,6 +590,20 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 )),
+                IncidentStatus::ConfigError => Cell::from(Span::styled(
+                    " ⚠️ ERROR ",
+                    Style::default()
+                        .bg(Theme::yellow())
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                IncidentStatus::ImageError => Cell::from(Span::styled(
+                    " 🚫 IMAGE ",
+                    Style::default()
+                        .bg(Theme::red())
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
                 IncidentStatus::Pending => Cell::from(Span::styled(
                     " ⏳ PENDING ",
                     Style::default()
@@ -618,8 +640,14 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
                 }
             };
 
+            let name_display = match d.kind.as_str() {
+                "StatefulSet" => format!("{} (sts)", d.app_name),
+                "CronJob" => format!("{} (cj)", d.app_name),
+                "Job" => format!("{} (job)", d.app_name),
+                _ => d.app_name.clone(),
+            };
             let name_cell = Cell::from(Span::styled(
-                &d.app_name,
+                name_display,
                 Style::default()
                     .fg(Theme::fg())
                     .add_modifier(Modifier::BOLD),
@@ -731,7 +759,7 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
     lines.push(Line::from(vec![
         Span::styled("Workload: ", Theme::header_label()),
         Span::styled(
-            format!("{}/{}", d.namespace, d.app_name),
+            format!("{}/{} ({})", d.namespace, d.app_name, d.kind),
             Style::default()
                 .fg(Theme::cyan())
                 .add_modifier(Modifier::BOLD),
@@ -760,6 +788,19 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
             Style::default().fg(Theme::dim()),
         ),
     ]));
+
+    // Line 1b: ArgoCD Rollout in Window (if detected)
+    if let Some(ref argo_msg) = d.argo_rollout_in_window {
+        lines.push(Line::from(vec![
+            Span::styled("🐙 ArgoCD Rollout: ", Theme::header_label()),
+            Span::styled(
+                sanitize_span_text(argo_msg),
+                Style::default()
+                    .fg(Theme::cyan())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
 
     // Line 2: GitOps / ArgoCD Panel (if available)
     if let Some(ref g) = d.gitops {
@@ -824,8 +865,26 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         ),
     ]));
 
-    // Line 4: Primary Symptoms
-    if !d.primary_symptoms.is_empty() {
+    // Line 4: Symptoms (multi-line pod breakdown)
+    if !d.pod_symptoms.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "Symptoms:",
+            Style::default()
+                .fg(Theme::red())
+                .add_modifier(Modifier::BOLD),
+        )]));
+        for ps in &d.pod_symptoms {
+            let text = if !ps.detail_message.is_empty() {
+                format!("  • {}: {} | {}", ps.pod_name, ps.status, ps.detail_message)
+            } else {
+                format!("  • {}: {}", ps.pod_name, ps.status)
+            };
+            lines.push(Line::from(vec![Span::styled(
+                sanitize_span_text(&text),
+                Style::default().fg(Theme::fg()),
+            )]));
+        }
+    } else if !d.primary_symptoms.is_empty() {
         lines.push(Line::from(vec![
             Span::styled(
                 "Symptoms: ",
@@ -840,29 +899,15 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         ]));
     }
 
-    // Line 5: Failing Pods
-    if !d.failing_pod_names.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "Failing Pods: ",
-                Style::default()
-                    .fg(Theme::red())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                d.failing_pod_names.join(", "),
-                Style::default().fg(Theme::red()),
-            ),
-        ]));
-    }
-
-    // Line 6: Inline Error Log Snippet (if available)
+    // Line 5: Inline Error Log Snippet (if available) with empty line before and after
     if let Some(ref log_lines) = d.error_log_snippet {
         let first_pod = d
-            .failing_pod_names
+            .pod_symptoms
             .first()
-            .map(|s| s.as_str())
+            .map(|ps| ps.pod_name.as_str())
+            .or_else(|| d.failing_pod_names.first().map(|s| s.as_str()))
             .unwrap_or("pod");
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
             format!("📜 Error Log Snippet ({first_pod}):"),
             Style::default()
@@ -875,9 +920,10 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
                 Span::styled(sanitize_span_text(line), Style::default().fg(Theme::red())),
             ]));
         }
+        lines.push(Line::from(""));
     }
 
-    // Line 7+: Correlated Events
+    // Line 6+: Correlated Events
     if !d.top_events.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "Correlated Events: ",
@@ -911,7 +957,7 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
     lines.push(Line::from(vec![
         Span::styled("Actions: ", Theme::header_label()),
         Span::styled(
-            "[l] Full Logs   [r] Rollout Restart   [y] YAML Diff   [d] Describe   [a] AI RCA",
+            "[l] Full Logs   [y] YAML Diff   [d] Describe   [a] AI RCA   [r] Refresh",
             Style::default()
                 .fg(Theme::accent())
                 .add_modifier(Modifier::BOLD),
@@ -1036,13 +1082,6 @@ fn render_infra_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
 fn render_footer(f: &mut Frame, area: Rect, state: &ChangedViewState) {
     let spans = vec![
         Span::styled(
-            " [j/k] ",
-            Style::default()
-                .fg(Theme::cyan())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Navigate  ", Style::default().fg(Theme::dim())),
-        Span::styled(
             "[Enter] ",
             Style::default()
                 .fg(Theme::cyan())
@@ -1062,7 +1101,7 @@ fn render_footer(f: &mut Frame, area: Rect, state: &ChangedViewState) {
                 .fg(Theme::cyan())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Restart  ", Style::default().fg(Theme::dim())),
+        Span::styled("Refresh  ", Style::default().fg(Theme::dim())),
         Span::styled(
             "[y] ",
             Style::default()

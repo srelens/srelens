@@ -7264,30 +7264,13 @@ impl App {
                         Theme::status_ok(),
                     );
                 }
-                KeyCode::Char('R') => {
-                    let target = changed
-                        .selected_deployment()
-                        .map(|d| (d.app_name.clone(), d.namespace.clone()));
-                    if let Some((name, ns)) = target {
-                        self.modal = Some(Modal::Confirm {
-                            title: format!("Restart Workload [{}]", name),
-                            message: format!(
-                                "Trigger zero-downtime rollout restart for Deployment '{}' in namespace '{}'?",
-                                name, ns
-                            ),
-                            action_name: format!("restart:Deployment:{}:{}", ns, name),
-                            is_destructive: false,
-                        });
-                    }
-                }
                 KeyCode::Enter | KeyCode::Char('d') => match changed.active_tab {
                     changed_view::ChangedTab::Deployments => {
                         let target = changed
                             .selected_deployment()
-                            .map(|d| (d.app_name.clone(), d.namespace.clone()));
-                        if let Some((name, ns)) = target {
-                            self.open_describe_view(name, "Deployment".to_string(), Some(ns))
-                                .await;
+                            .map(|d| (d.app_name.clone(), d.kind.clone(), d.namespace.clone()));
+                        if let Some((name, kind, ns)) = target {
+                            self.open_describe_view(name, kind, Some(ns)).await;
                         }
                     }
                     changed_view::ChangedTab::Infra => {
@@ -7303,10 +7286,9 @@ impl App {
                     changed_view::ChangedTab::Deployments => {
                         let target = changed
                             .selected_deployment()
-                            .map(|d| (d.app_name.clone(), d.namespace.clone()));
-                        if let Some((name, ns)) = target {
-                            self.open_yaml_view(name, "Deployment".to_string(), Some(ns))
-                                .await;
+                            .map(|d| (d.app_name.clone(), d.kind.clone(), d.namespace.clone()));
+                        if let Some((name, kind, ns)) = target {
+                            self.open_yaml_view(name, kind, Some(ns)).await;
                         }
                     }
                     changed_view::ChangedTab::Infra => {
@@ -7323,7 +7305,10 @@ impl App {
                         (
                             d.app_name.clone(),
                             d.namespace.clone(),
-                            d.failing_pod_names.first().cloned(),
+                            d.pod_symptoms
+                                .first()
+                                .map(|ps| ps.pod_name.clone())
+                                .or_else(|| d.failing_pod_names.first().cloned()),
                         )
                     });
                     if let Some((app_name, ns, pod_opt)) = target {
@@ -7339,20 +7324,28 @@ impl App {
                 }
                 KeyCode::Char('a') => {
                     let prompt_opt = changed.selected_deployment().map(|d| {
-                        let symptoms_str = if d.primary_symptoms.is_empty() {
-                            "None".to_string()
-                        } else {
+                        let symptoms_str = if !d.pod_symptoms.is_empty() {
+                            d.pod_symptoms
+                                .iter()
+                                .map(|ps| {
+                                    if !ps.detail_message.is_empty() {
+                                        format!("{}: {} | {}", ps.pod_name, ps.status, ps.detail_message)
+                                    } else {
+                                        format!("{}: {}", ps.pod_name, ps.status)
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        } else if !d.primary_symptoms.is_empty() {
                             d.primary_symptoms.join("; ")
-                        };
-                        let failing_str = if d.failing_pod_names.is_empty() {
-                            "None".to_string()
                         } else {
-                            d.failing_pod_names.join(", ")
+                            "None".to_string()
                         };
                         format!(
-                            "Analyze incident for {}/{}:\nStatus: {} ({})\nRoot Cause: {} {}\nRevision: {} (previous: {:?})\nImage Diff: {}\nReplicas: {}/{} Ready\nSymptoms: {}\nFailing Pods: {}\nWhat is the root cause, and what steps should I take to remediate or rollback?",
+                            "Analyze incident for {}/{} ({}):\nStatus: {} ({})\nRoot Cause: {} {}\nRevision: {} (previous: {:?})\nImage Diff: {}\nReplicas: {}/{} Ready\nSymptoms: {}\nWhat is the root cause, and what steps should I take to remediate or rollback?",
                             d.namespace,
                             d.app_name,
+                            d.kind,
                             d.incident_status.label(),
                             d.failure_detail,
                             d.failure_category.badge(),
@@ -7363,7 +7356,6 @@ impl App {
                             d.ready_replicas,
                             d.desired_replicas,
                             symptoms_str,
-                            failing_str,
                         )
                     });
                     if let Some(prompt) = prompt_opt {
