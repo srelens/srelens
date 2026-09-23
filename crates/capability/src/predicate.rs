@@ -185,7 +185,10 @@ enum Segment {
     /// whose `key` holds exactly the string `text`. The first, and only one,
     /// as a Kubernetes printer column reads the same path: a condition list
     /// is keyed by `type`, so there is one answer to "the Ready condition".
-    First { key: String, equals: String },
+    First {
+        key: String,
+        equals: String,
+    },
 }
 
 impl Predicate {
@@ -424,7 +427,10 @@ fn filter(open: &str) -> Option<(Segment, &str)> {
     {
         return None;
     }
-    let quote = comparand.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    let quote = comparand
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '\'' | '"'))?;
     let text = &comparand[1..];
     let end = text.find(quote)?;
     let (value, after) = (&text[..end], &text[end + 1..]);

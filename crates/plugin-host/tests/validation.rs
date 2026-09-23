@@ -124,10 +124,22 @@ fn status_rules_are_reported_at_the_field_that_has_to_change() {
     assert_eq!(
         problems(&errors(&value)),
         expected(&[
-            ("EXTENSION_INVALID_BINDING", "contributions.statusResolvers[0].rules[0].when[0]"),
-            ("EXTENSION_INVALID_VALUE", "contributions.statusResolvers[0].rules[1].label"),
-            ("EXTENSION_INVALID_VALUE", "contributions.statusResolvers[0].rules[1].reason"),
-            ("EXTENSION_INVALID_BINDING", "contributions.badges[0].rules[0].when[0]"),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.statusResolvers[0].rules[0].when[0]"
+            ),
+            (
+                "EXTENSION_INVALID_VALUE",
+                "contributions.statusResolvers[0].rules[1].label"
+            ),
+            (
+                "EXTENSION_INVALID_VALUE",
+                "contributions.statusResolvers[0].rules[1].reason"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.badges[0].rules[0].when[0]"
+            ),
         ])
     );
     // An unknown status is a schema error, not a sixth status.
@@ -139,15 +151,23 @@ fn status_rules_are_reported_at_the_field_that_has_to_change() {
 #[test]
 fn a_resolver_names_a_kind_the_app_reads_and_each_kind_has_one_resolver() {
     let mut value = with_status();
-    let resolvers = value["contributions"]["statusResolvers"].as_array_mut().unwrap();
+    let resolvers = value["contributions"]["statusResolvers"]
+        .as_array_mut()
+        .unwrap();
     let mut second = resolvers[0].clone();
     second["forKinds"] = json!(["argoproj.io/Application", "argoproj.io/AppProject"]);
     resolvers.push(second);
     assert_eq!(
         problems(&errors(&value)),
         expected(&[
-            ("EXTENSION_DUPLICATE_IDENTIFIER", "contributions.statusResolvers[1].forKinds[0]"),
-            ("EXTENSION_UNRESOLVED_CAPABILITY", "contributions.statusResolvers[1].forKinds[1]"),
+            (
+                "EXTENSION_DUPLICATE_IDENTIFIER",
+                "contributions.statusResolvers[1].forKinds[0]"
+            ),
+            (
+                "EXTENSION_UNRESOLVED_CAPABILITY",
+                "contributions.statusResolvers[1].forKinds[1]"
+            ),
         ])
     );
 }
@@ -163,8 +183,14 @@ fn a_badge_without_a_join_reads_only_its_rows_metadata() {
     assert_eq!(
         problems(&errors(&value)),
         expected(&[
-            ("EXTENSION_INVALID_BINDING", "contributions.badges[0].rules[0].when[0]"),
-            ("EXTENSION_INVALID_BINDING", "contributions.badges[0].rules[0].reason"),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.badges[0].rules[0].when[0]"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.badges[0].rules[0].reason"
+            ),
         ])
     );
     // Through a join, the rules read the joined resource, which the app was
@@ -190,7 +216,10 @@ fn badge_ids_are_identifiers_and_unique() {
     assert_eq!(
         problems(&errors(&value)),
         expected(&[
-            ("EXTENSION_DUPLICATE_IDENTIFIER", "contributions.badges[1].id"),
+            (
+                "EXTENSION_DUPLICATE_IDENTIFIER",
+                "contributions.badges[1].id"
+            ),
             ("EXTENSION_INVALID_VALUE", "contributions.badges[2].id"),
         ])
     );
@@ -204,8 +233,10 @@ fn badge_ids_are_identifiers_and_unique() {
     {
         badge["id"] = json!(format!("b{index}"));
     }
-    assert!(problems(&errors(&value))
-        .contains(&(code(ValidationCode::InvalidValue), "contributions.badges".into())));
+    assert!(problems(&errors(&value)).contains(&(
+        code(ValidationCode::InvalidValue),
+        "contributions.badges".into()
+    )));
 }
 
 #[test]
@@ -214,14 +245,19 @@ fn a_dashboard_counts_a_page_whose_kind_has_a_status_resolver() {
     value["contributions"]["pages"]
         .as_array_mut()
         .unwrap()
-        .push(json!({"id":"overview","title":"Overview","capability":"applications",
-            "dashboard":{"pages":["applications"]}}));
+        .push(
+            json!({"id":"overview","title":"Overview","capability":"applications",
+            "dashboard":{"pages":["applications"]}}),
+        );
     Manifest::parse(&value.to_string())
         .expect("statusResolvers replace statusColumns as what a dashboard counts");
     value["contributions"]["statusResolvers"] = json!([]);
     assert_eq!(
         problems(&errors(&value)),
-        expected(&[("EXTENSION_INVALID_VALUE", "contributions.pages[1].dashboard.pages[0]")])
+        expected(&[(
+            "EXTENSION_INVALID_VALUE",
+            "contributions.pages[1].dashboard.pages[0]"
+        )])
     );
     // The deprecated spelling is still accepted on the 0.3 line.
     value["contributions"]["pages"][0]["statusColumns"] = json!({"ready":0});

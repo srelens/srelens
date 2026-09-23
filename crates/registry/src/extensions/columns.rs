@@ -368,7 +368,10 @@ fn resolved_badges(
         .filter_map(|object| {
             let meta = &object["metadata"];
             Some((
-                (meta["namespace"].as_str().unwrap_or(""), meta["name"].as_str()?),
+                (
+                    meta["namespace"].as_str().unwrap_or(""),
+                    meta["name"].as_str()?,
+                ),
                 object,
             ))
         })
@@ -384,7 +387,9 @@ fn resolved_badges(
                         None => {
                             errors.insert(
                                 badge.id.clone(),
-                                Value::String("row is not in the host's metadata read; refresh".into()),
+                                Value::String(
+                                    "row is not in the host's metadata read; refresh".into(),
+                                ),
                             );
                             continue;
                         }
@@ -1079,15 +1084,36 @@ mod tests {
              "status":"unknown","label":"Argo CD?","reason":".metadata.labels['app.kubernetes.io/instance']"}
         ]}));
         let metadata = vec![
-            deployment("api", json!({"kustomize.toolkit.fluxcd.io/name":"apps",
-                "helm.toolkit.fluxcd.io/name":"also"}), json!({})),
-            deployment("chart", json!({"helm.toolkit.fluxcd.io/name":"podinfo"}), json!({})),
-            deployment("guestbook", json!({"app.kubernetes.io/instance":"guestbook"}),
-                json!({"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/guestbook"})),
-            deployment("legacy", json!({"app.kubernetes.io/instance":"legacy"}), json!({})),
+            deployment(
+                "api",
+                json!({"kustomize.toolkit.fluxcd.io/name":"apps",
+                "helm.toolkit.fluxcd.io/name":"also"}),
+                json!({}),
+            ),
+            deployment(
+                "chart",
+                json!({"helm.toolkit.fluxcd.io/name":"podinfo"}),
+                json!({}),
+            ),
+            deployment(
+                "guestbook",
+                json!({"app.kubernetes.io/instance":"guestbook"}),
+                json!({"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/guestbook"}),
+            ),
+            deployment(
+                "legacy",
+                json!({"app.kubernetes.io/instance":"legacy"}),
+                json!({}),
+            ),
             deployment("plain", json!({}), json!({})),
         ];
-        let rows = [row("api"), row("chart"), row("guestbook"), row("legacy"), row("plain")];
+        let rows = [
+            row("api"),
+            row("chart"),
+            row("guestbook"),
+            row("legacy"),
+            row("plain"),
+        ];
         let resolved = resolved_badges(
             &[flux, argo],
             &HashMap::new(),
@@ -1099,7 +1125,13 @@ mod tests {
             resolved[index]
                 .0
                 .iter()
-                .map(|b| (b.id.as_str(), b.resolved.label.as_str(), b.resolved.reason.as_deref()))
+                .map(|b| {
+                    (
+                        b.id.as_str(),
+                        b.resolved.label.as_str(),
+                        b.resolved.reason.as_deref(),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
         // First hit: api carries both Flux labels, and the kustomize rule is first.
@@ -1109,9 +1141,16 @@ mod tests {
         assert_eq!(shown(3), vec![("argo", "Argo CD?", Some("legacy"))]);
         // No rule holding is no badge — an answer, not an error.
         assert!(shown(4).is_empty() && resolved[4].1.is_empty());
-        assert!(resolved.iter().flat_map(|(badges, _)| badges).all(|b| !b.resolved.label.trim().is_empty()));
+        assert!(resolved.iter().flat_map(|(badges, _)| badges).all(|b| !b
+            .resolved
+            .label
+            .trim()
+            .is_empty()));
         let wire = serde_json::to_value(&resolved[0].0[0]).unwrap();
-        assert_eq!(wire, json!({"id":"flux","status":"healthy","label":"Flux","reason":"apps"}));
+        assert_eq!(
+            wire,
+            json!({"id":"flux","status":"healthy","label":"Flux","reason":"apps"})
+        );
     }
 
     #[test]
@@ -1127,7 +1166,11 @@ mod tests {
             "apps/Deployment",
         );
         assert!(resolved[0].0.is_empty());
-        assert!(resolved[0].1["flux"].as_str().unwrap().contains("metadata"), "{:?}", resolved[0].1);
+        assert!(
+            resolved[0].1["flux"].as_str().unwrap().contains("metadata"),
+            "{:?}",
+            resolved[0].1
+        );
     }
 
     #[test]
@@ -1152,14 +1195,19 @@ mod tests {
             report("dup", "r-dup-2", 2),
         ]);
         let joins = HashMap::from([("vulns".to_owned(), (rule, objects))]);
-        let vulns = badge(json!({"id":"cves","forKinds":["apps/Deployment"],"join":"vulns","rules":[
-            {"when":[{"jsonPath":".report.summary.criticalCount","equals":0}],"status":"healthy","label":"No critical CVEs"},
-            {"when":[],"status":"error","label":"Critical CVEs","reason":".report.summary.criticalCount"}
-        ]}));
+        let vulns = badge(
+            json!({"id":"cves","forKinds":["apps/Deployment"],"join":"vulns","rules":[
+                {"when":[{"jsonPath":".report.summary.criticalCount","equals":0}],"status":"healthy","label":"No critical CVEs"},
+                {"when":[],"status":"error","label":"Critical CVEs","reason":".report.summary.criticalCount"}
+            ]}),
+        );
         let rows = [row("api"), row("web"), row("dup"), row("unscanned")];
         let resolved = resolved_badges(&[vulns], &joins, None, &rows, "apps/Deployment");
         assert_eq!(resolved[0].0[0].resolved.label, "No critical CVEs");
-        assert_eq!(resolved[1].0[0].resolved.status, srelens_capability::status::NormalizedStatus::Error);
+        assert_eq!(
+            resolved[1].0[0].resolved.status,
+            srelens_capability::status::NormalizedStatus::Error
+        );
         assert_eq!(resolved[1].0[0].resolved.reason.as_deref(), Some("3"));
         assert!(resolved[2].0.is_empty());
         assert!(resolved[2].1["cves"].as_str().unwrap().contains("multiple"));

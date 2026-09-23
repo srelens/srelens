@@ -1570,9 +1570,16 @@ impl Manifest {
         }
         unique(
             problems,
-            contributions.badges.iter().enumerate().map(|(index, badge)| {
-                (format!("contributions.badges[{index}].id"), badge.id.as_str())
-            }),
+            contributions
+                .badges
+                .iter()
+                .enumerate()
+                .map(|(index, badge)| {
+                    (
+                        format!("contributions.badges[{index}].id"),
+                        badge.id.as_str(),
+                    )
+                }),
         );
         for (index, badge) in contributions.badges.iter().enumerate() {
             let at = format!("contributions.badges[{index}]");
@@ -1600,7 +1607,11 @@ impl Manifest {
                                 );
                             }
                         }
-                        if rule.reason.as_deref().is_some_and(|path| !metadata_path(path)) {
+                        if rule
+                            .reason
+                            .as_deref()
+                            .is_some_and(|path| !metadata_path(path))
+                        {
                             problems.push(
                                 Code::InvalidBinding,
                                 format!("{rule_at}.reason"),

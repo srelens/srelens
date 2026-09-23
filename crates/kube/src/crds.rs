@@ -1206,11 +1206,11 @@ mod tests {
                 "status":{"conditions":[{"type":"Ready","status":ready,"message":message}]}})
         };
         serde_json::json!({"apiVersion":"kustomize.toolkit.fluxcd.io/v1","kind":"KustomizationList",
-            "metadata":{},"items":[
-                item("apps", false, "True", "Applied revision: main@sha1:abc"),
-                item("infra", true, "True", "Applied"),
-                item("broken", false, "False", "kustomize build failed"),
-            ]})
+        "metadata":{},"items":[
+            item("apps", false, "True", "Applied revision: main@sha1:abc"),
+            item("infra", true, "True", "Applied"),
+            item("broken", false, "False", "kustomize build failed"),
+        ]})
     }
 
     /// The payload `extensions.read` sends once the host has bound a
@@ -1291,10 +1291,8 @@ mod tests {
                     "annotations":{"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/api"}},
                 "spec":{"replicas":3,"template":{"spec":{"containers":[{"name":"api","image":"x"}]}}},
                 "status":{"readyReplicas":3}}]});
-        let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
-            vec![page],
-            std::time::Duration::ZERO,
-        );
+        let (client, uris) =
+            crate::list_cap::test_support::mock_slow_pages(vec![page], std::time::Duration::ZERO);
         let cache = ClientCache::new_many(vec![]);
         cache.preload("fake", client).await;
         let (objects, truncated) = list_builtin_metadata(&cache, "fake", "team", "apps/Deployment")
@@ -1306,20 +1304,36 @@ mod tests {
             Some("/apis/apps/v1/namespaces/team/deployments")
         );
         assert_eq!(objects.len(), 1);
-        assert_eq!(objects[0]["metadata"]["labels"]["kustomize.toolkit.fluxcd.io/name"], "apps");
+        assert_eq!(
+            objects[0]["metadata"]["labels"]["kustomize.toolkit.fluxcd.io/name"],
+            "apps"
+        );
         assert_eq!(objects[0]["metadata"]["uid"], "u1");
-        assert!(objects[0].get("spec").is_none() && objects[0].get("status").is_none(), "{}", objects[0]);
+        assert!(
+            objects[0].get("spec").is_none() && objects[0].get("status").is_none(),
+            "{}",
+            objects[0]
+        );
     }
 
     #[tokio::test]
     async fn builtin_metadata_refuses_secrets_unknown_kinds_and_a_group_that_does_not_match() {
         let cache = ClientCache::new_many(vec![]);
-        for kind in ["/Secret", "acme.io/Widget", "acme.io/Deployment", "Deployment", "/Nope"] {
+        for kind in [
+            "/Secret",
+            "acme.io/Widget",
+            "acme.io/Deployment",
+            "Deployment",
+            "/Nope",
+        ] {
             let error = list_builtin_metadata(&cache, "fake", "team", kind)
                 .await
                 .err()
                 .unwrap_or_else(|| panic!("{kind} must be refused"));
-            assert!(matches!(error, CapabilityError::InvalidInput(_)), "{kind}: {error}");
+            assert!(
+                matches!(error, CapabilityError::InvalidInput(_)),
+                "{kind}: {error}"
+            );
         }
     }
 

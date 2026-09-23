@@ -307,7 +307,10 @@ fn the_gitops_examples_resolve_status_with_rules_and_badge_workloads() {
         (got.status, got.label, got.reason)
     };
     assert_eq!(
-        resolved(flux_rules, ready("True", "Release reconciliation succeeded")),
+        resolved(
+            flux_rules,
+            ready("True", "Release reconciliation succeeded")
+        ),
         (S::Healthy, "Ready".into(), None)
     );
     assert_eq!(
@@ -338,7 +341,10 @@ fn the_gitops_examples_resolve_status_with_rules_and_badge_workloads() {
         resolved(argo_rules, app("Progressing", "Synced")).0,
         S::Progressing
     );
-    assert_eq!(resolved(argo_rules, app("Suspended", "Synced")).0, S::Suspended);
+    assert_eq!(
+        resolved(argo_rules, app("Suspended", "Synced")).0,
+        S::Suspended
+    );
 
     // GitOps ownership on built-in workloads: the exit criterion of #517.
     let owned = |manifest: &Manifest, metadata: Value| {
@@ -348,15 +354,24 @@ fn the_gitops_examples_resolve_status_with_rules_and_badge_workloads() {
         first_match(&badge.rules, &json!({ "metadata": metadata })).map(|b| (b.label, b.reason))
     };
     assert_eq!(
-        owned(&flux, json!({"labels":{"kustomize.toolkit.fluxcd.io/name":"apps"}})),
+        owned(
+            &flux,
+            json!({"labels":{"kustomize.toolkit.fluxcd.io/name":"apps"}})
+        ),
         Some(("Flux".into(), Some("apps".into())))
     );
     assert_eq!(
-        owned(&flux, json!({"labels":{"helm.toolkit.fluxcd.io/name":"podinfo"}})),
+        owned(
+            &flux,
+            json!({"labels":{"helm.toolkit.fluxcd.io/name":"podinfo"}})
+        ),
         Some(("Flux".into(), Some("podinfo".into())))
     );
     assert_eq!(
-        owned(&argo, json!({"annotations":{"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/guestbook"}})),
+        owned(
+            &argo,
+            json!({"annotations":{"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/guestbook"}})
+        ),
         Some((
             "Argo CD".into(),
             Some("guestbook:apps/Deployment:team/guestbook".into())
@@ -365,7 +380,10 @@ fn the_gitops_examples_resolve_status_with_rules_and_badge_workloads() {
     // `app.kubernetes.io/instance` alone is Helm's label too; it is not
     // ownership by Argo CD.
     assert_eq!(
-        owned(&argo, json!({"labels":{"app.kubernetes.io/instance":"guestbook"}})),
+        owned(
+            &argo,
+            json!({"labels":{"app.kubernetes.io/instance":"guestbook"}})
+        ),
         None
     );
     assert_eq!(owned(&flux, json!({})), None);

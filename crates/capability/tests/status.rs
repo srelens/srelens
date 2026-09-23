@@ -4,8 +4,8 @@
 
 use serde_json::{json, Value};
 use srelens_capability::status::{
-    first_match, resolve_status, resolve_statuses, rule_problems, NormalizedStatus,
-    ResolvedStatus, StatusRule, MAX_RULES,
+    first_match, resolve_status, resolve_statuses, rule_problems, NormalizedStatus, ResolvedStatus,
+    StatusRule, MAX_RULES,
 };
 
 fn rules(value: Value) -> Vec<StatusRule> {
@@ -167,7 +167,10 @@ fn a_rule_set_the_host_would_refuse_matches_nothing() {
     ] {
         let declared = rules(broken.clone());
         assert!(!rule_problems(&declared).is_empty(), "{broken} is refused");
-        assert_eq!(first_match(&declared, &json!({"spec": {"suspend": true}})), None);
+        assert_eq!(
+            first_match(&declared, &json!({"spec": {"suspend": true}})),
+            None
+        );
         assert_eq!(
             resolve_status(&declared, &json!({})).status,
             NormalizedStatus::Unknown
@@ -196,21 +199,25 @@ fn rule_lists_and_their_conditions_are_bounded_and_located() {
     let found = rule_problems(&rules(json!(vec![one.clone(); MAX_RULES + 1])));
     assert!(found.iter().any(|(path, _)| path == "rules"), "{found:?}");
     assert!(rule_problems(&rules(json!(vec![one; MAX_RULES]))).is_empty());
-    assert!(rule_problems(&[])
-        .iter()
-        .any(|(path, _)| path == "rules"));
+    assert!(rule_problems(&[]).iter().any(|(path, _)| path == "rules"));
     let nine = vec![json!({"jsonPath": ".a", "present": true}); 9];
     let found = rule_problems(&rules(
         json!([{"when": nine, "status": "unknown", "label": "U"}]),
     ));
-    assert!(found.iter().any(|(path, _)| path == "rules[0].when"), "{found:?}");
+    assert!(
+        found.iter().any(|(path, _)| path == "rules[0].when"),
+        "{found:?}"
+    );
     let found = rule_problems(&rules(json!([
         {"when": [], "status": "unknown", "label": "U"},
         {"when": [{"jsonPath": ".a", "present": true}, {"jsonPath": "a", "present": true}],
          "status": "unknown", "label": "U", "reason": ".ok"}
     ])));
     assert_eq!(
-        found.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+        found
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
         vec!["rules[1].when[1]"]
     );
 }
@@ -220,7 +227,10 @@ fn labels_and_reasons_leave_the_host_escaped() {
     let rule = rules(json!([{"when": [], "status": "warning", "label": "Drift", "reason": ".r"}]));
     let got = resolve_status(&rule, &json!({"r": "Resume\u{202e} first\u{200b}"}));
     let reason = got.reason.unwrap();
-    assert!(!reason.contains('\u{202e}') && !reason.contains('\u{200b}'), "{reason}");
+    assert!(
+        !reason.contains('\u{202e}') && !reason.contains('\u{200b}'),
+        "{reason}"
+    );
     assert!(reason.contains("\\u{202e}"), "{reason}");
 }
 

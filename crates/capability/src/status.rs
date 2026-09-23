@@ -75,10 +75,7 @@ pub struct ResolvedStatus {
 pub fn rule_problems(rules: &[StatusRule]) -> Vec<(String, String)> {
     let mut problems = Vec::new();
     if rules.is_empty() || rules.len() > MAX_RULES {
-        problems.push((
-            "rules".to_owned(),
-            format!("Declare 1–{MAX_RULES} rules"),
-        ));
+        problems.push(("rules".to_owned(), format!("Declare 1–{MAX_RULES} rules")));
         if rules.len() > MAX_RULES {
             return problems;
         }

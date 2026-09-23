@@ -84,20 +84,20 @@ fn a_path_addresses_quoted_keys_and_list_elements() {
 #[test]
 fn a_path_the_host_does_not_evaluate_is_refused_rather_than_read_as_false() {
     for path in [
-        "spec.suspend",                                  // no leading `.`
-        ".spec..suspend",                                // empty segment
-        ".spec.*",                                       // wildcard
-        ".status.conditions[?(@.type!='Ready')].status", // a filter other than key == string
-        ".status.conditions[?(@.type=='Ready')]x",       // only a segment follows a filter
-        ".status.conditions[?(@.type==Ready)].status",   // an unquoted comparand
-        ".status.conditions[?(@.a.b=='x')].status",      // a nested key inside the filter
-        ".status.conditions[?(@.type=='')].status",      // an empty comparand
+        "spec.suspend",                                   // no leading `.`
+        ".spec..suspend",                                 // empty segment
+        ".spec.*",                                        // wildcard
+        ".status.conditions[?(@.type!='Ready')].status",  // a filter other than key == string
+        ".status.conditions[?(@.type=='Ready')]x",        // only a segment follows a filter
+        ".status.conditions[?(@.type==Ready)].status",    // an unquoted comparand
+        ".status.conditions[?(@.a.b=='x')].status",       // a nested key inside the filter
+        ".status.conditions[?(@.type=='')].status",       // an empty comparand
         ".status.conditions[?(@.type=='Re'ady')].status", // a quote inside the comparand
         ".status.conditions[?(@.type==\"Ready')].status", // mismatched quotes
-        "..suspend",                                     // recursive descent
-        ".metadata.annotations[acme.io/x]",              // unquoted odd key
-        ".spec.a.b.c.d.e.f.g.h.i",                       // deeper than the bound
-        ".spec[01]",                                     // a second spelling of `[1]`
+        "..suspend",                                      // recursive descent
+        ".metadata.annotations[acme.io/x]",               // unquoted odd key
+        ".spec.a.b.c.d.e.f.g.h.i",                        // deeper than the bound
+        ".spec[01]",                                      // a second spelling of `[1]`
     ] {
         let refused = predicate(json!({"jsonPath": path, "present": true, "reason": "r"}));
         assert!(
@@ -263,7 +263,10 @@ fn a_filter_that_matches_nothing_is_an_unset_field() {
     assert_eq!(resolve(&reconciling(), path), None);
     // Not an array, or elements that are not objects: nothing is selected.
     assert_eq!(
-        resolve(&json!({"status": {"conditions": {"type": "Stalled"}}}), path),
+        resolve(
+            &json!({"status": {"conditions": {"type": "Stalled"}}}),
+            path
+        ),
         None
     );
     assert_eq!(
@@ -273,7 +276,10 @@ fn a_filter_that_matches_nothing_is_an_unset_field() {
     // The comparand is a string: a key holding another type is not a match
     // for its spelling.
     assert_eq!(
-        resolve(&json!({"items": [{"n": 1, "v": "one"}]}), ".items[?(@.n=='1')].v"),
+        resolve(
+            &json!({"items": [{"n": 1, "v": "one"}]}),
+            ".items[?(@.n=='1')].v"
+        ),
         None
     );
     let stalled = |operator: Value| {
