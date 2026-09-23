@@ -53,6 +53,8 @@ struct ResolvedCell {
     name: String,
     namespace: String,
     values: Map<String, Value>,
+    #[serde(skip_serializing_if = "Map::is_empty")]
+    errors: Map<String, Value>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -66,6 +68,16 @@ fn check_input(input: &ResolveColumns) -> Result<(), CapabilityError> {
     if input.context.trim().is_empty() || input.kind.trim().is_empty() {
         return Err(CapabilityError::InvalidInput(
             "Explicit context and qualified kind are required".into(),
+        ));
+    }
+    if input.context.len() > 4_096 {
+        return Err(CapabilityError::InvalidInput(
+            "Context exceeds 4,096 bytes".into(),
+        ));
+    }
+    if input.kind.len() > 317 {
+        return Err(CapabilityError::InvalidInput(
+            "Qualified kind exceeds 317 bytes".into(),
         ));
     }
     if input.uids.len() > 1_000 {
@@ -89,6 +101,7 @@ fn check_input(input: &ResolveColumns) -> Result<(), CapabilityError> {
     for row in &input.uids {
         if row.name.is_empty()
             || row.name.len() > 253
+            || row.namespace.len() > 63
             || row.uid.as_ref().is_some_and(|uid| uid.len() > 128)
             || (!input.namespace.is_empty() && row.namespace != input.namespace)
             || serde_json::to_vec(&row.row).is_ok_and(|bytes| bytes.len() > 4_096)
@@ -251,17 +264,23 @@ fn resolved_cells(
     rows.iter()
         .map(|row| {
             let mut values = Map::new();
+            let mut errors = Map::new();
             for column in columns {
                 let source = &column.source;
                 let value = if let Some(join_id) = &source.join {
                     let object = match (joins.get(join_id), indexed.get(join_id)) {
                         (Some((rule, objects)), Some(index)) => {
-                            joined(rule, objects, index, row, kind).map_err(|()| {
-                                CapabilityError::Handler(format!(
-                                    "Column {} for {}/{} matched multiple joined resources",
-                                    column.id, row.namespace, row.name,
-                                ))
-                            })?
+                            match joined(rule, objects, index, row, kind) {
+                                Ok(object) => object,
+                                Err(()) => {
+                                    errors.insert(
+                                        column.id.clone(),
+                                        Value::String("matched multiple joined resources".into()),
+                                    );
+                                    values.insert(column.id.clone(), Value::Null);
+                                    continue;
+                                }
+                            }
                         }
                         _ => None,
                     };
@@ -275,10 +294,12 @@ fn resolved_cells(
                     ))
                 };
                 if value.as_ref().is_some_and(|value| value.len() > 1_024) {
-                    return Err(CapabilityError::Handler(format!(
-                        "Column {} value exceeds 1,024 bytes",
-                        column.id
-                    )));
+                    errors.insert(
+                        column.id.clone(),
+                        Value::String("value exceeds 1,024 bytes".into()),
+                    );
+                    values.insert(column.id.clone(), Value::Null);
+                    continue;
                 }
                 values.insert(
                     column.id.clone(),
@@ -293,6 +314,7 @@ fn resolved_cells(
                 name: row.name.clone(),
                 namespace: row.namespace.clone(),
                 values,
+                errors,
             })
         })
         .collect()
@@ -815,6 +837,7 @@ mod tests {
         let objects = Arc::new(vec![
             json!({"metadata":{"name":"report-a","namespace":"team","labels":{"target":"api"}},"report":{"count":2}}),
             json!({"metadata":{"name":"report-b","namespace":"team","labels":{"target":"api"}},"report":{"count":5}}),
+            json!({"metadata":{"name":"report-c","namespace":"team","labels":{"target":"worker"}},"report":{"count":7}}),
         ]);
         let joins = HashMap::from([("reports".into(), (rule, objects))]);
         let column = TableColumn {
@@ -833,13 +856,31 @@ mod tests {
             uid: None,
             name: "api".into(),
             namespace: "team".into(),
-            row: Value::Null,
+            row: json!({"note":"present"}),
         };
-        let error = resolved_cells(&[column], &joins, &[row], "/Pod")
-            .err()
+        let other = ColumnRow {
+            name: "worker".into(),
+            ..row.clone()
+        };
+        let row_column = TableColumn {
+            id: "note".into(),
+            title: "Note".into(),
+            source: srelens_plugin_host::ColumnSource {
+                join: None,
+                json_path: ".note".into(),
+            },
+            ..column.clone()
+        };
+        let cells = resolved_cells(&[column, row_column], &joins, &[row, other], "/Pod")
+            .expect("one ambiguous cell must not fail the batch");
+        let ambiguous = serde_json::to_value(&cells[0]).unwrap();
+        assert!(ambiguous["errors"]["count"]
+            .as_str()
             .unwrap()
-            .to_string();
-        assert!(error.contains("multiple joined resources"), "{error}");
+            .contains("multiple joined resources"));
+        assert!(ambiguous["values"]["count"].is_null());
+        assert_eq!(cells[0].values["note"], "present");
+        assert_eq!(cells[1].values["count"], "7");
     }
 
     #[test]
@@ -860,9 +901,69 @@ mod tests {
             uid: None,
             name: "api".into(),
             namespace: "team".into(),
-            row: json!({"note":"x".repeat(4_097)}),
+            row: json!({"note":"x".repeat(1_025)}),
         };
-        assert!(resolved_cells(&[column], &HashMap::new(), &[row], "/Pod").is_err());
+        let other = ColumnRow {
+            name: "worker".into(),
+            row: json!({"note":"short"}),
+            ..row.clone()
+        };
+        let cells = resolved_cells(&[column], &HashMap::new(), &[row, other], "/Pod")
+            .expect("one oversized cell must not fail the batch");
+        let oversized = serde_json::to_value(&cells[0]).unwrap();
+        assert!(oversized["errors"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("1,024"));
+        assert!(oversized["values"]["note"].is_null());
+        assert_eq!(cells[1].values["note"], "short");
+    }
+
+    #[test]
+    fn resolver_rejects_oversized_context_kind_and_all_namespace_row() {
+        let base = || ResolveColumns {
+            id: "app".into(),
+            revision: 1,
+            context: "prod".into(),
+            namespace: String::new(),
+            kind: "/Pod".into(),
+            uids: vec![ColumnRow {
+                uid: None,
+                name: "api".into(),
+                namespace: "team".into(),
+                row: Value::Null,
+            }],
+        };
+        assert!(check_input(&base()).is_ok());
+        let mut long_context = ResolveColumns {
+            context: "x".repeat(4_097),
+            ..base()
+        };
+        assert!(check_input(&long_context)
+            .unwrap_err()
+            .to_string()
+            .contains("4,096"));
+        long_context.context = "x".repeat(4_096);
+        assert!(check_input(&long_context).is_ok());
+        let long_kind = ResolveColumns {
+            kind: "x".repeat(318),
+            ..base()
+        };
+        assert!(check_input(&long_kind)
+            .unwrap_err()
+            .to_string()
+            .contains("317"));
+        let long_namespace = ResolveColumns {
+            uids: vec![ColumnRow {
+                namespace: "x".repeat(64),
+                ..base().uids[0].clone()
+            }],
+            ..base()
+        };
+        assert!(check_input(&long_namespace)
+            .unwrap_err()
+            .to_string()
+            .contains("namespace"));
     }
 
     #[tokio::test]

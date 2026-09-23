@@ -226,7 +226,8 @@ export interface ExtensionColumnRow {
 }
 export interface ExtensionColumnResult {
   columns: ExtensionTableColumn[];
-  cells: Array<{ uid?: string; name: string; namespace: string; values: Record<string, string | null> }>;
+  cells: Array<{ uid?: string | null; name: string; namespace: string;
+    values: Record<string, string | null>; errors?: Record<string, string> }>;
 }
 export const resolveExtensionColumns = (
   id: string, revision: number, context: string, namespace: string, kind: string,

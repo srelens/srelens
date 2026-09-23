@@ -287,8 +287,9 @@ are optional and off by default. A path starts with `.` and is at most 256
 characters; a resolved cell is at most 1,024 bytes. Values that are absent
 render `—`. A failed join read shows the reason and a retry, rather than an
 empty cell. A row field outside a column's top-level JSONPath key is not sent
-to the resolver. If multiple joined resources match one row, resolution fails
-explicitly instead of choosing an arbitrary resource. The host resolves up to
+to the resolver. If multiple joined resources match one row, that cell shows
+the reason instead of choosing an arbitrary resource; other cells still resolve.
+A scalar over 1,024 bytes is also reported on its cell. The host resolves up to
 1,000 rows in one call and caches each joined list for five seconds, sharing an
 in-flight read. A joined list beyond 2,000 objects fails as incomplete.
 

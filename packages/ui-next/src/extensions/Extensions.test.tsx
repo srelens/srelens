@@ -82,7 +82,7 @@ it("shows a declared native table column on the app's own resource page", async 
     capabilities:[{ name:"list", target:"k8s.listCustomResource", arguments:{ group:"argoproj.io", kind:"Application", namespaced:true } }],
     contributions:{ ...plugin.manifest.contributions, tableColumns:[column] } } };
   vi.mocked(readExtension).mockResolvedValue({ items:[{name:"apps",namespace:"team",age:"1d",columns:[]}], printerColumns:[] });
-  vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns:[column], cells:[{name:"apps",namespace:"team",values:{critical:"4"}}] });
+  vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns:[column], cells:[{uid:null,name:"apps",namespace:"team",values:{critical:"4"}}] });
   render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
   expect(await screen.findByRole("columnheader", {name:"Critical CVEs"})).toBeTruthy();
   expect(await screen.findByText("4")).toBeTruthy();
@@ -99,8 +99,8 @@ it("sorts and searches opted-in app column values", async () => {
     {name:"beta",namespace:"team",age:"1d",columns:[]},
   ], printerColumns:[] });
   vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns:[column], cells:[
-    {name:"alpha",namespace:"team",values:{score:"12"}},
-    {name:"beta",namespace:"team",values:{score:"4"}},
+    {uid:null,name:"alpha",namespace:"team",values:{score:"12"}},
+    {uid:null,name:"beta",namespace:"team",values:{score:"4"}},
   ] });
   const view = render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
   expect(await screen.findByText("12")).toBeTruthy();

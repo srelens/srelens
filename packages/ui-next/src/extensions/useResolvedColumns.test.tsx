@@ -22,7 +22,7 @@ beforeEach(() => { vi.clearAllMocks(); });
 
 it("resolves 1,000 deployment rows with one call, then removes the column on disable", async () => {
   resolve.mockResolvedValue({ columns: plugin.manifest.contributions.tableColumns, cells: [
-    { name: "api-0", namespace: "team", values: { critical: "3" } },
+    { uid: null, name: "api-0", namespace: "team", values: { critical: "3" } },
   ] });
   const rows = Array.from({ length: 1_000 }, (_, index) => ({ name: `api-${index}`, namespace: "team" }));
   const props = { plugins: [plugin], context: "prod", contextId: "context-key", namespace: "team", kind: "apps/Deployment", rows };
@@ -48,7 +48,7 @@ it("keeps a failed read explicit and retries one batch", async () => {
 it("keeps resolved cells while a watched snapshot is pending and loads only new rows", async () => {
   let complete!: (result: unknown) => void;
   resolve.mockResolvedValueOnce({ columns: [], cells: [
-    { name: "api", namespace: "team", values: { critical: "3" } },
+    { uid: null, name: "api", namespace: "team", values: { critical: "3" } },
   ] }).mockImplementationOnce(() => new Promise((done) => { complete = done; }));
   const first = { name: "api", namespace: "team" };
   const added = { name: "worker", namespace: "team" };
@@ -59,8 +59,8 @@ it("keeps resolved cells while a watched snapshot is pending and loads only new 
   expect(view.result.current.columns[0].getValue?.(first)).toBe("3");
   expect(renderToStaticMarkup(<>{view.result.current.columns[0].render?.(added)}</>)).toContain("Loading");
   await act(async () => { complete({ columns: [], cells: [
-    { name: "api", namespace: "team", values: { critical: "4" } },
-    { name: "worker", namespace: "team", values: { critical: null } },
+    { uid: null, name: "api", namespace: "team", values: { critical: "4" } },
+    { uid: null, name: "worker", namespace: "team", values: { critical: null } },
   ] }); });
   expect(view.result.current.columns[0].getValue?.(first)).toBe("4");
   expect(renderToStaticMarkup(<>{view.result.current.columns[0].render?.(added)}</>)).toContain("—");
@@ -84,4 +84,19 @@ it("projects only the root key read by a row column", async () => {
   renderHook(() => useResolvedColumns({ plugins: [source], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
   await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1));
   expect(resolve.mock.calls[0][5][0].row).toEqual({ status: { ready: "True" } });
+});
+
+it("shows one cell's resolver error without hiding another row's value", async () => {
+  resolve.mockResolvedValue({ columns: plugin.manifest.contributions.tableColumns, cells: [
+    { uid: null, name: "api", namespace: "team", values: { critical: null },
+      errors: { critical: "matched multiple joined resources" } },
+    { uid: null, name: "worker", namespace: "team", values: { critical: "7" } },
+  ] });
+  const rows = [{ name: "api", namespace: "team" }, { name: "worker", namespace: "team" }];
+  const view = renderHook(() => useResolvedColumns({ plugins: [plugin], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
+  await waitFor(() => expect(view.result.current.columns[0].getValue?.(rows[1])).toBe("7"));
+  expect(renderToStaticMarkup(<>{view.result.current.columns[0].render?.(rows[0])}</>))
+    .toContain("matched multiple joined resources");
+  expect(view.result.current.columns[0].getValue?.(rows[0])).toBe("");
+  expect(view.result.current.errors).toEqual([]);
 });

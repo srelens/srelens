@@ -137,6 +137,7 @@ export function useResolvedColumns<Row extends ListRow>(args: {
         return byIdentity.get(JSON.stringify([typeof uid === "string" ? uid : null, row.namespace ?? "", row.name]));
       };
       const value = (row: Row) => cell(row)?.values[column.id] ?? null;
+      const error = (row: Row) => cell(row)?.errors?.[column.id];
       return {
         key: `extension:${plugin.manifest.id}:${column.id}`,
         header: column.title,
@@ -147,7 +148,8 @@ export function useResolvedColumns<Row extends ListRow>(args: {
         render: (row) => found?.state === "error"
           ? <span title={found.error}>Couldn’t read</span>
           : found?.state === "ready" && cell(row)
-            ? value(row) === null ? <span>—</span> : displayCell(value(row)!, column.format)
+            ? error(row) ? <span title={error(row)} className="whitespace-nowrap">{error(row)}</span>
+              : value(row) === null ? <span>—</span> : displayCell(value(row)!, column.format)
             : found?.state === "ready" && !found.pending && !rowsPending ? <span>—</span> : <span>Loading…</span>,
       };
     });
