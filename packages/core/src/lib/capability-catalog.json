@@ -54,6 +54,15 @@
     "confirm": null
   },
   {
+    "id": "extensions.resolveColumns",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "extensions.resource",
     "readOnly": true,
     "destructive": false,

@@ -2653,6 +2653,20 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         )
         .await;
     assert!(item_names(&out).contains(&KUSTOMIZATION), "{out}");
+    let columns = h
+        .ok(
+            "extensions.resolveColumns",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespace": NS,
+                "kind": "kustomize.toolkit.fluxcd.io/Kustomization",
+                "uids": [{ "name": KUSTOMIZATION, "namespace": NS,
+                    "row": { "name": KUSTOMIZATION } }],
+            }),
+        )
+        .await;
+    assert_eq!(columns["columns"], json!([]), "{columns}");
+    assert_eq!(columns["cells"][0]["name"], KUSTOMIZATION, "{columns}");
     for app in [&argocd_app] {
         let out = h
             .ok(

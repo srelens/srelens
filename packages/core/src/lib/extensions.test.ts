@@ -6,6 +6,7 @@ import { invokeCapability } from "../transport/transport";
 import {
   configureExtensions,
   readExtension,
+  resolveExtensionColumns,
   extensionRoute,
   parseExtensionRoute,
 } from "./extensions";
@@ -28,6 +29,15 @@ describe("extension contract", () => {
   it("requests CRD columns using the host camelCase contract",async()=>{
     await readExtension("org.test.app",2,"list","cluster/a","ns",true);
     expect(invokeCapability).toHaveBeenCalledWith("extensions.read",{id:"org.test.app",revision:2,capability:"list",context:"cluster/a",namespace:"ns",useCrdColumns:true});
+  });
+  it("resolves a 1,000-row view in one caller-shaped batch", async () => {
+    vi.mocked(invokeCapability).mockClear();
+    const rows = Array.from({ length: 1_000 }, (_, index) => ({ name: `api-${index}`, namespace: "team", uid: `uid-${index}`, row: { name: `api-${index}` } }));
+    await resolveExtensionColumns("org.test.app", 2, "cluster/a", "team", "apps/Deployment", rows);
+    expect(invokeCapability).toHaveBeenLastCalledWith("extensions.resolveColumns", {
+      id: "org.test.app", revision: 2, context: "cluster/a", namespace: "team", kind: "apps/Deployment", uids: rows,
+    });
+    expect(vi.mocked(invokeCapability)).toHaveBeenCalledTimes(1);
   });
   it("pins cluster and namespace in route identity", () => {
     const route = extensionRoute("cluster/a", "org.test.app", "page", "ns/a");

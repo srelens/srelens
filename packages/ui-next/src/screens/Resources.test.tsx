@@ -19,6 +19,8 @@ const {
   useNamespaceOptions,
   deleteResource,
   getObject,
+  resolveExtensionColumns,
+  extensionInventory,
 } = vi.hoisted(() => ({
   watchResource: vi.fn(),
   listCrds: vi.fn(),
@@ -33,6 +35,13 @@ const {
   // is the only way to say "the peek did not refetch" — a rendered heading
   // looks identical whether or not a second round trip went out.
   getObject: vi.fn(),
+  resolveExtensionColumns: vi.fn(),
+  extensionInventory: { plugins: [] as unknown[] },
+}));
+
+vi.mock("../extensions/inventoryStore", async (original) => ({
+  ...(await original<typeof import("../extensions/inventoryStore")>()),
+  useExtensions: () => ({ status: "ready", data: { schemaVersion: 1, nextRevision: 1, plugins: extensionInventory.plugins }, reload: vi.fn() }),
 }));
 
 vi.mock("@srelens/core", async (importOriginal) => ({
@@ -46,6 +55,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   podMetrics: (...a: unknown[]) => podMetrics(...a),
   deleteResource,
   getObject: (...a: unknown[]) => getObject(...a),
+  resolveExtensionColumns: (...a: unknown[]) => resolveExtensionColumns(...a),
 }));
 
 /**
@@ -196,6 +206,8 @@ let stop: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  extensionInventory.plugins = [];
+  resolveExtensionColumns.mockResolvedValue({ columns: [], cells: [] });
   stop = vi.fn();
   asked = [];
   watchResource.mockImplementation(
@@ -402,6 +414,24 @@ async function openColumns() {
 }
 
 describe("Resources", () => {
+  it("renders a native app column in a built-in list and removes it when the app is disabled", async () => {
+    const app = { enabled: true, revision: 2, manifest: { id: "org.example.security", name: "Security", contributions: {
+      tableColumns: [{ id: "critical", title: "Critical CVEs", forKinds: ["apps/Deployment"],
+        source: { join: "reports", jsonPath: ".report.summary.criticalCount" }, format: "number", sortable: true }],
+    } } };
+    extensionInventory.plugins = [app];
+    resolveExtensionColumns.mockResolvedValue({ columns: app.manifest.contributions.tableColumns,
+      cells: [{ name: "web-1", namespace: "default", values: { critical: "3" } }] });
+    const view = open("/k/deployments");
+    await waitFor(() => expect(resolveExtensionColumns).toHaveBeenCalled());
+    await waitFor(() => expect(headers()).toContain("Critical CVEs"));
+    await waitFor(() => expect(screen.getByText("3")).toBeTruthy());
+    expect(resolveExtensionColumns).toHaveBeenCalledTimes(1);
+    expect(resolveExtensionColumns.mock.calls[0][4]).toBe("apps/Deployment");
+    extensionInventory.plugins = [{ ...app, enabled: false }];
+    view.rerender(<ConsoleProvider><Resources route="/k/deployments" /><AskPeek /></ConsoleProvider>);
+    expect(screen.queryByRole("columnheader", { name: "Critical CVEs" })).toBeNull();
+  });
   it("lists a kind's rows under its own title", async () => {
     open("/k/pods");
 

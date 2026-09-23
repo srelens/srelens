@@ -87,7 +87,13 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     pages: "required",
     detailTabs: "required",
     detailLinks: "required",
+    joins: "optional",
+    tableColumns: "optional",
   } satisfies Presence<Contributions>,
+  Join: { id:"required", capability:"required", match:"required" } satisfies Presence<NonNullable<Contributions["joins"]>[number]>,
+  JoinMatch: { label:"optional", kindLabel:"optional", ownerReference:"optional", annotation:"optional", name:"optional" } satisfies Presence<NonNullable<Contributions["joins"]>[number]["match"]>,
+  TableColumn: { id:"required", title:"required", forKinds:"required", source:"required", format:"required", sortable:"optional", filterable:"optional" } satisfies Presence<NonNullable<Contributions["tableColumns"]>[number]>,
+  ColumnSource: { join:"optional", jsonPath:"required" } satisfies Presence<NonNullable<Contributions["tableColumns"]>[number]["source"]>,
   Page: {
     id: "required",
     title: "required",

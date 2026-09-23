@@ -81,6 +81,35 @@
       ],
       "type": "object"
     },
+    "ColumnFormat": {
+      "enum": [
+        "text",
+        "number",
+        "status",
+        "badge",
+        "date",
+        "duration"
+      ],
+      "type": "string"
+    },
+    "ColumnSource": {
+      "additionalProperties": false,
+      "properties": {
+        "join": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "jsonPath": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "jsonPath"
+      ],
+      "type": "object"
+    },
     "Contributions": {
       "additionalProperties": false,
       "properties": {
@@ -96,9 +125,21 @@
           },
           "type": "array"
         },
+        "joins": {
+          "items": {
+            "$ref": "#/definitions/Join"
+          },
+          "type": "array"
+        },
         "pages": {
           "items": {
             "$ref": "#/definitions/Page"
+          },
+          "type": "array"
+        },
+        "tableColumns": {
+          "items": {
+            "$ref": "#/definitions/TableColumn"
           },
           "type": "array"
         }
@@ -208,6 +249,57 @@
         "id",
         "title"
       ],
+      "type": "object"
+    },
+    "Join": {
+      "additionalProperties": false,
+      "description": "A single granted custom-resource list used to enrich native table rows.",
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "match": {
+          "$ref": "#/definitions/JoinMatch"
+        }
+      },
+      "required": [
+        "capability",
+        "id",
+        "match"
+      ],
+      "type": "object"
+    },
+    "JoinMatch": {
+      "additionalProperties": false,
+      "properties": {
+        "annotation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kindLabel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "boolean"
+        },
+        "ownerReference": {
+          "type": "boolean"
+        }
+      },
       "type": "object"
     },
     "ManifestKind": {
@@ -326,6 +418,43 @@
       },
       "required": [
         "ready"
+      ],
+      "type": "object"
+    },
+    "TableColumn": {
+      "additionalProperties": false,
+      "properties": {
+        "filterable": {
+          "type": "boolean"
+        },
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "format": {
+          "$ref": "#/definitions/ColumnFormat"
+        },
+        "id": {
+          "type": "string"
+        },
+        "sortable": {
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/definitions/ColumnSource"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "forKinds",
+        "format",
+        "id",
+        "source",
+        "title"
       ],
       "type": "object"
     }

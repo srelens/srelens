@@ -1,5 +1,6 @@
 //! Durable, native declarative extensions for desktop hosts.
 mod catalog;
+mod columns;
 pub(crate) mod crd;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
@@ -977,6 +978,7 @@ pub fn register(
 ) {
     catalog::register(reg, path.with_extension("catalog.json"), core.clone());
     resource::register(reg, path.clone(), core.clone(), cache.clone());
+    columns::register(reg, path.clone(), core.clone(), cache.clone());
     let p = path.clone();
     reg.register(Capability::typed::<Empty, Inventory, _, _>(
         "extensions.list",
@@ -2697,6 +2699,7 @@ mod tests {
         );
         for id in [
             "extensions.read",
+            "extensions.resolveColumns",
             "extensions.catalog",
             "extensions.catalogManifest",
             "extensions.validate",
@@ -2704,7 +2707,7 @@ mod tests {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 8);
+        assert_eq!(mcp.list_tools().len(), 9);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

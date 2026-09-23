@@ -151,7 +151,8 @@ fn version_printer_columns(version: &serde_json::Value) -> Vec<PrinterColumn> {
 ///
 /// Anything absent, null, or not a scalar renders empty — an empty cell reads
 /// better than a blob of JSON.
-fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
+/// Restricted scalar projection shared by CRD printer columns and host-owned app columns.
+pub fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
     let mut current = value;
     let mut rest = path.trim_start_matches('.');
     while !rest.is_empty() {
@@ -585,6 +586,31 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
             }
         },
     )
+}
+
+/// Host-only join read. Raw resources stay in the broker and only resolved scalar cells
+/// leave `extensions.resolveColumns`; an app's reader capability still returns summaries.
+pub async fn list_custom_resource_join_objects(
+    cache: &ClientCache,
+    context: &str,
+    namespace: &str,
+    group: &str,
+    version: &str,
+    kind: &str,
+    plural: &str,
+    namespaced: bool,
+) -> Result<(Vec<serde_json::Value>, bool), CapabilityError> {
+    let client = cache.get(context).await.map_err(CapabilityError::Handler)?;
+    let ar = custom_api_resource(group, version, kind, plural);
+    let api: Api<DynamicObject> = if namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, namespace, &ar)
+    } else {
+        Api::all_with(client, &ar)
+    };
+    let (objects, truncated) = crate::list_cap::list_capped(&api, ListParams::default())
+        .await
+        .map_err(|error| error.into_capability_error("list joined custom resources"))?;
+    Ok((objects.iter().map(whole_object).collect(), truncated))
 }
 
 #[cfg(test)]

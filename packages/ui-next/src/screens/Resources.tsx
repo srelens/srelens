@@ -39,6 +39,8 @@ import { openTab, useTabs } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
 import { FailureAlert, FailureState } from "../lib/errorCopy";
+import { useExtensions } from "../extensions/inventoryStore";
+import { qualifiedTableKind, useResolvedColumns } from "../extensions/useResolvedColumns";
 import { AboutKind } from "./crd/AboutKind";
 import { ResourceDetailView } from "./detail/ResourceDetailView";
 import { ResourceTabView } from "./detail/ResourceTabView";
@@ -177,7 +179,17 @@ function KindList({
   const namespace = clusterScoped ? "" : watchNamespaceForSelection(selection);
   const list = useResourceList<ListRow>(name, slug, descriptor, namespace, files);
 
-  const allColumns = descriptor?.columns ?? NO_COLUMNS;
+  const rows = useMemo(
+    () => clusterScoped ? list.rows : list.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)),
+    [list.rows, clusterScoped, selection],
+  );
+  const inventory = useExtensions();
+  const appColumns = useResolvedColumns({
+    plugins: inventory.data?.plugins ?? [], context: name, contextId: context.key, namespace,
+    kind: qualifiedTableKind(descriptor?.k8sKind ?? "", descriptor?.group), rows,
+  });
+
+  const allColumns = useMemo(() => [...(descriptor?.columns ?? NO_COLUMNS), ...appColumns.columns], [descriptor, appColumns.columns]);
   const defaultHidden = useMemo(() => defaultHiddenKeys(allColumns), [allColumns]);
   const hidden = useHiddenColumns(slug, defaultHidden);
   const columns = useMemo(
@@ -214,13 +226,6 @@ function KindList({
     setRegex,
   } = useResourceTabView(route, columns);
 
-  const rows = useMemo(
-    () =>
-      clusterScoped
-        ? list.rows
-        : list.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)),
-    [list.rows, clusterScoped, selection],
-  );
   const filtered = useMemo(
     () => filterTableData(rows, columns, filter, filterKey, regex),
     [rows, columns, filter, filterKey, regex],
@@ -542,6 +547,12 @@ function KindList({
       </FilterBar>
 
       {!clusterScoped && <NamespaceErrorAlert error={namespaceError} />}
+
+      {appColumns.errors.map((error) => (
+        <Alert key={error.id} tone="warn" title={`Couldn’t read ${error.title} columns`} className="mx-3 mt-3 mb-3">
+          {error.message} <Button variant="secondary" onClick={appColumns.reload}>Retry columns</Button>
+        </Alert>
+      ))}
 
       {!clusterScoped && (
         <StaleSelectionAlert

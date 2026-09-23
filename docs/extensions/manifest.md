@@ -43,7 +43,7 @@ before publishing.
 | `permissions` | Yes | The exact host capability IDs the bindings use. |
 | `capabilities` | Yes | 1–32 bindings, below. |
 | `actions` | No | Up to 32 declared mutations, below. |
-| `contributions` | Yes | `pages`, `detailTabs` and `detailLinks`, below. |
+| `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins` and `tableColumns`, below. |
 
 Unknown fields are errors at every level. A manifest is at most 256 KiB.
 
@@ -256,6 +256,38 @@ writes to the cluster.
 ([#537](https://github.com/srelens/srelens/issues/537)). It is reserved for declared
 mutations ([#549](https://github.com/srelens/srelens/issues/549)), and a manifest that
 uses it now is rejected as an unknown field.
+
+### Table columns and joins
+
+An app can add host-rendered cells to built-in lists and its own resource lists:
+
+```json
+"joins": [{
+  "id": "vulns", "capability": "reports",
+  "match": { "label": "trivy-operator.resource.name", "kindLabel": "trivy-operator.resource.kind" }
+}],
+"tableColumns": [{
+  "id": "critical", "title": "Critical CVEs", "forKinds": ["apps/Deployment"],
+  "source": { "join": "vulns", "jsonPath": ".report.summary.criticalCount" },
+  "format": "number", "sortable": true, "filterable": true
+}]
+```
+
+`joins` has at most 16 entries. Each names a declared `k8s.listCustomResource`
+reader and one match: a metadata `label`, `annotation`, `ownerReference`, or
+resource `name`. `kindLabel` is optional alongside `label`. Joined resources
+are listed once per cluster and namespace, then indexed against each table row's
+namespace and name; owner references use the row UID when it is present.
+
+`tableColumns` has at most 32 entries. Each has a unique `id`, a `title`, 1–32
+group-qualified `forKinds`, a `source`, and a `format` (`text`, `number`,
+`status`, `badge`, `date`, or `duration`). A source is a scalar `jsonPath`
+on the summary row, or one with a declared `join`. `sortable` and `filterable`
+are optional and off by default. A path starts with `.` and is at most 256
+characters; a resolved cell is at most 1,024 bytes. Values that are absent
+render `—`. A failed join read shows the reason and a retry, rather than an
+empty cell. The host resolves up to 1,000 rows in one call and caches each
+joined list for five seconds, sharing an in-flight read.
 
 ## Rules the desktop app adds
 

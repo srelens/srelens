@@ -180,6 +180,9 @@ pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 /// Most printer columns a binding may declare (#609). Refused at
 /// `capabilities[i].arguments.printerColumns` with `EXTENSION_INVALID_VALUE`.
 pub const MAX_PRINTER_COLUMNS: usize = 32;
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -309,6 +312,74 @@ pub struct Contributions {
     pub detail_tabs: Vec<DetailTab>,
     #[serde(rename = "detailLinks")]
     pub detail_links: Vec<DetailLink>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub joins: Vec<Join>,
+    #[serde(
+        default,
+        rename = "tableColumns",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub table_columns: Vec<TableColumn>,
+}
+
+/// A single granted custom-resource list used to enrich native table rows.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Join {
+    pub id: String,
+    pub capability: String,
+    #[serde(rename = "match")]
+    pub match_by: JoinMatch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JoinMatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, rename = "kindLabel", skip_serializing_if = "Option::is_none")]
+    pub kind_label: Option<String>,
+    #[serde(default, rename = "ownerReference", skip_serializing_if = "is_false")]
+    pub owner_reference: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub name: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TableColumn {
+    pub id: String,
+    pub title: String,
+    #[serde(rename = "forKinds")]
+    pub for_kinds: Vec<String>,
+    pub source: ColumnSource,
+    pub format: ColumnFormat,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sortable: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub filterable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ColumnSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join: Option<String>,
+    #[serde(rename = "jsonPath")]
+    pub json_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ColumnFormat {
+    Text,
+    Number,
+    Status,
+    Badge,
+    Date,
+    Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -482,6 +553,65 @@ fn kinds(problems: &mut ValidationErrors, path: &str, values: &[String]) {
 }
 
 /// Maps a schema error to the field it names, without serde's line and column.
+/// Check the structural subset accepted by the host's scalar JSONPath reader.
+/// A typo must fail at install time instead of becoming an unexplained empty cell.
+fn column_json_path(path: &str) -> bool {
+    if path.len() > 256
+        || !path.starts_with('.')
+        || path.len() < 2
+        || path
+            .chars()
+            .any(|c| c.is_control() || is_format_character(c))
+    {
+        return false;
+    }
+    let chars: Vec<char> = path.chars().collect();
+    let mut index = 1;
+    while index < chars.len() {
+        if chars[index] == '[' {
+            index += 1;
+            let start = index;
+            while index < chars.len() && chars[index] != ']' {
+                index += 1;
+            }
+            if index == chars.len() || index == start {
+                return false;
+            }
+            let inner = &chars[start..index];
+            if (inner[0] == '\'' && inner.last() != Some(&'\''))
+                || (inner[0] == '"' && inner.last() != Some(&'"'))
+            {
+                return false;
+            }
+            index += 1;
+        } else {
+            let start = index;
+            while index < chars.len() && chars[index] != '.' && chars[index] != '[' {
+                if chars[index] == ']' {
+                    return false;
+                }
+                if chars[index] == '\\' {
+                    index += 1;
+                    if index == chars.len() {
+                        return false;
+                    }
+                }
+                index += 1;
+            }
+            if index == start {
+                return false;
+            }
+        }
+        if index < chars.len() && chars[index] == '.' {
+            index += 1;
+            if index == chars.len() || chars[index] == '.' {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn schema_error(error: &serde_path_to_error::Error<serde_json::Error>) -> ValidationError {
     let inner = error.inner();
     let mut message = inner.to_string();
@@ -1022,6 +1152,123 @@ impl Manifest {
                 &format!("contributions.detailLinks[{index}].forKinds"),
                 &link.for_kinds,
             );
+        }
+        if self.contributions.joins.len() > 16 {
+            problems.push(
+                Code::InvalidValue,
+                "contributions.joins",
+                "Declare at most 16 joins",
+            );
+        }
+        if self.contributions.table_columns.len() > 32 {
+            problems.push(
+                Code::InvalidValue,
+                "contributions.tableColumns",
+                "Declare at most 32 table columns",
+            );
+        }
+        let join_ids = unique(
+            &mut problems,
+            self.contributions
+                .joins
+                .iter()
+                .enumerate()
+                .map(|(index, join)| {
+                    (format!("contributions.joins[{index}].id"), join.id.as_str())
+                }),
+        );
+        for (index, join) in self.contributions.joins.iter().enumerate() {
+            let at = format!("contributions.joins[{index}]");
+            if !identifier(&join.id) {
+                problems.push(Code::InvalidValue, format!("{at}.id"), IDENTIFIER);
+            }
+            if !self.capabilities.iter().any(|binding| {
+                binding.name == join.capability && binding.target == "k8s.listCustomResource"
+            }) {
+                problems.push(
+                    Code::UnresolvedCapability,
+                    format!("{at}.capability"),
+                    "A join must name a declared custom-resource reader",
+                );
+            }
+            let matching = &join.match_by;
+            let selectors = usize::from(matching.label.is_some())
+                + usize::from(matching.owner_reference)
+                + usize::from(matching.annotation.is_some())
+                + usize::from(matching.name);
+            if selectors != 1 {
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.match"),
+                    "Choose exactly one of label, ownerReference, annotation or name",
+                );
+            }
+            if matching.kind_label.is_some() && matching.label.is_none() {
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.match.kindLabel"),
+                    "kindLabel requires label",
+                );
+            }
+            for (field, key) in [
+                ("label", &matching.label),
+                ("kindLabel", &matching.kind_label),
+                ("annotation", &matching.annotation),
+            ] {
+                if key.as_ref().is_some_and(|key| {
+                    key.is_empty()
+                        || key.len() > 253
+                        || key
+                            .chars()
+                            .any(|c| c.is_control() || is_format_character(c))
+                }) {
+                    problems.push(
+                        Code::InvalidValue,
+                        format!("{at}.match.{field}"),
+                        "Metadata key must be 1–253 visible characters",
+                    );
+                }
+            }
+        }
+        unique(
+            &mut problems,
+            self.contributions
+                .table_columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    (
+                        format!("contributions.tableColumns[{index}].id"),
+                        column.id.as_str(),
+                    )
+                }),
+        );
+        for (index, column) in self.contributions.table_columns.iter().enumerate() {
+            let at = format!("contributions.tableColumns[{index}]");
+            if !identifier(&column.id) {
+                problems.push(Code::InvalidValue, format!("{at}.id"), IDENTIFIER);
+            }
+            if !label(&column.title) {
+                problems.push(Code::InvalidValue, format!("{at}.title"), LABEL);
+            }
+            kinds(&mut problems, &format!("{at}.forKinds"), &column.for_kinds);
+            if let Some(join) = &column.source.join {
+                if !join_ids.contains(join.as_str()) {
+                    problems.push(
+                        Code::InvalidBinding,
+                        format!("{at}.source.join"),
+                        "Column source must name a declared join",
+                    );
+                }
+            }
+            let path = &column.source.json_path;
+            if !column_json_path(path) {
+                problems.push(
+                    Code::InvalidValue,
+                    format!("{at}.source.jsonPath"),
+                    "jsonPath must be a valid absolute scalar path of at most 256 characters",
+                );
+            }
         }
         problems.into_result()
     }
