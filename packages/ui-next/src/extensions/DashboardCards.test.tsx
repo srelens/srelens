@@ -69,6 +69,26 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+// A card's title and app name are app prose of up to 120 characters. Cut off
+// with an ellipsis, the rest was reachable only by pointer hover, never by
+// keyboard focus or touch. So they wrap, and a long unbroken word breaks
+// rather than overflowing the tile. jsdom has no layout, so the contract is
+// pinned in the stylesheet it lives in, as ExtensionResourceDetails does.
+it("shows a card's whole title and app name rather than cutting them off", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const css = readFileSync(join(__dirname, "extensions.css"), "utf8");
+  const rule = (selector: string) => {
+    const at = css.indexOf(`${selector} {`);
+    expect(at, `${selector} has a rule`).toBeGreaterThanOrEqual(0);
+    return css.slice(at, css.indexOf("}", at));
+  };
+  for (const selector of [".dashboard-card-title", ".dashboard-card-app"]) {
+    expect(rule(selector), selector).not.toMatch(/text-overflow|white-space\s*:\s*nowrap/);
+    expect(rule(selector), selector).toMatch(/overflow-wrap\s*:\s*anywhere/);
+  }
+});
+
 describe("DashboardCards", () => {
   it("draws loading, couldn't read and zero as three different things", async () => {
     installed(app([

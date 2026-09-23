@@ -570,21 +570,19 @@
   .dashboard-card[data-size] { grid-column: span 1; }
 }
 .dashboard-card-head { display: flex; flex-direction: column; min-width: 0; }
+/* App prose, not machine text: it wraps, so the whole of it is readable
+   without a pointer, and a long unbroken word breaks inside the tile. */
 .dashboard-card-app {
   font-size: 0.6875rem;
   color: var(--ink-faint, var(--fl-color-text-muted));
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .dashboard-card-title {
   margin: 0;
   font-size: 0.8125rem;
   font-weight: 500;
   color: var(--ink-soft, inherit);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .dashboard-card-link {
   display: block;
