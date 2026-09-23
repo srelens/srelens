@@ -235,6 +235,7 @@ mod tests {
                 signature: None,
                 manifest: source.to_string(),
                 grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision: None,
             },
         )
         .unwrap();
@@ -314,6 +315,7 @@ mod tests {
                     "k8s.annotate".into(),
                     "k8s.mergePatch".into(),
                 ],
+                reviewed_revision: None,
             },
         )
         .unwrap();

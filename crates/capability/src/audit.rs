@@ -183,6 +183,43 @@ pub fn describe_target(args: &Value) -> (Option<AppRef>, Option<String>, Option<
     (app, cluster, resource)
 }
 
+/// An install manifest is opaque in `args`, but a checked app ID still makes
+/// its audit record useful. Keep it in `resource`: an `AppRef` needs the new
+/// installed revision, which the install request does not carry.
+pub fn describe_call_target(
+    tool: &str,
+    original: &Value,
+    redacted: &Value,
+) -> (Option<AppRef>, Option<String>, Option<String>) {
+    let (app, cluster, resource) = describe_target(redacted);
+    let install_id = if tool == "extensions.configure" && original["action"] == "install" {
+        original["manifest"]
+            .as_str()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .and_then(|manifest| manifest["id"].as_str().map(str::to_owned))
+            .filter(|id| {
+                id.len() <= 128
+                    && id.contains('.')
+                    && id.split('.').all(|segment| {
+                        !segment.is_empty()
+                            && segment.len() <= 64
+                            && segment
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    })
+            })
+    } else {
+        None
+    };
+    // For an install, the checked manifest ID is authoritative. A caller may
+    // attach an unrelated top-level `name` to the request; it is not the app.
+    if tool == "extensions.configure" && original["action"] == "install" {
+        (app, cluster, install_id)
+    } else {
+        (app, cluster, resource)
+    }
+}
+
 /// Redact argument VALUES while keeping keys, so an operator can see the shape
 /// of a call without its secrets. Sensitive-annotated tools redact everything;
 /// otherwise a value goes only if its key names a credential, holds a
@@ -197,14 +234,15 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// secret material with no credential-shaped key inside it to catch:
     /// `data`/`stringData` on a Secret write (`k8s.updateConfigData` — a
     /// Secret's own keys are things like `username` and `ca.crt`), `yaml` on
-    /// `k8s.applyManifest` (one opaque string holding a whole manifest), and
+    /// `k8s.applyManifest` and `manifest` on `extensions.configure` (opaque
+    /// strings holding whole manifests), and
     /// `values` on the helm install/upgrade/template capabilities (user YAML
     /// that routinely holds registry credentials and database passwords).
     ///
     /// Matched EXACTLY, not as substrings, so `metadata` stays readable — the
     /// point is to keep the shape of a call auditable while dropping the part
     /// that carries secrets.
-    const PAYLOAD_FIELDS: [&str; 4] = ["data", "stringdata", "yaml", "values"];
+    const PAYLOAD_FIELDS: [&str; 5] = ["data", "stringdata", "yaml", "values", "manifest"];
     /// Fields holding a map of caller-chosen names to caller-chosen values,
     /// where the NAMES are the auditable shape and every VALUE is treated as a
     /// secret: `settings` on `extensions.configure` (#605). An app's settings
@@ -466,6 +504,16 @@ pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
         .match_kind(aho_corasick::MatchKind::LeftmostFirst)
         .build(&patterns);
     scrub_or_drop(built, error, &patterns)
+}
+
+/// An install error can echo any substring of an opaque manifest, including
+/// values inside malformed JSON. The audit cannot prove such text is clean, so
+/// keep the result and target but omit the caller-derived error details.
+pub fn redact_call_error(tool: &str, error: &str, args: &Value, redacted: &Value) -> String {
+    if tool == "extensions.configure" && args.get("manifest").is_some() {
+        return "App install failed; details omitted from audit".into();
+    }
+    redact_error(error, args, redacted)
 }
 
 /// Replace every pattern in `error`, or drop the message if the matcher
@@ -1167,6 +1215,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn redacts_opaque_extension_manifest_text_before_any_audit_sink_sees_it() {
+        let args = json!({
+            "action": "install",
+            "manifest": "{\"credential\":\"hunter2\"}",
+            "grants": ["k8s.listCustomResource"]
+        });
+        let out = redact(&args, false);
+        assert_eq!(out["action"], "install");
+        assert_eq!(out["manifest"], REDACTED);
+        assert!(!out.to_string().contains("hunter2"));
+    }
+
+    #[test]
+    fn install_audit_target_accepts_only_a_manifest_id_with_valid_syntax() {
+        for (id, expected) in [
+            ("org.example.app", Some("org.example.app")),
+            ("org.example..app", None),
+            ("org.example.app\nforged", None),
+        ] {
+            let args = json!({"action":"install","name":"spoofed","manifest":json!({"id":id}).to_string()});
+            let (_, _, resource) = describe_call_target("extensions.configure", &args, &redact(&args, false));
+            assert_eq!(resource.as_deref(), expected);
+        }
+    }
+
     /// A denied call is audited before its arguments are ever deserialized, so
     /// `settings` need not be the object the capability's schema demands. A
     /// scalar or array there is blanked whole rather than walked, where the
@@ -1264,9 +1338,9 @@ mod tests {
         );
     }
 
-    /// The other `extensions.configure` actions carry no settings, and their
-    /// audit shape is unchanged: an operator can still read which app was
-    /// installed with which grants, enabled, or limited to which clusters.
+    /// The other `extensions.configure` actions carry no settings. Keep the
+    /// action and grants visible while treating install manifests as opaque;
+    /// enabled state and cluster limits remain visible too.
     #[test]
     fn other_configure_actions_keep_their_audit_shape() {
         let install = redact(
@@ -1274,10 +1348,7 @@ mod tests {
             false,
         );
         assert_eq!(install["action"], json!("install"));
-        assert_eq!(
-            install["manifest"],
-            json!("{\"id\":\"org.example.argocd\"}")
-        );
+        assert_eq!(install["manifest"], REDACTED);
         assert_eq!(install["grants"], json!(["k8s.listCustomResource"]));
 
         let enable = redact(
