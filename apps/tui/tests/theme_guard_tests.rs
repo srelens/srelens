@@ -67,19 +67,33 @@ fn a_test_already_holding_the_guard_can_take_it_again() {
 fn a_second_test_waits_until_the_first_has_restored_the_theme() {
     let mut theme = common::theme::lock();
     theme.set_by_name("solarized-dark");
-    let second = std::thread::spawn(|| {
+    let (attempting, attempt_started) = mpsc::channel();
+    let (acquired, acquisition) = mpsc::channel();
+    let second = std::thread::spawn(move || {
+        attempting.send(()).unwrap();
         let _theme = common::theme::lock();
-        Theme::active_index()
+        acquired.send(Theme::active_index()).unwrap();
     });
-    // Long enough for the second thread to reach the lock and, without one,
-    // read the first test's palette.
-    std::thread::sleep(Duration::from_millis(200));
+    // Wait for the second thread to reach the lock before dropping the
+    // guard. If it only starts afterwards, the test proves nothing.
+    attempt_started
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the second thread never began its lock attempt");
+    assert!(
+        acquisition
+            .recv_timeout(Duration::from_millis(200))
+            .is_err(),
+        "the second test took the theme while the first test still held it"
+    );
     drop(theme);
     assert_eq!(
-        second.join().unwrap(),
+        acquisition
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the second thread never took the theme after it was released"),
         DEFAULT,
         "the second test saw a palette the first test still owned"
     );
+    second.join().unwrap();
 }
 
 /// Every `.rs` file under `dir`, recursively.
