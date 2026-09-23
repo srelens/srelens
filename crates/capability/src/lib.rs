@@ -208,7 +208,7 @@ impl Registry {
         let sensitive = annotations.is_some_and(|a| a.sensitive);
         let redacted = audit::redact(&input, sensitive);
         let called = self.invoke(id, input.clone()).await;
-        let (app, cluster, resource) = audit::describe_target(&redacted);
+        let (app, cluster, resource) = audit::describe_call_target(id, &input, &redacted);
         sink.record(audit::AuditRecord {
             source,
             tool: id.to_string(),
@@ -226,7 +226,7 @@ impl Registry {
             error: called
                 .as_ref()
                 .err()
-                .map(|e| audit::redact_error(&e.to_string(), &input, &redacted)),
+                .map(|e| audit::redact_call_error(id, &e.to_string(), &input, &redacted)),
             args: redacted,
         });
         called
@@ -307,6 +307,39 @@ mod registry_tests {
         write.annotations = Annotations::DESTRUCTIVE;
         reg.register(write);
         reg
+    }
+
+    #[tokio::test]
+    async fn install_audit_keeps_a_checked_app_id_without_manifest_values() {
+        let mut reg = Registry::new();
+        let mut install = Capability::read_only("extensions.configure", "install", |args| async move {
+            if args["fail"] == true {
+                Err(CapabilityError::InvalidInput("invalid credential hunter2".into()))
+            } else {
+                Ok(json!({}))
+            }
+        });
+        install.annotations = Annotations::MUTATING;
+        reg.register(install);
+        let spy = Spy::default();
+        for fail in [false, true] {
+            let _ = reg.invoke_audited(
+                "extensions.configure",
+                json!({"action":"install","manifest":"{\"id\":\"org.example.app\",\"credential\":\"hunter2\"}","grants":[],"fail":fail}),
+                &spy,
+                audit::Source::McpStdio,
+                "auto",
+            ).await;
+        }
+        let seen = spy.seen();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].outcome, audit::OUTCOME_OK);
+        assert_eq!(seen[1].outcome, audit::OUTCOME_REJECTED);
+        for record in seen {
+            assert_eq!(record.resource.as_deref(), Some("org.example.app"));
+            assert_eq!(record.args["manifest"], "<redacted>");
+            assert!(!record.error.as_deref().unwrap_or("").contains("hunter2"));
+        }
     }
 
     /// The asymmetry #555 settles: MCP is a third party and every call it

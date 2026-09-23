@@ -183,6 +183,43 @@ pub fn describe_target(args: &Value) -> (Option<AppRef>, Option<String>, Option<
     (app, cluster, resource)
 }
 
+/// An install manifest is opaque in `args`, but a checked app ID still makes
+/// its audit record useful. Keep it in `resource`: an `AppRef` needs the new
+/// installed revision, which the install request does not carry.
+pub fn describe_call_target(
+    tool: &str,
+    original: &Value,
+    redacted: &Value,
+) -> (Option<AppRef>, Option<String>, Option<String>) {
+    let (app, cluster, resource) = describe_target(redacted);
+    let install_id = if tool == "extensions.configure" && original["action"] == "install" {
+        original["manifest"]
+            .as_str()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .and_then(|manifest| manifest["id"].as_str().map(str::to_owned))
+            .filter(|id| {
+                id.len() <= 128
+                    && id.contains('.')
+                    && id.split('.').all(|segment| {
+                        !segment.is_empty()
+                            && segment.len() <= 64
+                            && segment
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    })
+            })
+    } else {
+        None
+    };
+    // For an install, the checked manifest ID is authoritative. A caller may
+    // attach an unrelated top-level `name` to the request; it is not the app.
+    if tool == "extensions.configure" && original["action"] == "install" {
+        (app, cluster, install_id)
+    } else {
+        (app, cluster, resource)
+    }
+}
+
 /// Redact argument VALUES while keeping keys, so an operator can see the shape
 /// of a call without its secrets. Sensitive-annotated tools redact everything;
 /// otherwise a value goes only if its key names a credential, holds a
@@ -467,6 +504,16 @@ pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
         .match_kind(aho_corasick::MatchKind::LeftmostFirst)
         .build(&patterns);
     scrub_or_drop(built, error, &patterns)
+}
+
+/// An install error can echo any substring of an opaque manifest, including
+/// values inside malformed JSON. The audit cannot prove such text is clean, so
+/// keep the result and target but omit the caller-derived error details.
+pub fn redact_call_error(tool: &str, error: &str, args: &Value, redacted: &Value) -> String {
+    if tool == "extensions.configure" && args.get("manifest").is_some() {
+        return "App install failed; details omitted from audit".into();
+    }
+    redact_error(error, args, redacted)
 }
 
 /// Replace every pattern in `error`, or drop the message if the matcher
@@ -1179,6 +1226,19 @@ mod tests {
         assert_eq!(out["action"], "install");
         assert_eq!(out["manifest"], REDACTED);
         assert!(!out.to_string().contains("hunter2"));
+    }
+
+    #[test]
+    fn install_audit_target_accepts_only_a_manifest_id_with_valid_syntax() {
+        for (id, expected) in [
+            ("org.example.app", Some("org.example.app")),
+            ("org.example..app", None),
+            ("org.example.app\nforged", None),
+        ] {
+            let args = json!({"action":"install","name":"spoofed","manifest":json!({"id":id}).to_string()});
+            let (_, _, resource) = describe_call_target("extensions.configure", &args, &redact(&args, false));
+            assert_eq!(resource.as_deref(), expected);
+        }
     }
 
     /// A denied call is audited before its arguments are ever deserialized, so

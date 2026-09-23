@@ -56,14 +56,14 @@ fn rejected_tool_call(
     message: String,
 ) -> Value {
     let redacted_args = crate::audit::redact(args, sensitive);
-    let (app, cluster, resource) = crate::audit::describe_target(&redacted_args);
+    let (app, cluster, resource) = crate::audit::describe_call_target(name, args, &redacted_args);
     server.audit().record(crate::audit::AuditRecord {
         source: transport.into(),
         tool: name.to_string(),
         app,
         cluster,
         resource,
-        error: Some(crate::audit::redact_error(&message, args, &redacted_args)),
+        error: Some(crate::audit::redact_call_error(name, &message, args, &redacted_args)),
         args: redacted_args,
         decision: "auto",
         outcome: crate::audit::OUTCOME_REJECTED,
@@ -217,14 +217,14 @@ pub async fn handle_request(
                     server.confirm_policy().confirm(&request).await
                 {
                     let redacted_args = crate::audit::redact(&args, sensitive);
-                    let (app, cluster, resource) = crate::audit::describe_target(&redacted_args);
+                    let (app, cluster, resource) = crate::audit::describe_call_target(name, &args, &redacted_args);
                     server.audit().record(crate::audit::AuditRecord {
                         source: transport.into(),
                         tool: name.to_string(),
                         app,
                         cluster,
                         resource,
-                        error: Some(crate::audit::redact_error(&reason, &args, &redacted_args)),
+                        error: Some(crate::audit::redact_call_error(name, &reason, &args, &redacted_args)),
                         args: redacted_args,
                         decision: "denied",
                         // Nothing ran: the refusal is the whole event.
@@ -1279,7 +1279,7 @@ mod tests {
         }
         let mut reg = Registry::new();
         reg.register(Capability::read_only("extensions.validate", "preview", |_| async {
-            Ok(json!({"errors":[{"code":"EXTENSION_INVALID_VALUE","path":"manifest","message":"bad"}]}))
+            Ok(json!({"errors":[{"code":"EXTENSION_INVALID_VALUE","path":"manifest","message":"invalid credential hunter2"}]}))
         }));
         let mut configure = Capability::read_only("extensions.configure", "configure", |_| async {
             panic!("install must not run after a failed preview");
@@ -1295,13 +1295,15 @@ mod tests {
             log: crate::audit::JsonlAuditLog::new(path.clone(), 1024 * 1024),
         });
         let server = McpServer::new(Arc::new(reg)).with_audit(spy.clone());
-        let response = handle_request(&server, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":{"action":"install","manifest":"{\"credential\":\"hunter2\"}","grants":[]}}}), Transport::Http).await.unwrap();
+        let response = handle_request(&server, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":{"action":"install","manifest":"{\"id\":\"org.example.app\",\"credential\":\"hunter2\"}","grants":[]}}}), Transport::Http).await.unwrap();
         assert_eq!(response["result"]["isError"], true);
         let records = spy.records.lock().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].outcome, crate::audit::OUTCOME_REJECTED);
         assert_eq!(records[0].tool, "extensions.configure");
         assert_eq!(records[0].args["manifest"], "<redacted>");
+        assert_eq!(records[0].resource.as_deref(), Some("org.example.app"));
+        assert!(!records[0].error.as_deref().unwrap_or("").contains("hunter2"));
         assert!(!std::fs::read_to_string(path).unwrap().contains("hunter2"));
     }
 
