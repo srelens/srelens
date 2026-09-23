@@ -24,7 +24,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `k8s.getManifest` | low | fetch a resource's manifest as YAML (any supported kind) |
 | `k8s.getObject` | low | fetch a resource as a structured JSON object (any supported kind) |
 | `k8s.listCRDs` | low | list installed CustomResourceDefinitions (group, kind, plural, scope) |
-| `k8s.listChanges` | low | holistic deployment and change incident triage: evaluates recent rollouts, image diffs, pod crash loops, probe failures, and produces a paging triage verdict |
+| `k8s.listChanges` | low | holistic deployment and change incident triage: evaluates recent rollouts, GitOps release info, pod crash loops, compute/storage blockers, and error log snippets |
 | `k8s.listClusterRoleBindings` | low | list ClusterRoleBindings of a connected kube context (cluster-scoped) |
 | `k8s.listClusterRoles` | low | list ClusterRoles of a connected kube context (cluster-scoped) |
 | `k8s.listConfigMaps` | low | list ConfigMaps in a namespace of a connected kube context |

@@ -1710,8 +1710,8 @@ mod tests {
     /// that resolve context names without a cluster.
     pub(super) fn kubeconfig(dir: &Path, file: &str, contexts: &[&str]) -> PathBuf {
         let path = dir.join(file);
-        let mut yaml = String::from(
-            "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://127.0.0.1:1\nusers:\n- name: u\n  user: {}\ncontexts:\n",
+        let mut yaml = format!(
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: c\n  cluster:\n    server: https://{file}:1\nusers:\n- name: u\n  user: {{}}\ncontexts:\n",
         );
         for context in contexts {
             yaml.push_str(&format!(

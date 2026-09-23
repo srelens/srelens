@@ -2,11 +2,12 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
 use srelens_kube::changed::{
-    AppDeploymentChange, ChangedTriageReport, InfraChangeItem, PagingVerdict, RolloutStatus,
+    AppDeploymentChange, ChangedTriageReport, FailureCategory, IncidentStatus, InfraChangeItem,
+    RolloutStatus,
 };
 use std::time::Duration;
 
@@ -21,29 +22,34 @@ pub const WINDOWS: &[(&str, Duration)] = &[
     ("24h", Duration::from_secs(86400)),
 ];
 
+pub type VerdictFilter = IncidentFilter;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VerdictFilter {
+pub enum IncidentFilter {
     All,
-    PageOnly,
-    InProgressOnly,
+    CrashingOnly,
+    PendingOnly,
+    RollingOnly,
     HealthyOnly,
 }
 
-impl VerdictFilter {
+impl IncidentFilter {
     pub fn label(&self) -> &'static str {
         match self {
             Self::All => "ALL",
-            Self::PageOnly => "PAGE ONLY",
-            Self::InProgressOnly => "IN PROGRESS",
+            Self::CrashingOnly => "CRASH / OOM",
+            Self::PendingOnly => "PENDING (INFRA)",
+            Self::RollingOnly => "ROLLING",
             Self::HealthyOnly => "HEALTHY",
         }
     }
 
     pub fn next(&self) -> Self {
         match self {
-            Self::All => Self::PageOnly,
-            Self::PageOnly => Self::InProgressOnly,
-            Self::InProgressOnly => Self::HealthyOnly,
+            Self::All => Self::CrashingOnly,
+            Self::CrashingOnly => Self::PendingOnly,
+            Self::PendingOnly => Self::RollingOnly,
+            Self::RollingOnly => Self::HealthyOnly,
             Self::HealthyOnly => Self::All,
         }
     }
@@ -64,7 +70,7 @@ pub struct ChangedViewState {
     pub error: Option<String>,
     pub filter_query: String,
     pub window_idx: usize,
-    pub verdict_filter: VerdictFilter,
+    pub incident_filter: IncidentFilter,
 }
 
 impl ChangedViewState {
@@ -78,7 +84,7 @@ impl ChangedViewState {
             error: None,
             filter_query: String::new(),
             window_idx: 2, // Default to 1h
-            verdict_filter: VerdictFilter::All,
+            incident_filter: IncidentFilter::All,
         }
     }
 
@@ -125,9 +131,13 @@ impl ChangedViewState {
         }
     }
 
-    pub fn cycle_verdict_filter(&mut self) {
-        self.verdict_filter = self.verdict_filter.next();
+    pub fn cycle_filter(&mut self) {
+        self.incident_filter = self.incident_filter.next();
         self.selected_idx = 0;
+    }
+
+    pub fn cycle_verdict_filter(&mut self) {
+        self.cycle_filter();
     }
 
     pub fn toggle_tab(&mut self) {
@@ -164,11 +174,18 @@ impl ChangedViewState {
         report
             .deployments
             .iter()
-            .filter(|d| match self.verdict_filter {
-                VerdictFilter::All => true,
-                VerdictFilter::PageOnly => d.verdict == PagingVerdict::Page,
-                VerdictFilter::InProgressOnly => d.verdict == PagingVerdict::InProgress,
-                VerdictFilter::HealthyOnly => d.verdict == PagingVerdict::Healthy,
+            .filter(|d| match self.incident_filter {
+                IncidentFilter::All => true,
+                IncidentFilter::CrashingOnly => {
+                    d.incident_status == IncidentStatus::CrashLoop
+                        || d.incident_status == IncidentStatus::OomKilled
+                }
+                IncidentFilter::PendingOnly => d.incident_status == IncidentStatus::Pending,
+                IncidentFilter::RollingOnly => {
+                    d.incident_status == IncidentStatus::Rolling
+                        || d.incident_status == IncidentStatus::Stalled
+                }
+                IncidentFilter::HealthyOnly => d.incident_status == IncidentStatus::Healthy,
             })
             .filter(|d| {
                 if q.is_empty() {
@@ -177,10 +194,18 @@ impl ChangedViewState {
                 d.app_name.to_ascii_lowercase().contains(&q)
                     || d.namespace.to_ascii_lowercase().contains(&q)
                     || d.image_diff.to_ascii_lowercase().contains(&q)
+                    || d.failure_detail.to_ascii_lowercase().contains(&q)
                     || d.current_images
                         .iter()
                         .any(|img| img.to_ascii_lowercase().contains(&q))
-                    || d.verdict_reason.to_ascii_lowercase().contains(&q)
+                    || d.gitops
+                        .as_ref()
+                        .map(|g| {
+                            g.app_name.to_ascii_lowercase().contains(&q)
+                                || g.sync_revision.to_ascii_lowercase().contains(&q)
+                                || g.target_revision.to_ascii_lowercase().contains(&q)
+                        })
+                        .unwrap_or(false)
             })
             .collect()
     }
@@ -286,14 +311,14 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Theme::border()))
-            .title(Span::styled(" Triage In Progress ", Theme::title()));
+            .title(Span::styled(" SRE Incident Investigation ", Theme::title()));
         let loading_p =
             Paragraph::new(vec![
                 Line::from(""),
                 Line::from(vec![
                 Span::styled("⚡ ", Style::default().fg(Theme::cyan())),
                 Span::styled(
-                    "Analyzing recent deployments, revision diffs, pod exit codes and events...",
+                    "Analyzing deployments, GitOps releases, error logs, and pending blockers...",
                     Style::default().fg(Theme::fg()).add_modifier(Modifier::BOLD),
                 ),
             ]),
@@ -311,7 +336,7 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Theme::status_error())
-            .title(Span::styled(" Triage Error ", Theme::status_error()));
+            .title(Span::styled(" Investigation Error ", Theme::status_error()));
         let err_p = Paragraph::new(format!("Failed to analyze cluster changes: {err}"))
             .style(Theme::status_error())
             .block(err_block)
@@ -330,16 +355,16 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
 }
 
 fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
-    let (alerts, in_prog, healthy, headline, overall) = if let Some(r) = &state.report {
+    let (crashing, pending, rolling, healthy, headline) = if let Some(r) = &state.report {
         (
-            r.summary.paging_alerts,
-            r.summary.in_progress,
-            r.summary.healthy,
+            r.summary.crashing_count,
+            r.summary.pending_count,
+            r.summary.rolling_count,
+            r.summary.healthy_count,
             r.summary.headline_message.as_str(),
-            r.summary.overall_verdict,
         )
     } else {
-        (0, 0, 0, "No changes analyzed yet", PagingVerdict::None)
+        (0, 0, 0, 0, "No changes analyzed yet")
     };
 
     let infra_count = state
@@ -348,16 +373,21 @@ fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
         .map(|r| r.infra_changes.len())
         .unwrap_or(0);
 
-    let border_style = match overall {
-        PagingVerdict::Page => Theme::status_error(),
-        PagingVerdict::InProgress => Theme::status_warn(),
-        PagingVerdict::Healthy => Theme::status_ok(),
-        PagingVerdict::None => Style::default().fg(Theme::border()),
+    let border_style = if crashing > 0 {
+        Theme::status_error()
+    } else if pending > 0 {
+        Theme::status_warn()
+    } else if rolling > 0 {
+        Style::default().fg(Theme::cyan())
+    } else if healthy > 0 {
+        Theme::status_ok()
+    } else {
+        Style::default().fg(Theme::border())
     };
 
     let title_badge = match state.active_tab {
         ChangedTab::Deployments => {
-            " 🚨 CHANGED & TRIAGE — RECENT ROLLOUT HEALTH [Tab: Deployments] "
+            " 🚨 CHANGED & TRIAGE — POST-PAGE INCIDENT INVESTIGATOR [Tab: Deployments] "
         }
         ChangedTab::Infra => " 📦 CHANGED & TRIAGE — INFRASTRUCTURE CHANGES [Tab: Infra] ",
     };
@@ -369,10 +399,10 @@ fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
         .title(Span::styled(title_badge, Theme::title()));
 
     let line1 = Line::from(vec![
-        Span::styled(" Verdicts: ", Theme::header_label()),
+        Span::styled(" Workload Health: ", Theme::header_label()),
         Span::styled(
-            format!(" 🚨 PAGE: {alerts} "),
-            if alerts > 0 {
+            format!(" 💥 CRASH/OOM: {crashing} "),
+            if crashing > 0 {
                 Style::default()
                     .bg(Theme::red())
                     .fg(Color::White)
@@ -383,10 +413,22 @@ fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
         ),
         Span::raw("  "),
         Span::styled(
-            format!(" ⚠️ IN PROGRESS: {in_prog} "),
-            if in_prog > 0 {
+            format!(" ⏳ PENDING: {pending} "),
+            if pending > 0 {
                 Style::default()
                     .bg(Theme::yellow())
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Theme::dim())
+            },
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!(" 🔄 ROLLING: {rolling} "),
+            if rolling > 0 {
+                Style::default()
+                    .bg(Theme::cyan())
                     .fg(Color::Black)
                     .add_modifier(Modifier::BOLD)
             } else {
@@ -416,7 +458,7 @@ fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
         Span::raw("  │  "),
         Span::styled("Filter: ", Theme::header_label()),
         Span::styled(
-            format!("[{}]", state.verdict_filter.label()),
+            format!("[{}]", state.incident_filter.label()),
             Style::default()
                 .fg(Theme::cyan())
                 .add_modifier(Modifier::BOLD),
@@ -431,21 +473,28 @@ fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
         ),
     ]);
 
-    let headline_style = match overall {
-        PagingVerdict::Page => Style::default()
+    let headline_style = if crashing > 0 {
+        Style::default()
             .fg(Theme::red())
-            .add_modifier(Modifier::BOLD),
-        PagingVerdict::InProgress => Style::default()
+            .add_modifier(Modifier::BOLD)
+    } else if pending > 0 {
+        Style::default()
             .fg(Theme::yellow())
-            .add_modifier(Modifier::BOLD),
-        PagingVerdict::Healthy => Style::default()
+            .add_modifier(Modifier::BOLD)
+    } else if rolling > 0 {
+        Style::default()
+            .fg(Theme::cyan())
+            .add_modifier(Modifier::BOLD)
+    } else if healthy > 0 {
+        Style::default()
             .fg(Theme::green())
-            .add_modifier(Modifier::BOLD),
-        PagingVerdict::None => Style::default().fg(Theme::dim()),
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Theme::dim())
     };
 
     let line2 = Line::from(vec![
-        Span::styled(" Status: ", Theme::header_label()),
+        Span::styled(" Headline: ", Theme::header_label()),
         Span::styled(sanitize_span_text(headline), headline_style),
     ]);
 
@@ -457,10 +506,10 @@ fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
 
 fn render_deployments_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
     if area.height >= 26 {
-        // Split vertically into upper table (50%) and lower diagnostic card (50%)
+        // Split vertically into upper table (45%) and lower diagnostic card (55%)
         let sub = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
             .split(area);
         render_deployments_table(f, sub[0], state);
         render_deployment_diagnostic_card(f, sub[1], state);
@@ -477,19 +526,19 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Theme::border()))
         .title(Span::styled(
-            " Applications Deployed in Window ",
+            " Workloads Changed in Window ",
             Theme::table_header(),
         ));
 
     if deps.is_empty() {
         let msg = if state.filter_query.is_empty() {
             format!(
-                "No deployments modified within the last {}. Use [ or ] to broaden the time window.",
+                "No workloads modified within the last {}. Use [ or ] to broaden the time window.",
                 state.current_window_label()
             )
         } else {
             format!(
-                "No deployments matching query '{}'. Press / to change search or Esc to clear.",
+                "No workloads matching query '{}'. Press / to change search or Esc to clear.",
                 state.filter_query
             )
         };
@@ -502,13 +551,12 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
     }
 
     let header_cells = [
-        Cell::from(Span::styled("VERDICT", Theme::table_header())),
-        Cell::from(Span::styled("NAMESPACE", Theme::table_header())),
-        Cell::from(Span::styled("DEPLOYMENT", Theme::table_header())),
-        Cell::from(Span::styled("REVISION", Theme::table_header())),
-        Cell::from(Span::styled("IMAGE DIFF", Theme::table_header())),
-        Cell::from(Span::styled("READY", Theme::table_header())),
         Cell::from(Span::styled("STATUS", Theme::table_header())),
+        Cell::from(Span::styled("WORKLOAD", Theme::table_header())),
+        Cell::from(Span::styled("NAMESPACE", Theme::table_header())),
+        Cell::from(Span::styled("REVISION / GITOPS", Theme::table_header())),
+        Cell::from(Span::styled("READY", Theme::table_header())),
+        Cell::from(Span::styled("ROOT CAUSE / DETAIL", Theme::table_header())),
         Cell::from(Span::styled("AGE", Theme::table_header())),
     ];
     let header = Row::new(header_cells).height(1).bottom_margin(0);
@@ -519,54 +567,74 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
         .map(|(i, d)| {
             let is_selected = i == state.selected_idx;
 
-            let verdict_cell = match d.verdict {
-                PagingVerdict::Page => Cell::from(Span::styled(
-                    " 🚨 PAGE ",
+            let status_cell = match d.incident_status {
+                IncidentStatus::CrashLoop => Cell::from(Span::styled(
+                    " 💥 CRASH ",
                     Style::default()
                         .bg(Theme::red())
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 )),
-                PagingVerdict::InProgress => Cell::from(Span::styled(
-                    " ⚠️ IN PROG ",
+                IncidentStatus::OomKilled => Cell::from(Span::styled(
+                    " 💀 OOM ",
+                    Style::default()
+                        .bg(Theme::red())
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                IncidentStatus::Pending => Cell::from(Span::styled(
+                    " ⏳ PENDING ",
                     Style::default()
                         .bg(Theme::yellow())
                         .fg(Color::Black)
                         .add_modifier(Modifier::BOLD),
                 )),
-                PagingVerdict::Healthy => Cell::from(Span::styled(
+                IncidentStatus::Stalled => Cell::from(Span::styled(
+                    " 🚫 STALLED ",
+                    Style::default()
+                        .bg(Theme::red())
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                IncidentStatus::Rolling => Cell::from(Span::styled(
+                    " 🔄 ROLLING ",
+                    Style::default()
+                        .bg(Theme::cyan())
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                IncidentStatus::Healthy => Cell::from(Span::styled(
                     " 🟢 HEALTHY ",
                     Style::default()
                         .bg(Theme::green())
                         .fg(Color::Black)
                         .add_modifier(Modifier::BOLD),
                 )),
-                PagingVerdict::None => {
+                IncidentStatus::ScaledDown => {
+                    Cell::from(Span::styled(" ⚪ OFF ", Style::default().fg(Theme::dim())))
+                }
+                IncidentStatus::Unknown => {
                     Cell::from(Span::styled(" - ", Style::default().fg(Theme::dim())))
                 }
             };
 
-            let ns_cell = Cell::from(Span::styled(
-                &d.namespace,
-                Style::default().fg(Theme::dim()),
-            ));
             let name_cell = Cell::from(Span::styled(
                 &d.app_name,
                 Style::default()
                     .fg(Theme::fg())
                     .add_modifier(Modifier::BOLD),
             ));
-
-            let rev_str = match &d.previous_revision {
-                Some(prev) => format!("r{prev}➔r{}", d.current_revision),
-                None => format!("r{}", d.current_revision),
-            };
-            let rev_cell = Cell::from(Span::styled(rev_str, Style::default().fg(Theme::cyan())));
-
-            let img_cell = Cell::from(Span::styled(
-                sanitize_span_text(&d.image_diff),
-                Style::default().fg(Theme::accent()),
+            let ns_cell = Cell::from(Span::styled(
+                &d.namespace,
+                Style::default().fg(Theme::dim()),
             ));
+
+            let gitops_str = if let Some(ref g) = d.gitops {
+                format!("r{} ({})", d.current_revision, g.sync_revision)
+            } else {
+                format!("r{}", d.current_revision)
+            };
+            let rev_cell = Cell::from(Span::styled(gitops_str, Style::default().fg(Theme::cyan())));
 
             let ready_str = format!("{}/{}", d.ready_replicas, d.desired_replicas);
             let ready_style = if d.ready_replicas < d.desired_replicas {
@@ -578,35 +646,20 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
             };
             let ready_cell = Cell::from(Span::styled(ready_str, ready_style));
 
-            let status_cell = match d.rollout_status {
-                RolloutStatus::Complete => Cell::from(Span::styled(
-                    "Complete",
-                    Style::default().fg(Theme::green()),
-                )),
-                RolloutStatus::Progressing => Cell::from(Span::styled(
-                    "Progressing",
-                    Style::default().fg(Theme::yellow()),
-                )),
-                RolloutStatus::Stalled => Cell::from(Span::styled(
-                    "Stalled",
+            let detail_text = format!("{} {}", d.failure_category.badge(), d.failure_detail);
+            let detail_style = match d.failure_category {
+                FailureCategory::Compute | FailureCategory::Storage | FailureCategory::Network => {
                     Style::default()
-                        .fg(Theme::red())
-                        .add_modifier(Modifier::BOLD),
-                )),
-                RolloutStatus::Failed => Cell::from(Span::styled(
-                    "Failed",
-                    Style::default()
-                        .fg(Theme::red())
-                        .add_modifier(Modifier::BOLD),
-                )),
-                RolloutStatus::ScaledDown => Cell::from(Span::styled(
-                    "Scaled Down",
-                    Style::default().fg(Theme::dim()),
-                )),
-                RolloutStatus::Unknown => {
-                    Cell::from(Span::styled("Unknown", Style::default().fg(Theme::dim())))
+                        .fg(Theme::yellow())
+                        .add_modifier(Modifier::BOLD)
                 }
+                FailureCategory::App | FailureCategory::Image => Style::default()
+                    .fg(Theme::red())
+                    .add_modifier(Modifier::BOLD),
+                FailureCategory::None => Style::default().fg(Theme::green()),
             };
+            let detail_cell =
+                Cell::from(Span::styled(sanitize_span_text(&detail_text), detail_style));
 
             let age_cell = Cell::from(Span::styled(
                 &d.deployed_age,
@@ -614,13 +667,12 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
             ));
 
             let row = Row::new(vec![
-                verdict_cell,
-                ns_cell,
-                name_cell,
-                rev_cell,
-                img_cell,
-                ready_cell,
                 status_cell,
+                name_cell,
+                ns_cell,
+                rev_cell,
+                ready_cell,
+                detail_cell,
                 age_cell,
             ]);
 
@@ -634,12 +686,11 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
 
     let widths = [
         Constraint::Length(12),
-        Constraint::Length(14),
         Constraint::Length(22),
-        Constraint::Length(12),
-        Constraint::Min(24),
+        Constraint::Length(14),
+        Constraint::Length(16),
         Constraint::Length(9),
-        Constraint::Length(13),
+        Constraint::Min(30),
         Constraint::Length(8),
     ];
 
@@ -659,13 +710,13 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Theme::border_focus()))
         .title(Span::styled(
-            " 🔍 Deployment Incident Diagnostic & Symptoms Card ",
+            " 🔍 Incident Diagnostic & Root Cause Investigator ",
             Theme::title(),
         ));
 
     let Some(d) = state.selected_deployment() else {
         let p = Paragraph::new(
-            "Select a deployment above to inspect incident symptoms and root cause.",
+            "Select a workload above to inspect root cause, GitOps commits, and error logs.",
         )
         .style(Style::default().fg(Theme::dim()))
         .block(block)
@@ -678,7 +729,7 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
 
     // Line 1: Workload Identity & Replicas
     lines.push(Line::from(vec![
-        Span::styled("Deployment: ", Theme::header_label()),
+        Span::styled("Workload: ", Theme::header_label()),
         Span::styled(
             format!("{}/{}", d.namespace, d.app_name),
             Style::default()
@@ -702,17 +753,6 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
             ),
             Theme::header_val(),
         ),
-    ]));
-
-    // Line 2: Image Transition
-    lines.push(Line::from(vec![
-        Span::styled("Image Diff: ", Theme::header_label()),
-        Span::styled(
-            sanitize_span_text(&d.image_diff),
-            Style::default()
-                .fg(Theme::yellow())
-                .add_modifier(Modifier::BOLD),
-        ),
         Span::raw("   "),
         Span::styled("Deployed: ", Theme::header_label()),
         Span::styled(
@@ -721,27 +761,67 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         ),
     ]));
 
-    // Line 3: Verdict Reason
-    let verdict_style = match d.verdict {
-        PagingVerdict::Page => Style::default()
+    // Line 2: GitOps / ArgoCD Panel (if available)
+    if let Some(ref g) = d.gitops {
+        let sync_style = if g.sync_status == "Synced" && g.health_status == "Healthy" {
+            Style::default().fg(Theme::green())
+        } else {
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD)
+        };
+        lines.push(Line::from(vec![
+            Span::styled("🐙 GitOps Release: ", Theme::header_label()),
+            Span::styled(format!("{} ({})", g.app_name, g.sync_status), sync_style),
+            Span::raw("   "),
+            Span::styled("Git: ", Theme::header_label()),
+            Span::styled(
+                format!("{} ({})", g.sync_revision, g.target_revision),
+                Style::default()
+                    .fg(Theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("   "),
+            Span::styled("Synced: ", Theme::header_label()),
+            Span::styled(
+                format!("{} ago", g.sync_age),
+                Style::default().fg(Theme::dim()),
+            ),
+        ]));
+        if let Some(ref msg) = g.sync_message {
+            lines.push(Line::from(vec![
+                Span::styled("   Sync Error: ", Theme::header_label()),
+                Span::styled(
+                    sanitize_span_text(msg),
+                    Style::default()
+                        .fg(Theme::red())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+    }
+
+    // Line 3: Root Cause & Failure Detail
+    let cat_style = match d.failure_category {
+        FailureCategory::Compute | FailureCategory::Storage | FailureCategory::Network => {
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD)
+        }
+        FailureCategory::App | FailureCategory::Image => Style::default()
             .fg(Theme::red())
             .add_modifier(Modifier::BOLD),
-        PagingVerdict::InProgress => Style::default()
-            .fg(Theme::yellow())
-            .add_modifier(Modifier::BOLD),
-        PagingVerdict::Healthy => Style::default()
-            .fg(Theme::green())
-            .add_modifier(Modifier::BOLD),
-        PagingVerdict::None => Style::default().fg(Theme::dim()),
+        FailureCategory::None => Style::default().fg(Theme::green()),
     };
     lines.push(Line::from(vec![
-        Span::styled("Paging Verdict: ", Theme::header_label()),
+        Span::styled("Root Cause: ", Theme::header_label()),
+        Span::styled(format!("{} ", d.failure_category.badge()), cat_style),
         Span::styled(
-            format!("{}  {}", d.verdict.icon(), d.verdict.label()),
-            verdict_style,
+            sanitize_span_text(&d.failure_detail),
+            Style::default()
+                .fg(Theme::fg())
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  —  "),
-        Span::styled(sanitize_span_text(&d.verdict_reason), Theme::header_val()),
     ]));
 
     // Line 4: Primary Symptoms
@@ -776,13 +856,34 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         ]));
     }
 
-    // Line 6+: Correlated Events
+    // Line 6: Inline Error Log Snippet (if available)
+    if let Some(ref log_lines) = d.error_log_snippet {
+        let first_pod = d
+            .failing_pod_names
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or("pod");
+        lines.push(Line::from(vec![Span::styled(
+            format!("📜 Error Log Snippet ({first_pod}):"),
+            Style::default()
+                .fg(Theme::yellow())
+                .add_modifier(Modifier::BOLD),
+        )]));
+        for line in log_lines.iter().take(4) {
+            lines.push(Line::from(vec![
+                Span::styled("   │ ", Style::default().fg(Theme::dim())),
+                Span::styled(sanitize_span_text(line), Style::default().fg(Theme::red())),
+            ]));
+        }
+    }
+
+    // Line 7+: Correlated Events
     if !d.top_events.is_empty() {
         lines.push(Line::from(vec![Span::styled(
             "Correlated Events: ",
             Theme::header_label(),
         )]));
-        for ev in d.top_events.iter().take(3) {
+        for ev in d.top_events.iter().take(2) {
             let ev_style = if ev.type_ == "Warning" {
                 Style::default().fg(Theme::yellow())
             } else {
@@ -809,7 +910,12 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
     // Actions Hint
     lines.push(Line::from(vec![
         Span::styled("Actions: ", Theme::header_label()),
-        Span::styled("[l] Tail Logs   [r] Restart/Rollback   [y] YAML Diff   [d] Describe   [a] AI Assistant Diagnosis", Style::default().fg(Theme::accent()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[l] Full Logs   [r] Rollout Restart   [y] YAML Diff   [d] Describe   [a] AI RCA",
+            Style::default()
+                .fg(Theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ),
     ]));
 
     let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
@@ -987,7 +1093,7 @@ fn render_footer(f: &mut Frame, area: Rect, state: &ChangedViewState) {
                 .fg(Theme::accent())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Verdict Filter  ", Style::default().fg(Theme::dim())),
+        Span::styled("Filter  ", Style::default().fg(Theme::dim())),
         Span::styled(
             "[Tab] ",
             Style::default()

@@ -4812,12 +4812,12 @@ async fn changed_view_command_and_interaction_flow() {
         );
     }
 
-    // Cycle verdict filter with 'f'
+    // Cycle filter with 'f'
     press(&mut app, ch('f')).await;
     if let ActiveView::Changed(ref changed) = app.active_view {
         assert_eq!(
-            changed.verdict_filter,
-            srelens_tui::views::changed_view::VerdictFilter::PageOnly
+            changed.incident_filter,
+            srelens_tui::views::changed_view::IncidentFilter::CrashingOnly
         );
     }
 

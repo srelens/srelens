@@ -7350,11 +7350,13 @@ impl App {
                             d.failing_pod_names.join(", ")
                         };
                         format!(
-                            "Analyze deployment incident for {}/{}:\nVerdict: {} ({})\nRevision: {} (previous: {:?})\nImage Diff: {}\nReplicas: {}/{} Ready\nSymptoms: {}\nFailing Pods: {}\nWhat is the root cause, and what steps should I take to remediate or rollback?",
+                            "Analyze incident for {}/{}:\nStatus: {} ({})\nRoot Cause: {} {}\nRevision: {} (previous: {:?})\nImage Diff: {}\nReplicas: {}/{} Ready\nSymptoms: {}\nFailing Pods: {}\nWhat is the root cause, and what steps should I take to remediate or rollback?",
                             d.namespace,
                             d.app_name,
-                            d.verdict.label(),
-                            d.verdict_reason,
+                            d.incident_status.label(),
+                            d.failure_detail,
+                            d.failure_category.badge(),
+                            d.failure_detail,
                             d.current_revision,
                             d.previous_revision,
                             d.image_diff,
