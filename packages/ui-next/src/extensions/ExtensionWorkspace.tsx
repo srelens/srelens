@@ -21,14 +21,42 @@ import { useResource } from "../lib/useResource";
 // The six normalized statuses (#541), each counted and listed by its word:
 // the legend names every one, zero included, so no colour is the only signal.
 const statuses: NormalizedStatus[] = ["healthy", "warning", "error", "progressing", "suspended", "unknown"];
-const colors: Record<NormalizedStatus, string> = {
+// Unknown is a state, drawn in a readable ink (`--ink-faint`, 5.5:1 or better
+// against the surface in every theme) — never `--rule`, the hairline the empty
+// ring below is drawn in, which an all-Unknown ring was indistinguishable from.
+export const DONUT_COLORS: Record<NormalizedStatus, string> = {
   healthy: "var(--ok, var(--fl-color-success, #388b5d))",
   warning: "var(--warn, var(--fl-color-warning, #bf8e32))",
   error: "var(--sev, var(--fl-color-danger, #d15f54))",
   progressing: "var(--info, var(--fl-color-info, #518dcc))",
   suspended: "var(--ink-muted, var(--fl-color-text-muted, #85818f))",
-  unknown: "var(--rule, var(--fl-color-border, #b9b5c0))",
+  unknown: "var(--ink-faint, var(--fl-color-text-muted, #696475))",
 };
+/** A ring with nothing in it: the hairline, so "none" never reads as a status. */
+export const EMPTY_DONUT = "var(--rule, #85818f)";
+/** The share of the ring cut from the end of each segment, in percent. */
+const GAP = 1.5;
+/**
+ * The ring for these counts. Adjacent segments are parted by a sliver of the
+ * surface: Suspended and Unknown are both neutral inks, too close to tell
+ * apart by colour alone, and each reads at 3:1 or better against the surface.
+ */
+export function donutBackground(counts: Record<NormalizedStatus, number>): string {
+  const total = statuses.reduce((sum, status) => sum + counts[status], 0);
+  if (!total) return EMPTY_DONUT;
+  const drawn = statuses.filter((status) => counts[status] > 0);
+  const gap = drawn.length > 1 ? GAP : 0;
+  let offset = 0;
+  const stops = drawn.flatMap((status) => {
+    const start = offset;
+    offset += (counts[status] / total) * 100;
+    const end = Math.max(start, offset - gap);
+    return gap
+      ? [`${DONUT_COLORS[status]} ${start}% ${end}%`, `var(--surface, #ffffff) ${end}% ${offset}%`]
+      : [`${DONUT_COLORS[status]} ${start}% ${offset}%`];
+  });
+  return `conic-gradient(${stops.join(",")})`;
+}
 function Summary({
   plugin,
   page,
@@ -83,14 +111,9 @@ function Summary({
   const resolved = itemStatuses(data.data?.items ?? [], page.statusColumns);
   const counts = statuses.map((status) => resolved.filter((found) => found === status).length);
   const total = counts.reduce((a, b) => a + b, 0);
-  let offset = 0;
-  const gradient = counts
-    .map((count, i) => {
-      const start = offset;
-      offset += total ? (count / total) * 100 : 0;
-      return `${colors[statuses[i]]} ${start}% ${offset}%`;
-    })
-    .join(",");
+  const ring = donutBackground(
+    Object.fromEntries(statuses.map((status, i) => [status, counts[i]])) as Record<NormalizedStatus, number>,
+  );
   return (
     <section className="extension-summary">
       <Button variant="ghost" onClick={() => onPage(page.id)}>
@@ -104,11 +127,7 @@ function Summary({
         <>
           <div
             className="extension-donut"
-            style={{
-              background: total
-                ? `conic-gradient(${gradient})`
-                : "var(--rule, #85818f)",
-            }}
+            style={{ background: ring }}
             aria-label={`${total} ${page.title}`}
           >
             <span>{total}</span>
@@ -116,7 +135,7 @@ function Summary({
           <ul>
             {statuses.map((status, i) => (
               <li key={status}>
-                <i aria-hidden="true" style={{ background: colors[status] }} />
+                <i aria-hidden="true" style={{ background: DONUT_COLORS[status] }} />
                 {STATUS_WORD[status]}: {counts[i]}
               </li>
             ))}

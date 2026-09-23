@@ -12,7 +12,33 @@ import {
   listNamespaces,
   type InstalledExtension,
 } from "@srelens/core";
-import { ExtensionWorkspace } from "./ExtensionWorkspace";
+import { ExtensionWorkspace, DONUT_COLORS, donutBackground, EMPTY_DONUT } from "./ExtensionWorkspace";
+
+it("draws Unknown in a readable ink, never the hairline an empty ring uses", () => {
+  // `--rule` is the subtle hairline role: an all-Unknown ring drawn in it
+  // looked exactly like an empty one.
+  expect(DONUT_COLORS.unknown).toMatch(/^var\(--ink-faint\b/);
+  expect(DONUT_COLORS.unknown).not.toContain("--rule");
+  expect(EMPTY_DONUT).toContain("--rule");
+  expect(new Set(Object.values(DONUT_COLORS)).size).toBe(6);
+  const allUnknown = donutBackground({ healthy: 0, warning: 0, error: 0, progressing: 0, suspended: 0, unknown: 4 });
+  expect(allUnknown).toContain(DONUT_COLORS.unknown);
+  expect(allUnknown).not.toBe(EMPTY_DONUT);
+  expect(donutBackground({ healthy: 0, warning: 0, error: 0, progressing: 0, suspended: 0, unknown: 0 })).toBe(EMPTY_DONUT);
+});
+
+it("parts adjacent segments with the surface, so two neutrals never meet edge to edge", () => {
+  // Suspended and Unknown are both neutral inks, too close to tell apart by
+  // colour; a surface gap between them reads at 3:1 or better in every theme.
+  const ring = donutBackground({ healthy: 0, warning: 0, error: 0, progressing: 0, suspended: 2, unknown: 2 });
+  const stops = ring.replace(/^conic-gradient\(/, "").replace(/\)$/, "").split(/(?<=%),/).map((stop) => stop.trim());
+  const suspended = stops.findIndex((stop) => stop.startsWith(DONUT_COLORS.suspended));
+  const unknown = stops.findIndex((stop) => stop.startsWith(DONUT_COLORS.unknown));
+  expect(suspended).toBeGreaterThanOrEqual(0);
+  expect(stops.slice(suspended + 1, unknown).some((stop) => stop.startsWith("var(--surface"))).toBe(true);
+  // A single segment is a whole ring, with no gap cut out of it.
+  expect(donutBackground({ healthy: 3, warning: 0, error: 0, progressing: 0, suspended: 0, unknown: 0 })).not.toContain("--surface");
+});
 // jsdom omits the browser layout APIs used by the shared searchable picker.
 if (!("ResizeObserver" in globalThis)) {
   (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver =
