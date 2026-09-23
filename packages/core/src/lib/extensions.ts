@@ -42,8 +42,13 @@ export interface ExtensionTableColumn {
 export type ExtensionPanelFormat = ExtensionTableColumn["format"];
 /** The six statuses every surface draws (#541). */
 export type NormalizedStatus = "healthy" | "warning" | "error" | "progressing" | "suspended" | "unknown";
-/** A predicate without its refusal sentence: the same operators and path grammar. */
-export type ExtensionStatusCondition = Omit<ActionPredicate, "reason">;
+/**
+ * A predicate without its refusal sentence: the same operators and path
+ * grammar, plus `selfReference` — the value must be a reference, in a
+ * host-known format, to the very object the rule reads (an Argo CD tracking
+ * id naming its own resource). The host evaluates it; the surface never does.
+ */
+export type ExtensionStatusCondition = Omit<ActionPredicate, "reason"> & { selfReference?: "argocd-tracking-id" };
 /** One status rule; the first whose conditions all hold wins. */
 export interface ExtensionStatusRule {
   when: ExtensionStatusCondition[];

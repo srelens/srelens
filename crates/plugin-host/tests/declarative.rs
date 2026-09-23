@@ -347,12 +347,29 @@ fn the_gitops_examples_resolve_status_with_rules_and_badge_workloads() {
     );
 
     // GitOps ownership on built-in workloads: the exit criterion of #517.
-    let owned = |manifest: &Manifest, metadata: Value| {
+    // Shaped as the host's metadata read hands a Deployment `team/guestbook`
+    // to a direct badge: its identity plus the metadata the rule may read.
+    let owned_named = |manifest: &Manifest, name: &str, metadata: Value| {
         let badge = &manifest.contributions.badges[0];
         assert!(badge.for_kinds.iter().any(|kind| kind == "apps/Deployment"));
         assert!(badge.join.is_none());
-        first_match(&badge.rules, &json!({ "metadata": metadata })).map(|b| (b.label, b.reason))
+        let mut metadata = metadata;
+        metadata["name"] = json!(name);
+        metadata["namespace"] = json!("team");
+        let object = json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": metadata});
+        first_match(&badge.rules, &object).map(|b| (b.label, b.reason))
     };
+    let owned = |manifest: &Manifest, metadata: Value| owned_named(manifest, "guestbook", metadata);
+    // A tracking id copied onto another workload names `team/guestbook`, not
+    // `team/clone`: Argo CD does not own `clone`, so it gets no badge.
+    assert_eq!(
+        owned_named(
+            &argo,
+            "clone",
+            json!({"annotations":{"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/guestbook"}})
+        ),
+        None
+    );
     assert_eq!(
         owned(
             &flux,

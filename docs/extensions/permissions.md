@@ -39,7 +39,7 @@ version, plural, kind and scope, plus explicitly granted `k8s.listEvents` reader
   one place the host reads a built-in kind on an app's behalf, and it needs no grant:
   when a built-in table the user opened shows that kind, the host lists the same kind
   in the same namespace, with the user's credentials, and keeps only each object's
-  name, namespace, UID, labels, annotations and owner references. The badge's rules
+  name, namespace, UID, labels, annotations and owner references, plus the kind's own `apiVersion` and `kind`. The badge's rules
   may address only `.metadata`, so no spec or status is read for an app. Secrets are
   refused outright, because their annotation values are redacted on every ungated
   read. What the app gets is its own word, drawn by the host; no app code sees the

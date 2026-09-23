@@ -181,7 +181,7 @@
             "when": [
               {
                 "jsonPath": ".metadata.annotations['argocd.argoproj.io/tracking-id']",
-                "present": true
+                "selfReference": "argocd-tracking-id"
               }
             ],
             "status": "healthy",

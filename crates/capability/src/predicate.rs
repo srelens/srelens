@@ -103,6 +103,78 @@ pub struct Condition {
     /// `true`: the value at `jsonPath` must be unset or null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub absent: Option<bool>,
+    /// The value at `jsonPath` must be a reference, in this host-known
+    /// format, to the very object the rule reads. See [`ReferenceFormat`].
+    #[serde(
+        default,
+        rename = "selfReference",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub self_reference: Option<ReferenceFormat>,
+}
+
+/// A reference format the host knows how to check against the object that
+/// carries it (#541 review).
+///
+/// A condition compares against literals, so it cannot say "this annotation
+/// names the resource it is on". An ownership claim needs exactly that — a
+/// copied annotation must not make a resource look owned — so the host
+/// implements the check for each format, exactly as the owning controller
+/// does, rather than offering a template language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ReferenceFormat {
+    /// Argo CD's resource tracking id, `<app>:<group>/<kind>:<namespace>/<name>`,
+    /// parsed as Argo CD parses it (`util/argo/resource_tracking.go`,
+    /// `ParseAppInstanceValue`) and held to the resource as Argo CD holds it
+    /// (`controller/state.go`, `isSelfReferencedObj`): group, kind and name
+    /// equal, and namespace equal unless the resource is cluster-scoped. Argo
+    /// CD ignores an id that does not name its own resource, so a badge must.
+    #[serde(rename = "argocd-tracking-id")]
+    ArgocdTrackingId,
+}
+
+impl ReferenceFormat {
+    /// Whether `reference` names `object`: its `apiVersion` group, `kind`,
+    /// `metadata.namespace` and `metadata.name`. An object without a kind or
+    /// a name is named by nothing.
+    fn names(self, reference: &str, object: &Value) -> bool {
+        let Self::ArgocdTrackingId = self;
+        let (Some(kind), Some(name)) =
+            (object["kind"].as_str(), object["metadata"]["name"].as_str())
+        else {
+            return false;
+        };
+        let group = match object["apiVersion"].as_str() {
+            Some(api_version) => api_version
+                .rsplit_once('/')
+                .map_or("", |(group, _version)| group),
+            None => return false,
+        };
+        let namespace = object["metadata"]["namespace"].as_str().unwrap_or("");
+        // `strings.SplitN(value, ":", 3)`, then `/` into exactly two, twice.
+        let mut parts = reference.splitn(3, ':');
+        let (Some(_app), Some(group_kind), Some(namespace_name)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        let pair = |text: &str| -> Option<(String, String)> {
+            let halves: Vec<&str> = text.split('/').collect();
+            match halves[..] {
+                [first, second] => Some((first.to_owned(), second.to_owned())),
+                _ => None,
+            }
+        };
+        let (Some((ref_group, ref_kind)), Some((ref_namespace, ref_name))) =
+            (pair(group_kind), pair(namespace_name))
+        else {
+            return false;
+        };
+        (namespace == ref_namespace || namespace.is_empty())
+            && name == ref_name
+            && group == ref_group
+            && kind == ref_kind
+    }
 }
 
 impl Condition {
@@ -115,6 +187,7 @@ impl Condition {
             &self.not_equals,
             self.present,
             self.absent,
+            self.self_reference,
         )
         .map(|_| ())
     }
@@ -128,6 +201,7 @@ impl Condition {
             &self.not_equals,
             self.present,
             self.absent,
+            self.self_reference,
         )
         .is_ok_and(|(operator, path)| evaluate(operator, &path, object))
     }
@@ -145,12 +219,13 @@ fn test_of<'a>(
     not_equals: &'a Option<Value>,
     present: Option<bool>,
     absent: Option<bool>,
+    self_reference: Option<ReferenceFormat>,
 ) -> Result<(Operator<'a>, Vec<Segment>), String> {
     let parsed = segments(path)?;
-    let operator = operator_of(path, equals, not_equals, present, absent)?;
+    let operator = operator_of(path, equals, not_equals, present, absent, self_reference)?;
     match operator {
         Operator::Equals(value) | Operator::NotEquals(value) => literal(value)?,
-        Operator::Present | Operator::Absent => {}
+        Operator::Present | Operator::Absent | Operator::SelfReference(_) => {}
     }
     Ok((operator, parsed))
 }
@@ -164,6 +239,9 @@ fn evaluate(operator: Operator<'_>, path: &[Segment], object: &Value) -> bool {
         Operator::NotEquals(want) => found != Some(want),
         Operator::Present => found.is_some(),
         Operator::Absent => found.is_none(),
+        Operator::SelfReference(format) => found
+            .and_then(Value::as_str)
+            .is_some_and(|reference| format.names(reference, object)),
     }
 }
 
@@ -174,6 +252,7 @@ enum Operator<'a> {
     NotEquals(&'a Value),
     Present,
     Absent,
+    SelfReference(ReferenceFormat),
 }
 
 /// One step of a predicate's path.
@@ -242,6 +321,9 @@ impl Predicate {
             &self.not_equals,
             self.present,
             self.absent,
+            // Action predicates keep to literal comparisons; a reference
+            // format is a status rule's question (#541).
+            None,
         )
     }
 }
@@ -252,19 +334,21 @@ fn operator_of<'a>(
     not_equals: &'a Option<Value>,
     present: Option<bool>,
     absent: Option<bool>,
+    self_reference: Option<ReferenceFormat>,
 ) -> Result<Operator<'a>, String> {
     let declared: Vec<Operator<'_>> = [
         equals.as_ref().map(Operator::Equals),
         not_equals.as_ref().map(Operator::NotEquals),
         present.map(|_| Operator::Present),
         absent.map(|_| Operator::Absent),
+        self_reference.map(Operator::SelfReference),
     ]
     .into_iter()
     .flatten()
     .collect();
     let [operator] = declared[..] else {
         return Err(format!(
-            "`{path}` must declare exactly one of `equals`, `notEquals`, `present` and `absent`; `null` is not a comparand, so write `absent: true` for a field nobody set"
+            "`{path}` must declare exactly one of `equals`, `notEquals`, `present` and `absent` (a status rule may use `selfReference` instead); `null` is not a comparand, so write `absent: true` for a field nobody set"
         ));
     };
     // `present: false` would be a second spelling of `absent`, and a

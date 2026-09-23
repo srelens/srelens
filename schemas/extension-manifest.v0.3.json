@@ -172,6 +172,17 @@
             "boolean",
             "null"
           ]
+        },
+        "selfReference": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReferenceFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The value at `jsonPath` must be a reference, in this host-known format, to the very object the rule reads. See [`ReferenceFormat`]."
         }
       },
       "required": [
@@ -607,6 +618,18 @@
         "reason"
       ],
       "type": "object"
+    },
+    "ReferenceFormat": {
+      "description": "A reference format the host knows how to check against the object that carries it (#541 review).\n\nA condition compares against literals, so it cannot say \"this annotation names the resource it is on\". An ownership claim needs exactly that — a copied annotation must not make a resource look owned — so the host implements the check for each format, exactly as the owning controller does, rather than offering a template language.",
+      "oneOf": [
+        {
+          "description": "Argo CD's resource tracking id, `<app>:<group>/<kind>:<namespace>/<name>`, parsed as Argo CD parses it (`util/argo/resource_tracking.go`, `ParseAppInstanceValue`) and held to the resource as Argo CD holds it (`controller/state.go`, `isSelfReferencedObj`): group, kind and name equal, and namespace equal unless the resource is cluster-scoped. Argo CD ignores an id that does not name its own resource, so a badge must.",
+          "enum": [
+            "argocd-tracking-id"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "StatusColumns": {
       "additionalProperties": false,

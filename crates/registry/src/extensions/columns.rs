@@ -1066,7 +1066,7 @@ mod tests {
 
     /// Deployment metadata as `list_builtin_metadata` returns it.
     fn deployment(name: &str, labels: Value, annotations: Value) -> Value {
-        json!({"metadata":{"name":name,"namespace":"team","labels":labels,"annotations":annotations}})
+        json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":name,"namespace":"team","labels":labels,"annotations":annotations}})
     }
 
     #[test]
@@ -1078,7 +1078,7 @@ mod tests {
              "status":"healthy","label":"Flux Helm","reason":".metadata.labels['helm.toolkit.fluxcd.io/name']"}
         ]}));
         let argo = badge(json!({"id":"argo","forKinds":["apps/Deployment"],"rules":[
-            {"when":[{"jsonPath":".metadata.annotations['argocd.argoproj.io/tracking-id']","present":true}],
+            {"when":[{"jsonPath":".metadata.annotations['argocd.argoproj.io/tracking-id']","selfReference":"argocd-tracking-id"}],
              "status":"healthy","label":"Argo CD"},
             {"when":[{"jsonPath":".metadata.labels['app.kubernetes.io/instance']","present":true}],
              "status":"unknown","label":"Argo CD?","reason":".metadata.labels['app.kubernetes.io/instance']"}
@@ -1106,6 +1106,12 @@ mod tests {
                 json!({}),
             ),
             deployment("plain", json!({}), json!({})),
+            // A tracking id copied from guestbook: it names another workload.
+            deployment(
+                "clone",
+                json!({}),
+                json!({"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/guestbook"}),
+            ),
         ];
         let rows = [
             row("api"),
@@ -1113,6 +1119,7 @@ mod tests {
             row("guestbook"),
             row("legacy"),
             row("plain"),
+            row("clone"),
         ];
         let resolved = resolved_badges(
             &[flux, argo],
@@ -1141,6 +1148,8 @@ mod tests {
         assert_eq!(shown(3), vec![("argo", "Argo CD?", Some("legacy"))]);
         // No rule holding is no badge — an answer, not an error.
         assert!(shown(4).is_empty() && resolved[4].1.is_empty());
+        // A copied tracking id is not ownership: no badge, and no error either.
+        assert!(shown(5).is_empty() && resolved[5].1.is_empty());
         assert!(resolved.iter().flat_map(|(badges, _)| badges).all(|b| !b
             .resolved
             .label

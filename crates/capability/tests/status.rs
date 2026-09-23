@@ -257,3 +257,163 @@ fn a_list_resolves_per_object_in_order() {
         ]
     );
 }
+
+/// A workload as the host's metadata read hands it to a direct badge.
+fn workload(api_version: &str, kind: &str, namespace: &str, name: &str, tracking: &str) -> Value {
+    json!({"apiVersion": api_version, "kind": kind, "metadata": {
+        "name": name, "namespace": namespace,
+        "annotations": {"argocd.argoproj.io/tracking-id": tracking}}})
+}
+
+/// The Argo CD ownership rule the reference manifest ships.
+fn argo_owned() -> Vec<StatusRule> {
+    rules(json!([{
+        "when": [{"jsonPath": ".metadata.annotations['argocd.argoproj.io/tracking-id']",
+                  "selfReference": "argocd-tracking-id"}],
+        "status": "healthy", "label": "Argo CD"
+    }]))
+}
+
+#[test]
+fn a_tracking_id_counts_only_when_it_names_the_object_it_is_on() {
+    // Argo CD's format is `<app>:<group>/<kind>:<namespace>/<name>`, and Argo CD
+    // itself ignores an annotation that does not reference its own resource
+    // (controller/state.go isSelfReferencedObj). A badge claiming ownership
+    // must not be more credulous than the controller.
+    assert!(rule_problems(&argo_owned()).is_empty());
+    let own = workload(
+        "apps/v1",
+        "Deployment",
+        "team",
+        "api",
+        "guestbook:apps/Deployment:team/api",
+    );
+    assert_eq!(
+        first_match(&argo_owned(), &own).map(|badge| badge.label),
+        Some("Argo CD".into())
+    );
+    // Copied from another resource: `team/clone` carries `team/original`'s id.
+    let copied = workload(
+        "apps/v1",
+        "Deployment",
+        "team",
+        "clone",
+        "guestbook:apps/Deployment:team/original",
+    );
+    assert_eq!(first_match(&argo_owned(), &copied), None);
+    for (why, object) in [
+        (
+            "another namespace",
+            workload(
+                "apps/v1",
+                "Deployment",
+                "prod",
+                "api",
+                "guestbook:apps/Deployment:team/api",
+            ),
+        ),
+        (
+            "another kind",
+            workload(
+                "apps/v1",
+                "StatefulSet",
+                "team",
+                "api",
+                "guestbook:apps/Deployment:team/api",
+            ),
+        ),
+        (
+            "another group",
+            workload(
+                "acme.io/v1",
+                "Deployment",
+                "team",
+                "api",
+                "guestbook:apps/Deployment:team/api",
+            ),
+        ),
+        (
+            "an extra colon",
+            workload(
+                "apps/v1",
+                "Deployment",
+                "team",
+                "api",
+                "x:guestbook:apps/Deployment:team/api",
+            ),
+        ),
+        (
+            "no group separator",
+            workload(
+                "apps/v1",
+                "Deployment",
+                "team",
+                "api",
+                "guestbook:Deployment:team/api",
+            ),
+        ),
+        (
+            "no name separator",
+            workload(
+                "apps/v1",
+                "Deployment",
+                "team",
+                "api",
+                "guestbook:apps/Deployment:api",
+            ),
+        ),
+        (
+            "an empty value",
+            workload("apps/v1", "Deployment", "team", "api", ""),
+        ),
+    ] {
+        assert_eq!(first_match(&argo_owned(), &object), None, "{why}");
+    }
+    // No identity to compare against is no match, never a pass.
+    assert_eq!(
+        first_match(
+            &argo_owned(),
+            &json!({"metadata": {"name": "api", "namespace": "team",
+            "annotations": {"argocd.argoproj.io/tracking-id": "guestbook:apps/Deployment:team/api"}}})
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_tracking_id_follows_argo_cd_for_the_core_group_and_cluster_scoped_objects() {
+    let core = workload(
+        "v1",
+        "ConfigMap",
+        "team",
+        "settings",
+        "guestbook:/ConfigMap:team/settings",
+    );
+    assert!(first_match(&argo_owned(), &core).is_some());
+    // Argo CD accepts any namespace in the id for a cluster-scoped object.
+    let role = workload(
+        "rbac.authorization.k8s.io/v1",
+        "ClusterRole",
+        "",
+        "reader",
+        "guestbook:rbac.authorization.k8s.io/ClusterRole:argocd/reader",
+    );
+    assert!(first_match(&argo_owned(), &role).is_some());
+}
+
+#[test]
+fn self_reference_is_one_operator_among_the_others_and_names_a_known_format() {
+    let two = rules(
+        json!([{"when": [{"jsonPath": ".metadata.name", "present": true,
+        "selfReference": "argocd-tracking-id"}], "status": "healthy", "label": "X"}]),
+    );
+    assert!(rule_problems(&two)
+        .iter()
+        .any(|(_, why)| why.contains("exactly one")));
+    // An unknown format is not a format the host implements.
+    assert!(serde_json::from_value::<Vec<StatusRule>>(
+        json!([{"when": [{"jsonPath": ".metadata.name",
+        "selfReference": "flux-inventory"}], "status": "healthy", "label": "X"}])
+    )
+    .is_err());
+}

@@ -8,7 +8,8 @@ pub mod status;
 mod text;
 
 pub use predicate::{
-    check_path, check_predicates, resolve, unmet, Condition, Predicate, MAX_PREDICATES,
+    check_path, check_predicates, resolve, unmet, Condition, Predicate, ReferenceFormat,
+    MAX_PREDICATES,
 };
 
 pub use annotations::{

@@ -96,7 +96,7 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
   StatusResolver: { forKinds:"required", rules:"required" } satisfies Presence<NonNullable<Contributions["statusResolvers"]>[number]>,
   Badge: { id:"required", forKinds:"required", join:"optional", rules:"required" } satisfies Presence<NonNullable<Contributions["badges"]>[number]>,
   StatusRule: { when:"required", status:"required", label:"required", reason:"optional" } satisfies Presence<ExtensionStatusRule>,
-  Condition: { jsonPath:"required", equals:"optional", notEquals:"optional", present:"optional", absent:"optional" } satisfies Presence<ExtensionStatusRule["when"][number]>,
+  Condition: { jsonPath:"required", equals:"optional", notEquals:"optional", present:"optional", absent:"optional", selfReference:"optional" } satisfies Presence<ExtensionStatusRule["when"][number]>,
   Join: { id:"required", capability:"required", match:"required" } satisfies Presence<NonNullable<Contributions["joins"]>[number]>,
   JoinMatch: { label:"optional", kindLabel:"optional", ownerReference:"optional", annotation:"optional", name:"optional" } satisfies Presence<NonNullable<Contributions["joins"]>[number]["match"]>,
   TableColumn: { id:"required", title:"required", forKinds:"required", source:"required", format:"required", sortable:"optional", filterable:"optional" } satisfies Presence<NonNullable<Contributions["tableColumns"]>[number]>,
@@ -178,6 +178,15 @@ describe("extension TypeScript types match the Rust contract", () => {
   it("has the Rust normalized statuses", () => {
     const statuses = { healthy: true, warning: true, error: true, progressing: true, suspended: true, unknown: true } satisfies Record<NormalizedStatus, true>;
     expect(Object.keys(statuses).sort()).toEqual([...(schema.definitions.NormalizedStatus.enum ?? [])].sort());
+  });
+
+  it("has the Rust self-reference formats", () => {
+    const formats = { "argocd-tracking-id": true } satisfies Record<NonNullable<ExtensionStatusRule["when"][number]["selfReference"]>, true>;
+    // A documented variant makes schemars emit `oneOf` rather than a flat `enum`.
+    const rust = schema.definitions.ReferenceFormat as ObjectSchema & { oneOf?: ObjectSchema[] };
+    const values = rust.enum ?? (rust.oneOf ?? []).flatMap((variant) => variant.enum ?? []);
+    expect(values.length).toBeGreaterThan(0);
+    expect(Object.keys(formats).sort()).toEqual([...values].sort());
   });
 
   it("has the Rust manifest kinds", () => {

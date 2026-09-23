@@ -688,7 +688,9 @@ pub async fn list_builtin_metadata(
         .iter()
         .map(|object| {
             let meta = &object.metadata;
-            serde_json::json!({"metadata": {
+            // The kind's identity is the host's own, from the GVK it listed,
+            // so a rule can check a reference against the very object.
+            serde_json::json!({"apiVersion": resource.api_version, "kind": resource.kind, "metadata": {
                 "name": meta.name,
                 "namespace": meta.namespace,
                 "uid": meta.uid,
@@ -1309,6 +1311,10 @@ mod tests {
             "apps"
         );
         assert_eq!(objects[0]["metadata"]["uid"], "u1");
+        // The object's own identity, so a rule can hold a reference against
+        // the resource it sits on (an Argo CD tracking id, #541 review).
+        assert_eq!(objects[0]["apiVersion"], "apps/v1");
+        assert_eq!(objects[0]["kind"], "Deployment");
         assert!(
             objects[0].get("spec").is_none() && objects[0].get("status").is_none(),
             "{}",

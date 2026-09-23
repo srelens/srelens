@@ -319,10 +319,30 @@ each rule at most 8 conditions.
 
 | Field | Meaning |
 |---|---|
-| `when` | Conditions: a [predicate](#preconditions-and-availability) without `reason` — the same operators, the same path grammar (including the one filter form), evaluated by the same code. |
+| `when` | Conditions: a [predicate](#preconditions-and-availability) without `reason` — the same operators, the same path grammar (including the one filter form), evaluated by the same code — plus one operator of its own, `selfReference` (below). |
 | `status` | One of `healthy`, `warning`, `error`, `progressing`, `suspended`, `unknown`. |
 | `label` | Required: 1–40 characters, no control or invisible format characters. The word shown. Colour is never the only signal, so a status or badge always carries its word. |
 | `reason` | Optional path whose scalar value is shown as the reason (a condition's `message`, a label's value). At most 200 characters are shown; objects, lists and empty strings are no reason. |
+
+An ownership claim must not be copyable. A condition otherwise compares against a
+literal, so it cannot say "this annotation names the resource it is on". Instead
+`selfReference` names a reference format the host checks against the object the rule
+reads:
+
+```json
+{ "jsonPath": ".metadata.annotations['argocd.argoproj.io/tracking-id']",
+  "selfReference": "argocd-tracking-id" }
+```
+
+`argocd-tracking-id` is Argo CD's `<app>:<group>/<kind>:<namespace>/<name>`, parsed as
+Argo CD parses it. The condition holds only when the group, kind and name equal the
+object's own, and the namespace does too unless the object is cluster-scoped: Argo CD's
+own rule for a tracking id that references its resource. A tracking id copied onto
+another resource names that other resource, which Argo CD does not treat as owned, so
+the badge does not either. `selfReference` is one operator among `equals`, `notEquals`,
+`present` and `absent`, and exists only in status rules. The host adds the listed
+kind's `apiVersion` and `kind` to a direct badge's metadata so the comparison has the
+object's identity.
 
 `statusResolvers` (at most 16) name 1–32 `forKinds`, each the `group/Kind` of a
 declared `k8s.listCustomResource` reader, and each kind has one resolver. The host
