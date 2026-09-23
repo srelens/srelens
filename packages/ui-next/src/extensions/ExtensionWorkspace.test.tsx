@@ -317,6 +317,16 @@ it("asks the host for only a dashboard card's rows on its target page", async ()
 });
 
 it("reads a card's rows over the several namespaces it counted in", async () => {
+  // Narrows like the host: only rows in the namespaces the read names.
+  const rows = [
+    { name: "in-prod", namespace: "prod", age: "1d", columns: [] },
+    { name: "in-team", namespace: "team", age: "1d", columns: [] },
+    { name: "in-other", namespace: "other", age: "1d", columns: [] },
+  ];
+  vi.mocked(readExtension).mockImplementation((async (...args: unknown[]) => {
+    const scope = (args[7] as string[] | undefined) ?? [];
+    return { items: rows.filter((row) => !scope.length || scope.includes(row.namespace)) };
+  }) as never);
   render(
     <ExtensionWorkspace
       plugin={plugin}
@@ -326,9 +336,10 @@ it("reads a card's rows over the several namespaces it counted in", async () => 
       cardNamespaces={["prod", "team"]}
     />,
   );
-  await waitFor(() =>
-    expect(readExtension).toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "", true, "suspended", ["prod", "team"]),
-  );
+  expect(await screen.findByRole("cell", { name: "in-prod" })).toBeTruthy();
+  expect(screen.getByRole("cell", { name: "in-team" })).toBeTruthy();
+  expect(screen.queryByRole("cell", { name: "in-other" })).toBeNull();
+  expect(readExtension).toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "", true, "suspended", ["prod", "team"]);
 });
 
 it("filters resource rows without a second cluster read", async () => {
