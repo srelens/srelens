@@ -134,7 +134,7 @@ fn settings_readers_share_the_guard_with_environment_writers() {
     let functions =
         regex::Regex::new(r"(?m)^([ ]*)(?:async )?fn (\w+)\([^\n]*\).*\{").unwrap();
     let readers = regex::Regex::new(
-        r#"App::new\(|\bapp\(\)\.await|app_with\(|AiSettings::load\(|TuiConfig::load\(|SettingsViewState::new\(|render_settings(?:_view)?\(|std::env::var\("(?:OPENAI_API_KEY|OPENAI_COMPATIBLE_API_KEY)""#,
+        r#"App::new\(|new_app\(|\bapp\(\)\.await|app_with\(|AiSettings::load\(|TuiConfig::load\(|SettingsViewState::new\(|render_settings(?:_view)?\(|std::env::var\("(?:OPENAI_API_KEY|OPENAI_COMPATIBLE_API_KEY)""#,
     )
     .unwrap();
     let guards =
@@ -143,6 +143,8 @@ fn settings_readers_share_the_guard_with_environment_writers() {
     let excluded = [
         tests.join("common").join("env.rs"),
         tests.join("common").join("mod.rs"),
+        // `new_app` wraps `App::new`; its callers hold the settings guard.
+        tests.join("common").join("theme.rs"),
         tests.join("env_guard_tests.rs"),
     ];
     let mut files = Vec::new();

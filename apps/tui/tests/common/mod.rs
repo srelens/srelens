@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod env;
+pub mod theme;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::backend::TestBackend;
@@ -21,7 +22,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 /// app emitted.
 pub async fn app_with(context: &str, namespace: &str) -> (App, UnboundedReceiver<AppEvent>) {
     let (tx, rx) = unbounded_channel();
-    let app = App::new(
+    let app = theme::new_app(
         Some(context.to_string()),
         Some(namespace.to_string()),
         false,
@@ -31,7 +32,6 @@ pub async fn app_with(context: &str, namespace: &str) -> (App, UnboundedReceiver
     )
     .await
     .expect("App::new never needs a cluster");
-    srelens_tui::theme::Theme::set_theme_by_index(0);
     (app, rx)
 }
 

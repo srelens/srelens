@@ -473,6 +473,7 @@ fn logs_view_shows_the_tail_while_following_and_the_offset_when_not() {
 
 #[test]
 fn logs_view_colours_lines_by_severity_and_highlights_search_hits() {
+    let _theme = common::theme::lock();
     let mut state = logs();
     state.push_line("something FATAL happened".to_string());
     state.push_line("a warning here".to_string());
@@ -662,6 +663,7 @@ fn describe_view_scrolling_is_clamped_to_the_content() {
 
 #[test]
 fn describe_view_renders_title_with_namespace_and_styled_key_value_lines() {
+    let _theme = common::theme::lock();
     let state = describe();
     let buf = render_buffer(120, 40, |f| render_describe_view(f, f.area(), &state));
     let title = buffer_row(&buf, 0);
@@ -702,6 +704,7 @@ fn describe_view_renders_without_namespace_and_from_the_scroll_offset() {
 
 #[test]
 fn describe_view_shows_the_search_badge_and_highlights_the_hit() {
+    let _theme = common::theme::lock();
     let mut state = describe();
     state.set_search_query("nginx");
     let buf = render_buffer(120, 40, |f| render_describe_view(f, f.area(), &state));
@@ -880,6 +883,7 @@ fn tree_view_renders_loading_error_and_empty_branches() {
 
 #[test]
 fn tree_view_renders_every_node_kind_with_its_badges_and_status_colour() {
+    let _theme = common::theme::lock();
     let mut state = TreeViewState::new("Pod".into(), "web-abc-1".into(), Some("prod".into()));
     state.set_tree(lineage());
     let buf = render_buffer(120, 40, |f| render_tree_view(f, f.area(), &state));
@@ -996,6 +1000,7 @@ fn toolbox_view_selection_moves_within_the_tool_list() {
 
 #[test]
 fn toolbox_view_renders_one_status_per_tool_with_the_right_colour() {
+    let _theme = common::theme::lock();
     let state = toolbox();
     let buf = render_buffer(120, 20, |f| render_toolbox_view(f, f.area(), &state));
     let rows: Vec<String> = (0..buf.area.height).map(|y| buffer_row(&buf, y)).collect();
@@ -1035,6 +1040,7 @@ fn toolbox_view_renders_one_status_per_tool_with_the_right_colour() {
 
 #[test]
 fn toolbox_view_highlights_the_selected_row_even_on_a_narrow_screen() {
+    let _theme = common::theme::lock();
     let mut state = toolbox();
     state.select_next();
     let buf = render_buffer(60, 20, |f| render_toolbox_view(f, f.area(), &state));
@@ -1117,6 +1123,7 @@ fn port_forward_view_renders_the_empty_placeholder() {
 
 #[test]
 fn port_forward_view_renders_rows_with_human_byte_counts_and_status_colours() {
+    let _theme = common::theme::lock();
     let mut state = PortForwardViewState::new();
     state.set_forwards(vec![
         forward("a", "active", 8080, 512, 1536),
@@ -1274,6 +1281,7 @@ fn helm_view_renders_the_empty_placeholder() {
 
 #[test]
 fn helm_view_renders_rows_and_colours_status_by_outcome() {
+    let _theme = common::theme::lock();
     let mut state = HelmViewState::new();
     state.set_releases(vec![
         release("ingress", "deployed", 4),
@@ -1387,6 +1395,7 @@ fn reason_rail_widget_shows_the_empty_placeholder_and_the_focus_dependent_title(
 
 #[test]
 fn reason_rail_widget_marks_the_cursor_the_active_filter_and_warning_dots() {
+    let _theme = common::theme::lock();
     let t = tallies();
     let buf = render_buffer(40, 8, |f| {
         render_reason_rail_widget(f, f.area(), &t, 1, true, Some("Pulled"))
@@ -2372,6 +2381,7 @@ fn an_off_screen_wall_of_a_cell_does_not_squeeze_the_rows_on_screen() {
 
 #[test]
 fn table_renders_headers_rows_marks_and_the_filtered_count_badge() {
+    let _theme = common::theme::lock();
     let mut t = ResourceTableState::new(ResourceKind::Pods);
     t.set_items(
         vec![
@@ -2434,6 +2444,7 @@ fn table_renders_headers_rows_marks_and_the_filtered_count_badge() {
 
 #[test]
 fn table_marked_but_unselected_row_uses_the_marked_background() {
+    let _theme = common::theme::lock();
     let mut t = ResourceTableState::new(ResourceKind::Namespaces);
     t.set_items(
         vec![
@@ -2465,6 +2476,7 @@ fn table_marked_but_unselected_row_uses_the_marked_background() {
 
 #[test]
 fn table_scrolls_to_keep_a_far_selection_in_a_short_viewport() {
+    let _theme = common::theme::lock();
     let mut t = ResourceTableState::new(ResourceKind::Pods);
     t.set_items(pods(40), "");
     t.select_bottom();
@@ -2533,6 +2545,7 @@ fn events_table_shows_the_reason_rail_only_when_wide_enough() {
 
 #[test]
 fn events_table_title_carries_triage_and_reason_badges_and_colours_the_type() {
+    let _theme = common::theme::lock();
     let mut t = ResourceTableState::new(ResourceKind::Events);
     t.set_items(events(), "");
     t.toggle_warning_triage("");
@@ -2614,6 +2627,7 @@ fn workloads_table_title_shows_the_segment_and_kind_column() {
 
 #[test]
 fn custom_resource_table_colours_printer_status_columns() {
+    let _theme = common::theme::lock();
     let kind = crd(
         true,
         &[

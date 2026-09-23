@@ -195,7 +195,7 @@ async fn new_with_an_explicit_namespace_opens_the_pods_table_and_starts_its_watc
 async fn new_without_a_namespace_opens_namespaces_and_all_namespaces_clears_the_namespace() {
     let _settings = common::env::isolate_settings();
     let (tx, _rx) = unbounded_channel();
-    let app = App::new(None, None, true, None, vec![], tx)
+    let app = common::theme::new_app(None, None, true, None, vec![], tx)
         .await
         .expect("app");
     assert_eq!(
@@ -211,7 +211,7 @@ async fn new_without_a_namespace_opens_namespaces_and_all_namespaces_clears_the_
     );
 
     let (tx, _rx) = unbounded_channel();
-    let app = App::new(
+    let app = common::theme::new_app(
         Some("c".into()),
         None,
         false,
@@ -257,7 +257,7 @@ users:
     .expect("write kubeconfig");
 
     let (tx, _rx) = unbounded_channel();
-    let app = App::new(None, None, false, None, vec![path.clone()], tx)
+    let app = common::theme::new_app(None, None, false, None, vec![path.clone()], tx)
         .await
         .expect("app");
     assert_eq!(app.contexts.len(), 2);
@@ -276,7 +276,7 @@ users:
     assert_eq!(app.kubeconfig_paths, vec![path]);
 
     let (tx, _rx) = unbounded_channel();
-    let app = App::new(
+    let app = common::theme::new_app(
         Some("prod".into()),
         None,
         false,
@@ -1473,6 +1473,7 @@ async fn command_completion_preserves_crd_identity_across_alias_and_group_collis
 #[tokio::test]
 async fn empty_command_enter_runs_highlighted_suggestion_and_arrow_selection() {
     let _settings = common::env::isolate_settings();
+    let _theme = common::theme::lock();
     let (mut app, _rx) = common::app().await;
 
     // 1. ':' + Esc returns to Normal with no view change
@@ -4242,7 +4243,7 @@ async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
     env.set("SRELENS_TUI_CONFIG_PATH", &config_path);
 
     let (tx, _rx) = unbounded_channel();
-    let mut app = App::new(
+    let mut app = common::theme::new_app(
         Some("test-ctx".into()),
         Some("default".into()),
         false,
