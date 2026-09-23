@@ -89,12 +89,31 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
         <p className="dashboard-cards-message">{SHARED_CONTEXT_ID_MESSAGE}</p>
       ) : (
         <div className="dashboard-cards">
-          {apps.map((plugin) => (
-            <AppCards key={plugin.manifest.id} plugin={plugin} context={context} selection={effective} refresh={refresh} />
-          ))}
+          {apps.map((plugin) =>
+            // Until the namespaces answer, a restricted credential's scope is not
+            // known, and a read of "every namespace" would draw its refusal as a
+            // failure the card does not have. So nothing reads yet.
+            namespaces === null ? (
+              <PendingAppCards key={plugin.manifest.id} plugin={plugin} />
+            ) : (
+              <AppCards key={plugin.manifest.id} plugin={plugin} context={context} selection={effective} refresh={refresh} />
+            ),
+          )}
         </div>
       )}
     </Section>
+  );
+}
+
+/** One app's cards before anything may be read: each is loading. */
+function PendingAppCards({ plugin }: { plugin: InstalledExtension }) {
+  const appName = extensionLabel(plugin);
+  return (
+    <>
+      {(plugin.manifest.contributions.dashboardCards ?? []).map((card) => (
+        <DashboardCard key={card.id} card={card} appName={appName} answer={undefined} retry={() => {}} />
+      ))}
+    </>
   );
 }
 

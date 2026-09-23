@@ -209,6 +209,24 @@ describe("DashboardCards", () => {
     );
   });
 
+  it("stays loading, and reads nothing, until the namespace scope is known", async () => {
+    // Still listing namespaces: a restricted credential's scope is not known yet,
+    // and reading "every namespace" now would draw its 403 as "Couldn't read".
+    namespaceOptions.useNamespaceOptions.mockReturnValue({ namespaces: null, scope: "", error: "" });
+    installed(app([card({ id: "c", title: "Expiring" })]));
+    answer([{ id: "c", state: "count", count: 2 }]);
+    const view = render(<DashboardCards context={CTX} />);
+    const region = await screen.findByRole("region", { name: "Expiring" });
+    expect(region.getAttribute("data-state")).toBe("loading");
+    await act(async () => {});
+    expect(core.resolveDashboardCards).not.toHaveBeenCalled();
+    namespaceOptions.useNamespaceOptions.mockReturnValue({ namespaces: ["team"], scope: "team", error: "" });
+    view.rerender(<DashboardCards context={CTX} />);
+    await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
+    expect(core.resolveDashboardCards).toHaveBeenCalledTimes(1);
+    expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.stableId, ["team"]);
+  });
+
   it("refreshes on request", async () => {
     installed(app([card({ id: "c", title: "Expiring" })]));
     core.resolveDashboardCards
