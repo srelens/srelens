@@ -796,8 +796,8 @@ fn render_settings(width: u16, height: u16, state: &SettingsViewState) -> String
 
 #[test]
 fn settings_view_new_selects_the_configured_default_provider() {
-    // `new` loads whatever the machine has on disk; the invariant that holds
-    // regardless is that the cursor starts on the default provider.
+    let _settings = common::env::isolate_settings();
+    // The cursor starts on the default provider loaded from isolated settings.
     let state = SettingsViewState::new();
     assert_eq!(state.current_provider(), state.settings.default_provider);
     assert_eq!(state.selected_field, SettingField::ProviderToggle);
@@ -1053,6 +1053,7 @@ fn settings_view_timeout_edits_are_parsed_and_clamped() {
 
 #[test]
 fn settings_view_renders_the_active_provider_summary_and_every_provider_card() {
+    let _env = common::env::lock();
     let mut state = settings_state();
     state.settings.default_provider = AiProvider::Gemini;
     state.selected_provider_idx = 2;
@@ -1167,6 +1168,7 @@ fn settings_view_reports_an_api_key_that_comes_from_the_environment() {
 
 #[test]
 fn settings_view_highlights_the_focused_field_on_the_selected_card() {
+    let _env = common::env::lock();
     let mut state = settings_state();
     state.selected_provider_idx = 1;
     state.selected_field = SettingField::Model;
@@ -1234,6 +1236,7 @@ fn settings_view_highlights_the_focused_field_on_the_selected_card() {
 
 #[test]
 fn settings_view_renders_base_url_for_openai_compatible_provider() {
+    let _env = common::env::lock();
     let state = settings_state();
     let lines = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &state));
     let oai_compat_row = row_of(&lines, "4. OpenAI-Compatible / Ollama (Local)");
@@ -1247,6 +1250,7 @@ fn settings_view_renders_base_url_for_openai_compatible_provider() {
 
 #[test]
 fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
+    let _env = common::env::lock();
     let mut state = settings_state();
     state.selected_provider_idx = 1;
     state.selected_field = SettingField::Model;
@@ -1313,6 +1317,7 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
 
 #[test]
 fn settings_view_narrow_terminal_still_shows_the_header_and_first_cards() {
+    let _env = common::env::lock();
     let state = settings_state();
     let text = render_settings(60, 20, &state);
     assert!(text.contains("SRElens AI & Assistant Settings"), "{text}");

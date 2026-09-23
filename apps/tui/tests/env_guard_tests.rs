@@ -134,7 +134,7 @@ fn settings_readers_share_the_guard_with_environment_writers() {
     let functions =
         regex::Regex::new(r"(?m)^([ ]*)(?:async )?fn (\w+)\([^\n]*\).*\{").unwrap();
     let readers = regex::Regex::new(
-        r#"App::new\(|\bapp\(\)\.await|app_with\(|AiSettings::load\(|TuiConfig::load\(|std::env::var\("(?:OPENAI_API_KEY|OPENAI_COMPATIBLE_API_KEY)""#,
+        r#"App::new\(|\bapp\(\)\.await|app_with\(|AiSettings::load\(|TuiConfig::load\(|SettingsViewState::new\(|render_settings(?:_view)?\(|std::env::var\("(?:OPENAI_API_KEY|OPENAI_COMPATIBLE_API_KEY)""#,
     )
     .unwrap();
     let guards =
@@ -153,6 +153,11 @@ fn settings_readers_share_the_guard_with_environment_writers() {
         // Each test function ends at a closing brace with its declaration's
         // indentation; nested blocks are indented further.
         for function in functions.captures_iter(&source) {
+            // Callers hold the guard for this wrapper. Audit those call sites
+            // and direct renderer calls rather than locking again inside it.
+            if file.to_string() == "views_inspect_tests.rs" && &function[2] == "render_settings" {
+                continue;
+            }
             let rest = &source[function.get(0).unwrap().end()..];
             let end = regex::Regex::new(&format!(r"(?m)^{}\}}", &function[1])).unwrap();
             let body = &rest[..end.find(rest).expect("function closing brace").start()];
