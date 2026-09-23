@@ -49,6 +49,41 @@
       ],
       "type": "object"
     },
+    "Badge": {
+      "additionalProperties": false,
+      "description": "A word on a built-in row. Without a `join`, the rules read the row's own `.metadata`; with one, they read the joined custom resource. The first rule that holds is the badge; when none does there is no badge.",
+      "properties": {
+        "forKinds": {
+          "description": "Qualified built-in kinds, e.g. `apps/Deployment`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "join": {
+          "description": "A declared join whose matched resource the rules read.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/definitions/StatusRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "forKinds",
+        "id",
+        "rules"
+      ],
+      "type": "object"
+    },
     "Binding": {
       "additionalProperties": false,
       "properties": {
@@ -266,9 +301,61 @@
       ],
       "type": "object"
     },
+    "Condition": {
+      "additionalProperties": false,
+      "description": "One question about one value, without a sentence to say when it fails.\n\nA [`Predicate`] is a condition plus the reason an operator is told when it does not hold. A status rule (#541) asks which of its rules describes an object; nobody is refused, so there is no reason to give — but the operators, the paths and the evaluation are these, and are this code:\n\n```json {\"jsonPath\": \".spec.suspend\", \"equals\": true} ```",
+      "properties": {
+        "absent": {
+          "description": "`true`: the value at `jsonPath` must be unset or null.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "equals": {
+          "description": "The value at `jsonPath` must equal this literal."
+        },
+        "jsonPath": {
+          "description": "The value this condition asks about, in the grammar [`resolve`] documents.",
+          "type": "string"
+        },
+        "notEquals": {
+          "description": "The value at `jsonPath` must not equal this literal. An unset field is not equal to anything, so this holds when it is absent."
+        },
+        "present": {
+          "description": "`true`: the value at `jsonPath` must be set and not null.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "selfReference": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReferenceFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The value at `jsonPath` must be a reference, in this host-known format, to the very object the rule reads. See [`ReferenceFormat`]."
+        }
+      },
+      "required": [
+        "jsonPath"
+      ],
+      "type": "object"
+    },
     "Contributions": {
       "additionalProperties": false,
       "properties": {
+        "badges": {
+          "description": "Words an app puts on built-in rows, from the row's metadata or from a joined resource (#541).",
+          "items": {
+            "$ref": "#/definitions/Badge"
+          },
+          "type": "array"
+        },
         "dashboardCards": {
           "items": {
             "$ref": "#/definitions/DashboardCard"
@@ -302,6 +389,13 @@
         "pages": {
           "items": {
             "$ref": "#/definitions/Page"
+          },
+          "type": "array"
+        },
+        "statusResolvers": {
+          "description": "What status an app's custom resources have (#541). Replaces `pages[].statusColumns`, which is deprecated but still accepted in 0.3.",
+          "items": {
+            "$ref": "#/definitions/StatusResolver"
           },
           "type": "array"
         },
@@ -812,6 +906,18 @@
       ],
       "type": "string"
     },
+    "NormalizedStatus": {
+      "description": "The six statuses every surface knows how to draw.",
+      "enum": [
+        "healthy",
+        "warning",
+        "error",
+        "progressing",
+        "suspended",
+        "unknown"
+      ],
+      "type": "string"
+    },
     "Page": {
       "additionalProperties": false,
       "properties": {
@@ -873,7 +979,7 @@
           "description": "The value at `jsonPath` must equal this literal."
         },
         "jsonPath": {
-          "description": "The value this predicate asks about, as a bounded JSONPath subset: `.spec.suspend`, `.metadata.annotations['acme.io/pinned']`, `.status.conditions[0].status`. The grammar is the bounded subset the module documents: no wildcard, filter or recursive descent.",
+          "description": "The value this predicate asks about, as a bounded JSONPath subset: `.spec.suspend`, `.metadata.annotations['acme.io/pinned']`, `.status.conditions[0].status`. The grammar is the bounded subset the module documents: no wildcard or recursive descent, and one filter form, `[?(@.type==\"Ready\")]`, that selects the first matching element.",
           "type": "string"
         },
         "notEquals": {
@@ -943,6 +1049,18 @@
       ],
       "type": "object"
     },
+    "ReferenceFormat": {
+      "description": "A reference format the host knows how to check against the object that carries it (#541 review).\n\nA condition compares against literals, so it cannot say \"this annotation names the resource it is on\". An ownership claim needs exactly that — a copied annotation must not make a resource look owned — so the host implements the check for each format, exactly as the owning controller does, rather than offering a template language.",
+      "oneOf": [
+        {
+          "description": "Argo CD's resource tracking id, `<app>:<group>/<kind>:<namespace>/<name>`, parsed as Argo CD parses it (`util/argo/resource_tracking.go`, `ParseAppInstanceValue`) and held to the resource as Argo CD holds it (`controller/state.go`, `isSelfReferencedObj`): group, kind and name equal, and namespace equal unless the resource is cluster-scoped. Argo CD ignores an id that does not name its own resource, so a badge must.",
+          "enum": [
+            "argocd-tracking-id"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "SignatureProof": {
       "additionalProperties": false,
       "properties": {
@@ -999,6 +1117,63 @@
       },
       "required": [
         "ready"
+      ],
+      "type": "object"
+    },
+    "StatusResolver": {
+      "additionalProperties": false,
+      "description": "Ordered rules that resolve the status of the custom resources of `forKinds`. The first rule whose conditions all hold is the status; when none does the host says `unknown`.",
+      "properties": {
+        "forKinds": {
+          "description": "Qualified kinds of custom resources this app declares a reader for.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/definitions/StatusRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "forKinds",
+        "rules"
+      ],
+      "type": "object"
+    },
+    "StatusRule": {
+      "additionalProperties": false,
+      "description": "One rule: when every condition holds, the object has this status.",
+      "properties": {
+        "label": {
+          "description": "The word shown. Required: colour is never the only signal.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Where in the object the reason is, e.g. `.status.conditions[?(@.type==\"Ready\")].message`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/NormalizedStatus"
+        },
+        "when": {
+          "description": "Every condition must hold. An empty list always holds, which is how a last, catch-all rule is written.",
+          "items": {
+            "$ref": "#/definitions/Condition"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "label",
+        "status",
+        "when"
       ],
       "type": "object"
     },

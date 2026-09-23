@@ -68,6 +68,49 @@ export interface ExtensionDashboardCard {
   list?: { jsonPath?: string; order?: "asc" | "desc"; limit?: number };
 }
 export type ExtensionPanelFormat = ExtensionTableColumn["format"];
+/** The six statuses every surface draws (#541). */
+export type NormalizedStatus = "healthy" | "warning" | "error" | "progressing" | "suspended" | "unknown";
+/**
+ * A predicate without its refusal sentence: the same operators and path
+ * grammar, plus `selfReference` — the value must be a reference, in a
+ * host-known format, to the very object the rule reads (an Argo CD tracking
+ * id naming its own resource). The host evaluates it; the surface never does.
+ */
+export type ExtensionStatusCondition = Omit<ActionPredicate, "reason"> & { selfReference?: "argocd-tracking-id" };
+/** One status rule; the first whose conditions all hold wins. */
+export interface ExtensionStatusRule {
+  when: ExtensionStatusCondition[];
+  status: NormalizedStatus;
+  /** The word shown. Required: colour is never the only signal. */
+  label: string;
+  /** Where in the object the reason is. */
+  reason?: string;
+}
+export interface ExtensionStatusResolver {
+  /** Qualified custom-resource kinds the app declares a reader for. */
+  forKinds: string[];
+  rules: ExtensionStatusRule[];
+}
+export interface ExtensionBadge {
+  id: string;
+  /** Qualified built-in kinds, e.g. `apps/Deployment`. */
+  forKinds: string[];
+  /** A declared join whose matched resource the rules read; without one they read the row's metadata. */
+  join?: string;
+  rules: ExtensionStatusRule[];
+}
+/**
+ * What the host resolved an object to. `label` and `reason` are an app's and
+ * a cluster's text: draw them through `plainText`.
+ */
+export interface ResolvedStatus {
+  status: NormalizedStatus;
+  label: string;
+  reason?: string;
+}
+export interface ResolvedBadge extends ResolvedStatus {
+  id: string;
+}
 export interface ExtensionDetailField {
   label: string;
   jsonPath: string;
@@ -136,6 +179,8 @@ export interface ExtensionManifest {
     tableColumns?: ExtensionTableColumn[];
     dashboardCards?: ExtensionDashboardCard[];
     detailPanels?: ExtensionDetailPanel[];
+    statusResolvers?: ExtensionStatusResolver[];
+    badges?: ExtensionBadge[];
   };
 }
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */
@@ -246,8 +291,32 @@ export interface ExtensionResourceResult {
     age: string;
     created?: string | null;
     columns: string[];
+    /** The row's status, when the app declares a status resolver for its kind (#541). */
+    status?: ResolvedStatus;
   }>;
 }
+type ExtensionResourceItem = ExtensionResourceResult["items"][number];
+/**
+ * One listed resource's normalized status (#541): the host's, resolved from
+ * the app's `statusResolvers` on the whole object, or — for a page still on
+ * the deprecated `statusColumns` — read from its printer columns and mapped
+ * onto the same six statuses. `unknown` when neither says anything.
+ *
+ * Per item on purpose, so a count by status (#540's `countByStatus`, an app
+ * dashboard) maps it over the rows it already holds.
+ */
+export function itemStatus(item: ExtensionResourceItem, statusColumns?: ExtensionPage["statusColumns"]): NormalizedStatus {
+  if (item.status) return item.status.status;
+  if (!statusColumns) return "unknown";
+  const truth = (index?: number) => index !== undefined && item.columns[index]?.toLowerCase() === "true";
+  if (truth(statusColumns.suspended)) return "suspended";
+  if (truth(statusColumns.progressing)) return "progressing";
+  const ready = item.columns[statusColumns.ready]?.toLowerCase();
+  return ready === "true" ? "healthy" : ready === "false" ? "error" : "unknown";
+}
+/** {@link itemStatus} for each item, in order. */
+export const itemStatuses = (items: ExtensionResourceItem[], statusColumns?: ExtensionPage["statusColumns"]) =>
+  items.map((item) => itemStatus(item, statusColumns));
 export const readExtension = <T = ExtensionResourceResult>(
   id: string,
   revision: number,
@@ -297,8 +366,11 @@ export interface ExtensionColumnRow {
 }
 export interface ExtensionColumnResult {
   columns: ExtensionTableColumn[];
+  /** The badges the app declares for the requested kind (#541). */
+  badges?: ExtensionBadge[];
   cells: Array<{ uid?: string | null; name: string; namespace: string;
-    values: Record<string, string | null>; errors?: Record<string, string> }>;
+    values: Record<string, string | null>; errors?: Record<string, string>;
+    badges?: ResolvedBadge[]; badgeErrors?: Record<string, string> }>;
 }
 export const resolveExtensionColumns = (
   id: string, revision: number, context: string, namespace: string, kind: string,

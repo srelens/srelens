@@ -34,11 +34,20 @@ with an explicit error notice.
 
 ## Status and dashboards
 
-- **`statusColumns`** name printer-column indices for `ready`, and optionally
-  `suspended` and `progressing`. Suspended takes precedence over progressing, which
-  takes precedence over Ready. A missing or unknown Ready condition stays **Unknown**.
-- **Dashboards** summarize the pages they reference by status, using those pages'
-  `statusColumns`. Dashboard reads keep indexing the manifest's `printerColumns`.
+- **`statusResolvers`** (#541) resolve each listed resource to one of six statuses —
+  healthy, warning, error, progressing, suspended, unknown — by the app's first-hit
+  rules, evaluated by the host on the whole object. App tables show a **Status**
+  column: the rule's word in a toned badge, and its reason beside it as plain text.
+  A kind with no resolver has no status column.
+- **`statusColumns`** are deprecated but still accepted on the 0.3 line. They name
+  printer-column indices for `ready`, and optionally `suspended` and `progressing`, and
+  map onto the same statuses: suspended, then progressing, then Ready True (healthy) or
+  False (error). A missing or unknown Ready condition stays **Unknown**.
+- **Dashboards** summarize the pages they reference by those six statuses, each listed
+  with its word and count, zero included.
+- **Badges** put an app's word on built-in rows — for example Flux or Argo CD ownership
+  on Deployments — in a column named after the app. A row with no badge shows `—`; a
+  badge the host could not answer shows *Couldn't read*, never `—`.
 - **Dashboard events** filter by the involved object's API group, so an unrelated kind
   with the same name is excluded. The events section uses the workspace namespace and
   search controls. Counts reflect the namespace and are not changed by event search.

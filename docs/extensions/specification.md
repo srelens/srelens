@@ -120,11 +120,14 @@ Why a new field needs a new minor even though it is optional: manifests are stri
 (see below), so a host that predates the field would reject it. Requiring the minor
 turns that into a clear "requires API 0.x" message.
 
-Pre-1.0 exception for #538 and #539: `contributions.joins`,
-`contributions.tableColumns`, and `contributions.detailPanels`
-were added to API 0.3 in place while the extension platform is still being built.
-Earlier signed Flux and Argo CD 0.3 releases without these fields remain valid;
-a manifest using `detailPanels` requires a host that includes #539. No alias or
+Pre-1.0 exception for #538, #539 and #541: `contributions.joins`,
+`contributions.tableColumns`, `contributions.detailPanels`,
+`contributions.statusResolvers` and `contributions.badges` were added to API 0.3 in
+place while the extension platform is still being built, and so was the one predicate
+path filter form, `[?(@.key=="text")]` (#541), which widens what a path accepts without
+changing what an accepted path means. Earlier signed Flux and Argo CD 0.3 releases
+without these fields remain valid — including their `statusColumns` — and a manifest
+using any of them requires a host that includes the issue that added it. No alias or
 older API line is retained for this exception.
 
 The same pre-1.0 exception covers `contributions.dashboardCards` (#540): added to API
@@ -170,6 +173,10 @@ Deprecated or planned:
   extensions went live ([#537](https://github.com/srelens/srelens/issues/537)) and will
   name declared mutations ([#549](https://github.com/srelens/srelens/issues/549)). Until
   then a manifest that uses it is rejected as an unknown field.
+- `pages[].statusColumns` is deprecated in favour of `contributions.statusResolvers`
+  ([#541](https://github.com/srelens/srelens/issues/541)). It keeps working unchanged
+  on the 0.3 line — its indices are validated and dashboards still count by it — and
+  the earliest version that may remove it is the next API line, 0.4.
 
 ## Unknown fields
 
@@ -278,6 +285,12 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   resources. `extensions.resolvePanels` rechecks the installed app's revision,
   grants and cluster scope (#539). These manifests require a host with #539;
   see the [manifest reference](manifest.md#detailpanels).
+- Apps may declare `statusResolvers` for their custom-resource kinds and `badges` on
+  built-in kinds, as first-hit rules resolving to six normalized statuses with a
+  required word (#541). A badge reads its row's metadata or a declared join. The
+  predicate path grammar gains one filter form, `[?(@.key=="text")]`, selecting the
+  first matching element. `statusColumns` is deprecated. See the
+  [manifest reference](manifest.md#status-resolvers-and-badges).
 - The cluster overview draws `dashboardCards` (`count`, `countByStatus`, `metric`,
   `list`) over a granted custom-resource reader, with `equals`, `absent`, and date
   `within` / `before` predicates. `extensions.resolveCards` answers one app's cards per
@@ -291,7 +304,7 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 - Flux and Argo CD actions are declared by manifests, with their target reader,
   primitive write binding, confirmation metadata and availability predicates.
   The host no longer supplies a controller-specific action menu.
-- Current examples are Flux 0.4.0 and Argo CD 0.3.0, requiring `^0.3` and naming
+- Current examples are Flux 0.5.0 and Argo CD 0.4.0, requiring `^0.3` and naming
   `schemas/extension-manifest.v0.3.json`. Publishing them requires fresh signed
   external releases and a catalog update; existing signed release bytes stay unchanged.
 

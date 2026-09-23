@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { contributionKind, extensionEnabledFor, resolveExtensionColumns, type ExtensionColumnResult, type ExtensionTableColumn, type InstalledExtension } from "@srelens/core";
 import { Badge, type Column } from "@srelens/ui-kit";
 import type { ListRow } from "../lib/kinds/types";
+import { plainText } from "./displayText";
+import { StatusBadge } from "./StatusBadge";
 
 type Result = { plugin: InstalledExtension; state: "loading" | "ready" | "error"; pending?: boolean; data?: ExtensionColumnResult; error?: string };
 const EMPTY_RESULTS: Result[] = [];
@@ -77,7 +79,8 @@ export function useResolvedColumns<Row extends ListRow>(args: {
 }) {
   const { plugins, context, contextId, namespace, kind, rows, refresh = 0 } = args;
   const offers = plugins.filter((plugin) => plugin.enabled && !plugin.quarantined && !plugin.policyBlocked &&
-    extensionEnabledFor(plugin, contextId) && plugin.manifest.contributions.tableColumns?.some((column) => column.forKinds.includes(kind)));
+    extensionEnabledFor(plugin, contextId) && (plugin.manifest.contributions.tableColumns?.some((column) => column.forKinds.includes(kind)) ||
+      plugin.manifest.contributions.badges?.some((badge) => badge.forKinds.includes(kind))));
   const signature = JSON.stringify(offers.map((plugin) => [plugin.manifest.id, plugin.revision]));
   const [retry, setRetry] = useState(0);
   const scope = JSON.stringify([context, namespace, kind, signature, refresh, retry]);
@@ -131,7 +134,35 @@ export function useResolvedColumns<Row extends ListRow>(args: {
     const byIdentity = new Map(found?.data?.cells.map((cell) => [
       JSON.stringify([cell.uid ?? null, cell.namespace, cell.name]), cell,
     ]) ?? []);
-    return (plugin.manifest.contributions.tableColumns ?? []).filter((column) => column.forKinds.includes(kind)).map((column): Column<Row> => {
+    const cellFor = (row: Row) => {
+      const uid = (row as ListRow & { uid?: unknown }).uid;
+      return byIdentity.get(JSON.stringify([typeof uid === "string" ? uid : null, row.namespace ?? "", row.name]));
+    };
+    // One column per app for its badges (#541): the words its rules put on
+    // this row. No badge is an answer ("—"); a badge the host could not
+    // answer is "Couldn't read", never folded into the answer.
+    const badgeColumns: Column<Row>[] = plugin.manifest.contributions.badges?.some((badge) => badge.forKinds.includes(kind)) ? [{
+      // Its own prefix: every table column's key is `extension:<app>:<id>`, and
+      // `badges` is a valid column id, so no suffix alone could keep them apart.
+      key: `extension-badges:${plugin.manifest.id}`,
+      header: plainText(plugin.manifest.name),
+      sortable: false,
+      filterable: true,
+      getValue: (row) => (cellFor(row)?.badges ?? []).map((badge) => badge.label).join(" "),
+      render: (row) => {
+        if (found?.state === "error") return <span title={found.error}>Couldn’t read</span>;
+        const cell = found?.state === "ready" ? cellFor(row) : undefined;
+        if (!cell) return found?.state === "ready" && !found.pending && !rowsPending ? <span>—</span> : <span>Loading…</span>;
+        const failed = Object.entries(cell.badgeErrors ?? {});
+        const shown = cell.badges ?? [];
+        if (!shown.length && !failed.length) return <span>—</span>;
+        return <span className="extension-badges">
+          {shown.map((badge) => <StatusBadge key={badge.id} resolved={badge} />)}
+          {failed.map(([id, why]) => <span key={id} className="extension-badge-error" title={plainText(why)}>Couldn’t read</span>)}
+        </span>;
+      },
+    }] : [];
+    return [...badgeColumns, ...(plugin.manifest.contributions.tableColumns ?? []).filter((column) => column.forKinds.includes(kind)).map((column): Column<Row> => {
       const cell = (row: Row) => {
         const uid = (row as ListRow & { uid?: unknown }).uid;
         return byIdentity.get(JSON.stringify([typeof uid === "string" ? uid : null, row.namespace ?? "", row.name]));
@@ -152,7 +183,7 @@ export function useResolvedColumns<Row extends ListRow>(args: {
               : value(row) === null ? <span>—</span> : displayCell(value(row)!, column.format)
             : found?.state === "ready" && !found.pending && !rowsPending ? <span>—</span> : <span>Loading…</span>,
       };
-    });
+    })];
   }), [signature, live, kind, rowsPending]);
   const errors = live.filter((result) => result.state === "error").map((result) => ({
     id: result.plugin.manifest.id, title: result.plugin.manifest.name, message: result.error ?? "Read failed",

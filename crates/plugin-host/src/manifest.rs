@@ -2,6 +2,7 @@ use crate::{ValidationCode as Code, ValidationError, ValidationErrors};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use srelens_capability::status::{self, StatusRule};
 use srelens_capability::{Predicate, MAX_PREDICATES};
 use std::collections::BTreeSet;
 
@@ -335,6 +336,18 @@ pub struct Contributions {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub detail_panels: Vec<DetailPanel>,
+    /// What status an app's custom resources have (#541). Replaces
+    /// `pages[].statusColumns`, which is deprecated but still accepted in 0.3.
+    #[serde(
+        default,
+        rename = "statusResolvers",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub status_resolvers: Vec<StatusResolver>,
+    /// Words an app puts on built-in rows, from the row's metadata or from a
+    /// joined resource (#541).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub badges: Vec<Badge>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -371,6 +384,62 @@ pub struct DetailField {
     pub join: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<ColumnFormat>,
+}
+
+/// Most status resolvers, and most badges, one manifest may declare.
+pub const MAX_STATUS_CONTRIBUTIONS: usize = 16;
+
+/// Ordered rules that resolve the status of the custom resources of `forKinds`.
+/// The first rule whose conditions all hold is the status; when none does the
+/// host says `unknown`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResolver {
+    /// Qualified kinds of custom resources this app declares a reader for.
+    #[serde(rename = "forKinds")]
+    pub for_kinds: Vec<String>,
+    pub rules: Vec<StatusRule>,
+}
+
+/// A word on a built-in row. Without a `join`, the rules read the row's own
+/// `.metadata`; with one, they read the joined custom resource. The first rule
+/// that holds is the badge; when none does there is no badge.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Badge {
+    pub id: String,
+    /// Qualified built-in kinds, e.g. `apps/Deployment`.
+    #[serde(rename = "forKinds")]
+    pub for_kinds: Vec<String>,
+    /// A declared join whose matched resource the rules read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join: Option<String>,
+    pub rules: Vec<StatusRule>,
+}
+
+/// Whether a direct badge's path stays inside the row's metadata, which is
+/// all of a built-in row the host reads on an app's behalf.
+fn metadata_path(path: &str) -> bool {
+    let path = path.strip_prefix('$').unwrap_or(path);
+    path == ".metadata"
+        || path.starts_with(".metadata.")
+        || path.starts_with(".metadata[")
+        || path.starts_with("['metadata']")
+        || path.starts_with("[\"metadata\"]")
+}
+
+/// Reports a status rule list's problems at the manifest path that owns it.
+fn rule_list_problems(problems: &mut ValidationErrors, at: &str, rules: &[StatusRule]) {
+    for (path, why) in status::rule_problems(rules) {
+        // A bad condition is a binding problem, as a bad predicate is; a
+        // count, a word or an unreadable reason path is a value out of range.
+        let code = if path.contains(".when[") {
+            Code::InvalidBinding
+        } else {
+            Code::InvalidValue
+        };
+        problems.push(code, format!("{at}.{path}"), why);
+    }
 }
 
 /// A single granted custom-resource list used to enrich native table rows.
@@ -786,6 +855,35 @@ impl Manifest {
         check_api_fields_in(&value, &admitted, fields)
     }
 
+    /// The qualified kind (`group/Kind`) a custom-resource reader binding
+    /// lists, from its bound `group` and `kind`.
+    pub fn reader_kind(binding: &Binding) -> Option<String> {
+        if binding.target != "k8s.listCustomResource" {
+            return None;
+        }
+        let group = binding.arguments.get("group")?.as_str()?;
+        let kind = binding.arguments.get("kind")?.as_str()?;
+        Some(format!("{group}/{kind}"))
+    }
+
+    /// The status rules declared for `kind` (`group/Kind`), if any.
+    ///
+    /// The per-kind lookup #540's `countByStatus` and every list read share;
+    /// validation allows one resolver per kind, so there is one answer.
+    pub fn status_rules_for(&self, kind: &str) -> Option<&[StatusRule]> {
+        self.contributions
+            .status_resolvers
+            .iter()
+            .find(|resolver| resolver.for_kinds.iter().any(|k| k == kind))
+            .map(|resolver| resolver.rules.as_slice())
+    }
+
+    /// The status rules for the kind the named reader binding lists.
+    pub fn status_rules_for_binding(&self, capability: &str) -> Option<&[StatusRule]> {
+        let binding = self.capabilities.iter().find(|b| b.name == capability)?;
+        self.status_rules_for(&Self::reader_kind(binding)?)
+    }
+
     /// The binding the host registers for one declared action: the primitive
     /// it names, the identity of the reader binding it acts through, and its
     /// own arguments, with the inputs the host fixes.
@@ -1145,12 +1243,14 @@ impl Manifest {
                         format!("Page \"{id}\" is not declared"),
                     ),
                     Some(target)
-                        if target.dashboard.is_some() || target.status_columns.is_none() =>
+                        if target.dashboard.is_some()
+                            || (target.status_columns.is_none()
+                                && self.status_rules_for_binding(&target.capability).is_none()) =>
                     {
                         problems.push(
                             Code::InvalidValue,
                             path,
-                            format!("Page \"{id}\" must be a resource page with statusColumns"),
+                            format!("Page \"{id}\" must be a resource page whose kind has a status resolver"),
                         )
                     }
                     Some(_) => {}
@@ -1428,7 +1528,110 @@ impl Manifest {
                 }
             }
         }
+        self.status_problems(&mut problems, &join_ids);
         cards::card_problems(self, &mut problems);
         problems.into_result()
+    }
+
+    /// `statusResolvers` and `badges` (#541).
+    fn status_problems(&self, problems: &mut ValidationErrors, join_ids: &BTreeSet<&str>) {
+        const IDENTIFIER: &str = "Must be 1–64 letters, digits and -";
+        let contributions = &self.contributions;
+        if contributions.status_resolvers.len() > MAX_STATUS_CONTRIBUTIONS {
+            problems.push(
+                Code::InvalidValue,
+                "contributions.statusResolvers",
+                format!("Declare at most {MAX_STATUS_CONTRIBUTIONS} status resolvers"),
+            );
+        }
+        let readable: BTreeSet<String> = self
+            .capabilities
+            .iter()
+            .filter_map(Self::reader_kind)
+            .collect();
+        let mut resolved: BTreeSet<&str> = BTreeSet::new();
+        for (index, resolver) in contributions.status_resolvers.iter().enumerate() {
+            let at = format!("contributions.statusResolvers[{index}]");
+            kinds(problems, &format!("{at}.forKinds"), &resolver.for_kinds);
+            for (position, kind) in resolver.for_kinds.iter().enumerate() {
+                let path = format!("{at}.forKinds[{position}]");
+                if !readable.contains(kind) {
+                    problems.push(
+                        Code::UnresolvedCapability,
+                        path,
+                        format!("No declared k8s.listCustomResource reader lists {kind}"),
+                    );
+                } else if !resolved.insert(kind.as_str()) {
+                    problems.push(
+                        Code::DuplicateIdentifier,
+                        path,
+                        format!("{kind} already has a status resolver"),
+                    );
+                }
+            }
+            rule_list_problems(problems, &at, &resolver.rules);
+        }
+        if contributions.badges.len() > MAX_STATUS_CONTRIBUTIONS {
+            problems.push(
+                Code::InvalidValue,
+                "contributions.badges",
+                format!("Declare at most {MAX_STATUS_CONTRIBUTIONS} badges"),
+            );
+        }
+        unique(
+            problems,
+            contributions
+                .badges
+                .iter()
+                .enumerate()
+                .map(|(index, badge)| {
+                    (
+                        format!("contributions.badges[{index}].id"),
+                        badge.id.as_str(),
+                    )
+                }),
+        );
+        for (index, badge) in contributions.badges.iter().enumerate() {
+            let at = format!("contributions.badges[{index}]");
+            if !identifier(&badge.id) {
+                problems.push(Code::InvalidValue, format!("{at}.id"), IDENTIFIER);
+            }
+            kinds(problems, &format!("{at}.forKinds"), &badge.for_kinds);
+            match &badge.join {
+                Some(join) if !join_ids.contains(join.as_str()) => problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.join"),
+                    "A badge's join must name a declared join",
+                ),
+                Some(_) => {}
+                None => {
+                    const METADATA: &str = "A badge without a join reads only its row's metadata: start the path with .metadata";
+                    for (position, rule) in badge.rules.iter().enumerate() {
+                        let rule_at = format!("{at}.rules[{position}]");
+                        for (item, condition) in rule.when.iter().enumerate() {
+                            if !metadata_path(&condition.json_path) {
+                                problems.push(
+                                    Code::InvalidBinding,
+                                    format!("{rule_at}.when[{item}]"),
+                                    METADATA,
+                                );
+                            }
+                        }
+                        if rule
+                            .reason
+                            .as_deref()
+                            .is_some_and(|path| !metadata_path(path))
+                        {
+                            problems.push(
+                                Code::InvalidBinding,
+                                format!("{rule_at}.reason"),
+                                METADATA,
+                            );
+                        }
+                    }
+                }
+            }
+            rule_list_problems(problems, &at, &badge.rules);
+        }
     }
 }

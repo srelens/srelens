@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.3.json",
   "id": "org.srelens.argocd",
   "name": "Argo CD",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "srelensApiVersion": "^0.3",
   "kind": "declarative",
   "permissions": [
@@ -82,6 +82,112 @@
         "capability": "applications",
         "forKinds": [
           "/Namespace"
+        ]
+      }
+    ],
+    "statusResolvers": [
+      {
+        "forKinds": [
+          "argoproj.io/Application"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".status.health.status",
+                "equals": "Suspended"
+              }
+            ],
+            "status": "suspended",
+            "label": "Suspended",
+            "reason": ".status.health.message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.health.status",
+                "equals": "Degraded"
+              }
+            ],
+            "status": "error",
+            "label": "Degraded",
+            "reason": ".status.health.message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.health.status",
+                "equals": "Missing"
+              }
+            ],
+            "status": "error",
+            "label": "Missing",
+            "reason": ".status.health.message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.health.status",
+                "equals": "Progressing"
+              }
+            ],
+            "status": "progressing",
+            "label": "Progressing",
+            "reason": ".status.health.message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.health.status",
+                "equals": "Healthy"
+              },
+              {
+                "jsonPath": ".status.sync.status",
+                "equals": "OutOfSync"
+              }
+            ],
+            "status": "warning",
+            "label": "Out of sync",
+            "reason": ".status.sync.revision"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.health.status",
+                "equals": "Healthy"
+              }
+            ],
+            "status": "healthy",
+            "label": "Healthy"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      }
+    ],
+    "badges": [
+      {
+        "id": "argocd-managed",
+        "forKinds": [
+          "apps/Deployment",
+          "apps/StatefulSet",
+          "apps/DaemonSet"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".metadata.annotations['argocd.argoproj.io/tracking-id']",
+                "selfReference": "argocd-tracking-id"
+              }
+            ],
+            "status": "healthy",
+            "label": "Argo CD",
+            "reason": ".metadata.annotations['argocd.argoproj.io/tracking-id']"
+          }
         ]
       }
     ]

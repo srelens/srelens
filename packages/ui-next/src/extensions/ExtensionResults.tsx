@@ -18,6 +18,7 @@ import { useResource } from "../lib/useResource";
 import { useResolvedColumns } from "./useResolvedColumns";
 import { contributionKind } from "@srelens/core";
 import { useContextId } from "./contextIds";
+import { StatusBadge } from "./StatusBadge";
 
 export function ErrorNotice({
   message,
@@ -194,6 +195,11 @@ export function ExtensionResults({
     typeof binding?.arguments.kind === "string" ? binding.arguments.kind : "",
     typeof binding?.arguments.group === "string" ? binding.arguments.group : "",
   );
+  // The host resolves each row's status from the app's rules for this kind
+  // (#541); a kind without a resolver has no status column rather than one
+  // guessed from printer-column names.
+  const resolvesStatus = binding?.target === "k8s.listCustomResource" &&
+    !!plugin.manifest.contributions.statusResolvers?.some((resolver) => resolver.forKinds.includes(columnKind));
   const contextId = useContextId(context);
   const appColumns = useResolvedColumns({
     plugins: [plugin], context, contextId, namespace, kind: columnKind, rows: sourceRows, refresh,
@@ -258,7 +264,7 @@ export function ExtensionResults({
       </p>
     );
   const rows = (data.data?.items ?? lastRows.current).filter((row) =>
-    [row.name, row.namespace, ...row.columns,
+    [row.name, row.namespace, ...row.columns, ...(resolvesStatus && row.status ? [row.status.label] : []),
       ...appColumns.columns.filter((column) => column.filterable === true).map((column) => column.getValue?.(row) ?? "")]
       .join(" ")
       .toLowerCase()
@@ -351,6 +357,7 @@ export function ExtensionResults({
                 )}
                 <th>Name</th>
                 <th>Namespace</th>
+                {resolvesStatus && <th>Status</th>}
                 {columns.map((c, i) => (
                   <th key={i}>{c.name}</th>
                 ))}
@@ -383,6 +390,11 @@ export function ExtensionResults({
                   <td className="extension-namespace">
                     {row.namespace || "—"}
                   </td>
+                  {resolvesStatus && (
+                    <td className="extension-status-cell">
+                      {row.status ? <StatusBadge resolved={row.status} showReason /> : <span title="The host returned no status for this resource">—</span>}
+                    </td>
+                  )}
                   {columns.map((column, i) => (
                     <td key={i}>
                       <ResultValue

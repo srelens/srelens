@@ -4,10 +4,12 @@ mod annotations;
 pub mod audit;
 mod error;
 mod predicate;
+pub mod status;
 mod text;
 
 pub use predicate::{
-    check_path, check_predicates, resolve, unmet, CardPredicate, Predicate, MAX_PREDICATES,
+    check_path, check_predicates, resolve, unmet, CardPredicate, Condition, Predicate, ReferenceFormat,
+    MAX_PREDICATES,
 };
 
 pub use annotations::{

@@ -34,7 +34,27 @@ export interface ActionPredicate {
   reason: string;
 }
 
-type Segment = { key: string } | { index: number };
+/**
+ * One step of a path. `first` is `[?(@.key=="text")]`: the first element of a
+ * list that is an object whose `key` holds exactly the string `text` — the one
+ * filter form the host evaluates (#541), read as a Kubernetes printer column
+ * reads it.
+ */
+type Segment = { key: string } | { index: number } | { first: { key: string; equals: string } };
+
+/** The rest of a `[?(` filter; `undefined` for anything but the one form. */
+function filter(open: string): [Segment, string] | undefined {
+  const match = /^@\.([A-Za-z0-9_-]+)==(['"])/.exec(open);
+  if (!match) return undefined;
+  const quote = match[2];
+  const text = open.slice(match[0].length);
+  const end = text.indexOf(quote);
+  if (end < 0) return undefined;
+  const value = text.slice(0, end);
+  const after = text.slice(end + 1);
+  if (!after.startsWith(")]") || !value || [...value].length > MAX_REASON_CHARS) return undefined;
+  return [{ first: { key: match[1], equals: value } }, after.slice(2)];
+}
 
 /** The inside of one `[...]`: an index, or a quoted key. */
 function bracket(inner: string): Segment | undefined {
@@ -55,7 +75,12 @@ function segments(path: string): Segment[] | undefined {
   if (!rest.startsWith(".") && !rest.startsWith("[")) return undefined;
   const parsed: Segment[] = [];
   while (rest) {
-    if (rest.startsWith("[")) {
+    if (rest.startsWith("[?(")) {
+      const found = filter(rest.slice(3));
+      if (!found) return undefined;
+      parsed.push(found[0]);
+      rest = found[1];
+    } else if (rest.startsWith("[")) {
       const close = rest.indexOf("]");
       if (close < 0) return undefined;
       const segment = bracket(rest.slice(1, close));
@@ -84,7 +109,12 @@ export function resolvePath(resource: unknown, path: string): unknown {
   let node: unknown = resource;
   for (const segment of parsed) {
     if (node === null || typeof node !== "object") return undefined;
-    if ("index" in segment) {
+    if ("first" in segment) {
+      if (!Array.isArray(node)) return undefined;
+      const { key, equals } = segment.first;
+      node = node.find((item) => item !== null && typeof item === "object" && !Array.isArray(item) &&
+        (item as Record<string, unknown>)[key] === equals);
+    } else if ("index" in segment) {
       if (!Array.isArray(node)) return undefined;
       node = node[segment.index];
     } else {

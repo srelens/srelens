@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/srelens/srelens/main/schemas/extension-manifest.v0.3.json",
   "id": "org.srelens.flux",
   "name": "Flux",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "srelensApiVersion": "^0.3",
   "kind": "declarative",
   "permissions": [
@@ -547,143 +547,78 @@
       {
         "id": "kustomizations",
         "title": "Kustomizations",
-        "capability": "kustomizations",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        }
+        "capability": "kustomizations"
       },
       {
         "id": "helmreleases",
         "title": "Helm releases",
         "capability": "helmreleases",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        },
         "group": "Helm"
       },
       {
         "id": "gitrepositories",
         "title": "Git repositories",
         "capability": "gitrepositories",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        },
         "group": "Sources"
       },
       {
         "id": "helmrepositories",
         "title": "Helm repositories",
         "capability": "helmrepositories",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        },
         "group": "Sources"
       },
       {
         "id": "helmcharts",
         "title": "Helm charts",
         "capability": "helmcharts",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        },
         "group": "Sources"
       },
       {
         "id": "buckets",
         "title": "Buckets",
         "capability": "buckets",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        },
         "group": "Sources"
       },
       {
         "id": "ocirepositories",
         "title": "OCI repositories",
         "capability": "ocirepositories",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        },
         "group": "Sources"
       },
       {
         "id": "imagerepositories",
         "title": "Image repositories",
         "capability": "imagerepositories",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        },
         "group": "Image Automation"
       },
       {
         "id": "imagepolicies",
         "title": "Image policies",
         "capability": "imagepolicies",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        },
         "group": "Image Automation"
       },
       {
         "id": "imageupdateautomations",
         "title": "Image update automations",
         "capability": "imageupdateautomations",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        },
         "group": "Image Automation"
       },
       {
         "id": "alerts",
         "title": "Alerts",
         "capability": "alerts",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        },
         "group": "Notifications"
       },
       {
         "id": "providers",
         "title": "Providers",
         "capability": "providers",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        },
         "group": "Notifications"
       },
       {
         "id": "receivers",
         "title": "Receivers",
         "capability": "receivers",
-        "statusColumns": {
-          "ready": 0,
-          "suspended": 1,
-          "progressing": 2
-        },
         "group": "Notifications"
       }
     ],
@@ -737,6 +672,108 @@
         ]
       }
     ],
+    "statusResolvers": [
+      {
+        "forKinds": [
+          "kustomize.toolkit.fluxcd.io/Kustomization",
+          "helm.toolkit.fluxcd.io/HelmRelease",
+          "source.toolkit.fluxcd.io/GitRepository",
+          "source.toolkit.fluxcd.io/HelmRepository",
+          "source.toolkit.fluxcd.io/HelmChart",
+          "source.toolkit.fluxcd.io/Bucket",
+          "source.toolkit.fluxcd.io/OCIRepository",
+          "image.toolkit.fluxcd.io/ImageRepository",
+          "image.toolkit.fluxcd.io/ImagePolicy",
+          "image.toolkit.fluxcd.io/ImageUpdateAutomation",
+          "notification.toolkit.fluxcd.io/Alert",
+          "notification.toolkit.fluxcd.io/Provider",
+          "notification.toolkit.fluxcd.io/Receiver"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".spec.suspend",
+                "equals": true
+              }
+            ],
+            "status": "suspended",
+            "label": "Suspended"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Reconciling\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "progressing",
+            "label": "Reconciling",
+            "reason": ".status.conditions[?(@.type==\"Reconciling\")].message"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "True"
+              }
+            ],
+            "status": "healthy",
+            "label": "Ready"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status",
+                "equals": "False"
+              }
+            ],
+            "status": "error",
+            "label": "Not ready",
+            "reason": ".status.conditions[?(@.type==\"Ready\")].message"
+          },
+          {
+            "when": [],
+            "status": "unknown",
+            "label": "Unknown"
+          }
+        ]
+      }
+    ],
+    "badges": [
+      {
+        "id": "flux-managed",
+        "forKinds": [
+          "apps/Deployment",
+          "apps/StatefulSet",
+          "apps/DaemonSet"
+        ],
+        "rules": [
+          {
+            "when": [
+              {
+                "jsonPath": ".metadata.labels['kustomize.toolkit.fluxcd.io/name']",
+                "present": true
+              }
+            ],
+            "status": "healthy",
+            "label": "Flux",
+            "reason": ".metadata.labels['kustomize.toolkit.fluxcd.io/name']"
+          },
+          {
+            "when": [
+              {
+                "jsonPath": ".metadata.labels['helm.toolkit.fluxcd.io/name']",
+                "present": true
+              }
+            ],
+            "status": "healthy",
+            "label": "Flux",
+            "reason": ".metadata.labels['helm.toolkit.fluxcd.io/name']"
+          }
+        ]
+      }
+    ],
     "dashboardCards": [
       {
         "id": "suspended-kustomizations",
@@ -748,6 +785,16 @@
           "jsonPath": ".spec.suspend",
           "equals": true
         },
+        "target": {
+          "page": "kustomizations"
+        }
+      },
+      {
+        "id": "kustomizations-by-status",
+        "title": "Kustomizations by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "kustomizations",
         "target": {
           "page": "kustomizations"
         }

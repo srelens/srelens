@@ -96,14 +96,21 @@ fn an_action_carries_its_preconditions_into_the_binding_the_host_builds() {
 
 #[test]
 fn a_path_the_host_cannot_evaluate_is_refused_at_install() {
+    // A filter other than the one `key == "string"` form (#541) addresses a
+    // set, and is refused.
     let bad = action(|a| {
-        a["preconditions"][0]["jsonPath"] = json!(".status.conditions[?(@.type=='Ready')].status");
+        a["preconditions"][0]["jsonPath"] = json!(".status.conditions[?(@.type!='Ready')].status");
     });
     let why = refused_at(&bad, "actions[0].preconditions[0]");
     assert!(
         why.contains("InvalidBinding") && why.contains("not a resource path"),
         "{why}"
     );
+    // The one filter form names the first matching element and is accepted.
+    let ready = action(|a| {
+        a["preconditions"][0]["jsonPath"] = json!(".status.conditions[?(@.type=='Ready')].status");
+    });
+    parse(&ready).expect("the narrow filter is a path the host evaluates");
 }
 
 #[test]

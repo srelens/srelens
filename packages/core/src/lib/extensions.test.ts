@@ -9,7 +9,33 @@ import {
   resolveExtensionColumns,
   extensionRoute,
   parseExtensionRoute,
+  itemStatus,
+  itemStatuses,
 } from "./extensions";
+
+describe("itemStatus: one normalized status per listed resource (#541)", () => {
+  const legacy = { ready: 0, suspended: 1, progressing: 2 };
+  const item = (columns: string[], status?: { status: "warning"; label: string }) =>
+    ({ name: "a", namespace: "n", age: "1d", columns, ...(status ? { status } : {}) });
+
+  it("takes the host's resolved status when the app declares a resolver", () => {
+    expect(itemStatus(item(["True"], { status: "warning", label: "Out of sync" }), legacy)).toBe("warning");
+  });
+
+  it("maps deprecated statusColumns onto the same six statuses", () => {
+    expect(itemStatus(item(["True", "true", "False"]), legacy)).toBe("suspended");
+    expect(itemStatus(item(["True", "false", "True"]), legacy)).toBe("progressing");
+    expect(itemStatus(item(["True", "false", "False"]), legacy)).toBe("healthy");
+    expect(itemStatus(item(["False"]), legacy)).toBe("error");
+    expect(itemStatus(item([]), legacy)).toBe("unknown");
+  });
+
+  it("says unknown when nothing classifies the item, and maps a list in order", () => {
+    expect(itemStatus(item(["True"]))).toBe("unknown");
+    expect(itemStatuses([item(["False"]), item(["True"], { status: "warning", label: "W" })], legacy))
+      .toEqual(["error", "warning"]);
+  });
+});
 describe("extension contract", () => {
   it("uses the backend configure and read wire payloads", async () => {
     await configureExtensions({ action: "enable", id: "org.test.app", enabled: true });
