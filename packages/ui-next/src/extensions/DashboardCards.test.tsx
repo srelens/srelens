@@ -211,11 +211,15 @@ describe("DashboardCards", () => {
 
   it("refreshes on request", async () => {
     installed(app([card({ id: "c", title: "Expiring" })]));
-    answer([{ id: "c", state: "count", count: 1 }]);
+    core.resolveDashboardCards
+      .mockResolvedValueOnce({ cards: [{ id: "c", state: "count", count: 1 }] })
+      .mockResolvedValueOnce({ cards: [{ id: "c", state: "count", count: 5 }] });
     render(<DashboardCards context={CTX} />);
-    await waitFor(() => expect(core.resolveDashboardCards).toHaveBeenCalledTimes(1));
+    const figure = () => cardRegion("Expiring").querySelector(".dashboard-card-figure")?.textContent;
+    await waitFor(() => expect(figure()).toBe("1"));
     await userEvent.click(screen.getByRole("button", { name: "Refresh app cards" }));
-    await waitFor(() => expect(core.resolveDashboardCards).toHaveBeenCalledTimes(2));
+    // The new answer is drawn, not merely requested.
+    await waitFor(() => expect(figure()).toBe("5"));
   });
 
   it("opens the target page on the pinned cluster with the card as its filter", async () => {
