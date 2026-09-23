@@ -27,6 +27,67 @@ it("draws Unknown in a readable ink, never the hairline an empty ring uses", () 
   expect(donutBackground({ healthy: 0, warning: 0, error: 0, progressing: 0, suspended: 0, unknown: 0 })).toBe(EMPTY_DONUT);
 });
 
+/** The ring's stops as `{ colour, from, to }`, in order. */
+function ringStops(ring: string) {
+  return ring.replace(/^conic-gradient\(/, "").replace(/\)$/, "").split(/(?<=%),/).map((stop) => {
+    const match = /^(.*) (-?[\d.]+)% (-?[\d.]+)%$/.exec(stop.trim())!;
+    return { colour: match[1], from: Number(match[2]), to: Number(match[3]) };
+  });
+}
+
+it.each([
+  ["1 in 100", 99],
+  ["1 in 1000", 999],
+])("never lets a rare status vanish from the ring: %s", (_name, healthy) => {
+  // One error among many rows is exactly what an operator scans the ring
+  // for; a gap wider than its share used to leave it a zero-width stop.
+  const stops = ringStops(donutBackground({ healthy, warning: 0, error: 1, progressing: 0, suspended: 0, unknown: 0 }));
+  const error = stops.findIndex((stop) => stop.colour === DONUT_COLORS.error);
+  expect(error).toBeGreaterThanOrEqual(0);
+  expect(stops[error].to - stops[error].from).toBeGreaterThan(1);
+  // A mark the eye finds: its colour is wider than the gap beside it.
+  const gap = stops[error + 1] ? stops[error + 1].to - stops[error + 1].from : 0;
+  expect(stops[error].to - stops[error].from).toBeGreaterThanOrEqual(3 * gap - 1e-9);
+  // And it keeps its gap, so it is not merged into its neighbour.
+  expect(stops[error + 1]?.colour ?? stops[0].colour).toMatch(/^var\(--surface/);
+  // The ring still closes: every stop in order, ending at 100%.
+  stops.forEach((stop, i) => {
+    expect(stop.to).toBeGreaterThanOrEqual(stop.from);
+    if (i) expect(stop.from).toBeCloseTo(stops[i - 1].to, 6);
+  });
+  expect(stops[0].from).toBe(0);
+  expect(stops.at(-1)!.to).toBeCloseTo(100, 6);
+  // Every non-zero colour segment is visible.
+  for (const stop of stops.filter((s) => !s.colour.startsWith("var(--surface"))) expect(stop.to - stop.from).toBeGreaterThan(1);
+});
+
+it("keeps every one of six rare statuses visible beside a dominant one", () => {
+  const stops = ringStops(donutBackground({ healthy: 10_000, warning: 1, error: 1, progressing: 1, suspended: 1, unknown: 1 }));
+  const colours = stops.filter((stop) => !stop.colour.startsWith("var(--surface"));
+  expect(colours.map((stop) => stop.colour)).toEqual(Object.values(DONUT_COLORS));
+  for (const stop of colours) expect(stop.to - stop.from).toBeGreaterThan(1);
+  expect(stops.at(-1)!.to).toBeCloseTo(100, 6);
+});
+
+it("keeps the legend's counts exact when the ring exaggerates a sliver", async () => {
+  const items = [
+    ...Array.from({ length: 999 }, (_, i) => ({ name: `ok-${i}`, namespace: "flux-system", age: "1d", columns: [], status: { status: "healthy", label: "Ready" } })),
+    { name: "broken", namespace: "flux-system", age: "1d", columns: [], status: { status: "error", label: "Not ready" } },
+  ];
+  const migrated = {
+    ...plugin,
+    manifest: { ...plugin.manifest,
+      capabilities: [{ name: "apps", target: "k8s.listCustomResource", arguments: { group: "kustomize.toolkit.fluxcd.io", kind: "Kustomization" } }],
+      contributions: { ...plugin.manifest.contributions,
+        pages: plugin.manifest.contributions.pages.map(({ statusColumns: _unused, ...page }) => page),
+        statusResolvers: [{ forKinds: ["kustomize.toolkit.fluxcd.io/Kustomization"], rules: [] }] } },
+  } as unknown as InstalledExtension;
+  vi.mocked(readExtension).mockResolvedValue({ items } as never);
+  render(<ExtensionWorkspace plugin={migrated} page={migrated.manifest.contributions.pages[0]} context="staging" />);
+  expect(await screen.findByText("Healthy: 999")).toBeTruthy();
+  expect(screen.getByText("Error: 1")).toBeTruthy();
+});
+
 it("parts adjacent segments with the surface, so two neutrals never meet edge to edge", () => {
   // Suspended and Unknown are both neutral inks, too close to tell apart by
   // colour; a surface gap between them reads at 3:1 or better in every theme.

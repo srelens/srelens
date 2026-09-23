@@ -37,20 +37,52 @@ export const EMPTY_DONUT = "var(--rule, #85818f)";
 /** The share of the ring cut from the end of each segment, in percent. */
 const GAP = 1.5;
 /**
+ * The least arc a non-zero status is drawn with, in percent: four gaps, so
+ * its colour (the arc less its gap) is three times as wide as the gap beside
+ * it — about 16° of the ring, a mark the eye finds, not a hairline.
+ */
+const MIN_ARC = 4 * GAP;
+
+/**
+ * Each drawn status's arc, in percent of the ring, summing to 100.
+ *
+ * Proportional, except that a non-zero status never gets less than `MIN_ARC`:
+ * one error among a thousand rows is what an operator scans the ring for,
+ * and a true 0.1% share (smaller than the gap) would not be drawn at all. The
+ * space is taken from the larger statuses in proportion to their size. The
+ * ring may exaggerate a sliver; the legend's counts never do.
+ */
+function arcs(shares: number[]): number[] {
+  let floored = shares.map(() => false);
+  for (;;) {
+    const fixed = floored.filter(Boolean).length * MIN_ARC;
+    const free = shares.reduce((sum, share, i) => (floored[i] ? sum : sum + share), 0);
+    const scaled = shares.map((share, i) => (floored[i] ? MIN_ARC : (share * (100 - fixed)) / free));
+    const next = scaled.map((arc, i) => floored[i] || arc < MIN_ARC);
+    if (next.every((value, i) => value === floored[i])) return scaled;
+    floored = next;
+  }
+}
+
+/**
  * The ring for these counts. Adjacent segments are parted by a sliver of the
- * surface: Suspended and Unknown are both neutral inks, too close to tell
- * apart by colour alone, and each reads at 3:1 or better against the surface.
+ * surface, inset at each segment's end: Suspended and Unknown are both
+ * neutral inks, too close to tell apart by colour alone, and each reads at
+ * 3:1 or better against the surface. With `MIN_ARC` at four gaps, every
+ * segment keeps a colour three times as wide as its gap.
  */
 export function donutBackground(counts: Record<NormalizedStatus, number>): string {
   const total = statuses.reduce((sum, status) => sum + counts[status], 0);
   if (!total) return EMPTY_DONUT;
   const drawn = statuses.filter((status) => counts[status] > 0);
   const gap = drawn.length > 1 ? GAP : 0;
+  const widths = arcs(drawn.map((status) => (counts[status] / total) * 100));
   let offset = 0;
-  const stops = drawn.flatMap((status) => {
+  const stops = drawn.flatMap((status, i) => {
     const start = offset;
-    offset += (counts[status] / total) * 100;
-    const end = Math.max(start, offset - gap);
+    // The last arc closes the ring exactly, whatever the rounding.
+    offset = i === drawn.length - 1 ? 100 : offset + widths[i];
+    const end = offset - gap;
     return gap
       ? [`${DONUT_COLORS[status]} ${start}% ${end}%`, `var(--surface, #ffffff) ${end}% ${offset}%`]
       : [`${DONUT_COLORS[status]} ${start}% ${offset}%`];
