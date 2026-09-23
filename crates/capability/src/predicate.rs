@@ -137,7 +137,10 @@ fn duration(text: &str) -> Result<i64, String> {
         return bad();
     };
     let digits = &magnitude[..magnitude.len() - unit.len_utf8()];
-    if digits.is_empty() || digits.len() > 6 || !digits.bytes().all(|c| c.is_ascii_digit()) {
+    // The limit is `MAX_DURATION_SECONDS`, below. This only stops an absurd
+    // count before parsing: the smallest ten-digit count, 10^9 seconds, is
+    // already about 11,574 days, so nine digits refuse nothing in range.
+    if digits.is_empty() || digits.len() > 9 || !digits.bytes().all(|c| c.is_ascii_digit()) {
         return bad();
     }
     let scale = match unit {
@@ -151,10 +154,12 @@ fn duration(text: &str) -> Result<i64, String> {
     let Ok(count) = digits.parse::<i64>() else {
         return bad();
     };
-    let seconds = count * scale;
-    if seconds > MAX_DURATION_SECONDS {
+    let Some(seconds) = count
+        .checked_mul(scale)
+        .filter(|s| *s <= MAX_DURATION_SECONDS)
+    else {
         return bad();
-    }
+    };
     Ok(if negative { -seconds } else { seconds })
 }
 

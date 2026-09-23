@@ -172,6 +172,30 @@ fn a_duration_is_a_signed_count_of_one_unit_and_bounded() {
         let error = declared.check().expect_err(bad);
         assert!(error.contains("duration"), "{bad}: {error}");
     }
+    // The bound is 3650 days in whatever unit the count is written, not a
+    // number of digits: 14 days in seconds is a seven-digit count.
+    for good in [
+        "1209600s",
+        "315360000s",
+        "5256000m",
+        "87600h",
+        "521w",
+        "-315360000s",
+    ] {
+        let declared = predicate(json!({"jsonPath": ".a", "within": good}));
+        assert!(declared.check().is_ok(), "{good} is at most 3650d");
+    }
+    for bad in [
+        "315360001s",
+        "5256001m",
+        "87601h",
+        "522w",
+        "9999999999s",
+        &"9".repeat(40),
+    ] {
+        let declared = predicate(json!({"jsonPath": ".a", "within": bad}));
+        assert!(declared.check().is_err(), "{bad} is more than 3650d");
+    }
     let empty = predicate(json!({"jsonPath": ".a", "within": "0d"}));
     assert!(
         empty.check().unwrap_err().contains("window"),
