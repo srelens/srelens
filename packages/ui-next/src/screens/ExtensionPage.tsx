@@ -113,6 +113,9 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
           {target.resourceName ? <ExtensionResourceDetails fullPage key={route} selection={{id:target.id,revision:plugin.revision,capability:page.capability,context:clusterId,namespace:target.namespace,name:target.resourceName}}/> : <ExtensionWorkspace
             card={card?.id}
             cardNamespaces={target.namespaces}
+            onLeaveCard={(namespace) =>
+              openTab(extensionRoute(clusterId, target.id, target.page, namespace), { clusterName: cluster?.name })
+            }
             plugin={plugin}
             page={page}
             onPage={(id, namespace) =>

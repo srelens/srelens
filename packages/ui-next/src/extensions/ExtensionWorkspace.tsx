@@ -264,6 +264,9 @@ function Events({
   );
 }
 
+/** The picker value standing for a card target's own namespaces; never a namespace name. */
+const CARD_SCOPE = "\u0000card";
+
 /** Native, data-only extension workspace. Every reader stays pinned to this route's context. */
 export function ExtensionWorkspace({
   plugin,
@@ -274,6 +277,7 @@ export function ExtensionWorkspace({
   onNamespace,
   card,
   cardNamespaces,
+  onLeaveCard,
 }: {
   plugin: InstalledExtension;
   page: ExtensionPage;
@@ -285,6 +289,8 @@ export function ExtensionWorkspace({
   card?: string;
   /** The several namespaces the card counted in, when it counted in more than one. */
   cardNamespaces?: string[];
+  /** On a card's target: the picker chose another namespace, whose plain page this is not. */
+  onLeaveCard?(namespace: string): void;
 }) {
   const { Button, Combobox } = useContext(ExtensionControls);
   const [localPage, setLocalPage] = useState(page.id);
@@ -293,6 +299,8 @@ export function ExtensionWorkspace({
   const [refresh, setRefresh] = useState(0);
   const {namespaces, scope, error:namespaceError} = useNamespaceOptions(context, loadKubeconfigFiles(), refresh);
   const namespace = scope || selectedNamespace;
+  // What the picker shows on a card target counted over several namespaces.
+  const cardScope = card && !namespace && cardNamespaces?.length ? cardNamespaces.join(", ") : "";
   const current = onPage
     ? page
     : (plugin.manifest.contributions.pages.find((p) => p.id === localPage) ??
@@ -353,9 +361,17 @@ export function ExtensionWorkspace({
       <div className="extension-toolbar extension-filters">
         {namespaces === null ? <Button variant="secondary" disabled>Loading namespaces…</Button> : <Combobox
           ariaLabel="App namespace"
-          value={namespace}
-          onValueChange={(value) => { setNamespace(value); onNamespace?.(value); }}
+          value={cardScope ? CARD_SCOPE : namespace}
+          onValueChange={(value) => {
+            if (value === CARD_SCOPE) return;
+            // A card's target shows what the card counted, where it counted it.
+            // Another namespace is another page: leave the card's route for it,
+            // and keep this one showing what its route says.
+            if (card && onLeaveCard) { onLeaveCard(value); return; }
+            setNamespace(value); onNamespace?.(value);
+          }}
           options={[
+            ...(cardScope ? [{ value: CARD_SCOPE, label: cardScope }] : []),
             ...(scope ? [] : [{ value: "", label: "All namespaces" }]),
             ...(namespaces ?? []).map(n=>({value:n,label:n})),
           ]}
