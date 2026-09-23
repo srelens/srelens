@@ -142,7 +142,9 @@ export function useResolvedColumns<Row extends ListRow>(args: {
     // this row. No badge is an answer ("—"); a badge the host could not
     // answer is "Couldn't read", never folded into the answer.
     const badgeColumns: Column<Row>[] = plugin.manifest.contributions.badges?.some((badge) => badge.forKinds.includes(kind)) ? [{
-      key: `extension:${plugin.manifest.id}:badges`,
+      // Its own prefix: every table column's key is `extension:<app>:<id>`, and
+      // `badges` is a valid column id, so no suffix alone could keep them apart.
+      key: `extension-badges:${plugin.manifest.id}`,
       header: plainText(plugin.manifest.name),
       sortable: false,
       filterable: true,

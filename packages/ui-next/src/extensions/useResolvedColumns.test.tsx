@@ -120,6 +120,21 @@ it("puts an app's badges on built-in rows from the same one batch, always as wor
   expect(column.getValue?.(rows[1])).toBe("");
 });
 
+it("keeps an app's badge column apart from a table column whose id is `badges`", async () => {
+  // `badges` is a valid column id; the badge column's key must not be one a
+  // column id can produce, or the table treats the two as one column.
+  const both = { ...flux, manifest: { ...flux.manifest, contributions: { ...flux.manifest.contributions,
+    tableColumns: [{ id: "badges", title: "Badges", forKinds: ["apps/Deployment"], source: { jsonPath: ".name" }, format: "text" }],
+  } } } as InstalledExtension;
+  resolve.mockResolvedValue({ columns: both.manifest.contributions.tableColumns, badges: flux.manifest.contributions.badges, cells: [] });
+  const rows = [{ name: "api", namespace: "team" }];
+  const view = renderHook(() => useResolvedColumns({ plugins: [both], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
+  await waitFor(() => expect(resolve).toHaveBeenCalledTimes(1));
+  const keys = view.result.current.columns.map((column) => column.key);
+  expect(keys).toHaveLength(2);
+  expect(new Set(keys).size).toBe(2);
+});
+
 it("asks for nothing on a kind no badge names", async () => {
   const rows = [{ name: "db", namespace: "team" }];
   const view = renderHook(() => useResolvedColumns({ plugins: [flux], context: "prod", namespace: "team", kind: "apps/StatefulSet", rows }));
