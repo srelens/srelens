@@ -126,6 +126,10 @@ The existing signed Flux and Argo CD 0.3 manifests contain neither field and rem
 valid; a manifest using either field requires a host that includes #538. No alias or
 older API line is retained for this exception.
 
+The same pre-1.0 exception covers `contributions.dashboardCards` (#540): added to API
+0.3 in place, absent from every published signed manifest, and requiring a host that
+includes #540.
+
 The host enforces this for fields. `API_FIELDS` in `crates/plugin-host/src/manifest.rs`
 lists fields whose availability differs across supported API lines. It is empty while
 0.3 is the only supported line. A rename is a removal plus an addition.
@@ -269,6 +273,12 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   custom-resource reader and `tableColumns` with a row or joined `jsonPath`.
   `extensions.resolveColumns` batches up to 1,000 rows per request and reports
   failed reads explicitly (#538). See [Manifest reference](manifest.md#table-columns-and-joins).
+- The cluster overview draws `dashboardCards` (`count`, `countByStatus`, `metric`,
+  `list`) over a granted custom-resource reader, with `equals`, `absent`, and date
+  `within` / `before` predicates. `extensions.resolveCards` answers one app's cards per
+  request, each with a figure or the reason it has none, and `extensions.read` takes a
+  `card` to show a card's target page narrowed to what it counted (#540). See
+  [Manifest reference](manifest.md#dashboard-cards).
 - Unsigned apps declaring write actions require the default-off inventory policy
   described above (#558). Turning it off disables affected installations without
   removing them; normal read-only declarative permission grants are unchanged.

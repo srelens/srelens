@@ -43,7 +43,7 @@ before publishing.
 | `permissions` | Yes | The exact host capability IDs the bindings use. |
 | `capabilities` | Yes | 1–32 bindings, below. |
 | `actions` | No | Up to 32 declared mutations, below. |
-| `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins` and `tableColumns`, below. |
+| `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns` and `dashboardCards`, below. |
 
 Unknown fields are errors at every level. A manifest is at most 256 KiB.
 
@@ -292,6 +292,71 @@ the reason instead of choosing an arbitrary resource; other cells still resolve.
 A scalar over 1,024 bytes is also reported on its cell. The host resolves up to
 1,000 rows in one call and caches each joined list for five seconds, sharing an
 in-flight read. A joined list beyond 2,000 objects fails as incomplete.
+
+### Dashboard cards
+
+An app can put host-drawn figures on the cluster overview:
+
+```json
+"dashboardCards": [{
+  "id": "expiring", "title": "Certificates expiring soon", "size": "s",
+  "type": "count", "source": "certificates",
+  "predicate": { "jsonPath": ".status.notAfter", "within": "14d" },
+  "target": { "page": "certificates" }
+}]
+```
+
+`dashboardCards` has at most 16 entries. Each has a unique `id`, a `title`, a
+`size` (`s`, `m` or `l`), a `type`, and a `source`: the name of a declared
+`k8s.listCustomResource` binding. The app supplies data only; the host draws
+every card, and its title and values render as plain text.
+
+| `type` | Shows | Extra field |
+|---|---|---|
+| `count` | How many of the source's objects the predicate holds for. | — |
+| `countByStatus` | Those objects counted by the status the app's status resolvers give them. | — |
+| `metric` | One number reduced from those objects. | `metric`: `{ "jsonPath", "aggregate": "sum" \| "min" \| "max" }`, required |
+| `list` | The first rows of those objects, by namespace and name. | `list`: `{ "jsonPath"?, "order"?: "asc" \| "desc", "limit"?: 1–10 }` |
+
+`metric` is refused on every other type, and so is `list`. A list with no
+`limit` shows 3, 5 or 10 rows by size. With a `jsonPath` it shows that value
+beside each row and orders by it, numbers numerically, missing values last.
+A metric counts only JSON numbers: a matching object without the value is
+skipped, and one whose value is not a number fails the card and names the
+object. A sum of nothing is `0`; a minimum or maximum of nothing is no value.
+
+`predicate` is optional; without it a card counts every object. It has one
+`jsonPath`, in the bounded grammar action predicates use, and exactly one
+operator:
+
+| Operator | Holds when the value at `jsonPath` |
+|---|---|
+| `equals` | is this string, number or boolean. |
+| `absent: true` | is unset or null. |
+| `within` | is an RFC 3339 timestamp within this duration of now: `"14d"` is from now until 14 days ahead, `"-1h"` the last hour. |
+| `before` | is an RFC 3339 timestamp earlier than now plus this duration: `"14d"` includes everything already past, `"0d"` is only the past. |
+
+A duration is a whole number of one unit, `s`, `m`, `h`, `d` or `w`, with an
+optional leading `-`, at most 3650 days either way. A `within` window of zero
+is refused. A value that is not an RFC 3339 timestamp never satisfies a date
+operator. A path the host cannot evaluate is refused at install, and never
+holds, so a typo cannot count every object.
+
+`target` is optional. Its `page` must be a declared page, not a dashboard, whose
+`capability` is the card's `source`. The card's title then opens that page
+showing only the objects the card counted, on the same cluster and namespace
+selection, with a way back to the whole list.
+
+The host answers every card an app declares in one call, reading each source
+once through the five-second snapshot table columns use. Cards follow the
+overview's namespace selection: one selected namespace is read directly, and
+none or several read every namespace and keep the selected ones. A
+cluster-scoped source ignores the selection. A card whose source cannot be read
+shows the reason and a retry instead of a figure, as does one whose source
+reached the 2,000-object read limit. A `countByStatus` card says it is not
+available until status resolvers exist
+([#541](https://github.com/srelens/srelens/issues/541)); it never counts by
+`statusColumns`.
 
 ## Rules the desktop app adds
 

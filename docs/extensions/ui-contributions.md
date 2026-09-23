@@ -45,6 +45,25 @@ with an explicit error notice.
 
 Failed reads keep their error and a retry; they never become zero-count summaries.
 
+## Cluster dashboard cards
+
+`dashboardCards` ([Manifest reference](manifest.md#dashboard-cards)) draw an **App
+cards** band on the cluster overview, under the capacity strip, in the new design only.
+The band follows the cluster's namespace selection — the one the resource lists use —
+reads the cluster in focus by its stable ID, and has a **Refresh** action. Each card is
+in exactly one of four visibly different states:
+
+- **Loading**: a spinner and no figure.
+- **Couldn't read**: the reason and a **Retry**, and no figure.
+- **None**: the figure `0` (or *No value* for an empty minimum or maximum), drawn
+  quieter than a count.
+- **Not available yet**: a card this host cannot make at all, such as `countByStatus`
+  before status resolvers (#541); no retry, and no figure.
+
+A card with a `target` opens that app page narrowed to what the card counted; the page
+says so and offers the whole list. A card the app no longer declares is reported as
+gone rather than shown as every row. Titles, app names and values render as plain text.
+
 ## Detail tabs and detail links
 
 A Namespace's resource overview has an **Apps** section with the app's declared detail
