@@ -11,7 +11,7 @@ use srelens_kube::changed::{
 use srelens_kube::events::EventSummary;
 use srelens_tui::commands::{resolve_command, CommandTarget, ResourceKind};
 use srelens_tui::views::changed_view::{
-    render_changed_view, ChangedTab, ChangedViewState, IncidentFilter,
+    render_changed_view, ChangedTab, ChangedViewState, IncidentFilter, QuickRca, QuickRcaStatus,
 };
 
 fn render_lines<F>(width: u16, height: u16, draw: F) -> Vec<String>
@@ -61,7 +61,7 @@ fn sample_report() -> ChangedTriageReport {
                     repo_url: "https://github.com/org/checkout.git".to_string(),
                     target_revision: "main".to_string(),
                     sync_revision: "7b89abc".to_string(),
-                    sync_age: "12m ago".to_string(),
+                    sync_age: "12m".to_string(),
                     sync_message: None,
                 }),
                 error_log_snippet: Some(vec![
@@ -93,7 +93,10 @@ fn sample_report() -> ChangedTriageReport {
                     detail_message: "exited with code 1".to_string(),
                 }],
                 failing_pod_names: vec!["checkout-api-7b89-abcd".to_string()],
-                argo_rollout_in_window: None,
+                argo_rollout_in_window: Some("rev 7b89abc synced 12m ago".to_string()),
+                error_log_pod: Some("checkout-api-7b89-abcd".to_string()),
+                error_log_container: Some("api".to_string()),
+                unchanged_in_window: false,
                 top_events: vec![EventSummary {
                     name: "checkout-api-7b89-abcd.ev1".to_string(),
                     namespace: "prod".to_string(),
@@ -145,6 +148,9 @@ fn sample_report() -> ChangedTriageReport {
                 }],
                 failing_pod_names: vec!["payment-worker-9988-xyz".to_string()],
                 argo_rollout_in_window: None,
+                error_log_pod: None,
+                error_log_container: None,
+                unchanged_in_window: false,
                 top_events: vec![],
             },
             AppDeploymentChange {
@@ -161,7 +167,7 @@ fn sample_report() -> ChangedTriageReport {
                     repo_url: "https://github.com/org/frontend.git".to_string(),
                     target_revision: "main".to_string(),
                     sync_revision: "a1b2c3d".to_string(),
-                    sync_age: "27m ago".to_string(),
+                    sync_age: "27m".to_string(),
                     sync_message: None,
                 }),
                 error_log_snippet: None,
@@ -186,6 +192,9 @@ fn sample_report() -> ChangedTriageReport {
                 pod_symptoms: vec![],
                 failing_pod_names: vec![],
                 argo_rollout_in_window: None,
+                error_log_pod: None,
+                error_log_container: None,
+                unchanged_in_window: false,
                 top_events: vec![],
             },
         ],
@@ -213,6 +222,7 @@ fn sample_report() -> ChangedTriageReport {
                 is_warning: true,
             },
         ],
+        includes_failing: false,
     }
 }
 
@@ -360,17 +370,26 @@ fn renders_changed_view_wide_with_diagnostic_card() {
     assert!(rendered.contains("GitOps Release: checkout-prod"));
     assert!(rendered.contains("7b89abc"));
     assert!(rendered.contains("Root Cause: [APP]"));
-    assert!(rendered.contains("Symptoms:"));
+    assert!(rendered.contains("Symptoms (1 pod failing):"));
     assert!(rendered.contains("checkout-api-7b89-abcd: CrashLoopBackOff | exited with code 1"));
     assert!(!rendered.contains("Failing Pods:"));
-    assert!(rendered.contains("Error Log Snippet (checkout-api-7b89-abcd)"));
-    assert!(rendered.contains("Failed to connect to Redis cache"));
-    assert!(rendered.contains("panic: initialization failed"));
-    assert!(rendered.contains("Back-off restarting failed container"));
-    assert!(rendered.contains("[l] Full Logs"));
-    assert!(rendered.contains("[r] Refresh"));
+    assert!(rendered.contains("ArgoCD Rollout: rev 7b89abc synced 12m ago"));
+    assert!(rendered.contains("Synced: 12m ago"));
+    assert!(!rendered.contains("ago ago"));
+    // The logs are one key away (`l`), and the events are gone: the card
+    // carries neither, however much of either there is.
+    assert!(!rendered.contains("Error Log Snippet"));
+    assert!(!rendered.contains("Failed to connect to Redis cache"));
+    assert!(!rendered.contains("Correlated Events"));
+    assert!(!rendered.contains("Back-off restarting failed container"));
+    assert!(rendered.contains(
+        "[Enter/d] Describe   [l] Logs   [y] YAML   [s] Quick AI RCA   [a] Assistant   [r] Refresh"
+    ));
+    assert!(rendered.contains("Scope: [CHANGED]"));
     assert!(!rendered.contains("[j/k] Navigate"));
     assert!(!rendered.contains("[r] Rollout Restart"));
+    assert!(rendered.contains("[y] YAML"));
+    assert!(!rendered.contains("YAML Diff"), "y opens the manifest, not a diff");
 }
 
 #[test]
@@ -416,4 +435,233 @@ fn renders_loading_and_error_states() {
     });
     let err_rendered = err_lines.join("\n");
     assert!(err_rendered.contains("Connection refused to API server"));
+}
+
+fn render_card(state: &ChangedViewState) -> String {
+    render_lines(160, 44, |f| render_changed_view(f, f.area(), state)).join("\n")
+}
+
+fn with_rca(status: QuickRcaStatus) -> ChangedViewState {
+    let mut state = ChangedViewState::new();
+    state.context = "prod-eu".to_string();
+    state.set_report(sample_report());
+    let d = state.selected_deployment().unwrap().clone();
+    let key = state.rca_key(&d);
+    state.ai_summaries.insert(
+        key,
+        QuickRca {
+            pod_name: Some("checkout-api-7b89-abcd".to_string()),
+            provider: "Anthropic (Claude)".to_string(),
+            status,
+            updated_at: std::time::Instant::now(),
+        },
+    );
+    state
+}
+
+#[test]
+fn card_advertises_quick_rca_and_the_assistant_separately() {
+    let _settings = common::env::isolate_settings();
+    let mut state = ChangedViewState::new();
+    state.set_report(sample_report());
+    let rendered = render_card(&state);
+    assert!(rendered.contains("[s] Quick AI RCA"));
+    assert!(rendered.contains("[a] Assistant"));
+    assert!(!rendered.contains("Quick AI RCA ("), "no RCA section until asked for");
+}
+
+#[test]
+fn card_renders_quick_rca_loading_ready_and_error() {
+    let _settings = common::env::isolate_settings();
+
+    let loading = render_card(&with_rca(QuickRcaStatus::Loading));
+    assert!(loading.contains("Quick AI RCA (checkout-api-7b89-abcd, Anthropic (Claude)):"));
+    assert!(loading.contains("Analyzing termination state, events, and error logs"));
+
+    let ready = render_card(&with_rca(QuickRcaStatus::Ready {
+        root_cause: "Redis at redis-master.prod:6379 refuses connections.".to_string(),
+        action_item: "Check the redis-master pods, or roll back 7b89abc.".to_string(),
+    }));
+    assert!(ready.contains("[cached 0s ago]"));
+    assert!(ready.contains("Root Cause: Redis at redis-master.prod:6379 refuses connections."));
+    assert!(ready.contains("Action Item: Check the redis-master pods, or roll back 7b89abc."));
+    let rca_at = ready.find("Quick AI RCA (").unwrap();
+    assert!(ready.find("Symptoms (").unwrap() < rca_at, "after the symptoms");
+    assert!(rca_at < ready.find("Actions:").unwrap(), "before the actions");
+
+    let error = render_card(&with_rca(QuickRcaStatus::Error(
+        "No API key configured for Anthropic (Claude). Add one in :ai-settings".to_string(),
+    )));
+    assert!(error.contains("No API key configured for Anthropic (Claude). Add one in :ai-settings"));
+    assert!(!error.contains("Ctrl+s"), "Ctrl+s means Scale outside the Assistant");
+}
+
+#[test]
+fn quick_rca_is_keyed_by_cluster_and_revision() {
+    let _settings = common::env::isolate_settings();
+    let state = with_rca(QuickRcaStatus::Ready {
+        root_cause: "old release".to_string(),
+        action_item: String::new(),
+    });
+    let d = state.selected_deployment().unwrap().clone();
+    assert!(state.rca_for(&d).is_some());
+
+    // The same workload rolled forward: the old answer is not shown as its.
+    let mut rolled = d.clone();
+    rolled.current_revision = "6".to_string();
+    assert!(state.rca_for(&rolled).is_none());
+
+    // The same workload name on another regional cluster.
+    let mut other = with_rca(QuickRcaStatus::Loading);
+    other.context = "prod-us".to_string();
+    assert!(other.rca_for(&d).is_none());
+
+    // And an unformatted answer renders without an empty Action Item line.
+    let rendered = render_card(&state);
+    assert!(rendered.contains("Root Cause: old release"));
+    assert!(!rendered.contains("Action Item:"));
+}
+
+fn crash_pod(name: &str) -> PodIncidentDetail {
+    PodIncidentDetail {
+        pod_name: name.to_string(),
+        status: "CrashLoopBackOff".to_string(),
+        detail_message: "exited with code 1".to_string(),
+    }
+}
+
+#[test]
+fn group_pod_symptoms_collapses_identical_pods() {
+    use srelens_tui::views::changed_view::group_pod_symptoms;
+    let pods: Vec<_> = (0..150).map(|i| crash_pod(&format!("api-{i}"))).collect();
+    let groups = group_pod_symptoms(&pods);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].count, 150);
+    assert_eq!(
+        groups[0].describe(),
+        "CrashLoopBackOff | exited with code 1 — 150 pods (api-0, api-1, +148 more)"
+    );
+
+    // A lone pod reads as itself; first-seen order is kept.
+    let mixed = vec![
+        crash_pod("a"),
+        PodIncidentDetail {
+            pod_name: "b".to_string(),
+            status: "Pending".to_string(),
+            detail_message: "Insufficient cpu".to_string(),
+        },
+        crash_pod("c"),
+    ];
+    let groups = group_pod_symptoms(&mixed);
+    let lines: Vec<String> = groups.iter().map(|g| g.describe()).collect();
+    assert_eq!(
+        lines,
+        [
+            "CrashLoopBackOff | exited with code 1 — 2 pods (a, c)",
+            "b: Pending | Insufficient cpu",
+        ]
+    );
+}
+
+#[test]
+fn card_shows_at_most_three_symptom_groups_however_many_pods_fail() {
+    let _settings = common::env::isolate_settings();
+    let mut report = sample_report();
+    let d = &mut report.deployments[0];
+    d.pod_symptoms = (0..150).map(|i| crash_pod(&format!("checkout-api-{i}"))).collect();
+    for (i, status) in ["OOMKilled", "Error", "Pending", "ImagePullBackOff"].iter().enumerate() {
+        d.pod_symptoms.push(PodIncidentDetail {
+            pod_name: format!("odd-{i}"),
+            status: status.to_string(),
+            detail_message: String::new(),
+        });
+    }
+    let mut state = ChangedViewState::new();
+    state.set_report(report);
+
+    let rendered = render_card(&state);
+
+    assert!(rendered.contains("Symptoms (154 pods failing):"));
+    assert!(rendered.contains("150 pods (checkout-api-0, checkout-api-1, +148 more)"));
+    assert!(rendered.contains("odd-0: OOMKilled"));
+    assert!(rendered.contains("odd-1: Error"));
+    assert!(!rendered.contains("odd-2"), "the fourth group is not drawn");
+    assert!(rendered.contains("+2 other symptoms"));
+    assert!(!rendered.contains("checkout-api-7,"), "individual pods are not listed");
+}
+
+#[test]
+fn an_unchanged_row_says_why_it_is_shown() {
+    let _settings = common::env::isolate_settings();
+    let mut report = sample_report();
+    report.includes_failing = true;
+    report.deployments[0].unchanged_in_window = true;
+    let mut state = ChangedViewState::new();
+    state.include_failing = true;
+    state.set_report(report);
+
+    let rendered = render_card(&state);
+
+    assert!(rendered.contains("checkout-api (unchanged)"), "a word, not only colour");
+    assert!(rendered.contains("Not changed in the last 1h; shown because it is failing now (u to hide)."));
+    assert!(rendered.contains("Scope: [CHANGED + FAILING]"));
+    assert!(rendered.contains("[u] Hide unchanged"));
+    // Rows that did change carry no marker.
+    assert!(!rendered.contains("payment-worker (unchanged)"));
+}
+
+fn footer_line(width: u16, height: u16, state: &ChangedViewState) -> String {
+    let lines = render_lines(width, height, |f| render_changed_view(f, f.area(), state));
+    lines.last().unwrap().trim_end().to_string()
+}
+
+#[test]
+fn footer_leaves_the_cards_keys_to_the_card() {
+    let _settings = common::env::isolate_settings();
+    let mut state = ChangedViewState::new();
+    state.set_report(sample_report());
+
+    // Tall enough for the card: only the view-wide keys.
+    let footer = footer_line(200, 44, &state);
+    assert_eq!(
+        footer,
+        "[[/]] Window (1h)  [f] Filter  [u] Include failing  [Tab] Toggle Infra  [/] Search"
+    );
+
+    // Too short for a card: its keys move to the footer.
+    let short = footer_line(200, 24, &state);
+    assert!(short.starts_with("[Enter] Describe  [y] YAML  [l] Logs  [s] Quick RCA  [a] Assistant  [r] Refresh"), "{short}");
+
+    // Infra tab: no card and no workload keys, but describe/yaml/refresh.
+    state.toggle_tab();
+    let infra = footer_line(200, 44, &state);
+    assert!(infra.starts_with("[Enter] Describe  [y] YAML  [r] Refresh  [[/]] Window"), "{infra}");
+    assert!(!infra.contains("Quick RCA"));
+}
+
+#[test]
+fn an_empty_list_says_why_it_is_empty() {
+    let _settings = common::env::isolate_settings();
+    let mut report = sample_report();
+    report.deployments.clear();
+    let mut state = ChangedViewState::new();
+    state.set_report(report.clone());
+    let strict = render_card(&state);
+    assert!(strict.contains("No workloads changed within the last 1h."));
+    assert!(strict.contains("or u to include workloads failing without a change"));
+
+    state.include_failing = true;
+    let wide = render_card(&state);
+    assert!(wide.contains("Workloads Changed or Failing in Window"));
+    assert!(wide.contains("No workloads changed or failing within the last 1h."));
+
+    // Rows exist, but the incident filter hides them: say so, not "none".
+    let mut state = ChangedViewState::new();
+    state.set_report(sample_report());
+    for _ in 0..2 {
+        state.cycle_filter(); // ALL -> CRASH -> OOM
+    }
+    let filtered = render_card(&state);
+    assert!(filtered.contains("No workloads in the window match the OOM filter."));
+    assert!(!filtered.contains("No workloads changed"));
 }

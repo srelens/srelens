@@ -87,3 +87,12 @@ pub struct SettingsGuard {
     _env: EnvGuard,
     _dir: tempfile::TempDir,
 }
+
+impl SettingsGuard {
+    /// Unset `name` for this test, restored on drop. For settings that also
+    /// read the environment, such as a provider's API key variable.
+    #[allow(dead_code)]
+    pub fn remove_env(&mut self, name: &'static str) {
+        self._env.remove(name);
+    }
+}

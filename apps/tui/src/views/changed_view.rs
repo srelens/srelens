@@ -7,12 +7,86 @@ use ratatui::{
 };
 use srelens_kube::changed::{
     AppDeploymentChange, ChangedTriageReport, FailureCategory, IncidentStatus, InfraChangeItem,
-    RolloutStatus,
+    PodIncidentDetail, RolloutStatus,
 };
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::theme::Theme;
 use crate::views::sanitize_span_text;
+
+/// The diagnostic card is drawn below the table only when the workspace is
+/// at least this tall; below it the footer carries the card's keys instead.
+pub const CARD_MIN_HEIGHT: u16 = 26;
+
+/// Symptom groups shown on the card before "+K other symptoms".
+const MAX_SYMPTOM_GROUPS: usize = 3;
+
+/// Pod names shown per symptom group before "+N more".
+const MAX_SAMPLE_PODS: usize = 2;
+
+/// Failing pods that share one symptom, e.g. 147 pods all
+/// "CrashLoopBackOff | exited with code 1".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymptomGroup {
+    pub status: String,
+    pub detail: String,
+    pub count: usize,
+    /// Up to [`MAX_SAMPLE_PODS`] pod names, in first-seen order.
+    pub sample_pods: Vec<String>,
+}
+
+impl SymptomGroup {
+    /// One line: the pod itself when it is alone, else the count and a
+    /// couple of names.
+    pub fn describe(&self) -> String {
+        let what = if self.detail.is_empty() {
+            self.status.clone()
+        } else {
+            format!("{} | {}", self.status, self.detail)
+        };
+        if self.count == 1 {
+            let pod = self
+                .sample_pods
+                .first()
+                .map(String::as_str)
+                .unwrap_or("pod");
+            return format!("{pod}: {what}");
+        }
+        let mut names = self.sample_pods.join(", ");
+        let rest = self.count.saturating_sub(self.sample_pods.len());
+        if rest > 0 {
+            names.push_str(&format!(", +{rest} more"));
+        }
+        format!("{what} — {} pods ({names})", self.count)
+    }
+}
+
+/// Group failing pods by what is wrong with them, keeping first-seen order,
+/// so a deployment of 150 identical crash-looping pods reads as one line.
+pub fn group_pod_symptoms(symptoms: &[PodIncidentDetail]) -> Vec<SymptomGroup> {
+    let mut groups: Vec<SymptomGroup> = Vec::new();
+    for ps in symptoms {
+        match groups
+            .iter_mut()
+            .find(|g| g.status == ps.status && g.detail == ps.detail_message)
+        {
+            Some(g) => {
+                g.count += 1;
+                if g.sample_pods.len() < MAX_SAMPLE_PODS {
+                    g.sample_pods.push(ps.pod_name.clone());
+                }
+            }
+            None => groups.push(SymptomGroup {
+                status: ps.status.clone(),
+                detail: ps.detail_message.clone(),
+                count: 1,
+                sample_pods: vec![ps.pod_name.clone()],
+            }),
+        }
+    }
+    groups
+}
 
 pub const WINDOWS: &[(&str, Duration)] = &[
     ("15m", Duration::from_secs(900)),
@@ -21,8 +95,6 @@ pub const WINDOWS: &[(&str, Duration)] = &[
     ("3h", Duration::from_secs(10800)),
     ("24h", Duration::from_secs(86400)),
 ];
-
-pub type VerdictFilter = IncidentFilter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncidentFilter {
@@ -67,8 +139,41 @@ pub enum ChangedTab {
     Infra,
 }
 
+/// Where one Quick AI RCA request stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuickRcaStatus {
+    Loading,
+    Ready {
+        root_cause: String,
+        /// Empty when the model ignored the two-line format; the whole
+        /// reply is then the root cause.
+        action_item: String,
+    },
+    Error(String),
+}
+
+/// A Quick AI RCA for one workload revision, as shown on its card.
+#[derive(Debug, Clone)]
+pub struct QuickRca {
+    /// The pod whose logs were sent, when there were any.
+    pub pod_name: Option<String>,
+    /// Which provider answered, shown so the reader knows where the
+    /// workload's logs went.
+    pub provider: String,
+    pub status: QuickRcaStatus,
+    pub updated_at: Instant,
+}
+
 pub struct ChangedViewState {
     pub report: Option<ChangedTriageReport>,
+    /// The context `report` was fetched from. The view outlives a context
+    /// switch, and regional clusters run workloads of the same name, so the
+    /// RCA cache is keyed by it.
+    pub context: String,
+    /// Quick AI RCA results by [`ChangedViewState::rca_key`]. Kept across
+    /// refreshes and navigation; a new revision gets a new key, so an answer
+    /// about the previous release is never shown as current.
+    pub ai_summaries: HashMap<String, QuickRca>,
     pub selected_idx: usize,
     pub infra_selected_idx: usize,
     pub active_tab: ChangedTab,
@@ -77,12 +182,17 @@ pub struct ChangedViewState {
     pub filter_query: String,
     pub window_idx: usize,
     pub incident_filter: IncidentFilter,
+    /// Also list workloads that did not change in the window but are failing
+    /// in it (`u`). Off by default: the window means "changed".
+    pub include_failing: bool,
 }
 
 impl ChangedViewState {
     pub fn new() -> Self {
         Self {
             report: None,
+            context: String::new(),
+            ai_summaries: HashMap::new(),
             selected_idx: 0,
             infra_selected_idx: 0,
             active_tab: ChangedTab::Deployments,
@@ -91,7 +201,21 @@ impl ChangedViewState {
             filter_query: String::new(),
             window_idx: 2, // Default to 1h
             incident_filter: IncidentFilter::All,
+            include_failing: false,
         }
+    }
+
+    /// Cache key for a workload's Quick AI RCA: cluster, namespace, kind,
+    /// name and revision.
+    pub fn rca_key(&self, d: &AppDeploymentChange) -> String {
+        format!(
+            "{}|{}/{}/{}@{}",
+            self.context, d.namespace, d.kind, d.app_name, d.current_revision
+        )
+    }
+
+    pub fn rca_for(&self, d: &AppDeploymentChange) -> Option<&QuickRca> {
+        self.ai_summaries.get(&self.rca_key(d))
     }
 
     pub fn current_window(&self) -> Duration {
@@ -142,8 +266,10 @@ impl ChangedViewState {
         self.selected_idx = 0;
     }
 
-    pub fn cycle_verdict_filter(&mut self) {
-        self.cycle_filter();
+    pub fn toggle_include_failing(&mut self) {
+        self.include_failing = !self.include_failing;
+        self.selected_idx = 0;
+        self.is_loading = true;
     }
 
     pub fn toggle_tab(&mut self) {
@@ -303,16 +429,17 @@ impl ChangedViewState {
 }
 
 pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) {
+    let (banner_block, health, controls) = summary_banner(state);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Summary banner
+            Constraint::Length(banner_height(&health, &controls, area.width)),
             Constraint::Min(8),    // Main workspace
             Constraint::Length(1), // Footer shortcuts
         ])
         .split(area);
 
-    render_summary_banner(f, chunks[0], state);
+    render_summary_banner(f, chunks[0], banner_block, health, controls);
 
     if state.is_loading && state.report.is_none() {
         let loading_block = Block::default()
@@ -335,7 +462,7 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
             .block(loading_block)
             .wrap(Wrap { trim: true });
         f.render_widget(loading_p, chunks[1]);
-        render_footer(f, chunks[2], state);
+        render_footer(f, chunks[2], state, false);
         return;
     }
 
@@ -350,7 +477,7 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
             .block(err_block)
             .wrap(Wrap { trim: true });
         f.render_widget(err_p, chunks[1]);
-        render_footer(f, chunks[2], state);
+        render_footer(f, chunks[2], state, false);
         return;
     }
 
@@ -359,10 +486,15 @@ pub fn render_changed_view(f: &mut Frame, area: Rect, state: &ChangedViewState) 
         ChangedTab::Infra => render_infra_tab(f, chunks[1], state),
     }
 
-    render_footer(f, chunks[2], state);
+    let card_visible =
+        state.active_tab == ChangedTab::Deployments && chunks[1].height >= CARD_MIN_HEIGHT;
+    render_footer(f, chunks[2], state, card_visible);
 }
 
-fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
+/// The banner's block, its health badges, and its controls (window, filter,
+/// scope, infra). They share one line when it fits and take two when not, so
+/// the controls are never clipped off a narrow terminal.
+fn summary_banner(state: &ChangedViewState) -> (Block<'static>, Line<'static>, Line<'static>) {
     let (crashing, oom, error, pending, rolling, healthy) = if let Some(r) = &state.report {
         (
             r.summary.crashing_count,
@@ -480,8 +612,10 @@ fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
                 Style::default().fg(Theme::dim())
             },
         ),
-        Span::raw("  │  "),
-        Span::styled("Window: ", Theme::header_label()),
+    ]);
+
+    let controls = Line::from(vec![
+        Span::styled(" Window: ", Theme::header_label()),
         Span::styled(
             format!("[{}]", state.current_window_label()),
             Style::default()
@@ -497,6 +631,18 @@ fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  │  "),
+        Span::styled("Scope: ", Theme::header_label()),
+        Span::styled(
+            if state.include_failing {
+                "[CHANGED + FAILING]"
+            } else {
+                "[CHANGED]"
+            },
+            Style::default()
+                .fg(Theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  │  "),
         Span::styled("Infra: ", Theme::header_label()),
         Span::styled(
             format!("{infra_count}"),
@@ -506,14 +652,40 @@ fn render_summary_banner(f: &mut Frame, area: Rect, state: &ChangedViewState) {
         ),
     ]);
 
-    let p = Paragraph::new(vec![line1])
-        .block(block)
-        .wrap(Wrap { trim: true });
+    (block, line1, controls)
+}
+
+/// Rows the banner needs at `width`: one content line, or two.
+fn banner_height(health: &Line, controls: &Line, width: u16) -> u16 {
+    let inner = usize::from(width.saturating_sub(2));
+    if health.width() + 2 + controls.width() <= inner {
+        3
+    } else {
+        4
+    }
+}
+
+fn render_summary_banner(
+    f: &mut Frame,
+    area: Rect,
+    block: Block<'static>,
+    health: Line<'static>,
+    controls: Line<'static>,
+) {
+    let lines = if area.height >= 4 {
+        vec![health, controls]
+    } else {
+        let mut spans = health.spans;
+        spans.push(Span::raw("  "));
+        spans.extend(controls.spans);
+        vec![Line::from(spans)]
+    };
+    let p = Paragraph::new(lines).block(block);
     f.render_widget(p, area);
 }
 
 fn render_deployments_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
-    if area.height >= 26 {
+    if area.height >= CARD_MIN_HEIGHT {
         // Split vertically into upper table (45%) and lower diagnostic card (55%)
         let sub = Layout::default()
             .direction(Direction::Vertical)
@@ -534,20 +706,35 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Theme::border()))
         .title(Span::styled(
-            " Workloads Changed in Window ",
+            if state.include_failing {
+                " Workloads Changed or Failing in Window "
+            } else {
+                " Workloads Changed in Window "
+            },
             Theme::table_header(),
         ));
 
     if deps.is_empty() {
-        let msg = if state.filter_query.is_empty() {
+        let msg = if !state.filter_query.is_empty() {
             format!(
-                "No workloads modified within the last {}. Use [ or ] to broaden the time window.",
+                "No workloads matching query '{}'. Press / to change search or Esc to clear.",
+                state.filter_query
+            )
+        } else if state.incident_filter != IncidentFilter::All {
+            // Workloads may be there; the filter hides them. Say which.
+            format!(
+                "No workloads in the window match the {} filter. Press f to cycle it back to ALL.",
+                state.incident_filter.label()
+            )
+        } else if state.include_failing {
+            format!(
+                "No workloads changed or failing within the last {}. Use [ or ] to broaden the time window.",
                 state.current_window_label()
             )
         } else {
             format!(
-                "No workloads matching query '{}'. Press / to change search or Esc to clear.",
-                state.filter_query
+                "No workloads changed within the last {}. Use [ or ] to broaden the time window, or u to include workloads failing without a change.",
+                state.current_window_label()
             )
         };
         let p = Paragraph::new(msg)
@@ -646,12 +833,19 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
                 "Job" => format!("{} (job)", d.app_name),
                 _ => d.app_name.clone(),
             };
-            let name_cell = Cell::from(Span::styled(
+            let mut name_spans = vec![Span::styled(
                 name_display,
                 Style::default()
                     .fg(Theme::fg())
                     .add_modifier(Modifier::BOLD),
-            ));
+            )];
+            if d.unchanged_in_window {
+                name_spans.push(Span::styled(
+                    " (unchanged)",
+                    Style::default().fg(Theme::dim()),
+                ));
+            }
+            let name_cell = Cell::from(Line::from(name_spans));
             let ns_cell = Cell::from(Span::styled(
                 &d.namespace,
                 Style::default().fg(Theme::dim()),
@@ -712,9 +906,25 @@ fn render_deployments_table(f: &mut Frame, area: Rect, state: &ChangedViewState)
         })
         .collect();
 
+    // Wide enough for the longest name and its "(sts)"/"(unchanged)"
+    // markers, within reason; the ROOT CAUSE column takes the rest.
+    let workload_width = deps
+        .iter()
+        .map(|d| {
+            let kind_tag = match d.kind.as_str() {
+                "StatefulSet" | "CronJob" => 5,
+                "Job" => 6,
+                _ => 0,
+            };
+            let unchanged_tag = if d.unchanged_in_window { 12 } else { 0 };
+            d.app_name.chars().count() + kind_tag + unchanged_tag
+        })
+        .max()
+        .unwrap_or(0)
+        .clamp(22, 44) as u16;
     let widths = [
         Constraint::Length(12),
-        Constraint::Length(22),
+        Constraint::Length(workload_width),
         Constraint::Length(14),
         Constraint::Length(16),
         Constraint::Length(9),
@@ -744,7 +954,7 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
 
     let Some(d) = state.selected_deployment() else {
         let p = Paragraph::new(
-            "Select a workload above to inspect root cause, GitOps commits, and error logs.",
+            "Select a workload above to inspect its root cause, GitOps release, and symptoms.",
         )
         .style(Style::default().fg(Theme::dim()))
         .block(block)
@@ -789,6 +999,16 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         ),
     ]));
 
+    if d.unchanged_in_window {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Not changed in the last {}; shown because it is failing now (u to hide).",
+                state.current_window_label()
+            ),
+            Style::default().fg(Theme::dim()),
+        )));
+    }
+
     // Line 1b: ArgoCD Rollout in Window (if detected)
     if let Some(ref argo_msg) = d.argo_rollout_in_window {
         lines.push(Line::from(vec![
@@ -825,7 +1045,11 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
             Span::raw("   "),
             Span::styled("Synced: ", Theme::header_label()),
             Span::styled(
-                format!("{} ago", g.sync_age),
+                if g.sync_age == "-" {
+                    "never".to_string()
+                } else {
+                    format!("{} ago", sanitize_span_text(&g.sync_age))
+                },
                 Style::default().fg(Theme::dim()),
             ),
         ]));
@@ -865,25 +1089,37 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
         ),
     ]));
 
-    // Line 4: Symptoms (multi-line pod breakdown)
+    // Symptoms, grouped: one line per distinct failure, not one per pod.
+    // The full logs are one key away (`l`), so the card carries none.
     if !d.pod_symptoms.is_empty() {
+        let groups = group_pod_symptoms(&d.pod_symptoms);
+        let n = d.pod_symptoms.len();
         lines.push(Line::from(vec![Span::styled(
-            "Symptoms:",
+            format!(
+                "Symptoms ({n} pod{} failing):",
+                if n == 1 { "" } else { "s" }
+            ),
             Style::default()
                 .fg(Theme::red())
                 .add_modifier(Modifier::BOLD),
         )]));
-        for ps in &d.pod_symptoms {
-            let text = if !ps.detail_message.is_empty() {
-                format!("  • {}: {} | {}", ps.pod_name, ps.status, ps.detail_message)
-            } else {
-                format!("  • {}: {}", ps.pod_name, ps.status)
-            };
+        for g in groups.iter().take(MAX_SYMPTOM_GROUPS) {
             lines.push(Line::from(vec![Span::styled(
-                sanitize_span_text(&text),
+                sanitize_span_text(&format!("  • {}", g.describe())),
                 Style::default().fg(Theme::fg()),
             )]));
         }
+        let hidden = groups.len().saturating_sub(MAX_SYMPTOM_GROUPS);
+        if hidden > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  +{hidden} other symptom{}",
+                    if hidden == 1 { "" } else { "s" }
+                ),
+                Style::default().fg(Theme::dim()),
+            )));
+        }
+        lines.push(Line::from(""));
     } else if !d.primary_symptoms.is_empty() {
         lines.push(Line::from(vec![
             Span::styled(
@@ -897,67 +1133,71 @@ fn render_deployment_diagnostic_card(f: &mut Frame, area: Rect, state: &ChangedV
                 Style::default().fg(Theme::fg()),
             ),
         ]));
+        lines.push(Line::from(""));
     }
 
-    // Line 5: Inline Error Log Snippet (if available) with empty line before and after
-    if let Some(ref log_lines) = d.error_log_snippet {
-        let first_pod = d
-            .pod_symptoms
-            .first()
-            .map(|ps| ps.pod_name.as_str())
-            .or_else(|| d.failing_pod_names.first().map(|s| s.as_str()))
-            .unwrap_or("pod");
-        lines.push(Line::from(""));
+    // Quick AI RCA (on demand, `s`)
+    if let Some(rca) = state.rca_for(d) {
+        let mut source = rca
+            .pod_name
+            .clone()
+            .unwrap_or_else(|| "no logs".to_string());
+        source.push_str(", ");
+        source.push_str(&rca.provider);
+        let suffix = match rca.status {
+            QuickRcaStatus::Ready { .. } => format!(
+                " [cached {} ago]",
+                srelens_kube::format_age(rca.updated_at.elapsed().as_secs() as i64)
+            ),
+            _ => String::new(),
+        };
         lines.push(Line::from(vec![Span::styled(
-            format!("📜 Error Log Snippet ({first_pod}):"),
+            format!("🤖 Quick AI RCA ({}){suffix}:", sanitize_span_text(&source)),
             Style::default()
-                .fg(Theme::yellow())
+                .fg(Theme::cyan())
                 .add_modifier(Modifier::BOLD),
         )]));
-        for line in log_lines.iter().take(4) {
-            lines.push(Line::from(vec![
-                Span::styled("   │ ", Style::default().fg(Theme::dim())),
-                Span::styled(sanitize_span_text(line), Style::default().fg(Theme::red())),
-            ]));
+        match &rca.status {
+            QuickRcaStatus::Loading => lines.push(Line::from(Span::styled(
+                "   ⚡ Analyzing termination state, events, and error logs...",
+                Style::default().fg(Theme::dim()),
+            ))),
+            QuickRcaStatus::Ready {
+                root_cause,
+                action_item,
+            } => {
+                lines.push(Line::from(vec![
+                    Span::styled("   • Root Cause: ", Theme::header_label()),
+                    Span::styled(
+                        sanitize_span_text(root_cause),
+                        Style::default().fg(Theme::fg()),
+                    ),
+                ]));
+                if !action_item.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("   • Action Item: ", Theme::header_label()),
+                        Span::styled(
+                            sanitize_span_text(action_item),
+                            Style::default().fg(Theme::green()),
+                        ),
+                    ]));
+                }
+            }
+            QuickRcaStatus::Error(msg) => lines.push(Line::from(Span::styled(
+                format!("   ⚠️ {}", sanitize_span_text(msg)),
+                Style::default()
+                    .fg(Theme::yellow())
+                    .add_modifier(Modifier::BOLD),
+            ))),
         }
         lines.push(Line::from(""));
-    }
-
-    // Line 6+: Correlated Events
-    if !d.top_events.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            "Correlated Events: ",
-            Theme::header_label(),
-        )]));
-        for ev in d.top_events.iter().take(2) {
-            let ev_style = if ev.type_ == "Warning" {
-                Style::default().fg(Theme::yellow())
-            } else {
-                Style::default().fg(Theme::dim())
-            };
-            lines.push(Line::from(vec![
-                Span::raw("  • "),
-                Span::styled(
-                    format!("[{}] ", ev.reason),
-                    ev_style.add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    sanitize_span_text(&ev.message),
-                    Style::default().fg(Theme::fg()),
-                ),
-                Span::styled(
-                    format!(" (x{}, {})", ev.count, ev.age),
-                    Style::default().fg(Theme::dim()),
-                ),
-            ]));
-        }
     }
 
     // Actions Hint
     lines.push(Line::from(vec![
         Span::styled("Actions: ", Theme::header_label()),
         Span::styled(
-            "[l] Full Logs   [y] YAML Diff   [d] Describe   [a] AI RCA   [r] Refresh",
+            "[Enter/d] Describe   [l] Logs   [y] YAML   [s] Quick AI RCA   [a] Assistant   [r] Refresh",
             Style::default()
                 .fg(Theme::accent())
                 .add_modifier(Modifier::BOLD),
@@ -1079,75 +1319,51 @@ fn render_infra_tab(f: &mut Frame, area: Rect, state: &ChangedViewState) {
     f.render_stateful_widget(table, area, &mut table_state);
 }
 
-fn render_footer(f: &mut Frame, area: Rect, state: &ChangedViewState) {
-    let spans = vec![
-        Span::styled(
-            "[Enter] ",
-            Style::default()
-                .fg(Theme::cyan())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Inspect  ", Style::default().fg(Theme::dim())),
-        Span::styled(
-            "[l] ",
-            Style::default()
-                .fg(Theme::cyan())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Logs  ", Style::default().fg(Theme::dim())),
-        Span::styled(
-            "[r] ",
-            Style::default()
-                .fg(Theme::cyan())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Refresh  ", Style::default().fg(Theme::dim())),
-        Span::styled(
-            "[y] ",
-            Style::default()
-                .fg(Theme::cyan())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("YAML  ", Style::default().fg(Theme::dim())),
-        Span::styled(
-            "[a] ",
-            Style::default()
-                .fg(Theme::cyan())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("AI RCA  ", Style::default().fg(Theme::dim())),
-        Span::styled(
-            "[[/]] ",
+/// The footer carries only keys not already on screen. The card's Actions
+/// line lists the per-workload keys, so they appear here only when there is
+/// no card: on the Infra tab, or when the pane is too short to draw one.
+/// Cmd, Help and Back live in the status bar below.
+fn render_footer(f: &mut Frame, area: Rect, state: &ChangedViewState, card_visible: bool) {
+    let mut keys: Vec<(String, String)> = Vec::new();
+    if !card_visible {
+        keys.push(("[Enter]".into(), "Describe".into()));
+        keys.push(("[y]".into(), "YAML".into()));
+        if state.active_tab == ChangedTab::Deployments {
+            keys.push(("[l]".into(), "Logs".into()));
+            keys.push(("[s]".into(), "Quick RCA".into()));
+            keys.push(("[a]".into(), "Assistant".into()));
+        }
+        keys.push(("[r]".into(), "Refresh".into()));
+    }
+    keys.push((
+        "[[/]]".into(),
+        format!("Window ({})", state.current_window_label()),
+    ));
+    keys.push(("[f]".into(), "Filter".into()));
+    keys.push((
+        "[u]".into(),
+        if state.include_failing {
+            "Hide unchanged".into()
+        } else {
+            "Include failing".into()
+        },
+    ));
+    keys.push(("[Tab]".into(), "Toggle Infra".into()));
+    keys.push(("[/]".into(), "Search".into()));
+
+    let mut spans = Vec::new();
+    for (key, label) in keys {
+        spans.push(Span::styled(
+            format!("{key} "),
             Style::default()
                 .fg(Theme::accent())
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("Window ({})  ", state.current_window_label()),
+        ));
+        spans.push(Span::styled(
+            format!("{label}  "),
             Style::default().fg(Theme::dim()),
-        ),
-        Span::styled(
-            "[f] ",
-            Style::default()
-                .fg(Theme::accent())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Filter  ", Style::default().fg(Theme::dim())),
-        Span::styled(
-            "[Tab] ",
-            Style::default()
-                .fg(Theme::accent())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Toggle Infra  ", Style::default().fg(Theme::dim())),
-        Span::styled(
-            "[/] ",
-            Style::default()
-                .fg(Theme::cyan())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Search", Style::default().fg(Theme::dim())),
-    ];
+        ));
+    }
     let p = Paragraph::new(Line::from(spans)).wrap(Wrap { trim: true });
     f.render_widget(p, area);
 }

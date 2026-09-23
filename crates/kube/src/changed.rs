@@ -185,6 +185,16 @@ pub struct AppDeploymentChange {
     pub argo_rollout_in_window: Option<String>,
     #[serde(rename = "errorLogSnippet")]
     pub error_log_snippet: Option<Vec<String>>,
+    /// The pod the snippet was tailed from; not always the first failing
+    /// pod, because a Pending or image-pull pod has no logs to tail.
+    #[serde(default, rename = "errorLogPod")]
+    pub error_log_pod: Option<String>,
+    #[serde(default, rename = "errorLogContainer")]
+    pub error_log_container: Option<String>,
+    /// Nothing about this workload changed in the window; it is reported
+    /// only because it is failing in it (see [`TriageOptions`]).
+    #[serde(default, rename = "unchangedInWindow")]
+    pub unchanged_in_window: bool,
     #[serde(rename = "deployedAt")]
     pub deployed_at: Option<String>,
     #[serde(rename = "deployedAge")]
@@ -264,6 +274,18 @@ pub struct TriageSummary {
     pub headline_message: String,
 }
 
+/// What a triage run includes and fetches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TriageOptions {
+    /// Also report workloads that did not change in the window but are
+    /// failing in it (a Warning on a pod or the current ReplicaSet). They
+    /// are marked [`AppDeploymentChange::unchanged_in_window`].
+    pub include_failing: bool,
+    /// Tail a five-line log snippet per failing workload. The TUI leaves
+    /// this off (its card links to the full logs); MCP callers get it.
+    pub log_snippets: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ChangedTriageReport {
     #[serde(rename = "windowSeconds")]
@@ -275,6 +297,10 @@ pub struct ChangedTriageReport {
     pub deployments: Vec<AppDeploymentChange>,
     #[serde(rename = "infraChanges")]
     pub infra_changes: Vec<InfraChangeItem>,
+    /// Whether failing-but-unchanged workloads were included, so a reader
+    /// can tell a stale answer from a current one.
+    #[serde(default, rename = "includesFailing")]
+    pub includes_failing: bool,
 }
 
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
@@ -548,6 +574,155 @@ pub fn analyze_pod_failure(pod: &Pod, pod_events: &[&Event]) -> (FailureCategory
     (FailureCategory::None, None)
 }
 
+/// Whether any of `events` is a Warning that last fired at or after `cutoff`.
+fn warning_in_window(events: Option<&Vec<&Event>>, cutoff: &Timestamp) -> bool {
+    events.into_iter().flatten().any(|ev| {
+        ev.type_.as_deref() == Some("Warning")
+            && event_last_timestamp(ev).is_some_and(|t| t >= *cutoff)
+    })
+}
+
+/// Whether a Warning fired on any of `pods` inside the window. A workload
+/// rolled out days ago that started crash-looping tonight has no new
+/// ReplicaSet, but its pods' BackOff warnings are recent, and that is the
+/// workload the page is about. Pod creation alone is not counted: an HPA
+/// scale-up or a rescheduled pod is not an incident.
+fn pods_warned_in_window(
+    pods: &[&Pod],
+    events_by_object: &HashMap<(String, String, String), Vec<&Event>>,
+    ns: &str,
+    cutoff: &Timestamp,
+) -> bool {
+    pods.iter().any(|p| {
+        let name = p.metadata.name.clone().unwrap_or_default();
+        warning_in_window(
+            events_by_object.get(&("Pod".to_string(), ns.to_string(), name)),
+            cutoff,
+        )
+    })
+}
+
+/// The container whose logs explain a pod's failure: the first one that is
+/// waiting on an error, terminated non-zero now or last time, else the first
+/// that has restarted, else the pod's first container. The log API refuses a
+/// multi-container pod without a container name, so this must be named.
+pub fn failing_container_name(pod: &Pod) -> Option<String> {
+    use k8s_openapi::api::core::v1::ContainerState;
+    let exited_non_zero = |st: Option<&ContainerState>| {
+        st.and_then(|s| s.terminated.as_ref())
+            .is_some_and(|t| t.exit_code != 0)
+    };
+    let statuses = pod
+        .status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref());
+    if let Some(list) = statuses {
+        let failing = list
+            .iter()
+            .find(|cs| {
+                let waiting_on_error = cs
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.waiting.as_ref())
+                    .and_then(|w| w.reason.as_deref())
+                    .is_some_and(|r| r != "ContainerCreating" && r != "PodInitializing");
+                waiting_on_error
+                    || exited_non_zero(cs.state.as_ref())
+                    || exited_non_zero(cs.last_state.as_ref())
+            })
+            .or_else(|| list.iter().find(|cs| cs.restart_count > 0));
+        if let Some(cs) = failing {
+            return Some(cs.name.clone());
+        }
+    }
+    pod.spec
+        .as_ref()
+        .and_then(|s| s.containers.first())
+        .map(|c| c.name.clone())
+}
+
+/// Pod statuses whose container actually ran, so a log tail has something to
+/// show. Pending, image-pull and config-error pods never started a process.
+fn status_has_logs(status: &str) -> bool {
+    matches!(status, "CrashLoopBackOff" | "OOMKilled" | "Error")
+}
+
+/// The pod and container whose logs explain a workload's failure: the first
+/// failing pod that actually ran a process, and its failing container.
+/// Chosen here, from the pods already listed, so `l` and Quick AI RCA know
+/// where to look without a log call on every refresh.
+fn log_target(symptoms: &[PodIncidentDetail], pods: &[&Pod]) -> (Option<String>, Option<String>) {
+    let Some(sym) = symptoms.iter().find(|s| status_has_logs(&s.status)) else {
+        return (None, None);
+    };
+    let container = pods
+        .iter()
+        .find(|p| p.metadata.name.as_deref() == Some(sym.pod_name.as_str()))
+        .and_then(|p| failing_container_name(p));
+    (Some(sym.pod_name.clone()), container)
+}
+
+/// Match a workload to the ArgoCD Application that manages it, by the app's
+/// resource list or by the instance label, and describe its last sync.
+///
+/// The second value is set only when that sync finished inside the window:
+/// "a release landed during the incident" is a claim about time, and an app
+/// that last synced a week ago must not make it.
+fn gitops_release_for(
+    argo_apps: &[ArgoApplication],
+    kind: &str,
+    name: &str,
+    ns: &str,
+    labels: Option<&std::collections::BTreeMap<String, String>>,
+    now: Timestamp,
+    cutoff: Option<&Timestamp>,
+) -> (Option<GitOpsReleaseInfo>, Option<String>) {
+    let instance = labels.and_then(|l| {
+        l.get("app.kubernetes.io/instance")
+            .or_else(|| l.get("argocd.argoproj.io/instance"))
+    });
+    let Some(app) = argo_apps.iter().find(|app| {
+        app.resources
+            .iter()
+            .any(|r| r.kind == kind && r.name == name && r.namespace == ns)
+            || instance.is_some_and(|v| v == &app.name)
+    }) else {
+        return (None, None);
+    };
+
+    let short_rev: String = app.sync_revision.chars().take(7).collect();
+    let synced_at = app.last_sync_time.parse::<Timestamp>().ok();
+    let sync_age = match synced_at {
+        Some(ts) => crate::format_age(now.duration_since(ts).as_secs()),
+        None if app.last_sync_time.is_empty() => "-".to_string(),
+        None => app.last_sync_time.clone(),
+    };
+    let rollout_in_window = match (synced_at, cutoff) {
+        (Some(ts), Some(cutoff)) if ts >= *cutoff && !short_rev.is_empty() => {
+            Some(format!("rev {short_rev} synced {sync_age} ago"))
+        }
+        _ => None,
+    };
+
+    let info = GitOpsReleaseInfo {
+        app_name: app.name.clone(),
+        sync_status: app.sync_status.clone(),
+        health_status: app.health_status.clone(),
+        repo_url: app.repo_url.clone(),
+        target_revision: app.target_revision.clone(),
+        sync_revision: short_rev,
+        sync_age,
+        sync_message: if !app.operation_message.is_empty() {
+            Some(app.operation_message.clone())
+        } else if !app.health_message.is_empty() {
+            Some(app.health_message.clone())
+        } else {
+            None
+        },
+    };
+    (Some(info), rollout_in_window)
+}
+
 fn evaluate_pod_failures(
     pods: &[&Pod],
     events_by_object: &HashMap<(String, String, String), Vec<&Event>>,
@@ -582,6 +757,7 @@ fn evaluate_pod_failures(
         let mut is_pod_failing = false;
         let mut pod_status_label = String::new();
         let mut pod_error_msg = String::new();
+        let mut exited_non_zero = false;
 
         if let Some(ref st) = p.status {
             if st.phase.as_deref() == Some("Pending") {
@@ -634,6 +810,7 @@ fn evaluate_pod_failures(
                             pod_error_msg = "exit code 137".to_string();
                         } else if term.exit_code != 0 {
                             is_pod_failing = true;
+                            exited_non_zero = true;
                             if pod_status_label.is_empty() {
                                 pod_status_label = "Error".to_string();
                             }
@@ -653,6 +830,7 @@ fn evaluate_pod_failures(
                             pod_error_msg = "exit code 137".to_string();
                         } else if term.exit_code != 0 {
                             is_pod_failing = true;
+                            exited_non_zero = true;
                             if pod_status_label.is_empty() {
                                 pod_status_label = "Error".to_string();
                             }
@@ -683,6 +861,13 @@ fn evaluate_pod_failures(
             if let Some(d) = detail {
                 pod_error_msg = d;
             }
+        }
+
+        // Between crashes a container is Running with a non-zero last exit.
+        // That is still a crash loop; without counting it the workload's
+        // status fell through to Unknown and flickered on every refresh.
+        if exited_non_zero && pod_status_label == "Error" {
+            crash_loop_count += 1;
         }
 
         if is_pod_failing {
@@ -736,6 +921,7 @@ pub fn evaluate_changed_triage(
     window: Duration,
     now: Timestamp,
     namespace: Option<String>,
+    opts: TriageOptions,
 ) -> ChangedTriageReport {
     let window_secs = window.as_secs();
     let cutoff_ts = now
@@ -832,7 +1018,11 @@ pub fn evaluate_changed_triage(
     }
 
     let mut deployment_changes = Vec::new();
-    let mut deployments_seen = std::collections::HashSet::new();
+    // Every object whose events already sit on a workload's card, so the
+    // Infra tab does not repeat them. Keyed by kind as well as name: a
+    // ReplicaSet or Pod never shares its owner's name.
+    let mut tracked_objects: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
 
     // 4a. Examine each Deployment
     for dep in deployments {
@@ -843,7 +1033,6 @@ pub fn evaluate_changed_triage(
             }
         }
         let dep_name = dep.metadata.name.clone().unwrap_or_default();
-        deployments_seen.insert((dep_ns.clone(), dep_name.clone()));
 
         let mut owned_rs = rs_by_deployment
             .get(&(dep_ns.clone(), dep_name.clone()))
@@ -893,8 +1082,49 @@ pub fn evaluate_changed_triage(
             }
         }
 
+        let current_rs_name = current_rs
+            .and_then(|rs| rs.metadata.name.as_deref())
+            .unwrap_or("");
+        let current_pods = pods_by_rs
+            .get(&(dep_ns.clone(), current_rs_name.to_string()))
+            .cloned()
+            .unwrap_or_default();
+
+        // Not rolled out in the window, but failing in it: a Warning on the
+        // current ReplicaSet (FailedCreate on a quota) or on one of its pods.
+        // Only when asked for; by default the window means "changed".
+        let mut unchanged_in_window = false;
+        if !in_window && opts.include_failing {
+            if let Some(ref cutoff) = cutoff_ts {
+                in_window =
+                    warning_in_window(
+                        events_by_object.get(&(
+                            "ReplicaSet".to_string(),
+                            dep_ns.clone(),
+                            current_rs_name.to_string(),
+                        )),
+                        cutoff,
+                    ) || pods_warned_in_window(&current_pods, &events_by_object, &dep_ns, cutoff);
+                unchanged_in_window = in_window;
+            }
+        }
+
         if !in_window {
             continue;
+        }
+
+        tracked_objects.insert(("Deployment".to_string(), dep_ns.clone(), dep_name.clone()));
+        for rs in &owned_rs {
+            let rs_name = rs.metadata.name.clone().unwrap_or_default();
+            for p in pods_by_rs
+                .get(&(dep_ns.clone(), rs_name.clone()))
+                .into_iter()
+                .flatten()
+            {
+                let pod_name = p.metadata.name.clone().unwrap_or_default();
+                tracked_objects.insert(("Pod".to_string(), dep_ns.clone(), pod_name));
+            }
+            tracked_objects.insert(("ReplicaSet".to_string(), dep_ns.clone(), rs_name));
         }
 
         let current_images = current_rs.map(extract_container_images).unwrap_or_default();
@@ -938,14 +1168,6 @@ pub fn evaluate_changed_triage(
                 }
             }
         }
-
-        let current_rs_name = current_rs
-            .and_then(|rs| rs.metadata.name.as_deref())
-            .unwrap_or("");
-        let current_pods = pods_by_rs
-            .get(&(dep_ns.clone(), current_rs_name.to_string()))
-            .cloned()
-            .unwrap_or_default();
 
         let (
             failing_pod_names,
@@ -1004,56 +1226,15 @@ pub fn evaluate_changed_triage(
             }
         }
 
-        let matched_argo = argo_apps.iter().find(|app| {
-            app.resources
-                .iter()
-                .any(|r| r.kind == "Deployment" && r.name == dep_name && r.namespace == dep_ns)
-                || dep
-                    .metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|l| {
-                        l.get("app.kubernetes.io/instance")
-                            .or_else(|| l.get("argocd.argoproj.io/instance"))
-                    })
-                    .map(|val| val == &app.name)
-                    .unwrap_or(false)
-        });
-
-        let mut argo_rollout_in_window = None;
-        let gitops = matched_argo.map(|app| {
-            if !app.sync_revision.is_empty() {
-                argo_rollout_in_window = Some(format!(
-                    "ArgoCD Rollout: rev {} ({})",
-                    app.sync_revision.chars().take(7).collect::<String>(),
-                    if app.last_sync_time.is_empty() {
-                        "recently"
-                    } else {
-                        &app.last_sync_time
-                    }
-                ));
-            }
-            GitOpsReleaseInfo {
-                app_name: app.name.clone(),
-                sync_status: app.sync_status.clone(),
-                health_status: app.health_status.clone(),
-                repo_url: app.repo_url.clone(),
-                target_revision: app.target_revision.clone(),
-                sync_revision: app.sync_revision.chars().take(7).collect(),
-                sync_age: if app.last_sync_time.is_empty() {
-                    "-".to_string()
-                } else {
-                    app.last_sync_time.clone()
-                },
-                sync_message: if !app.operation_message.is_empty() {
-                    Some(app.operation_message.clone())
-                } else if !app.health_message.is_empty() {
-                    Some(app.health_message.clone())
-                } else {
-                    None
-                },
-            }
-        });
+        let (gitops, argo_rollout_in_window) = gitops_release_for(
+            argo_apps,
+            "Deployment",
+            &dep_name,
+            &dep_ns,
+            dep.metadata.labels.as_ref(),
+            now,
+            cutoff_ts.as_ref(),
+        );
 
         let rollout_status = if desired_replicas == 0 {
             RolloutStatus::ScaledDown
@@ -1126,6 +1307,7 @@ pub fn evaluate_changed_triage(
             "Healthy".to_string()
         };
 
+        let (error_log_pod, error_log_container) = log_target(&pod_symptoms, &current_pods);
         deployment_changes.push(AppDeploymentChange {
             app_name: dep_name,
             kind: "Deployment".to_string(),
@@ -1136,6 +1318,9 @@ pub fn evaluate_changed_triage(
             gitops,
             argo_rollout_in_window,
             error_log_snippet: None,
+            error_log_pod,
+            error_log_container,
+            unchanged_in_window,
             deployed_at,
             deployed_age,
             current_revision,
@@ -1169,7 +1354,6 @@ pub fn evaluate_changed_triage(
             }
         }
         let sts_name = sts.metadata.name.clone().unwrap_or_default();
-        deployments_seen.insert((sts_ns.clone(), sts_name.clone()));
 
         let mut in_window = false;
         let mut deployed_at = None;
@@ -1215,9 +1399,23 @@ pub fn evaluate_changed_triage(
                 }
             }
         }
+        let mut unchanged_in_window = false;
+        if !in_window && opts.include_failing {
+            if let Some(ref cutoff) = cutoff_ts {
+                in_window =
+                    pods_warned_in_window(&current_pods, &events_by_object, &sts_ns, cutoff);
+                unchanged_in_window = in_window;
+            }
+        }
 
         if !in_window {
             continue;
+        }
+
+        tracked_objects.insert(("StatefulSet".to_string(), sts_ns.clone(), sts_name.clone()));
+        for p in &current_pods {
+            let pod_name = p.metadata.name.clone().unwrap_or_default();
+            tracked_objects.insert(("Pod".to_string(), sts_ns.clone(), pod_name));
         }
 
         let current_images = extract_sts_container_images(sts);
@@ -1278,56 +1476,15 @@ pub fn evaluate_changed_triage(
             }
         }
 
-        let matched_argo = argo_apps.iter().find(|app| {
-            app.resources
-                .iter()
-                .any(|r| r.kind == "StatefulSet" && r.name == sts_name && r.namespace == sts_ns)
-                || sts
-                    .metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|l| {
-                        l.get("app.kubernetes.io/instance")
-                            .or_else(|| l.get("argocd.argoproj.io/instance"))
-                    })
-                    .map(|val| val == &app.name)
-                    .unwrap_or(false)
-        });
-
-        let mut argo_rollout_in_window = None;
-        let gitops = matched_argo.map(|app| {
-            if !app.sync_revision.is_empty() {
-                argo_rollout_in_window = Some(format!(
-                    "ArgoCD Rollout: rev {} ({})",
-                    app.sync_revision.chars().take(7).collect::<String>(),
-                    if app.last_sync_time.is_empty() {
-                        "recently"
-                    } else {
-                        &app.last_sync_time
-                    }
-                ));
-            }
-            GitOpsReleaseInfo {
-                app_name: app.name.clone(),
-                sync_status: app.sync_status.clone(),
-                health_status: app.health_status.clone(),
-                repo_url: app.repo_url.clone(),
-                target_revision: app.target_revision.clone(),
-                sync_revision: app.sync_revision.chars().take(7).collect(),
-                sync_age: if app.last_sync_time.is_empty() {
-                    "-".to_string()
-                } else {
-                    app.last_sync_time.clone()
-                },
-                sync_message: if !app.operation_message.is_empty() {
-                    Some(app.operation_message.clone())
-                } else if !app.health_message.is_empty() {
-                    Some(app.health_message.clone())
-                } else {
-                    None
-                },
-            }
-        });
+        let (gitops, argo_rollout_in_window) = gitops_release_for(
+            argo_apps,
+            "StatefulSet",
+            &sts_name,
+            &sts_ns,
+            sts.metadata.labels.as_ref(),
+            now,
+            cutoff_ts.as_ref(),
+        );
 
         let rollout_status = if desired_replicas == 0 {
             RolloutStatus::ScaledDown
@@ -1394,6 +1551,7 @@ pub fn evaluate_changed_triage(
             "Healthy".to_string()
         };
 
+        let (error_log_pod, error_log_container) = log_target(&pod_symptoms, &current_pods);
         deployment_changes.push(AppDeploymentChange {
             app_name: sts_name,
             kind: "StatefulSet".to_string(),
@@ -1404,6 +1562,9 @@ pub fn evaluate_changed_triage(
             gitops,
             argo_rollout_in_window,
             error_log_snippet: None,
+            error_log_pod,
+            error_log_container,
+            unchanged_in_window,
             deployed_at,
             deployed_age,
             current_revision,
@@ -1437,7 +1598,6 @@ pub fn evaluate_changed_triage(
             }
         }
         let cj_name = cj.metadata.name.clone().unwrap_or_default();
-        deployments_seen.insert((cj_ns.clone(), cj_name.clone()));
 
         let mut in_window = false;
         let mut deployed_at = None;
@@ -1502,9 +1662,30 @@ pub fn evaluate_changed_triage(
                 }
             }
         }
+        let mut unchanged_in_window = false;
+        if !in_window && opts.include_failing {
+            if let Some(ref cutoff) = cutoff_ts {
+                in_window = pods_warned_in_window(&current_pods, &events_by_object, &cj_ns, cutoff);
+                unchanged_in_window = in_window;
+            }
+        }
 
         if !in_window {
             continue;
+        }
+
+        tracked_objects.insert(("CronJob".to_string(), cj_ns.clone(), cj_name.clone()));
+        for job in jobs_by_cj
+            .get(&(cj_ns.clone(), cj_name.clone()))
+            .into_iter()
+            .flatten()
+        {
+            let job_name = job.metadata.name.clone().unwrap_or_default();
+            tracked_objects.insert(("Job".to_string(), cj_ns.clone(), job_name));
+        }
+        for p in &current_pods {
+            let pod_name = p.metadata.name.clone().unwrap_or_default();
+            tracked_objects.insert(("Pod".to_string(), cj_ns.clone(), pod_name));
         }
 
         let current_images = extract_cronjob_container_images(cj);
@@ -1565,56 +1746,15 @@ pub fn evaluate_changed_triage(
             }
         }
 
-        let matched_argo = argo_apps.iter().find(|app| {
-            app.resources
-                .iter()
-                .any(|r| r.kind == "CronJob" && r.name == cj_name && r.namespace == cj_ns)
-                || cj
-                    .metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|l| {
-                        l.get("app.kubernetes.io/instance")
-                            .or_else(|| l.get("argocd.argoproj.io/instance"))
-                    })
-                    .map(|val| val == &app.name)
-                    .unwrap_or(false)
-        });
-
-        let mut argo_rollout_in_window = None;
-        let gitops = matched_argo.map(|app| {
-            if !app.sync_revision.is_empty() {
-                argo_rollout_in_window = Some(format!(
-                    "ArgoCD Rollout: rev {} ({})",
-                    app.sync_revision.chars().take(7).collect::<String>(),
-                    if app.last_sync_time.is_empty() {
-                        "recently"
-                    } else {
-                        &app.last_sync_time
-                    }
-                ));
-            }
-            GitOpsReleaseInfo {
-                app_name: app.name.clone(),
-                sync_status: app.sync_status.clone(),
-                health_status: app.health_status.clone(),
-                repo_url: app.repo_url.clone(),
-                target_revision: app.target_revision.clone(),
-                sync_revision: app.sync_revision.chars().take(7).collect(),
-                sync_age: if app.last_sync_time.is_empty() {
-                    "-".to_string()
-                } else {
-                    app.last_sync_time.clone()
-                },
-                sync_message: if !app.operation_message.is_empty() {
-                    Some(app.operation_message.clone())
-                } else if !app.health_message.is_empty() {
-                    Some(app.health_message.clone())
-                } else {
-                    None
-                },
-            }
-        });
+        let (gitops, argo_rollout_in_window) = gitops_release_for(
+            argo_apps,
+            "CronJob",
+            &cj_name,
+            &cj_ns,
+            cj.metadata.labels.as_ref(),
+            now,
+            cutoff_ts.as_ref(),
+        );
 
         let rollout_status = if is_suspended {
             RolloutStatus::ScaledDown
@@ -1668,6 +1808,7 @@ pub fn evaluate_changed_triage(
             format!("Scheduled ({schedule_str})")
         };
 
+        let (error_log_pod, error_log_container) = log_target(&pod_symptoms, &current_pods);
         deployment_changes.push(AppDeploymentChange {
             app_name: cj_name,
             kind: "CronJob".to_string(),
@@ -1678,6 +1819,9 @@ pub fn evaluate_changed_triage(
             gitops,
             argo_rollout_in_window,
             error_log_snippet: None,
+            error_log_pod,
+            error_log_container,
+            unchanged_in_window,
             deployed_at,
             deployed_age,
             current_revision: schedule_str,
@@ -1716,7 +1860,9 @@ pub fn evaluate_changed_triage(
             IncidentStatus::ScaledDown => 8,
             IncidentStatus::Unknown => 9,
         };
-        rank(a.incident_status).cmp(&rank(b.incident_status))
+        rank(a.incident_status)
+            .cmp(&rank(b.incident_status))
+            .then(a.unchanged_in_window.cmp(&b.unchanged_in_window))
     });
 
     // 5. Gather non-workload Infrastructure & Config changes
@@ -1746,18 +1892,17 @@ pub fn evaluate_changed_triage(
             continue;
         }
 
-        // Skip events belonging to workloads already tracked in deployment_changes
-        if (kind == "Deployment"
-            || kind == "ReplicaSet"
-            || kind == "StatefulSet"
-            || kind == "CronJob"
-            || kind == "Job")
-            && deployments_seen.contains(&(ev_ns.clone(), obj_name.clone()))
-        {
+        // Skip events already shown on a tracked workload's card
+        if tracked_objects.contains(&(kind.clone(), ev_ns.clone(), obj_name.clone())) {
             continue;
         }
 
         let reason = ev.reason.clone().unwrap_or_default();
+        // Routine lifecycle noise (Pulling, Created, Started...) from pods
+        // no card owns would bury the one ConfigMap or Node change.
+        if is_noisy_normal_event(&reason, ev.type_.as_deref()) {
+            continue;
+        }
         let message = ev.message.clone().unwrap_or_default();
         let count = ev.count.unwrap_or(1);
         let is_warning = ev.type_.as_deref() == Some("Warning");
@@ -1889,6 +2034,7 @@ pub fn evaluate_changed_triage(
         },
         deployments: deployment_changes,
         infra_changes,
+        includes_failing: opts.include_failing,
     }
 }
 
@@ -1899,6 +2045,9 @@ pub struct ListChangesIn {
     pub namespace: String,
     #[serde(default = "default_since")]
     pub since: String,
+    /// Also report workloads failing in the window that did not change in it.
+    #[serde(default, rename = "includeFailing")]
+    pub include_failing: bool,
 }
 
 fn default_since() -> String {
@@ -1911,6 +2060,7 @@ pub async fn fetch_changed_triage(
     context: &str,
     namespace: Option<&str>,
     window: Duration,
+    opts: TriageOptions,
 ) -> Result<ChangedTriageReport, String> {
     let client = cache.get(context).await.map_err(|e| e.to_string())?;
     let ns_str = namespace.unwrap_or("");
@@ -1925,107 +2075,165 @@ pub async fn fetch_changed_triage(
     let ev_api: Api<Event> = crate::scoped_api(client.clone(), ns_str);
 
     let timeout = request_timeout();
-    let deps = tokio::time::timeout(timeout, dep_api.list(&ListParams::default()))
-        .await
-        .map_err(|_| "list deployments timed out".to_string())?
-        .map_err(|e| e.to_string())?
-        .items;
-
-    let sts = match tokio::time::timeout(timeout, sts_api.list(&ListParams::default())).await {
-        Ok(Ok(list)) => list.items,
-        _ => Vec::new(),
-    };
-
-    let cjs = match tokio::time::timeout(timeout, cj_api.list(&ListParams::default())).await {
-        Ok(Ok(list)) => list.items,
-        _ => Vec::new(),
-    };
-
-    let jobs = match tokio::time::timeout(timeout, job_api.list(&ListParams::default())).await {
-        Ok(Ok(list)) => list.items,
-        _ => Vec::new(),
-    };
-
-    let rs = tokio::time::timeout(timeout, rs_api.list(&ListParams::default()))
-        .await
-        .map_err(|_| "list replicasets timed out".to_string())?
-        .map_err(|e| e.to_string())?
-        .items;
-
-    let pods = tokio::time::timeout(timeout, pod_api.list(&ListParams::default()))
-        .await
-        .map_err(|_| "list pods timed out".to_string())?
-        .map_err(|e| e.to_string())?
-        .items;
-
-    let events = tokio::time::timeout(timeout, ev_api.list(&ListParams::default()))
-        .await
-        .map_err(|_| "list events timed out".to_string())?
-        .map_err(|e| e.to_string())?
-        .items;
-
+    let lp = ListParams::default();
     let ns_opt = namespace.filter(|s| !s.is_empty()).map(|s| s.to_string());
 
-    // Query ArgoCD Applications if available
-    let argo_apps = match crate::argo::fetch_argo_applications_cached(
-        cache,
-        context,
-        None,
-        None,
-        None,
-        ns_opt.as_deref(),
-        true,
-        false,
-    )
-    .await
-    {
-        Ok(res) => res.filtered_apps,
-        Err(_) => Vec::new(),
-    };
-
-    let mut report = evaluate_changed_triage(
-        &deps, &sts, &cjs, &jobs, &rs, &pods, &events, &argo_apps, window, now, ns_opt,
+    // One round trip of wall time, not seven. Deployments, ReplicaSets, Pods
+    // and Events are the core and fail the report; StatefulSets, CronJobs,
+    // Jobs and Argo are optional and degrade to empty (RBAC may refuse them,
+    // or Argo may not be installed).
+    let (deps, sts, cjs, jobs, rs, pods, events, argo) = futures::join!(
+        tokio::time::timeout(timeout, dep_api.list(&lp)),
+        tokio::time::timeout(timeout, sts_api.list(&lp)),
+        tokio::time::timeout(timeout, cj_api.list(&lp)),
+        tokio::time::timeout(timeout, job_api.list(&lp)),
+        tokio::time::timeout(timeout, rs_api.list(&lp)),
+        tokio::time::timeout(timeout, pod_api.list(&lp)),
+        tokio::time::timeout(timeout, ev_api.list(&lp)),
+        crate::argo::fetch_argo_applications_cached(
+            cache,
+            context,
+            None,
+            None,
+            None,
+            ns_opt.as_deref(),
+            true,
+            false,
+        ),
     );
 
-    // Fetch inline 5-line error logs for failing workloads
-    for dep in &mut report.deployments {
-        if !dep.failing_pod_names.is_empty() {
-            if let Some(failing_pod_name) = dep.failing_pod_names.first() {
-                let pod_client: Api<Pod> = Api::namespaced(client.clone(), &dep.namespace);
-                let lp_prev = kube::api::LogParams {
-                    previous: true,
-                    tail_lines: Some(5),
-                    timestamps: false,
-                    ..Default::default()
-                };
-                let log_text = match pod_client.logs(failing_pod_name, &lp_prev).await {
-                    Ok(text) if !text.trim().is_empty() => Some(text),
-                    _ => {
-                        let lp_curr = kube::api::LogParams {
-                            previous: false,
-                            tail_lines: Some(5),
-                            timestamps: false,
-                            ..Default::default()
-                        };
-                        pod_client.logs(failing_pod_name, &lp_curr).await.ok()
-                    }
-                };
+    fn required<T>(
+        what: &str,
+        res: Result<Result<kube::core::ObjectList<T>, kube::Error>, tokio::time::error::Elapsed>,
+    ) -> Result<Vec<T>, String>
+    where
+        T: Clone,
+    {
+        res.map_err(|_| format!("list {what} timed out"))?
+            .map(|l| l.items)
+            .map_err(|e| format!("list {what}: {e}"))
+    }
+    fn optional<T>(
+        res: Result<Result<kube::core::ObjectList<T>, kube::Error>, tokio::time::error::Elapsed>,
+    ) -> Vec<T>
+    where
+        T: Clone,
+    {
+        match res {
+            Ok(Ok(l)) => l.items,
+            _ => Vec::new(),
+        }
+    }
 
-                if let Some(raw_log) = log_text {
-                    let lines: Vec<String> = raw_log
-                        .lines()
-                        .map(|l| l.trim_end().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                    if !lines.is_empty() {
-                        dep.error_log_snippet = Some(lines);
-                    }
-                }
+    let deps = required("deployments", deps)?;
+    let rs = required("replicasets", rs)?;
+    let pods = required("pods", pods)?;
+    let events = required("events", events)?;
+    let sts = optional(sts);
+    let cjs = optional(cjs);
+    let jobs = optional(jobs);
+    let argo_apps = argo.map(|r| r.filtered_apps).unwrap_or_default();
+
+    let mut report = evaluate_changed_triage(
+        &deps, &sts, &cjs, &jobs, &rs, &pods, &events, &argo_apps, window, now, ns_opt, opts,
+    );
+    if !opts.log_snippets {
+        return Ok(report);
+    }
+
+    // Tail five log lines per failing workload, from the pod and container
+    // the evaluation chose.
+    let targets: Vec<(usize, String, String, Option<String>)> = report
+        .deployments
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| {
+            let pod = d.error_log_pod.clone()?;
+            Some((i, d.namespace.clone(), pod, d.error_log_container.clone()))
+        })
+        .collect();
+
+    use futures::StreamExt;
+    let tails: Vec<_> =
+        futures::stream::iter(targets.into_iter().map(|(i, ns, pod, container)| {
+            let api: Api<Pod> = Api::namespaced(client.clone(), &ns);
+            async move {
+                let lines = tail_error_log(&api, &pod, container.as_deref(), 5, timeout).await;
+                (i, pod, container, lines)
             }
+        }))
+        .buffer_unordered(8)
+        .collect()
+        .await;
+
+    for (i, _pod, _container, lines) in tails {
+        if let (Some(lines), Some(d)) = (lines, report.deployments.get_mut(i)) {
+            d.error_log_snippet = Some(lines);
         }
     }
 
     Ok(report)
+}
+
+/// The last `tail_lines` log lines from `container` of `pod`: the previous
+/// (crashed) run first, else the current one. `None` when neither returns
+/// any text.
+async fn tail_error_log(
+    api: &Api<Pod>,
+    pod: &str,
+    container: Option<&str>,
+    tail_lines: i64,
+    timeout: Duration,
+) -> Option<Vec<String>> {
+    for previous in [true, false] {
+        let lp = kube::api::LogParams {
+            container: container.map(str::to_string),
+            previous,
+            tail_lines: Some(tail_lines),
+            timestamps: false,
+            ..Default::default()
+        };
+        let Ok(Ok(text)) = tokio::time::timeout(timeout, api.logs(pod, &lp)).await else {
+            continue;
+        };
+        if let Some(lines) = log_snippet_lines(&text) {
+            return Some(lines);
+        }
+    }
+    None
+}
+
+/// A longer error-log tail for one pod, for the TUI's on-demand Quick AI
+/// RCA: the card keeps five lines, the model gets `tail_lines`. `Ok(None)`
+/// means the pod answered with no usable log; `Err` means the cluster could
+/// not be reached at all, which the caller must not report as "no logs".
+pub async fn fetch_error_log_tail(
+    cache: &Arc<ClientCache>,
+    context: &str,
+    namespace: &str,
+    pod: &str,
+    container: Option<&str>,
+    tail_lines: i64,
+) -> Result<Option<Vec<String>>, String> {
+    let client = cache.get(context).await.map_err(|e| e.to_string())?;
+    let api: Api<Pod> = Api::namespaced(client, namespace);
+    Ok(tail_error_log(&api, pod, container, tail_lines, request_timeout()).await)
+}
+
+/// The non-empty lines of a log tail, or `None` when there are none or the
+/// body is the kubelet saying it has no log. That message arrives as log
+/// text (a rotated or garbage-collected previous container), and shown on
+/// the card it reads as the application's own last words.
+fn log_snippet_lines(text: &str) -> Option<Vec<String>> {
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let kubelet_refusal = lines.len() == 1
+        && (lines[0].starts_with("unable to retrieve container logs")
+            || lines[0].starts_with("failed to try resolving symlinks"));
+    (!lines.is_empty() && !kubelet_refusal).then_some(lines)
 }
 
 /// `k8s.listChanges` — provides holistic deployment & change incident triage for MCP and agents.
@@ -2043,7 +2251,11 @@ pub fn list_changes_capability(cache: Arc<ClientCache>) -> Capability {
                 } else {
                     Some(input.namespace.as_str())
                 };
-                fetch_changed_triage(&cache, &input.context, ns_opt, window)
+                let opts = TriageOptions {
+                    include_failing: input.include_failing,
+                    log_snippets: true,
+                };
+                fetch_changed_triage(&cache, &input.context, ns_opt, window, opts)
                     .await
                     .map_err(CapabilityError::Handler)
             }
@@ -2236,6 +2448,7 @@ mod tests {
             Duration::from_secs(1800), // 30m
             now,
             Some("default".to_string()),
+            TriageOptions::default(),
         );
 
         assert_eq!(report.summary.total_deployments, 1);
@@ -2323,6 +2536,7 @@ mod tests {
             Duration::from_secs(1800),
             now,
             Some("default".to_string()),
+            TriageOptions::default(),
         );
 
         assert_eq!(report.summary.pending_count, 1);
@@ -2412,6 +2626,7 @@ mod tests {
             Duration::from_secs(1800),
             now,
             Some("default".to_string()),
+            TriageOptions::default(),
         );
 
         assert_eq!(report.summary.pending_count, 1);
@@ -2487,6 +2702,7 @@ mod tests {
             Duration::from_secs(1800),
             now,
             Some("default".to_string()),
+            TriageOptions::default(),
         );
 
         assert_eq!(report.summary.healthy_count, 1);
@@ -2560,7 +2776,8 @@ mod tests {
             auto_sync_enabled: true,
             self_heal_enabled: true,
             prune_enabled: true,
-            last_sync_time: "5m ago".to_string(),
+            // Argo writes operationState.finishedAt: RFC 3339, 5m before `now`.
+            last_sync_time: "2023-11-14T22:08:20Z".to_string(),
             created_at: "10d ago".to_string(),
             resources: vec![],
             sync_history: vec![],
@@ -2578,6 +2795,7 @@ mod tests {
             Duration::from_secs(1800),
             now,
             Some("default".to_string()),
+            TriageOptions::default(),
         );
 
         let change = &report.deployments[0];
@@ -2588,6 +2806,11 @@ mod tests {
         assert_eq!(gitops.sync_revision, "4869710");
         assert_eq!(gitops.target_revision, "main");
         assert_eq!(gitops.repo_url, "https://github.com/org/repo.git");
+        assert_eq!(gitops.sync_age, "5m");
+        assert_eq!(
+            change.argo_rollout_in_window.as_deref(),
+            Some("rev 4869710 synced 5m ago")
+        );
         assert!(change.argo_rollout_in_window.is_some());
     }
 
@@ -2672,6 +2895,7 @@ mod tests {
             Duration::from_secs(1800),
             now,
             Some("default".to_string()),
+            TriageOptions::default(),
         );
 
         assert_eq!(report.summary.total_deployments, 1);
@@ -2775,6 +2999,7 @@ mod tests {
             Duration::from_secs(1800),
             now,
             Some("default".to_string()),
+            TriageOptions::default(),
         );
 
         assert_eq!(report.summary.total_deployments, 1);
@@ -2802,5 +3027,531 @@ mod tests {
         assert!(!is_noisy_normal_event("FailedScheduling", Some("Warning")));
         assert!(!is_noisy_normal_event("FailedMount", Some("Warning")));
         assert!(!is_noisy_normal_event("Unhealthy", Some("Warning")));
+    }
+
+    // ---- fixtures for the window, dedup and log-target tests ----
+
+    const NOW: i64 = 1_700_000_000;
+
+    fn ts(secs_ago: i64) -> Time {
+        Time(Timestamp::from_second(NOW - secs_ago).unwrap())
+    }
+
+    fn deployment(name: &str, replicas: i32, ready: i32) -> Deployment {
+        Deployment {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(DeploymentSpec {
+                replicas: Some(replicas),
+                ..Default::default()
+            }),
+            status: Some(DeploymentStatus {
+                replicas: Some(replicas),
+                updated_replicas: Some(replicas),
+                ready_replicas: Some(ready),
+                available_replicas: Some(ready),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn replicaset(name: &str, owner: &str, created_secs_ago: i64) -> ReplicaSet {
+        ReplicaSet {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("Deployment", owner)]),
+                creation_timestamp: Some(ts(created_secs_ago)),
+                ..Default::default()
+            },
+            spec: Some(ReplicaSetSpec::default()),
+            status: Some(ReplicaSetStatus::default()),
+        }
+    }
+
+    fn pod(name: &str, rs: &str, statuses: Vec<ContainerStatus>) -> Pod {
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                owner_references: Some(vec![make_owner_ref("ReplicaSet", rs)]),
+                creation_timestamp: Some(ts(3 * 86_400)),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: statuses
+                    .iter()
+                    .map(|cs| Container {
+                        name: cs.name.clone(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                container_statuses: Some(statuses),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn running(name: &str) -> ContainerStatus {
+        ContainerStatus {
+            name: name.to_string(),
+            ready: true,
+            ..Default::default()
+        }
+    }
+
+    fn crash_looping(name: &str) -> ContainerStatus {
+        ContainerStatus {
+            name: name.to_string(),
+            restart_count: 12,
+            state: Some(ContainerState {
+                waiting: Some(ContainerStateWaiting {
+                    reason: Some("CrashLoopBackOff".to_string()),
+                    message: Some("back-off 5m0s restarting failed container".to_string()),
+                }),
+                ..Default::default()
+            }),
+            last_state: Some(ContainerState {
+                terminated: Some(ContainerStateTerminated {
+                    exit_code: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn event(kind: &str, name: &str, type_: &str, reason: &str, secs_ago: i64) -> Event {
+        Event {
+            metadata: ObjectMeta {
+                name: Some(format!("{name}.{reason}")),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            involved_object: k8s_openapi::api::core::v1::ObjectReference {
+                kind: Some(kind.to_string()),
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            type_: Some(type_.to_string()),
+            reason: Some(reason.to_string()),
+            message: Some(format!("{reason} on {name}")),
+            last_timestamp: Some(ts(secs_ago)),
+            count: Some(1),
+            ..Default::default()
+        }
+    }
+
+    fn triage(
+        deps: &[Deployment],
+        rs: &[ReplicaSet],
+        pods: &[Pod],
+        events: &[Event],
+        argo: &[ArgoApplication],
+    ) -> ChangedTriageReport {
+        triage_with(deps, rs, pods, events, argo, TriageOptions::default())
+    }
+
+    fn triage_with(
+        deps: &[Deployment],
+        rs: &[ReplicaSet],
+        pods: &[Pod],
+        events: &[Event],
+        argo: &[ArgoApplication],
+        opts: TriageOptions,
+    ) -> ChangedTriageReport {
+        evaluate_changed_triage(
+            deps,
+            &[],
+            &[],
+            &[],
+            rs,
+            pods,
+            events,
+            argo,
+            Duration::from_secs(1800),
+            Timestamp::from_second(NOW).unwrap(),
+            Some("default".to_string()),
+            opts,
+        )
+    }
+
+    #[test]
+    fn an_old_rollout_failing_in_the_window_is_reported_only_when_asked() {
+        // Rolled out three days ago; crash-looping now, BackOff 2m ago.
+        let crashing = [deployment("api", 1, 0), deployment("quiet", 1, 1)];
+        let rs = [
+            replicaset("api-6f7", "api", 3 * 86_400),
+            replicaset("quiet-1a2", "quiet", 3 * 86_400),
+        ];
+        let pods = [
+            pod("api-6f7-x1", "api-6f7", vec![crash_looping("api")]),
+            pod("quiet-1a2-y1", "quiet-1a2", vec![running("quiet")]),
+        ];
+        let events = [event("Pod", "api-6f7-x1", "Warning", "BackOff", 120)];
+
+        // By default the window means "changed": nothing here changed.
+        let strict = triage(&crashing, &rs, &pods, &events, &[]);
+        assert!(strict.deployments.is_empty(), "{:?}", strict.deployments);
+        assert!(!strict.includes_failing);
+
+        let wide = triage_with(
+            &crashing,
+            &rs,
+            &pods,
+            &events,
+            &[],
+            TriageOptions {
+                include_failing: true,
+                ..TriageOptions::default()
+            },
+        );
+        let names: Vec<&str> = wide
+            .deployments
+            .iter()
+            .map(|d| d.app_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["api"],
+            "the quiet, old, healthy deployment stays out"
+        );
+        assert!(wide.includes_failing);
+        let api = &wide.deployments[0];
+        assert_eq!(api.incident_status, IncidentStatus::CrashLoop);
+        assert!(
+            api.unchanged_in_window,
+            "marked as included for failing, not for changing"
+        );
+    }
+
+    #[test]
+    fn a_replicaset_that_cannot_create_pods_is_reported_only_when_asked() {
+        let deps = [deployment("batch", 2, 0)];
+        let rs = [replicaset("batch-9c", "batch", 3 * 86_400)];
+        let events = [event(
+            "ReplicaSet",
+            "batch-9c",
+            "Warning",
+            "FailedCreate",
+            60,
+        )];
+
+        assert!(triage(&deps, &rs, &[], &events, &[]).deployments.is_empty());
+
+        let wide = triage_with(
+            &deps,
+            &rs,
+            &[],
+            &events,
+            &[],
+            TriageOptions {
+                include_failing: true,
+                ..TriageOptions::default()
+            },
+        );
+        assert_eq!(wide.deployments.len(), 1);
+        assert_eq!(wide.deployments[0].app_name, "batch");
+        assert!(wide.deployments[0].unchanged_in_window);
+    }
+
+    #[test]
+    fn a_changed_workload_is_not_marked_unchanged_and_sorts_first() {
+        // Both crash-loop; only "fresh" rolled out in the window.
+        let deps = [deployment("stale", 1, 0), deployment("fresh", 1, 0)];
+        let rs = [
+            replicaset("stale-1", "stale", 3 * 86_400),
+            replicaset("fresh-1", "fresh", 300),
+        ];
+        let pods = [
+            pod("stale-1-a", "stale-1", vec![crash_looping("app")]),
+            pod("fresh-1-a", "fresh-1", vec![crash_looping("app")]),
+        ];
+        let events = [event("Pod", "stale-1-a", "Warning", "BackOff", 60)];
+        let report = triage_with(
+            &deps,
+            &rs,
+            &pods,
+            &events,
+            &[],
+            TriageOptions {
+                include_failing: true,
+                ..TriageOptions::default()
+            },
+        );
+        let rows: Vec<(&str, bool)> = report
+            .deployments
+            .iter()
+            .map(|d| (d.app_name.as_str(), d.unchanged_in_window))
+            .collect();
+        assert_eq!(rows, [("fresh", false), ("stale", true)]);
+    }
+
+    #[test]
+    fn a_container_running_again_after_a_non_zero_exit_is_crash_looping() {
+        // Between back-offs: Running, last exit 1. Used to fall to Unknown.
+        let restarted = ContainerStatus {
+            name: "payment".to_string(),
+            ready: false,
+            restart_count: 40,
+            state: Some(ContainerState {
+                running: Some(Default::default()),
+                ..Default::default()
+            }),
+            last_state: Some(ContainerState {
+                terminated: Some(ContainerStateTerminated {
+                    exit_code: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let deps = [deployment("payment-api", 2, 0)];
+        let rs = [replicaset("payment-api-6d", "payment-api", 300)];
+        let pods = [pod("payment-api-6d-a", "payment-api-6d", vec![restarted])];
+
+        let report = triage(&deps, &rs, &pods, &[], &[]);
+
+        let d = &report.deployments[0];
+        assert_eq!(d.incident_status, IncidentStatus::CrashLoop);
+        assert_eq!(d.failure_category, FailureCategory::App);
+        assert_eq!(report.summary.crashing_count, 1);
+    }
+
+    #[test]
+    fn the_log_target_is_chosen_during_evaluation() {
+        let deps = [deployment("api", 2, 0)];
+        let rs = [replicaset("api-new", "api", 300)];
+        let mut pending = pod("api-new-p", "api-new", vec![]);
+        pending.status = Some(PodStatus {
+            phase: Some("Pending".to_string()),
+            ..Default::default()
+        });
+        let pods = [
+            pending,
+            pod(
+                "api-new-c",
+                "api-new",
+                vec![running("app"), crash_looping("sidecar")],
+            ),
+        ];
+
+        let report = triage(&deps, &rs, &pods, &[], &[]);
+
+        let d = &report.deployments[0];
+        assert_eq!(
+            d.error_log_pod.as_deref(),
+            Some("api-new-c"),
+            "skips the Pending pod"
+        );
+        assert_eq!(d.error_log_container.as_deref(), Some("sidecar"));
+        assert_eq!(d.error_log_snippet, None, "no log call was made");
+    }
+
+    #[test]
+    fn list_changes_input_reads_the_callers_camel_case() {
+        let input: ListChangesIn = serde_json::from_value(serde_json::json!({
+            "context": "kind-x", "since": "1h", "includeFailing": true
+        }))
+        .unwrap();
+        assert!(input.include_failing);
+
+        // The struct's own spelling is not what callers send, and is ignored.
+        let input: ListChangesIn = serde_json::from_value(serde_json::json!({
+            "context": "kind-x", "include_failing": true
+        }))
+        .unwrap();
+        assert!(!input.include_failing);
+    }
+
+    #[test]
+    fn a_normal_pod_event_alone_does_not_pull_an_old_deployment_in() {
+        let deps = [deployment("web", 1, 1)];
+        let rs = [replicaset("web-3d", "web", 3 * 86_400)];
+        let pods = [pod("web-3d-z", "web-3d", vec![running("web")])];
+        let events = [event("Pod", "web-3d-z", "Normal", "Pulled", 60)];
+
+        let report = triage(&deps, &rs, &pods, &events, &[]);
+
+        assert!(report.deployments.is_empty());
+    }
+
+    #[test]
+    fn infra_tab_leaves_out_events_already_on_a_workload_card() {
+        let deps = [deployment("api", 1, 0)];
+        let rs = [
+            replicaset("api-new", "api", 300),
+            replicaset("api-old", "api", 3 * 86_400),
+        ];
+        let pods = [
+            pod("api-new-a", "api-new", vec![crash_looping("api")]),
+            pod("api-old-b", "api-old", vec![running("api")]),
+        ];
+        let events = [
+            event("Deployment", "api", "Normal", "ScalingReplicaSet", 300),
+            event("ReplicaSet", "api-new", "Warning", "FailedCreate", 200),
+            event("Pod", "api-new-a", "Warning", "BackOff", 100),
+            event("Pod", "api-old-b", "Normal", "Killing", 100),
+            event("ConfigMap", "api-config", "Normal", "Updated", 100),
+        ];
+
+        let report = triage(&deps, &rs, &pods, &events, &[]);
+
+        let infra: Vec<(&str, &str)> = report
+            .infra_changes
+            .iter()
+            .map(|i| (i.kind.as_str(), i.name.as_str()))
+            .collect();
+        assert_eq!(infra, [("ConfigMap", "api-config")]);
+    }
+
+    #[test]
+    fn events_of_an_untracked_object_sharing_a_workload_name_stay_in_infra() {
+        // A Service called "api" is not the Deployment called "api".
+        let deps = [deployment("api", 1, 1)];
+        let rs = [replicaset("api-new", "api", 300)];
+        let events = [event(
+            "Service",
+            "api",
+            "Warning",
+            "SyncLoadBalancerFailed",
+            60,
+        )];
+
+        let report = triage(&deps, &rs, &[], &events, &[]);
+
+        assert_eq!(report.infra_changes.len(), 1);
+        assert_eq!(report.infra_changes[0].kind, "Service");
+    }
+
+    #[test]
+    fn an_argo_sync_before_the_window_is_not_reported_as_a_rollout_in_it() {
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "app.kubernetes.io/instance".to_string(),
+            "api-app".to_string(),
+        );
+        let mut dep = deployment("api", 1, 1);
+        dep.metadata.labels = Some(labels);
+        let rs = [replicaset("api-new", "api", 300)];
+        let app = ArgoApplication {
+            name: "api-app".to_string(),
+            namespace: "argocd".to_string(),
+            uid: "uid-argo-2".to_string(),
+            resource_version: "1".to_string(),
+            project: "default".to_string(),
+            destination_server: "https://kubernetes.default.svc".to_string(),
+            destination_name: String::new(),
+            destination_namespace: "default".to_string(),
+            repo_url: "https://github.com/org/repo.git".to_string(),
+            target_revision: "main".to_string(),
+            path: "manifests".to_string(),
+            sync_status: "Synced".to_string(),
+            health_status: "Healthy".to_string(),
+            health_message: String::new(),
+            sync_revision: "0123456789abcdef".to_string(),
+            operation_phase: String::new(),
+            operation_message: String::new(),
+            auto_sync_enabled: true,
+            self_heal_enabled: true,
+            prune_enabled: true,
+            // Two hours before `now`; the window is 30m.
+            last_sync_time: "2023-11-14T20:13:20Z".to_string(),
+            created_at: String::new(),
+            resources: vec![],
+            sync_history: vec![],
+        };
+
+        let report = triage(&[dep], &rs, &[], &[], &[app]);
+
+        let change = &report.deployments[0];
+        let gitops = change.gitops.as_ref().expect("still matched to its app");
+        assert_eq!(gitops.sync_age, "2h");
+        assert_eq!(change.argo_rollout_in_window, None);
+    }
+
+    #[test]
+    fn failing_container_name_picks_the_container_that_is_failing() {
+        let p = pod(
+            "api-x",
+            "api-rs",
+            vec![running("app"), crash_looping("sidecar")],
+        );
+        assert_eq!(failing_container_name(&p).as_deref(), Some("sidecar"));
+
+        let healthy = pod("api-y", "api-rs", vec![running("app"), running("sidecar")]);
+        assert_eq!(failing_container_name(&healthy).as_deref(), Some("app"));
+
+        let mut no_status = healthy.clone();
+        no_status.status = None;
+        assert_eq!(failing_container_name(&no_status).as_deref(), Some("app"));
+    }
+
+    #[test]
+    fn infra_tab_leaves_out_routine_lifecycle_noise() {
+        let events = [
+            event("Pod", "other-abc", "Normal", "Pulling", 60),
+            event("Pod", "other-abc", "Normal", "Started", 60),
+            event("Pod", "other-abc", "Warning", "BackOff", 60),
+            event("Node", "node-1", "Normal", "NodeNotReady", 60),
+        ];
+
+        let report = triage(&[], &[], &[], &events, &[]);
+
+        let mut reasons: Vec<&str> = report
+            .infra_changes
+            .iter()
+            .map(|i| i.reason.as_str())
+            .collect();
+        reasons.sort();
+        assert_eq!(reasons, ["BackOff", "NodeNotReady"]);
+    }
+
+    #[test]
+    fn a_kubelet_refusal_is_not_a_log_snippet() {
+        let refusal = "unable to retrieve container logs for containerd://c7d5745da967\n";
+        assert_eq!(log_snippet_lines(refusal), None);
+        assert_eq!(log_snippet_lines("\n  \n"), None);
+        assert_eq!(
+            log_snippet_lines("booting\npanic: nil map\n"),
+            Some(vec!["booting".to_string(), "panic: nil map".to_string()])
+        );
+    }
+
+    #[test]
+    fn only_pods_that_ran_a_process_are_log_tail_targets() {
+        assert!(status_has_logs("CrashLoopBackOff"));
+        assert!(status_has_logs("OOMKilled"));
+        assert!(status_has_logs("Error"));
+        assert!(!status_has_logs("Pending"));
+        assert!(!status_has_logs("ImagePullBackOff"));
+        assert!(!status_has_logs("CreateContainerConfigError"));
+    }
+
+    #[test]
+    fn report_deserializes_without_the_log_source_fields() {
+        // An older host's report has no errorLogPod / errorLogContainer.
+        let report = triage(
+            &[deployment("api", 1, 1)],
+            &[replicaset("api-new", "api", 300)],
+            &[],
+            &[],
+            &[],
+        );
+        let mut raw = serde_json::to_value(&report).unwrap();
+        let dep = raw["deployments"][0].as_object_mut().unwrap();
+        assert!(dep.remove("errorLogPod").is_some());
+        assert!(dep.remove("errorLogContainer").is_some());
+        let back: ChangedTriageReport = serde_json::from_value(raw).unwrap();
+        assert_eq!(back.deployments[0].error_log_pod, None);
     }
 }

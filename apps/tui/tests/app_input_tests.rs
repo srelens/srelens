@@ -4836,6 +4836,280 @@ async fn changed_view_command_and_interaction_flow() {
 }
 
 #[tokio::test]
+async fn changed_view_drops_a_result_for_a_window_it_no_longer_shows() {
+    use srelens_kube::changed::{ChangedTriageReport, TriageSummary};
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "changed").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    let report = |window_seconds: u64| ChangedTriageReport {
+        window_seconds,
+        window_label: String::new(),
+        namespace: Some("default".to_string()),
+        summary: TriageSummary {
+            total_deployments: 0,
+            crashing_count: 0,
+            oom_count: 0,
+            error_count: 0,
+            pending_count: 0,
+            rolling_count: 0,
+            healthy_count: 0,
+            headline_message: String::new(),
+        },
+        deployments: vec![],
+        infra_changes: vec![],
+        includes_failing: false,
+    };
+
+    // The view shows 1h; a 15m answer from before a window change is stale.
+    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(report(900)));
+    match &app.active_view {
+        ActiveView::Changed(c) => {
+            assert!(c.report.is_none(), "a stale window's report was shown");
+            assert!(c.is_loading);
+        }
+        _ => panic!("expected ActiveView::Changed"),
+    }
+    assert!(app.changed_refreshing, "the current window is fetched again");
+
+    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(report(3600)));
+    match &app.active_view {
+        ActiveView::Changed(c) => assert!(c.report.is_some()),
+        _ => panic!("expected ActiveView::Changed"),
+    }
+}
+
+/// A report with one failing workload, as the `:changed` view receives it.
+fn changed_report_with_one_workload() -> srelens_kube::changed::ChangedTriageReport {
+    serde_json::from_value(serde_json::json!({
+        "windowSeconds": 3600, "windowLabel": "1h", "namespace": "default",
+        "summary": {"totalDeployments": 1, "crashingCount": 1, "pendingCount": 0,
+                    "rollingCount": 0, "healthyCount": 0, "headlineMessage": ""},
+        "deployments": [{
+            "appName": "payment-api", "kind": "Deployment", "namespace": "default",
+            "incidentStatus": "crashLoop", "failureCategory": "app",
+            "failureDetail": "payment terminated with Exit Code 1",
+            "deployedAge": "5d", "currentRevision": "3",
+            "currentImages": [], "previousImages": [], "imageDiff": "payment:v2",
+            "desiredReplicas": 2, "updatedReplicas": 2, "readyReplicas": 0, "availableReplicas": 0,
+            "rolloutStatus": "failed", "failingPodsCount": 1, "crashLoopCount": 1,
+            "oomKilledCount": 0, "probeFailureCount": 0, "restartCount": 9,
+            "primarySymptoms": [], "failingPodNames": ["payment-api-1"], "topEvents": [],
+            "errorLogPod": "payment-api-1", "errorLogContainer": "payment"
+        }],
+        "infraChanges": []
+    }))
+    .expect("report JSON matches the wire shape")
+}
+
+async fn changed_app_with_report(
+    settings: &common::env::SettingsGuard,
+) -> (srelens_tui::App, tokio::sync::mpsc::UnboundedReceiver<srelens_tui::event::AppEvent>) {
+    let _ = settings;
+    let (mut app, rx) = common::app_with("fake-cluster", "default").await;
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "changed").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    app.handle_changed_triage_result(
+        "fake-cluster",
+        Some("default"),
+        Ok(changed_report_with_one_workload()),
+    );
+    (app, rx)
+}
+
+fn only_rca(app: &srelens_tui::App) -> srelens_tui::views::changed_view::QuickRca {
+    match &app.active_view {
+        ActiveView::Changed(c) => {
+            assert_eq!(c.ai_summaries.len(), 1, "exactly one RCA entry");
+            c.ai_summaries.values().next().unwrap().clone()
+        }
+        _ => panic!("expected ActiveView::Changed"),
+    }
+}
+
+#[tokio::test]
+async fn quick_rca_with_cursor_says_it_needs_an_http_provider() {
+    use srelens_tui::views::changed_view::QuickRcaStatus;
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    app.ai_settings.default_provider = srelens_tui::AiProvider::Cursor;
+
+    press(&mut app, ch('s')).await;
+
+    let rca = only_rca(&app);
+    match rca.status {
+        QuickRcaStatus::Error(msg) => {
+            assert!(msg.contains("needs an HTTP provider"), "{msg}");
+            assert!(msg.contains("[a]"), "points at the Assistant: {msg}");
+            assert!(!msg.contains("API key"), "Cursor's problem is not a key: {msg}");
+        }
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn quick_rca_without_a_key_names_the_setting_and_the_variable() {
+    use srelens_tui::views::changed_view::QuickRcaStatus;
+    let mut settings = common::env::isolate_settings();
+    settings.remove_env("ANTHROPIC_API_KEY");
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    app.ai_settings.default_provider = srelens_tui::AiProvider::Anthropic;
+    app.ai_settings.api_keys.clear();
+
+    press(&mut app, ch('s')).await;
+
+    match only_rca(&app).status {
+        QuickRcaStatus::Error(msg) => {
+            assert!(msg.contains("No API key configured"), "{msg}");
+            assert!(msg.contains(":ai-settings"), "{msg}");
+            assert!(msg.contains("ANTHROPIC_API_KEY"), "{msg}");
+            assert!(!msg.contains("Ctrl+s"), "{msg}");
+        }
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn quick_rca_reply_lands_on_its_entry_and_errors_offer_a_retry() {
+    use srelens_tui::views::changed_view::{QuickRca, QuickRcaStatus};
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+
+    let key = match &mut app.active_view {
+        ActiveView::Changed(c) => {
+            let d = c.selected_deployment().unwrap().clone();
+            let key = c.rca_key(&d);
+            assert_eq!(key, "fake-cluster|default/Deployment/payment-api@3");
+            c.ai_summaries.insert(
+                key.clone(),
+                QuickRca {
+                    pod_name: d.error_log_pod.clone(),
+                    provider: "Anthropic (Claude)".to_string(),
+                    status: QuickRcaStatus::Loading,
+                    updated_at: std::time::Instant::now(),
+                },
+            );
+            key
+        }
+        _ => panic!("expected ActiveView::Changed"),
+    };
+
+    // A second press while one is in flight does not start another.
+    press(&mut app, ch('s')).await;
+    assert_eq!(only_rca(&app).status, QuickRcaStatus::Loading);
+
+    app.handle_changed_quick_rca_result(
+        &key,
+        Ok("**Root Cause:** DB_HOST points nowhere.\nAction Item: Fix the ConfigMap.".to_string()),
+    );
+    assert_eq!(
+        only_rca(&app).status,
+        QuickRcaStatus::Ready {
+            root_cause: "DB_HOST points nowhere.".to_string(),
+            action_item: "Fix the ConfigMap.".to_string(),
+        }
+    );
+
+    app.handle_changed_quick_rca_result(&key, Err("rate limited (429)".to_string()));
+    match only_rca(&app).status {
+        QuickRcaStatus::Error(msg) => {
+            assert!(msg.contains("Anthropic (Claude) did not answer: rate limited (429)"), "{msg}");
+            assert!(msg.contains("Press [s] to retry"), "{msg}");
+        }
+        other => panic!("expected an error, got {other:?}"),
+    }
+
+    // A reply for an entry that no longer exists changes nothing.
+    app.handle_changed_quick_rca_result("other|x/Deployment/y@1", Ok("Root Cause: z".to_string()));
+    assert_eq!(match &app.active_view { ActiveView::Changed(c) => c.ai_summaries.len(), _ => 0 }, 1);
+}
+
+/// The same one-workload report, twice, so selection can move.
+fn changed_report_with_two_workloads(includes_failing: bool) -> srelens_kube::changed::ChangedTriageReport {
+    let mut report = changed_report_with_one_workload();
+    let mut second = report.deployments[0].clone();
+    second.app_name = "payment-worker".to_string();
+    report.deployments.push(second);
+    report.includes_failing = includes_failing;
+    report
+}
+
+fn changed_state(app: &srelens_tui::App) -> &srelens_tui::views::changed_view::ChangedViewState {
+    match &app.active_view {
+        ActiveView::Changed(c) => c,
+        _ => panic!("expected ActiveView::Changed"),
+    }
+}
+
+#[tokio::test]
+async fn changed_view_moves_with_arrows_and_ignores_j_and_k() {
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(changed_report_with_two_workloads(false)));
+    assert_eq!(changed_state(&app).selected_idx, 0);
+
+    press(&mut app, ch('j')).await;
+    assert_eq!(changed_state(&app).selected_idx, 0, "j is not bound in :changed");
+
+    press(&mut app, key(KeyCode::Down)).await;
+    assert_eq!(changed_state(&app).selected_idx, 1);
+
+    press(&mut app, ch('k')).await;
+    assert_eq!(changed_state(&app).selected_idx, 1, "k is not bound in :changed");
+
+    press(&mut app, key(KeyCode::Up)).await;
+    assert_eq!(changed_state(&app).selected_idx, 0);
+}
+
+#[tokio::test]
+async fn changed_view_u_widens_the_scope_and_drops_the_narrow_answer() {
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+    assert!(!changed_state(&app).include_failing, "strict by default");
+    app.changed_refreshing = false;
+
+    press(&mut app, ch('u')).await;
+    let c = changed_state(&app);
+    assert!(c.include_failing);
+    assert!(c.is_loading);
+    assert!(app.changed_refreshing, "the wider scope is fetched");
+
+    // The strict answer from before the toggle lands late: dropped, refetched.
+    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(changed_report_with_two_workloads(false)));
+    let c = changed_state(&app);
+    assert!(c.report.as_ref().is_some_and(|r| r.deployments.len() == 1), "still the report from before");
+    assert!(c.is_loading);
+
+    app.handle_changed_triage_result("fake-cluster", Some("default"), Ok(changed_report_with_two_workloads(true)));
+    let c = changed_state(&app);
+    assert_eq!(c.report.as_ref().unwrap().deployments.len(), 2);
+    assert!(!c.is_loading);
+}
+
+#[tokio::test]
+async fn changed_view_status_bar_keeps_only_app_wide_keys() {
+    let settings = common::env::isolate_settings();
+    let (mut app, _rx) = changed_app_with_report(&settings).await;
+
+    let screen = common::render_app(&mut app, 200, 50);
+    let status = screen
+        .lines()
+        .rev()
+        .find(|l| l.contains("<:>"))
+        .expect("a status bar with hints");
+    assert!(status.contains("<:> Cmd"), "{status}");
+    assert!(status.contains("<?> Help"), "{status}");
+    assert!(status.contains("<Esc> Back"), "{status}");
+    for gone in ["<j/k>", "<l>", "<y>", "<s>", "<a>", "<Enter>", "<f>", "<Tab>"] {
+        assert!(!status.contains(gone), "{gone} belongs to the view, not the status bar: {status}");
+    }
+}
+
+#[tokio::test]
 async fn node_inspector_press_b_jumps_to_bgp_dashboard() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;

@@ -77,6 +77,12 @@ pub enum AppEvent {
         namespace: Option<String>,
         result: Result<srelens_kube::changed::ChangedTriageReport, String>,
     },
+    /// A Quick AI RCA reply for the `:changed` card entry under `key`: the
+    /// model's raw text, or why the call failed.
+    ChangedQuickRcaResult {
+        key: String,
+        result: Result<String, String>,
+    },
 }
 
 pub struct EventHandler {

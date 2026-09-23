@@ -33,6 +33,7 @@ mod sink;
 mod theme;
 mod tui_config;
 mod ui;
+mod quick_rca;
 mod views;
 
 use srelens_tui::self_update;
@@ -449,6 +450,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AppEvent::ChangedTriageResult { context, namespace, result } => {
                     app.handle_changed_triage_result(&context, namespace.as_deref(), result);
+                }
+                AppEvent::ChangedQuickRcaResult { key, result } => {
+                    app.handle_changed_quick_rca_result(&key, result);
                 }
             }
 

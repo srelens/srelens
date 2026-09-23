@@ -534,10 +534,12 @@ impl App {
             self.argo_tick_counter = 0;
         }
 
-        // Periodically refresh Changed triage report every ~3 seconds (30 ticks at 100ms)
+        // Refresh the Changed triage report every ~10 seconds (100 ticks at
+        // 100ms). Each refresh lists seven kinds cluster-wide and tails logs,
+        // so it runs slower than the cheap views; `r` refreshes on demand.
         if matches!(self.active_view, ActiveView::Changed(_)) {
             self.changed_tick_counter = self.changed_tick_counter.saturating_add(1);
-            if self.changed_tick_counter % 30 == 1 && !self.changed_refreshing {
+            if self.changed_tick_counter % 100 == 1 && !self.changed_refreshing {
                 self.refresh_changed_triage();
             }
         } else {
@@ -7210,11 +7212,16 @@ impl App {
                 KeyCode::Tab | KeyCode::BackTab => {
                     changed.toggle_tab();
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
+                // Arrows only: j/k are deliberately not bound in :changed.
+                KeyCode::Up => {
                     changed.select_prev();
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down => {
                     changed.select_next();
+                }
+                KeyCode::Char('u') => {
+                    changed.toggle_include_failing();
+                    self.refresh_changed_triage();
                 }
                 KeyCode::Char('g') | KeyCode::Home => {
                     changed.select_first();
@@ -7251,18 +7258,20 @@ impl App {
                     self.refresh_changed_triage();
                 }
                 KeyCode::Char('f') => {
-                    changed.cycle_verdict_filter();
+                    changed.cycle_filter();
                 }
                 KeyCode::Char('/') => {
                     self.input_mode = InputMode::Filter;
                     self.filter_buffer = changed.filter_query.clone();
                 }
                 KeyCode::Char('r') => {
+                    let msg = if self.changed_refreshing {
+                        "Triage report is already refreshing"
+                    } else {
+                        "Refreshing triage report..."
+                    };
                     self.refresh_changed_triage();
-                    self.set_toast(
-                        "Refreshed changed triage report".to_string(),
-                        Theme::status_ok(),
-                    );
+                    self.set_toast(msg.to_string(), Theme::status_ok());
                 }
                 KeyCode::Enter | KeyCode::Char('d') => match changed.active_tab {
                     changed_view::ChangedTab::Deployments => {
@@ -7305,9 +7314,9 @@ impl App {
                         (
                             d.app_name.clone(),
                             d.namespace.clone(),
-                            d.pod_symptoms
-                                .first()
-                                .map(|ps| ps.pod_name.clone())
+                            d.error_log_pod
+                                .clone()
+                                .or_else(|| d.pod_symptoms.first().map(|ps| ps.pod_name.clone()))
                                 .or_else(|| d.failing_pod_names.first().cloned()),
                         )
                     });
@@ -7342,12 +7351,11 @@ impl App {
                             "None".to_string()
                         };
                         format!(
-                            "Analyze incident for {}/{} ({}):\nStatus: {} ({})\nRoot Cause: {} {}\nRevision: {} (previous: {:?})\nImage Diff: {}\nReplicas: {}/{} Ready\nSymptoms: {}\nWhat is the root cause, and what steps should I take to remediate or rollback?",
+                            "Analyze incident for {}/{} ({}):\nStatus: {}\nRoot Cause: {} {}\nRevision: {} (previous: {:?})\nImage Diff: {}\nReplicas: {}/{} Ready\nSymptoms: {}\nWhat is the root cause, and what steps should I take to remediate or rollback?",
                             d.namespace,
                             d.app_name,
                             d.kind,
                             d.incident_status.label(),
-                            d.failure_detail,
                             d.failure_category.badge(),
                             d.failure_detail,
                             d.current_revision,
@@ -7370,6 +7378,9 @@ impl App {
                 }
                 KeyCode::Char('e') => {
                     self.switch_view_to_kind(ResourceKind::Events).await;
+                }
+                KeyCode::Char('s') => {
+                    self.start_quick_rca();
                 }
                 _ => {}
             },
@@ -9293,6 +9304,10 @@ impl App {
             ResourceKind::Changed => {
                 let changed_state = changed_view::ChangedViewState::new();
                 let window = changed_state.current_window();
+                let opts = srelens_kube::changed::TriageOptions {
+                    include_failing: changed_state.include_failing,
+                    log_snippets: false,
+                };
                 let ctx = self.active_context.clone();
                 let ns = if self.active_namespace.is_empty() {
                     None
@@ -9309,6 +9324,7 @@ impl App {
                         &ctx,
                         ns.as_deref(),
                         window,
+                        opts,
                     )
                     .await;
                     let _ = event_tx.send(crate::event::AppEvent::ChangedTriageResult {
@@ -10658,7 +10674,7 @@ impl App {
         if self.changed_refreshing {
             return;
         }
-        let (window, ns) = if let ActiveView::Changed(changed) = &mut self.active_view {
+        let (window, ns, opts) = if let ActiveView::Changed(changed) = &mut self.active_view {
             if changed.report.is_none() {
                 changed.is_loading = true;
             }
@@ -10667,7 +10683,13 @@ impl App {
             } else {
                 Some(self.active_namespace.clone())
             };
-            (changed.current_window(), ns)
+            // The card links to full logs (`l`) and Quick RCA fetches its
+            // own tail, so a refresh makes no log calls.
+            let opts = srelens_kube::changed::TriageOptions {
+                include_failing: changed.include_failing,
+                log_snippets: false,
+            };
+            (changed.current_window(), ns, opts)
         } else {
             return;
         };
@@ -10678,15 +10700,149 @@ impl App {
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
-            let res =
-                srelens_kube::changed::fetch_changed_triage(&cache, &ctx, ns.as_deref(), window)
-                    .await;
+            let res = srelens_kube::changed::fetch_changed_triage(
+                &cache,
+                &ctx,
+                ns.as_deref(),
+                window,
+                opts,
+            )
+            .await;
             let _ = event_tx.send(crate::event::AppEvent::ChangedTriageResult {
                 context: ctx,
                 namespace: ns,
                 result: res,
             });
         });
+    }
+
+    /// `s` on the `:changed` Deployments tab: one tool-less completion over
+    /// the selected workload's card plus a 20-line log tail, rendered inline.
+    /// A cached answer for the same revision is re-run on purpose: the key is
+    /// how the reader asks for a fresh one.
+    pub fn start_quick_rca(&mut self) {
+        use changed_view::{QuickRca, QuickRcaStatus};
+        let provider = self.ai_settings.default_provider;
+        let provider_name = crate::ai_config::provider_display_name(provider).to_string();
+        let timeout_seconds = self.ai_settings.get_timeout_seconds(provider);
+        let config = self.ai_settings.resolve_provider_config(provider);
+
+        let ActiveView::Changed(changed) = &mut self.active_view else {
+            return;
+        };
+        if changed.active_tab != changed_view::ChangedTab::Deployments {
+            self.set_toast(
+                "Quick AI RCA works on workloads; press Tab for the Deployments tab".to_string(),
+                Theme::status_warn(),
+            );
+            return;
+        }
+        let Some(d) = changed.selected_deployment().cloned() else {
+            self.set_toast("Select a workload first".to_string(), Theme::status_warn());
+            return;
+        };
+        let key = changed.rca_key(&d);
+        if matches!(
+            changed.ai_summaries.get(&key).map(|r| &r.status),
+            Some(QuickRcaStatus::Loading)
+        ) {
+            self.set_toast(
+                format!("Already analyzing {}", d.app_name),
+                Theme::status_warn(),
+            );
+            return;
+        }
+
+        let entry = |status| QuickRca {
+            pod_name: d.error_log_pod.clone(),
+            provider: provider_name.clone(),
+            status,
+            updated_at: std::time::Instant::now(),
+        };
+
+        // Said before any request goes out, and said precisely: Cursor has a
+        // key but no HTTP path, so "no API key" would be false for it.
+        let config = if provider == crate::ai_config::AiProvider::Cursor {
+            Err(format!(
+                "Quick AI RCA needs an HTTP provider; {provider_name} runs only through the \
+                 Assistant. Press [a] for it, or pick another provider in :ai-settings."
+            ))
+        } else {
+            config.ok_or_else(|| {
+                format!(
+                    "No API key configured for {provider_name}. Add one in :ai-settings, or set {}.",
+                    crate::ai_config::env_var_for_provider(provider)
+                )
+            })
+        };
+        let config = match config {
+            Ok(c) => c,
+            Err(msg) => {
+                changed
+                    .ai_summaries
+                    .insert(key, entry(QuickRcaStatus::Error(msg)));
+                return;
+            }
+        };
+
+        changed
+            .ai_summaries
+            .insert(key.clone(), entry(QuickRcaStatus::Loading));
+        let context = changed.context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            // Fetch the longer tail from the pod and container the report
+            // chose. A failed fetch is said as such in the prompt, not
+            // passed off as a pod that never ran.
+            use crate::quick_rca::LogEvidence;
+            let logs = match d.error_log_pod.as_deref() {
+                Some(pod) => match srelens_kube::changed::fetch_error_log_tail(
+                    &cache,
+                    &context,
+                    &d.namespace,
+                    pod,
+                    d.error_log_container.as_deref(),
+                    crate::quick_rca::LOG_TAIL_LINES,
+                )
+                .await
+                {
+                    Ok(Some(lines)) => LogEvidence::Lines(lines),
+                    Ok(None) => LogEvidence::NeverRan,
+                    Err(e) => LogEvidence::Unavailable(e),
+                },
+                None => LogEvidence::NeverRan,
+            };
+            let prompt = crate::quick_rca::build_prompt(&d, &logs);
+            let result = crate::quick_rca::run(config, prompt, timeout_seconds).await;
+            let _ = event_tx.send(crate::event::AppEvent::ChangedQuickRcaResult { key, result });
+        });
+    }
+
+    pub fn handle_changed_quick_rca_result(&mut self, key: &str, result: Result<String, String>) {
+        use changed_view::QuickRcaStatus;
+        // Left the view, or a different report took its place: nothing to
+        // update. The key carries cluster and revision, so a late reply can
+        // only land on the entry that asked for it.
+        let ActiveView::Changed(changed) = &mut self.active_view else {
+            return;
+        };
+        let Some(entry) = changed.ai_summaries.get_mut(key) else {
+            return;
+        };
+        entry.status = match result.and_then(|text| crate::quick_rca::parse_reply(&text)) {
+            Ok(reply) => QuickRcaStatus::Ready {
+                root_cause: reply.root_cause,
+                action_item: reply.action_item,
+            },
+            Err(e) => QuickRcaStatus::Error(format!(
+                "{} did not answer: {}. Press [s] to retry.",
+                entry.provider,
+                e.trim_end_matches('.')
+            )),
+        };
+        entry.updated_at = std::time::Instant::now();
     }
 
     pub fn handle_changed_triage_result(
@@ -10702,11 +10858,27 @@ impl App {
             } else {
                 Some(self.active_namespace.as_str())
             };
-            if self.active_context == context && cur_ns == namespace {
-                match result {
-                    Ok(report) => changed.set_report(report),
-                    Err(err) => changed.set_error(err),
+            if self.active_context != context || cur_ns != namespace {
+                return;
+            }
+            // A window change while a fetch was in flight could not start its
+            // own fetch (one at a time); drop the old window's answer rather
+            // than show it under the new window's label, and fetch again.
+            // The same holds for the `u` scope toggle.
+            let wanted = changed.current_window().as_secs();
+            let wanted_scope = changed.include_failing;
+            match result {
+                Ok(report)
+                    if report.window_seconds != wanted
+                        || report.includes_failing != wanted_scope =>
+                {
+                    self.refresh_changed_triage();
                 }
+                Ok(report) => {
+                    changed.context = context.to_string();
+                    changed.set_report(report);
+                }
+                Err(err) => changed.set_error(err),
             }
         }
     }
@@ -13672,23 +13844,11 @@ impl App {
                     ("<?>", "Help"),
                 ][..],
             ),
-            ActiveView::Changed(_) => Some(
-                &[
-                    ("<:>", "Cmd"),
-                    ("<Tab>", "Tab"),
-                    ("<j/k>", "Select"),
-                    ("</>", "Filter"),
-                    ("<Enter>", "Inspect"),
-                    ("<l>", "Logs"),
-                    ("<r>", "Refresh"),
-                    ("<y>", "YAML"),
-                    ("<a>", "AI RCA"),
-                    ("<[ / ]>", "Window"),
-                    ("<f>", "Verdict"),
-                    ("<Esc>", "Back"),
-                    ("<?>", "Help"),
-                ][..],
-            ),
+            // The view's own footer and card carry its keys; only the
+            // app-wide ones live here.
+            ActiveView::Changed(_) => {
+                Some(&[("<:>", "Cmd"), ("<?>", "Help"), ("<Esc>", "Back")][..])
+            }
             ActiveView::Topology(_) => Some(
                 &[
                     ("<:>", "Cmd"),
