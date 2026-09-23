@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ExtensionResourceDetails } from "../extensions/ExtensionResourceDetails";
 import { ErrorNotice } from "../extensions/ExtensionResults";
 import { SHARED_CONTEXT_ID_MESSAGE } from "../extensions/contextIds";
+import { plainText } from "../extensions/displayText";
 import { ExtensionResourceNavigation } from "../extensions/resourceNavigation";
 import { extensionEnabledFor, extensionClusterRoute as extensionRoute, extensionClusterResourceRoute as extensionResourceRoute, listContexts, parseExtensionRoute } from "@srelens/core";
 import { Button, Screen } from "@srelens/ui-kit";
@@ -51,6 +52,13 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
   // A stable ID two contexts share does not say which was chosen; the host refuses both.
   const shared =
     !!plugin && !!cluster && contexts.filter((c) => c.stableId === cluster.stableId).length > 1;
+  // A dashboard card's target (#540): the same page, narrowed to what the card
+  // counted. Only a card that still names this page narrows it.
+  const card = target.card
+    ? plugin?.manifest.contributions.dashboardCards?.find((c) => c.id === target.card && c.target?.page === target.page)
+    : undefined;
+  const showAll = () =>
+    openTab(extensionRoute(clusterId, target.id, target.page, target.namespace), { clusterName: cluster?.name });
   return (
     <Screen
       title={target.resourceName ?? page?.title ?? "App"}
@@ -84,9 +92,25 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
           <p className="extension-message">
             This app is not enabled for this cluster. Manage it in Settings → Apps.
           </p>
+        ) : plugin && page && target.card && !card ? (
+          // A card the app has since dropped: filtering by it is impossible, and
+          // showing every row would present the whole list as the card's answer.
+          <div className="extension-message">
+            <p>{plainText(plugin.manifest.name)} no longer declares this dashboard card, so there is nothing to narrow this list to.</p>
+            <Button variant="secondary" onClick={showAll}>Show all {plainText(page.title)}</Button>
+          </div>
         ) : plugin && page ? (
           <ExtensionResourceNavigation.Provider value={resource=>openTab(extensionResourceRoute(clusterId,target.id,target.page,resource.namespace,resource.name),{clusterName:cluster?.name})}>
+          {card && (
+            <div role="status" className="extension-card-filter">
+              <span>
+                Showing the {plainText(page.title)} counted by <strong>{plainText(card.title)}</strong>
+              </span>
+              <Button variant="ghost" size="sm" onClick={showAll}>Show all {plainText(page.title)}</Button>
+            </div>
+          )}
           {target.resourceName ? <ExtensionResourceDetails fullPage key={route} selection={{id:target.id,revision:plugin.revision,capability:page.capability,context:clusterId,namespace:target.namespace,name:target.resourceName}}/> : <ExtensionWorkspace
+            card={card?.id}
             plugin={plugin}
             page={page}
             onPage={(id, namespace) =>

@@ -302,6 +302,20 @@ it("retains a namespace discovery error and offers retry", async () => {
   await waitFor(() => expect(listNamespaces).toHaveBeenCalledTimes(2));
 });
 
+it("asks the host for only a dashboard card's rows on its target page", async () => {
+  render(
+    <ExtensionWorkspace
+      plugin={plugin}
+      page={plugin.manifest.contributions.pages[1]}
+      context="staging"
+      namespace="flux-system"
+      card="suspended"
+    />,
+  );
+  expect(await screen.findByRole("cell", { name: "apps" })).toBeTruthy();
+  expect(readExtension).toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "flux-system", true, "suspended");
+});
+
 it("filters resource rows without a second cluster read", async () => {
   render(
     <ExtensionWorkspace

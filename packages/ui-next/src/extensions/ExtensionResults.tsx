@@ -98,6 +98,7 @@ export function ExtensionResults({
   refresh = 0,
   hideToolbar = false,
   actionAvailability,
+  card,
 }: {
   plugin: InstalledExtension;
   capability: string;
@@ -111,13 +112,16 @@ export function ExtensionResults({
    * bulk bar evaluates the shared predicates against inspected resources.
    */
   actionAvailability?: BulkActionAvailability;
+  /** A dashboard card whose rows alone are read (#540). */
+  card?: string;
 }) {
   const { Button } = useContext(ExtensionControls);
   const openResource = useContext(ExtensionResourceNavigation);
   const rowButtons = useRef(new Map<string,HTMLButtonElement>());
   const listRow = usePeekBounds();
   const peekWidth = clampPeekWidth(usePeekWidth(), listRow.bounds);
-  const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,namespace]);
+  // The card is part of what is on screen: the filtered and whole lists keep no rows of each other.
+  const scope = JSON.stringify([plugin.manifest.id,plugin.revision,capability,context,namespace,card ?? ""]);
   const [selected,setSelected] = useState<{scope:string;name:string;namespace:string}|null>(null);
   const [columnSort, setColumnSort] = useState<{key:string;direction:"asc"|"desc"}|null>(null);
   useEffect(() => setColumnSort(null), [scope]);
@@ -148,6 +152,8 @@ export function ExtensionResults({
             context,
             namespace,
             true,
+            // Only a card's target narrows the read; the whole list is called as before.
+            ...(card ? [card] : []),
           )
         : null,
     [
@@ -157,6 +163,7 @@ export function ExtensionResults({
       context,
       namespace,
       refresh,
+      card,
     ],
   );
   const { reload } = data;

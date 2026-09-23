@@ -7,7 +7,7 @@ vi.mock("../lib/tabsStore",()=>({openTab:vi.fn()}));
 vi.mock("../extensions/ExtensionResourceDetails",()=>({ExtensionResourceDetails:({selection,fullPage}:any)=><div data-testid="detail-page">{JSON.stringify({selection,fullPage})}</div>}));
 vi.mock("../extensions/ExtensionWorkspace",async()=>{
  const {useContext}=await import("react");const {ExtensionResourceNavigation}=await import("../extensions/resourceNavigation");
- return {ExtensionWorkspace:()=>{const open=useContext(ExtensionResourceNavigation);return <button onClick={()=>open?.({id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"wrong-rail-cluster",namespace:"team",name:"apps"})}>Open resource</button>;}};
+ return {ExtensionWorkspace:(props:{card?:string})=>{const open=useContext(ExtensionResourceNavigation);return <button data-card={props.card??""} onClick={()=>open?.({id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"wrong-rail-cluster",namespace:"team",name:"apps"})}>Open resource</button>;}};
 });
 import {listExtensions,listContexts,extensionRoute,extensionResourceRoute,extensionClusterRoute,extensionClusterResourceRoute,type InstalledExtension} from "@srelens/core";
 import {setContexts} from "../lib/clusters";
@@ -103,4 +103,21 @@ it("retains the identity of an already-open legacy route when its name changes",
  expect(screen.getByText("Open resource")).toBeTruthy();
  fireEvent.click(screen.getByText("Open resource"));
  expect(openTab).toHaveBeenCalledWith(extensionClusterResourceRoute(id,manifest.id,"kustomizations","team","apps"),{clusterName:"first/cluster/a"});
+});
+
+it("opens a dashboard card's target filtered to what the card counted, and offers the whole list", async () => {
+ const {extensionCardRoute}=await import("@srelens/core");
+ render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionCardRoute("cluster/a",manifest.id,"kustomizations","team","suspended-kustomizations")}/>);
+ expect((await screen.findByText("Open resource")).getAttribute("data-card")).toBe("suspended-kustomizations");
+ const notice=screen.getByRole("status");
+ expect(notice.textContent).toContain("Suspended Kustomizations");
+ fireEvent.click(within(notice).getByRole("button",{name:"Show all Kustomizations"}));
+ expect(openTab).toHaveBeenCalledWith(extensionClusterRoute("cluster/a",manifest.id,"kustomizations","team"),{clusterName:"cluster/a"});
+});
+it("says a card the app no longer declares is gone rather than showing every row as its answer", async () => {
+ const {extensionCardRoute}=await import("@srelens/core");
+ render(<ExtensionPage ported={[]} onSwitchToClassic={vi.fn()} onLocked={vi.fn()} route={extensionCardRoute("cluster/a",manifest.id,"kustomizations","","removed-card")}/>);
+ expect(await screen.findByText(/no longer declares this dashboard card/)).toBeTruthy();
+ expect(screen.queryByText("Open resource")).toBeNull();
+ expect(screen.getByRole("button",{name:"Show all Kustomizations"})).toBeTruthy();
 });
