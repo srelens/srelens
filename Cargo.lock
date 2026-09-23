@@ -6419,6 +6419,7 @@ name = "srelens-capability"
 version = "0.15.0"
 dependencies = [
  "aho-corasick",
+ "chrono",
  "schemars 0.8.22",
  "serde",
  "serde_json",

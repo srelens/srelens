@@ -76,6 +76,175 @@ enum Operator<'a> {
     NotEquals(&'a Value),
     Present,
     Absent,
+    /// A timestamp within this many seconds of now: ahead when positive, behind
+    /// when negative. Only a card predicate declares it.
+    Within(i64),
+    /// A timestamp earlier than now plus this many seconds. Only a card
+    /// predicate declares it.
+    Before(i64),
+}
+
+/// Whether `operator` holds for the value found at a predicate's path, read
+/// against `now` in seconds since the Unix epoch.
+///
+/// The one evaluator both kinds of predicate go through, so an action's
+/// `equals` and a card's `equals` cannot come to mean different things.
+fn evaluate(operator: Operator<'_>, found: Option<&Value>, now: i64) -> bool {
+    // A null is how the API server spells a field nobody set, so the two
+    // are one answer here rather than a distinction an app must know.
+    let found = found.filter(|value| !value.is_null());
+    match operator {
+        Operator::Equals(want) => found == Some(want),
+        Operator::NotEquals(want) => found != Some(want),
+        Operator::Present => found.is_some(),
+        Operator::Absent => found.is_none(),
+        Operator::Within(window) => timestamp(found).is_some_and(|at| {
+            let edge = now.saturating_add(window);
+            (now.min(edge)..=now.max(edge)).contains(&at)
+        }),
+        Operator::Before(offset) => timestamp(found).is_some_and(|at| at < now.saturating_add(offset)),
+    }
+}
+
+/// The instant a value names, when it is an RFC 3339 timestamp — the form
+/// Kubernetes writes every `metav1.Time` in. Anything else is no instant, and
+/// a date operator over it does not hold.
+fn timestamp(value: Option<&Value>) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value?.as_str()?)
+        .ok()
+        .map(|at| at.timestamp())
+}
+
+/// The longest duration a card predicate may name: ten years, either way.
+const MAX_DURATION_SECONDS: i64 = 3_650 * 86_400;
+
+/// A signed duration of one unit, such as `14d`, `-1h` or `30s`, in seconds.
+/// One spelling per quantity, and no calendar units: a month or a year is not
+/// a fixed number of seconds.
+fn duration(text: &str) -> Result<i64, String> {
+    let bad = || {
+        Err(format!(
+            "`{text}` is not a duration: write a whole number and one unit of s, m, h, d or w, such as `14d` or `-1h`, at most 3650d"
+        ))
+    };
+    let (negative, magnitude) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let Some(unit) = magnitude.chars().last() else {
+        return bad();
+    };
+    let digits = &magnitude[..magnitude.len() - unit.len_utf8()];
+    if digits.is_empty() || digits.len() > 6 || !digits.bytes().all(|c| c.is_ascii_digit()) {
+        return bad();
+    }
+    let scale = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3_600,
+        'd' => 86_400,
+        'w' => 7 * 86_400,
+        _ => return bad(),
+    };
+    let Ok(count) = digits.parse::<i64>() else {
+        return bad();
+    };
+    let seconds = count * scale;
+    if seconds > MAX_DURATION_SECONDS {
+        return bad();
+    }
+    Ok(if negative { -seconds } else { seconds })
+}
+
+/// What a dashboard card counts (#540): one question about one value of each
+/// object its source lists.
+///
+/// The action predicates' path grammar, literal rule and `equals` / `absent`,
+/// plus two date operators. There is no `reason`: nothing is refused, so
+/// there is nothing to tell an operator. Exactly one operator per predicate:
+///
+/// ```json
+/// {"jsonPath": ".status.notAfter", "within": "14d"}
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CardPredicate {
+    /// The value this predicate asks about, in the same bounded JSONPath
+    /// subset as an action predicate's.
+    #[serde(rename = "jsonPath")]
+    pub json_path: String,
+    /// The value at `jsonPath` must equal this string, number or boolean.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<Value>,
+    /// `true`: the value at `jsonPath` must be unset or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absent: Option<bool>,
+    /// The value at `jsonPath` is an RFC 3339 timestamp within this duration
+    /// of now: `14d` is from now until fourteen days ahead, `-1h` the last
+    /// hour. Units s, m, h, d and w.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub within: Option<String>,
+    /// The value at `jsonPath` is an RFC 3339 timestamp earlier than now plus
+    /// this duration: `14d` includes everything already past, `0d` is only the
+    /// past, `-30d` is older than thirty days.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+}
+
+impl CardPredicate {
+    /// Every rule a declared card predicate must satisfy.
+    pub fn check(&self) -> Result<(), String> {
+        segments(&self.json_path)?;
+        if let Operator::Equals(value) = self.operator()? {
+            literal(value)?;
+        }
+        Ok(())
+    }
+
+    /// Whether this predicate holds for `object` at `now`, in seconds since
+    /// the Unix epoch.
+    ///
+    /// A predicate this host would refuse at install does not hold, whatever
+    /// it says — so a path typo counts nothing rather than everything, even
+    /// under `absent`.
+    pub fn holds_at(&self, object: &Value, now: i64) -> bool {
+        let (Ok(operator), Ok(path)) = (self.operator(), segments(&self.json_path)) else {
+            return false;
+        };
+        if self.check().is_err() {
+            return false;
+        }
+        evaluate(operator, walk(object, &path), now)
+    }
+
+    fn operator(&self) -> Result<Operator<'_>, String> {
+        let within = self.within.as_deref().map(duration).transpose()?;
+        let before = self.before.as_deref().map(duration).transpose()?;
+        let declared: Vec<Operator<'_>> = [
+            self.equals.as_ref().map(Operator::Equals),
+            self.absent.map(|_| Operator::Absent),
+            within.map(Operator::Within),
+            before.map(Operator::Before),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let [operator] = declared[..] else {
+            return Err(format!(
+                "`{}` must declare exactly one of `equals`, `absent`, `within` and `before`",
+                self.json_path
+            ));
+        };
+        if matches!(operator, Operator::Absent) && self.absent != Some(true) {
+            return Err("`absent` is written `true`".into());
+        }
+        if operator == Operator::Within(0) {
+            return Err(
+                "`within` needs a window of some length; `0d` matches nothing".into(),
+            );
+        }
+        Ok(operator)
+    }
 }
 
 /// One step of a predicate's path.
@@ -95,7 +264,8 @@ impl Predicate {
         segments(&self.json_path)?;
         match self.operator()? {
             Operator::Equals(value) | Operator::NotEquals(value) => literal(value)?,
-            Operator::Present | Operator::Absent => {}
+            // An action predicate declares no date operator.
+            Operator::Present | Operator::Absent | Operator::Within(_) | Operator::Before(_) => {}
         }
         if self.reason.trim().is_empty() {
             return Err(format!(
@@ -124,15 +294,8 @@ impl Predicate {
         let (Ok(operator), Ok(path)) = (self.operator(), segments(&self.json_path)) else {
             return false;
         };
-        // A null is how the API server spells a field nobody set, so the two
-        // are one answer here rather than a distinction an app must know.
-        let found = walk(object, &path).filter(|value| !value.is_null());
-        match operator {
-            Operator::Equals(want) => found == Some(want),
-            Operator::NotEquals(want) => found != Some(want),
-            Operator::Present => found.is_some(),
-            Operator::Absent => found.is_none(),
-        }
+        // No date operator reaches here, so the clock is never read.
+        evaluate(operator, walk(object, &path), 0)
     }
 
     /// The declared reason, safe to show: it came from a manifest, so control
@@ -226,6 +389,13 @@ pub fn unmet<'a>(predicates: &'a [Predicate], object: &Value) -> Option<&'a Pred
 /// into a check that passes.
 pub fn resolve<'a>(object: &'a Value, path: &str) -> Option<&'a Value> {
     walk(object, &segments(path).ok()?)
+}
+
+/// Whether `path` is one this host evaluates, and why not when it is not. For
+/// a declared path that is read without a predicate around it, such as the
+/// value a dashboard card sums.
+pub fn check_path(path: &str) -> Result<(), String> {
+    segments(path).map(|_| ())
 }
 
 fn walk<'a>(object: &'a Value, path: &[Segment]) -> Option<&'a Value> {

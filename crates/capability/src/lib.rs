@@ -6,7 +6,9 @@ mod error;
 mod predicate;
 mod text;
 
-pub use predicate::{check_predicates, resolve, unmet, Predicate, MAX_PREDICATES};
+pub use predicate::{
+    check_path, check_predicates, resolve, unmet, CardPredicate, Predicate, MAX_PREDICATES,
+};
 
 pub use annotations::{
     check_confirm_template, confirm_fields, render_confirm, Annotations, ConfirmFields, Impact,

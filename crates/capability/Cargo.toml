@@ -16,6 +16,9 @@ aho-corasick = "1.1.5"
 # and in query parameters; keeping the rest of the URL readable means taking
 # it apart properly rather than with a regex.
 url = "2"
+# A dashboard card's date predicates (#540) read RFC 3339 timestamps. Already in
+# the workspace through kube; no clock feature, since the caller supplies now.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
