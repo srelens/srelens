@@ -111,8 +111,14 @@ it("shows the host-resolved status as a word in its own column, searchable, when
   expect(screen.queryByText("guestbook")).toBeNull();
 });
 it("draws no status column for a kind without a resolver", async () => {
+  // A real custom-resource reader, and a resolver — for another kind. The
+  // only thing keeping the column away is that this kind has no resolver.
+  const app = { ...plugin, manifest: { ...plugin.manifest,
+    capabilities:[{ name:"list", target:"k8s.listCustomResource", arguments:{ group:"argoproj.io", kind:"Application", namespaced:true } }],
+    contributions:{ ...plugin.manifest.contributions, statusResolvers:[{ forKinds:["argoproj.io/AppProject"],
+      rules:[{ when:[], status:"unknown", label:"Unknown" }] }] } } };
   vi.mocked(readExtension).mockResolvedValue({ items:[{ name:"apps", namespace:"team", age:"1d", columns:["True"] }], printerColumns:[{ name:"Ready", jsonPath:".r" }] });
-  render(<ExtensionResults plugin={plugin} capability="list" context="prod" namespace="team" />);
+  render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
   expect(await screen.findByText("apps")).toBeTruthy();
   expect(screen.queryByRole("columnheader", { name:"Status" })).toBeNull();
 });

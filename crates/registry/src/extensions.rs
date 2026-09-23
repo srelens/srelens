@@ -2282,7 +2282,16 @@ mod tests {
         assert!(validate_app(&parsed, &without_events, core.clone()).is_err());
         value["contributions"]["pages"][1]["capability"] = json!("events");
         let invalid = Manifest::decode(&value.to_string()).unwrap();
-        assert!(validate_app(&invalid, &grants, core).is_err());
+        // The specific refusal: an event reader cannot back a table. Other
+        // problems this edit also causes (the dashboard page now names a
+        // kind with no resolver) must not stand in for it.
+        let refused = validate_app(&invalid, &grants, core).unwrap_err();
+        assert!(
+            refused.0.iter().any(|p| p.code == Code::UnsupportedTarget
+                && p.path == "contributions.pages[1].capability"
+                && p.message.contains("k8s.listCustomResource reader")),
+            "{refused}"
+        );
     }
 
     #[test]
