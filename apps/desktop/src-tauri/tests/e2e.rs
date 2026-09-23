@@ -2690,6 +2690,26 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         detail["resource"]["metadata"]["name"], KUSTOMIZATION,
         "{detail}"
     );
+    let panels = h
+        .ok(
+            "extensions.resolvePanels",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespace": NS,
+                "kind": "kustomize.toolkit.fluxcd.io/Kustomization",
+                "resource": detail["resource"],
+            }),
+        )
+        .await;
+    assert_eq!(
+        panels["panels"][0]["id"], "kustomization-summary",
+        "{panels}"
+    );
+    assert_eq!(
+        panels["panels"][0]["sections"][0]["fields"][0]["label"],
+        "Source reference",
+        "{panels}"
+    );
     assert_eq!(
         detail["actions"],
         json!(["kustomizations-suspend", "kustomizations-resume", "kustomizations-reconcile"]),
