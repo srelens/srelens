@@ -1,4 +1,5 @@
 import { NativeComponent } from "../native-components/NativeComponent";
+import { ExtensionPanelSlot } from "./ExtensionPanelSlot";
 import { ExtensionResourceNavigation } from "./resourceNavigation";
 import { useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import { inspectExtensionResource, actOnExtensionResource, formatResourceManifest, onExtensionResourceChanged, renderConfirmTemplate, unmetPredicate, type ExtensionResourceDetail, type ExtensionResourceSelection } from "@srelens/core";
@@ -10,10 +11,9 @@ import { useResource } from "../lib/useResource";
 import { HostConfirmation } from "../confirm/HostConfirmation";
 import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
-const fieldLabels: Record<string,string> = {sourceRef:"Source reference",suspend:"Suspended",prune:"Prune",wait:"Wait for readiness",force:"Force",apiVersion:"API version"};
 function fieldLabel(key:string) {
   const words=key.replace(/([a-z0-9])([A-Z])/g,"$1 $2").replace(/_/g," ");
-  return Object.hasOwn(fieldLabels,key) ? fieldLabels[key] : words.charAt(0).toUpperCase()+words.slice(1);
+  return words.charAt(0).toUpperCase()+words.slice(1);
 }
 function Entries({label,items}:{label:string;items:unknown[]}) {
   const [open,setOpen]=useState(false);
@@ -201,6 +201,7 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
         <h4 className="extension-detail-heading">Events</h4>
         {data.data?.eventsError ? <ErrorNotice cluster message={data.data.eventsError} retry={data.reload}/> : <Events detail={data.data}/>}
         <details className="extension-detail-metadata"><summary>Labels and annotations</summary><Fields value={{labels:resource.metadata.labels??{},annotations:resource.metadata.annotations??{}}}/></details>
+        <ExtensionPanelSlot context={selection.context} resource={resource}/>
       </>}
     </>}
     </Inspector>

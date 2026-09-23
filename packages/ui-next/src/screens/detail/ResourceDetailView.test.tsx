@@ -41,6 +41,10 @@ const { descriptorFor } = vi.hoisted(() => ({
 }));
 
 vi.mock("../../lib/kinds/descriptors", () => ({ descriptorFor }));
+vi.mock("../../extensions/ExtensionPanelSlot", () => ({
+  ExtensionPanelSlot: ({resource}:{resource:K8sObject}) =>
+    <section className="section" data-testid="peek-extension-panel">{resource.kind} app panels</section>,
+}));
 
 // The kit's `CodeEditor`, unchanged — wrapped only to record what the YAML
 // pane hands it. CodeMirror compiles its sizing into a generated stylesheet
@@ -231,6 +235,17 @@ describe("ResourceDetailView", () => {
     expect(getByRole("tab", { name: "Events" })).toBeDefined();
     expect(queryByRole("tab", { name: "Containers" })).toBeNull();
     expect(queryByRole("tab", { name: "Metrics" })).toBeNull();
+  });
+
+  it("places app panels after the peek's host facts only on Details", async () => {
+    getObject.mockResolvedValue({ object: POD });
+    render(<ResourceDetailView context="ctx" kind="Pod" namespace="default" name="web-1" />);
+    const panel = await screen.findByTestId("peek-extension-panel");
+    const facts = document.querySelector(".fact-list");
+    expect(facts).toBeTruthy();
+    expect(facts!.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await userEvent.click(screen.getByRole("tab", { name: "YAML" }));
+    expect(screen.queryByTestId("peek-extension-panel")).toBeNull();
   });
 
   it("names the object in the error state", async () => {

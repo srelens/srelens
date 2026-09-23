@@ -5,6 +5,7 @@ pub(crate) mod crd;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 mod limits;
+mod panels;
 #[cfg(test)]
 mod policy_tests;
 mod resource;
@@ -162,6 +163,7 @@ pub struct Inventory {
     allow_unsigned_apps: bool,
     plugins: Vec<Installed>,
 }
+
 impl Default for Inventory {
     fn default() -> Self {
         Self {
@@ -171,6 +173,43 @@ impl Default for Inventory {
             plugins: vec![],
         }
     }
+}
+/// Recheck installed app authority for each native contribution read.
+async fn resolver_app(
+    path: PathBuf,
+    core: &Arc<Registry>,
+    client_cache: &Arc<srelens_kube::client_cache::ClientCache>,
+    id: &str,
+    revision: u64,
+    context: String,
+) -> Result<(Inventory, usize, String), CapabilityError> {
+    let resolved = request_context(client_cache, &context).await;
+    let state = tokio::task::spawn_blocking(move || read(&path))
+        .await
+        .map_err(|error| CapabilityError::Handler(error.to_string()))?
+        .map_err(CapabilityError::Handler)?;
+    let index = state
+        .plugins
+        .iter()
+        .position(|plugin| plugin.manifest.id == id)
+        .ok_or_else(|| CapabilityError::Handler("Extension was removed; refresh the view".into()))?;
+    let plugin = &state.plugins[index];
+    if let Some(reason) = &plugin.policy_blocked {
+        return Err(CapabilityError::Handler(reason.clone()));
+    }
+    if !plugin.enabled || plugin.revision != revision {
+        return Err(CapabilityError::Handler(
+            "Extension was disabled or updated; refresh the view".into(),
+        ));
+    }
+    plugin.check_scope(&resolved)?;
+    validate_app(&plugin.manifest, &plugin.grants, core.clone())
+        .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
+    let context = resolved
+        .ok()
+        .and_then(|context| context.pinned_id())
+        .unwrap_or(context);
+    Ok((state, index, context))
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "action", deny_unknown_fields)]
@@ -2906,6 +2945,7 @@ mod tests {
         for id in [
             "extensions.read",
             "extensions.resolveColumns",
+            "extensions.resolvePanels",
             "extensions.catalog",
             "extensions.catalogManifest",
             "extensions.validate",
@@ -2913,7 +2953,7 @@ mod tests {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 9);
+        assert_eq!(mcp.list_tools().len(), 10);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

@@ -1,4 +1,5 @@
 import { ExtensionResourceSlot } from "../../extensions/Extensions";
+import { ExtensionPanelSlot } from "../../extensions/ExtensionPanelSlot";
 import type { ReactNode } from "react";
 import { ageFromTimestamp, type K8sObject, type ResourceStatusLine } from "@srelens/core";
 import {
@@ -286,6 +287,7 @@ export function ResourceDetailView({ context, kind, namespace, name, peek }: Res
           sections beneath is still a run of direct siblings and every
           hairline is unchanged. (`lib/sectionFolds.ts`) */}
       <SectionMemory kind={kind}>{pane}</SectionMemory>
+        {active === PANE_DETAILS && <ExtensionPanelSlot context={context} resource={object}/>}
         {active === PANE_DETAILS && <ExtensionResourceSlot context={context} kind={object.kind ?? kind} group={object.apiVersion?.includes("/") ? object.apiVersion.split("/")[0] : ""} namespace={namespace} name={name} />}
     </Inspector>
   );

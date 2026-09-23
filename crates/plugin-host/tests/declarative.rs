@@ -251,6 +251,27 @@ fn gitops_examples_bind_to_the_real_host_contract() {
 }
 
 #[test]
+fn gitops_examples_declare_curated_inspector_panels() {
+    let flux = Manifest::parse(include_str!("../../../examples/extensions/flux.json")).unwrap();
+    let argo = Manifest::parse(include_str!("../../../examples/extensions/argocd.json")).unwrap();
+    for kind in [
+        "kustomize.toolkit.fluxcd.io/Kustomization",
+        "helm.toolkit.fluxcd.io/HelmRelease",
+    ] {
+        assert!(
+            flux.contributions
+                .detail_panels
+                .iter()
+                .any(|panel| panel.for_kinds.iter().any(|candidate| candidate == kind)),
+            "missing Flux panel for {kind}"
+        );
+    }
+    assert!(argo.contributions.detail_panels.iter().any(|panel| panel
+        .for_kinds
+        .contains(&"argoproj.io/Application".to_owned())));
+}
+
+#[test]
 fn a_later_invalid_binding_does_not_partially_register() {
     let mut value = manifest();
     let mut second = value["capabilities"][0].clone();
