@@ -501,6 +501,19 @@ it("uses the restricted namespace instead of an all-namespace resource read", as
   expect(vi.mocked(readExtension).mock.calls.every(call=>call[4]==="team")).toBe(true);
 });
 
+it("reads a card target's own namespaces even under a namespace-restricted credential", async () => {
+  // The route says what the card counted; the credential's one namespace must not
+  // quietly narrow it. If the credential cannot read them, the read says so.
+  vi.mocked(listNamespaces).mockResolvedValue({error:'Forbidden: User "system:serviceaccount:team:reader" cannot list namespaces'} as any);
+  vi.spyOn(await import("@srelens/core/lib/clusters"),"listContexts").mockResolvedValue({contexts:[{name:"staging",namespace:"team"}]} as any);
+  render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" card="suspended" cardNamespaces={["prod","team"]} />);
+  await waitFor(()=>expect(readExtension).toHaveBeenCalled());
+  await waitFor(()=>expect(screen.getByRole("combobox",{name:"App namespace"}).textContent).toContain("prod, team"));
+  const cardReads = vi.mocked(readExtension).mock.calls.filter(call=>call[6]==="suspended");
+  expect(cardReads.length).toBeGreaterThan(0);
+  for (const call of cardReads) expect(call.slice(4)).toEqual(["",true,"suspended",["prod","team"]]);
+});
+
 it("carries the selected namespace into group navigation", async () => {
   vi.mocked(listNamespaces).mockResolvedValue({namespaces:["team"]} as any);
   const onPage=vi.fn();

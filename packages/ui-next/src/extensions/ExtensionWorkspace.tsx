@@ -331,9 +331,13 @@ export function ExtensionWorkspace({
   const [search, setSearch] = useState("");
   const [refresh, setRefresh] = useState(0);
   const {namespaces, scope, error:namespaceError} = useNamespaceOptions(context, loadKubeconfigFiles(), refresh);
-  const namespace = scope || selectedNamespace;
+  // A card target counted over several namespaces reads exactly those: its route,
+  // not a restricted credential's one namespace, says what the page shows. A
+  // credential that cannot read them gets the refusal, not quietly fewer rows.
+  const cardOwnsScope = Boolean(card && !initialNamespace && cardNamespaces?.length);
+  const namespace = cardOwnsScope ? "" : scope || selectedNamespace;
   // What the picker shows on a card target counted over several namespaces.
-  const cardScope = card && !namespace && cardNamespaces?.length ? cardNamespaces.join(", ") : "";
+  const cardScope = cardOwnsScope ? cardNamespaces!.join(", ") : "";
   const current = onPage
     ? page
     : (plugin.manifest.contributions.pages.find((p) => p.id === localPage) ??
