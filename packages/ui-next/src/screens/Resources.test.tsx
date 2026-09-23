@@ -430,7 +430,7 @@ describe("Resources", () => {
     expect(resolveExtensionColumns.mock.calls[0][4]).toBe("apps/Deployment");
     extensionInventory.plugins = [{ ...app, enabled: false }];
     view.rerender(<ConsoleProvider><Resources route="/k/deployments" /><AskPeek /></ConsoleProvider>);
-    expect(screen.queryByRole("columnheader", { name: "Critical CVEs" })).toBeNull();
+    await waitFor(() => expect(headers()).not.toContain("Critical CVEs"));
   });
   it("keeps Pod enrichment rows stable while an app column answer rerenders the table", async () => {
     const app = { enabled: true, revision: 2, manifest: { id: "org.example.pod", name: "Pod score", contributions: {
@@ -450,6 +450,20 @@ describe("Resources", () => {
     view.rerender(<ConsoleProvider><Resources route="/k/pods" /><AskPeek /></ConsoleProvider>);
     await act(async () => { await Promise.resolve(); });
     expect(resolveExtensionColumns).toHaveBeenCalledTimes(completed);
+  });
+  it("describes a failed app column read and keeps its retry available", async () => {
+    extensionInventory.plugins = [{ enabled: true, revision: 2, manifest: {
+      id: "org.example.security", name: "Security", contributions: { tableColumns: [
+        { id: "critical", title: "Critical CVEs", forKinds: ["apps/Deployment"],
+          source: { join: "reports", jsonPath: ".report.criticalCount" }, format: "number" },
+      ] },
+    } }];
+    resolveExtensionColumns.mockRejectedValue(new Error("handler error: list joined custom resources timed out"));
+    open("/k/deployments");
+    const alert = await screen.findByText("Couldn’t read Security columns");
+    expect(alert.parentElement?.textContent).toContain("didn't respond in time");
+    expect(alert.parentElement?.textContent).not.toContain("handler error:");
+    expect(screen.getByRole("button", { name: "Retry columns" })).toBeTruthy();
   });
   it("lists a kind's rows under its own title", async () => {
     open("/k/pods");

@@ -29,7 +29,7 @@ libc = "0.2"
 # `durable` warns when a save could not be made durable; the desktop app routes `log`.
 log = "0.4"
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "sync"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 sha2 = "0.10"
@@ -51,4 +51,4 @@ fuzzing = []
 # test support.
 srelens-plugin-host = { path = "../plugin-host", features = ["fuzzing"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "test-util"] }

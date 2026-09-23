@@ -1,6 +1,7 @@
 import { ContextLabel } from "../lib/contextLabel";
 import { useEffect, useMemo, useState } from "react";
 import {
+  describeError,
   listCrds,
   rowInSelection,
   watchNamespaceForSelection,
@@ -550,7 +551,8 @@ function KindList({
 
       {appColumns.errors.map((error) => (
         <Alert key={error.id} tone="warn" title={`Couldn’t read ${error.title} columns`} className="mx-3 mt-3 mb-3">
-          {error.message} <Button variant="secondary" onClick={appColumns.reload}>Retry columns</Button>
+          {describeError(error.message, { domain: "cluster" }).detail}{" "}
+          <Button variant="secondary" onClick={appColumns.reload}>Retry columns</Button>
         </Alert>
       ))}
 

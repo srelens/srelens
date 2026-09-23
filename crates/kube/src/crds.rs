@@ -1071,6 +1071,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn join_list_scopes_requests_and_reconstructs_complete_custom_resources() {
+        let object = serde_json::json!({"apiVersion":"example.io/v1","kind":"Widget",
+            "metadata":{"name":"report","namespace":"team","labels":{"target":"api"}},
+            "report":{"critical":3}});
+        let page = serde_json::json!({"apiVersion":"example.io/v1","kind":"WidgetList",
+            "metadata":{},"items":[object]});
+        for (namespace, namespaced, expected_path) in [
+            ("team", true, "/apis/example.io/v1/namespaces/team/widgets"),
+            ("team", false, "/apis/example.io/v1/widgets"),
+        ] {
+            let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+                vec![page.clone()],
+                std::time::Duration::ZERO,
+            );
+            let cache = ClientCache::new_many(vec![]);
+            cache.preload("fake", client).await;
+            let (objects, truncated) = list_custom_resource_join_objects(
+                &cache,
+                "fake",
+                namespace,
+                "example.io",
+                "v1",
+                "Widget",
+                "widgets",
+                namespaced,
+            )
+            .await
+            .unwrap();
+            assert!(!truncated);
+            assert_eq!(objects.len(), 1);
+            assert_eq!(objects[0]["apiVersion"], "example.io/v1");
+            assert_eq!(objects[0]["kind"], "Widget");
+            assert_eq!(objects[0]["metadata"]["labels"]["target"], "api");
+            assert_eq!(objects[0]["report"]["critical"], 3);
+            assert!(uris.lock().unwrap()[0].starts_with(expected_path));
+        }
+    }
+
+    #[tokio::test]
+    async fn join_list_reports_truncation_at_the_shared_list_cap() {
+        let page = |start: usize, next: Option<&str>| {
+            serde_json::json!({
+                "apiVersion":"example.io/v1","kind":"WidgetList",
+                "metadata":{"continue":next},
+                "items":(start..start+500).map(|i| serde_json::json!({
+                    "apiVersion":"example.io/v1","kind":"Widget","metadata":{"name":format!("w{i}")}
+                })).collect::<Vec<_>>(),
+            })
+        };
+        let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+            vec![
+                page(0, Some("p2")),
+                page(500, Some("p3")),
+                page(1000, Some("p4")),
+                page(1500, Some("p5")),
+            ],
+            std::time::Duration::ZERO,
+        );
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, truncated) = list_custom_resource_join_objects(
+            &cache,
+            "fake",
+            "",
+            "example.io",
+            "v1",
+            "Widget",
+            "widgets",
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(objects.len(), crate::list_cap::APP_LIST_CAP);
+        assert!(truncated);
+        assert_eq!(uris.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn join_list_preserves_api_failure_as_an_error() {
+        let (client, paths) = answering(403);
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let error = list_custom_resource_join_objects(
+            &cache,
+            "fake",
+            "team",
+            "example.io",
+            "v1",
+            "Widget",
+            "widgets",
+            true,
+        )
+        .await
+        .err()
+        .expect("Forbidden must not become an empty list");
+        assert!(matches!(error, CapabilityError::Handler(_)));
+        assert!(error.to_string().contains("Forbidden"), "{error}");
+        assert_eq!(
+            paths.lock().unwrap()[0],
+            "/apis/example.io/v1/namespaces/team/widgets"
+        );
+    }
+
+    #[tokio::test]
     async fn a_crd_lookup_checks_the_served_version_and_tells_absence_from_failure() {
         let (client, paths) = answering(200);
         assert_eq!(

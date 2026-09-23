@@ -3,7 +3,7 @@ import { contributionKind, extensionEnabledFor, resolveExtensionColumns, type Ex
 import { Badge, type Column } from "@srelens/ui-kit";
 import type { ListRow } from "../lib/kinds/types";
 
-type Result = { plugin: InstalledExtension; state: "loading" | "ready" | "error"; data?: ExtensionColumnResult; error?: string };
+type Result = { plugin: InstalledExtension; state: "loading" | "ready" | "error"; pending?: boolean; data?: ExtensionColumnResult; error?: string };
 const EMPTY_RESULTS: Result[] = [];
 
 function displayCell(value: string, format: ExtensionTableColumn["format"]) {
@@ -34,6 +34,24 @@ function sortCell(value: string | null, format: ExtensionTableColumn["format"]):
   if (format === "number") { const number = Number(value); return Number.isFinite(number) ? number : Number.NEGATIVE_INFINITY; }
   if (format === "date") { const time = new Date(value).getTime(); return Number.isFinite(time) ? time : Number.NEGATIVE_INFINITY; }
   return value;
+}
+
+/** The host's scalar JSONPath reader starts at one top-level key. */
+function rootKey(path: string): string {
+  const text = path.slice(1);
+  if (text.startsWith("[")) {
+    const end = text.indexOf("]");
+    const bracket = text.slice(1, end);
+    return (bracket.startsWith("'") || bracket.startsWith('"')) ? bracket.slice(1, -1) : bracket;
+  }
+  let key = "";
+  for (let index = 0; index < text.length; index++) {
+    const ch = text[index];
+    if (ch === "." || ch === "[") break;
+    if (ch === "\\" && index + 1 < text.length) key += text[++index];
+    else key += ch;
+  }
+  return key;
 }
 
 /** API group is part of a kind's identity; a CRD can reuse a built-in kind name. */
@@ -67,12 +85,22 @@ export function useResolvedColumns<Row extends ListRow>(args: {
   useEffect(() => {
     let current = true;
     if (!context || offers.length === 0 || rows.length === 0) return;
-    setAnswer({ scope, rows, results: offers.map((plugin) => ({ plugin, state: "loading" })) });
+    setAnswer((previous) => ({ scope, rows, results: offers.map((plugin) => {
+      const old = previous?.scope === scope
+        ? previous.results.find((result) => result.plugin.manifest.id === plugin.manifest.id)
+        : undefined;
+      return old?.state === "ready" ? { ...old, plugin, pending: true } : { plugin, state: "loading", pending: true };
+    }) }));
+    const rowKeys = new Set(offers.flatMap((plugin) => (plugin.manifest.contributions.tableColumns ?? [])
+      .filter((column) => column.forKinds.includes(kind) && !column.source.join)
+      .map((column) => rootKey(column.source.jsonPath))));
     const uids = rows.map((row) => {
       const uid = (row as ListRow & { uid?: unknown }).uid;
       return {
         uid: typeof uid === "string" ? uid : undefined,
-        name: row.name, namespace: row.namespace ?? "", row: row as Record<string, unknown>,
+        name: row.name, namespace: row.namespace ?? "",
+        row: Object.fromEntries([...rowKeys].filter((key) => Object.hasOwn(row, key))
+          .map((key) => [key, (row as Record<string, unknown>)[key]])),
       };
     });
     for (const plugin of offers) {
@@ -81,21 +109,22 @@ export function useResolvedColumns<Row extends ListRow>(args: {
           if (!current) return;
           setAnswer((previous) => previous?.scope === scope && previous.rows === rows
             ? { ...previous, results: previous.results.map((result) => result.plugin.manifest.id === plugin.manifest.id
-              ? { plugin, state: "ready", data } : result) }
+              ? { plugin, state: "ready", data, pending: false } : result) }
             : previous);
         },
         (error) => {
           if (!current) return;
           setAnswer((previous) => previous?.scope === scope && previous.rows === rows
             ? { ...previous, results: previous.results.map((result) => result.plugin.manifest.id === plugin.manifest.id
-              ? { plugin, state: "error", error: error instanceof Error ? error.message : String(error) } : result) }
+              ? { plugin, state: "error", pending: false, error: error instanceof Error ? error.message : String(error) } : result) }
             : previous);
         },
       );
     }
     return () => { current = false; };
   }, [scope, rows]);
-  const live = answer?.scope === scope && answer.rows === rows ? answer.results : EMPTY_RESULTS;
+  const live = answer?.scope === scope ? answer.results : EMPTY_RESULTS;
+  const rowsPending = answer?.scope === scope && answer.rows !== rows;
   const reload = () => setRetry((value) => value + 1);
   const columns = useMemo(() => offers.flatMap((plugin) => {
     const found = live.find((result) => result.plugin.manifest.id === plugin.manifest.id);
@@ -117,12 +146,12 @@ export function useResolvedColumns<Row extends ListRow>(args: {
         getSortValue: (row) => sortCell(value(row), column.format),
         render: (row) => found?.state === "error"
           ? <span title={found.error}>Couldn’t read</span>
-          : found?.state === "ready"
+          : found?.state === "ready" && cell(row)
             ? value(row) === null ? <span>—</span> : displayCell(value(row)!, column.format)
-            : <span>Loading…</span>,
+            : found?.state === "ready" && !found.pending && !rowsPending ? <span>—</span> : <span>Loading…</span>,
       };
     });
-  }), [signature, live, kind]);
+  }), [signature, live, kind, rowsPending]);
   const errors = live.filter((result) => result.state === "error").map((result) => ({
     id: result.plugin.manifest.id, title: result.plugin.manifest.name, message: result.error ?? "Read failed",
   }));

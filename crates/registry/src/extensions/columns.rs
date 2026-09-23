@@ -10,7 +10,7 @@ use std::{
 
 const CACHE_TTL: Duration = Duration::from_secs(5);
 const CACHE_LIMIT: usize = 32;
-type Snapshot = (Instant, Vec<Value>);
+type Snapshot = (Instant, Arc<Vec<Value>>);
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct CacheKey {
     app: String,
@@ -133,7 +133,7 @@ async fn cached_objects<F, Fut>(
     cache: &JoinCache,
     key: CacheKey,
     load: F,
-) -> Result<Vec<Value>, CapabilityError>
+) -> Result<Arc<Vec<Value>>, CapabilityError>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<Vec<Value>, CapabilityError>>,
@@ -142,11 +142,29 @@ where
     let mut snapshot = slot.lock().await;
     if let Some((time, objects)) = &*snapshot {
         if time.elapsed() < CACHE_TTL {
-            return Ok(objects.clone());
+            return Ok(Arc::clone(objects));
         }
     }
-    let objects = load().await?;
-    *snapshot = Some((Instant::now(), objects.clone()));
+    // Release an expired large list even if its replacement fails.
+    *snapshot = None;
+    let objects = Arc::new(load().await?);
+    let loaded_at = Instant::now();
+    *snapshot = Some((loaded_at, Arc::clone(&objects)));
+    drop(snapshot);
+    // Idle cache entries must release their raw CRs after the TTL as well.
+    let weak = Arc::downgrade(&slot);
+    tokio::spawn(async move {
+        tokio::time::sleep(CACHE_TTL).await;
+        if let Some(slot) = weak.upgrade() {
+            let mut snapshot = slot.lock().await;
+            if snapshot
+                .as_ref()
+                .is_some_and(|(time, _)| *time == loaded_at)
+            {
+                *snapshot = None;
+            }
+        }
+    });
     Ok(objects)
 }
 
@@ -158,7 +176,7 @@ async fn join_objects(
     join: &Join,
     context: &str,
     namespace: &str,
-) -> Result<Vec<Value>, CapabilityError> {
+) -> Result<Arc<Vec<Value>>, CapabilityError> {
     let binding = plugin
         .manifest
         .capabilities
@@ -192,7 +210,7 @@ async fn join_objects(
         ).await?;
         if truncated {
             return Err(CapabilityError::Handler(
-                "Joined resource list reached its 1,000-row limit; column values would be incomplete".into(),
+                "Joined resource list reached its 2,000-object limit; column values would be incomplete".into(),
             ));
         }
         Ok(objects)
@@ -201,7 +219,7 @@ async fn join_objects(
 
 fn resolved_cells(
     columns: &[TableColumn],
-    joins: &HashMap<String, (JoinMatch, Vec<Value>)>,
+    joins: &HashMap<String, (JoinMatch, Arc<Vec<Value>>)>,
     rows: &[ColumnRow],
     kind: &str,
 ) -> Result<Vec<ResolvedCell>, CapabilityError> {
@@ -215,16 +233,20 @@ fn resolved_cells(
             for column in columns {
                 let source = &column.source;
                 let value = if let Some(join_id) = &source.join {
-                    joins
-                        .get(join_id)
-                        .and_then(|(rule, objects)| {
-                            indexed
-                                .get(join_id)
-                                .and_then(|index| joined(rule, objects, index, row, kind))
-                        })
-                        .map(|object| {
-                            srelens_kube::crds::resolve_json_path(object, &source.json_path)
-                        })
+                    let object = match (joins.get(join_id), indexed.get(join_id)) {
+                        (Some((rule, objects)), Some(index)) => {
+                            joined(rule, objects, index, row, kind).map_err(|()| {
+                                CapabilityError::Handler(format!(
+                                    "Column {} for {}/{} matched multiple joined resources",
+                                    column.id, row.namespace, row.name,
+                                ))
+                            })?
+                        }
+                        _ => None,
+                    };
+                    object.map(|object| {
+                        srelens_kube::crds::resolve_json_path(object, &source.json_path)
+                    })
                 } else {
                     Some(srelens_kube::crds::resolve_json_path(
                         &row.row,
@@ -344,51 +366,25 @@ pub(super) fn register(
     ));
 }
 
-#[cfg(test)]
-fn matches_join(rule: &JoinMatch, object: &Value, row: &ColumnRow, kind: &str) -> bool {
-    let metadata = &object["metadata"];
-    let namespace = metadata["namespace"].as_str().unwrap_or("");
-    if !namespace.is_empty() && namespace != row.namespace {
-        return false;
-    }
-    let row_kind = kind.rsplit('/').next().unwrap_or(kind);
-    if let Some(label) = &rule.label {
-        if metadata["labels"][label].as_str() != Some(row.name.as_str()) {
-            return false;
-        }
-        return rule
-            .kind_label
-            .as_ref()
-            .is_none_or(|key| metadata["labels"][key].as_str() == Some(row_kind));
-    }
-    if let Some(annotation) = &rule.annotation {
-        return metadata["annotations"][annotation].as_str() == Some(row.name.as_str());
-    }
-    if rule.name {
-        return metadata["name"].as_str() == Some(row.name.as_str());
-    }
-    if rule.owner_reference {
-        return metadata["ownerReferences"]
-            .as_array()
-            .is_some_and(|owners| {
-                owners.iter().any(|owner| {
-                    owner["kind"].as_str() == Some(row_kind)
-                        && match row.uid.as_deref() {
-                            Some(uid) => owner["uid"].as_str() == Some(uid),
-                            None => owner["name"].as_str() == Some(row.name.as_str()),
-                        }
-                })
-            });
-    }
-    false
-}
-
 fn join_key(namespace: &str, kind: &str, name: &str) -> String {
     format!("{namespace}\u{0}{kind}\u{0}{name}")
 }
 
 /// Each joined list is indexed once, then every row/column lookup is constant time.
-fn index_join(rule: &JoinMatch, objects: &[Value]) -> HashMap<String, usize> {
+fn record_match(index: &mut HashMap<String, Option<usize>>, key: String, position: usize) {
+    use std::collections::hash_map::Entry;
+    match index.entry(key) {
+        Entry::Vacant(entry) => {
+            entry.insert(Some(position));
+        }
+        Entry::Occupied(mut entry) if *entry.get() != Some(position) => {
+            entry.insert(None);
+        }
+        _ => {}
+    }
+}
+
+fn index_join(rule: &JoinMatch, objects: &[Value]) -> HashMap<String, Option<usize>> {
     let mut index = HashMap::new();
     for (position, object) in objects.iter().enumerate() {
         let metadata = &object["metadata"];
@@ -401,36 +397,34 @@ fn index_join(rule: &JoinMatch, objects: &[Value]) -> HashMap<String, usize> {
                     .and_then(|key| metadata["labels"][key].as_str())
                     .unwrap_or("");
                 if rule.kind_label.is_none() || !kind.is_empty() {
-                    index
-                        .entry(join_key(namespace, kind, name))
-                        .or_insert(position);
+                    record_match(&mut index, join_key(namespace, kind, name), position);
                 }
             }
         } else if let Some(annotation) = &rule.annotation {
             if let Some(name) = metadata["annotations"][annotation].as_str() {
-                index
-                    .entry(join_key(namespace, "", name))
-                    .or_insert(position);
+                record_match(&mut index, join_key(namespace, "", name), position);
             }
         } else if rule.name {
             if let Some(name) = metadata["name"].as_str() {
-                index
-                    .entry(join_key(namespace, "", name))
-                    .or_insert(position);
+                record_match(&mut index, join_key(namespace, "", name), position);
             }
         } else if rule.owner_reference {
             if let Some(owners) = metadata["ownerReferences"].as_array() {
                 for owner in owners {
                     let kind = owner["kind"].as_str().unwrap_or("");
                     if let Some(uid) = owner["uid"].as_str() {
-                        index
-                            .entry(join_key(namespace, &format!("uid:{kind}"), uid))
-                            .or_insert(position);
+                        record_match(
+                            &mut index,
+                            join_key(namespace, &format!("uid:{kind}"), uid),
+                            position,
+                        );
                     }
                     if let Some(name) = owner["name"].as_str() {
-                        index
-                            .entry(join_key(namespace, &format!("name:{kind}"), name))
-                            .or_insert(position);
+                        record_match(
+                            &mut index,
+                            join_key(namespace, &format!("name:{kind}"), name),
+                            position,
+                        );
                     }
                 }
             }
@@ -442,10 +436,10 @@ fn index_join(rule: &JoinMatch, objects: &[Value]) -> HashMap<String, usize> {
 fn joined<'a>(
     rule: &JoinMatch,
     objects: &'a [Value],
-    index: &HashMap<String, usize>,
+    index: &HashMap<String, Option<usize>>,
     row: &ColumnRow,
     kind: &str,
-) -> Option<&'a Value> {
+) -> Result<Option<&'a Value>, ()> {
     let kind = kind.rsplit('/').next().unwrap_or(kind);
     let (kind_key, identity) = if rule.owner_reference {
         match row.uid.as_deref() {
@@ -458,10 +452,17 @@ fn joined<'a>(
         (String::new(), row.name.as_str())
     };
     let key = join_key(&row.namespace, &kind_key, identity);
-    index
-        .get(&key)
-        .or_else(|| index.get(&join_key("", &kind_key, identity)))
-        .and_then(|position| objects.get(*position))
+    let exact = index.get(&key);
+    let fallback = if row.namespace.is_empty() {
+        None
+    } else {
+        index.get(&join_key("", &kind_key, identity))
+    };
+    match (exact, fallback) {
+        (Some(_), Some(_)) | (Some(None), _) | (_, Some(None)) => Err(()),
+        (Some(Some(position)), None) | (None, Some(Some(position))) => Ok(objects.get(*position)),
+        (None, None) => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -473,6 +474,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let cache: JoinCache = Arc::new(Mutex::new(HashMap::new()));
         let calls = AtomicUsize::new(0);
+        let mut first_snapshot = None;
         for id in ["by-name", "by-label"] {
             let rule = JoinMatch {
                 label: (id == "by-label").then(|| "target".into()),
@@ -497,6 +499,11 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(result.len(), 1);
+            if let Some(first) = &first_snapshot {
+                assert!(Arc::ptr_eq(first, &result));
+            } else {
+                first_snapshot = Some(Arc::clone(&result));
+            }
             let row = ColumnRow {
                 uid: None,
                 name: "report".into(),
@@ -504,9 +511,68 @@ mod tests {
                 row: Value::Null,
             };
             let index = index_join(&join.match_by, &result);
-            assert!(joined(&join.match_by, &result, &index, &row, "/Pod").is_some());
+            assert!(joined(&join.match_by, &result, &index, &row, "/Pod")
+                .unwrap()
+                .is_some());
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_snapshot_is_released_even_when_reloading_fails() {
+        let cache: JoinCache = Arc::new(Mutex::new(HashMap::new()));
+        let join = Join {
+            id: "by-name".into(),
+            capability: "reports".into(),
+            match_by: JoinMatch {
+                label: None,
+                kind_label: None,
+                owner_reference: false,
+                annotation: None,
+                name: true,
+            },
+        };
+        let key = key_for_join("app", 2, "prod", "team", &join);
+        let slot = cache_slot(&cache, key.clone());
+        *slot.lock().await = Some((
+            Instant::now() - CACHE_TTL - Duration::from_secs(1),
+            Arc::new(vec![json!({"large":"old"})]),
+        ));
+        assert!(cached_objects(&cache, key, || async {
+            Err(CapabilityError::Handler("offline".into()))
+        })
+        .await
+        .is_err());
+        assert!(slot.lock().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_snapshot_releases_raw_objects_at_ttl() {
+        let cache: JoinCache = Arc::new(Mutex::new(HashMap::new()));
+        let join = Join {
+            id: "by-name".into(),
+            capability: "reports".into(),
+            match_by: JoinMatch {
+                label: None,
+                kind_label: None,
+                owner_reference: false,
+                annotation: None,
+                name: true,
+            },
+        };
+        let key = key_for_join("app", 2, "prod", "team", &join);
+        let slot = cache_slot(&cache, key.clone());
+        let objects = cached_objects(&cache, key, || async {
+            Ok(vec![json!({"large":"raw CR"})])
+        })
+        .await
+        .unwrap();
+        assert!(slot.lock().await.is_some());
+        drop(objects);
+        tokio::task::yield_now().await;
+        tokio::time::advance(CACHE_TTL).await;
+        tokio::task::yield_now().await;
+        assert!(slot.lock().await.is_none());
     }
 
     #[test]
@@ -527,21 +593,22 @@ mod tests {
             annotation: None,
             name: false,
         };
-        assert!(matches_join(&label, &object, &row, "apps/Deployment"));
+        let objects = vec![object.clone()];
+        let label_index = index_join(&label, &objects);
         assert_eq!(
-            joined(
-                &label,
-                &[object.clone()],
-                &index_join(&label, &[object.clone()]),
-                &row,
-                "apps/Deployment"
-            ),
-            Some(&object)
+            joined(&label, &objects, &label_index, &row, "apps/Deployment"),
+            Ok(Some(&object))
         );
-        assert!(!matches_join(&label, &object, &row, "apps/StatefulSet"));
+        assert_eq!(
+            joined(&label, &objects, &label_index, &row, "apps/StatefulSet"),
+            Ok(None)
+        );
         let mut other = row.clone();
         other.namespace = "prod".into();
-        assert!(!matches_join(&label, &object, &other, "apps/Deployment"));
+        assert_eq!(
+            joined(&label, &objects, &label_index, &other, "apps/Deployment"),
+            Ok(None)
+        );
         let owner = JoinMatch {
             label: None,
             kind_label: None,
@@ -549,20 +616,21 @@ mod tests {
             annotation: None,
             name: false,
         };
-        assert!(matches_join(&owner, &object, &row, "apps/Deployment"));
+        let owner_index = index_join(&owner, &objects);
         assert_eq!(
-            joined(
-                &owner,
-                &[object.clone()],
-                &index_join(&owner, &[object.clone()]),
-                &row,
-                "apps/Deployment"
-            ),
-            Some(&object)
+            joined(&owner, &objects, &owner_index, &row, "apps/Deployment"),
+            Ok(Some(&object))
+        );
+        assert_eq!(
+            joined(&owner, &objects, &owner_index, &row, "apps/StatefulSet"),
+            Ok(None)
         );
         other.namespace = "team".into();
         other.uid = Some("different".into());
-        assert!(!matches_join(&owner, &object, &other, "apps/Deployment"));
+        assert_eq!(
+            joined(&owner, &objects, &owner_index, &other, "apps/Deployment"),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -599,7 +667,7 @@ mod tests {
         let index = index_join(&annotation, &objects);
         assert_eq!(
             joined(&annotation, &objects, &index, &row, "/Pod"),
-            Some(&objects[1])
+            Ok(Some(&objects[1]))
         );
         let name = JoinMatch {
             label: None,
@@ -615,8 +683,47 @@ mod tests {
         let index = index_join(&name, &objects);
         assert_eq!(
             joined(&name, &objects, &index, &row, "/Pod"),
-            Some(&objects[1])
+            Ok(Some(&objects[1]))
         );
+    }
+
+    #[test]
+    fn duplicate_join_matches_report_ambiguity_instead_of_arbitrary_first_value() {
+        let rule = JoinMatch {
+            label: Some("target".into()),
+            kind_label: None,
+            owner_reference: false,
+            annotation: None,
+            name: false,
+        };
+        let objects = Arc::new(vec![
+            json!({"metadata":{"name":"report-a","namespace":"team","labels":{"target":"api"}},"report":{"count":2}}),
+            json!({"metadata":{"name":"report-b","namespace":"team","labels":{"target":"api"}},"report":{"count":5}}),
+        ]);
+        let joins = HashMap::from([("reports".into(), (rule, objects))]);
+        let column = TableColumn {
+            id: "count".into(),
+            title: "Count".into(),
+            for_kinds: vec!["/Pod".into()],
+            source: srelens_plugin_host::ColumnSource {
+                join: Some("reports".into()),
+                json_path: ".report.count".into(),
+            },
+            format: srelens_plugin_host::ColumnFormat::Number,
+            sortable: false,
+            filterable: false,
+        };
+        let row = ColumnRow {
+            uid: None,
+            name: "api".into(),
+            namespace: "team".into(),
+            row: Value::Null,
+        };
+        let error = resolved_cells(&[column], &joins, &[row], "/Pod")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("multiple joined resources"), "{error}");
     }
 
     #[test]
