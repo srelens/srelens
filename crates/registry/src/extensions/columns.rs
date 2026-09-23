@@ -3,6 +3,7 @@ use serde_json::Map;
 use srelens_plugin_host::{Join, JoinMatch, TableColumn};
 use std::{
     collections::HashMap,
+    future::Future,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -16,7 +17,7 @@ struct CacheKey {
     revision: u64,
     context: String,
     namespace: String,
-    join: String,
+    reader: String,
 }
 type JoinCache = Arc<Mutex<HashMap<CacheKey, Arc<tokio::sync::Mutex<Option<Snapshot>>>>>>;
 
@@ -117,6 +118,38 @@ fn cache_slot(cache: &JoinCache, key: CacheKey) -> Arc<tokio::sync::Mutex<Option
         .clone()
 }
 
+fn key_for_join(app: &str, revision: u64, context: &str, namespace: &str, join: &Join) -> CacheKey {
+    CacheKey {
+        app: app.to_owned(),
+        revision,
+        context: context.to_owned(),
+        namespace: namespace.to_owned(),
+        // Two match rules over one granted reader need one Kubernetes list.
+        reader: join.capability.clone(),
+    }
+}
+
+async fn cached_objects<F, Fut>(
+    cache: &JoinCache,
+    key: CacheKey,
+    load: F,
+) -> Result<Vec<Value>, CapabilityError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Vec<Value>, CapabilityError>>,
+{
+    let slot = cache_slot(cache, key);
+    let mut snapshot = slot.lock().await;
+    if let Some((time, objects)) = &*snapshot {
+        if time.elapsed() < CACHE_TTL {
+            return Ok(objects.clone());
+        }
+    }
+    let objects = load().await?;
+    *snapshot = Some((Instant::now(), objects.clone()));
+    Ok(objects)
+}
+
 async fn join_objects(
     cache: &JoinCache,
     client_cache: &srelens_kube::client_cache::ClientCache,
@@ -133,20 +166,13 @@ async fn join_objects(
         .find(|binding| binding.name == join.capability)
         .ok_or_else(|| CapabilityError::Handler("Declared join reader is unavailable".into()))?;
     crd::require(core, context, binding).await?;
-    let key = CacheKey {
-        app: plugin.manifest.id.clone(),
-        revision: plugin.revision,
-        context: context.to_owned(),
-        namespace: namespace.to_owned(),
-        join: join.id.clone(),
-    };
-    let slot = cache_slot(cache, key);
-    let mut snapshot = slot.lock().await;
-    if let Some((time, objects)) = &*snapshot {
-        if time.elapsed() < CACHE_TTL {
-            return Ok(objects.clone());
-        }
-    }
+    let key = key_for_join(
+        &plugin.manifest.id,
+        plugin.revision,
+        context,
+        namespace,
+        join,
+    );
     let argument = |key: &str| {
         binding
             .arguments
@@ -159,25 +185,18 @@ async fn join_objects(
         .get("namespaced")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let (objects, truncated) = srelens_kube::crds::list_custom_resource_join_objects(
-        client_cache,
-        context,
-        namespace,
-        argument("group"),
-        argument("version"),
-        argument("kind"),
-        argument("plural"),
-        namespaced,
-    )
-    .await?;
-    if truncated {
-        return Err(CapabilityError::Handler(
-            "Joined resource list reached its 1,000-row limit; column values would be incomplete"
-                .into(),
-        ));
-    }
-    *snapshot = Some((Instant::now(), objects.clone()));
-    Ok(objects)
+    cached_objects(cache, key, || async {
+        let (objects, truncated) = srelens_kube::crds::list_custom_resource_join_objects(
+            client_cache, context, namespace, argument("group"), argument("version"),
+            argument("kind"), argument("plural"), namespaced,
+        ).await?;
+        if truncated {
+            return Err(CapabilityError::Handler(
+                "Joined resource list reached its 1,000-row limit; column values would be incomplete".into(),
+            ));
+        }
+        Ok(objects)
+    }).await
 }
 
 fn resolved_cells(
@@ -448,6 +467,47 @@ fn joined<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn two_join_rules_share_one_granted_reader_snapshot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache: JoinCache = Arc::new(Mutex::new(HashMap::new()));
+        let calls = AtomicUsize::new(0);
+        for id in ["by-name", "by-label"] {
+            let rule = JoinMatch {
+                label: (id == "by-label").then(|| "target".into()),
+                kind_label: None,
+                owner_reference: false,
+                annotation: None,
+                name: id == "by-name",
+            };
+            let join = Join {
+                id: id.into(),
+                capability: "reports".into(),
+                match_by: rule,
+            };
+            let result = cached_objects(
+                &cache,
+                key_for_join("app", 2, "prod", "team", &join),
+                || async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![json!({"metadata":{"name":"report","namespace":"team","labels":{"target":"report"}}})])
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.len(), 1);
+            let row = ColumnRow {
+                uid: None,
+                name: "report".into(),
+                namespace: "team".into(),
+                row: Value::Null,
+            };
+            let index = index_join(&join.match_by, &result);
+            assert!(joined(&join.match_by, &result, &index, &row, "/Pod").is_some());
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn join_keys_use_metadata_and_row_identity_without_crossing_namespaces() {

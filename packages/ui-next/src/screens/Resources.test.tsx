@@ -432,6 +432,25 @@ describe("Resources", () => {
     view.rerender(<ConsoleProvider><Resources route="/k/deployments" /><AskPeek /></ConsoleProvider>);
     expect(screen.queryByRole("columnheader", { name: "Critical CVEs" })).toBeNull();
   });
+  it("keeps Pod enrichment rows stable while an app column answer rerenders the table", async () => {
+    const app = { enabled: true, revision: 2, manifest: { id: "org.example.pod", name: "Pod score", contributions: {
+      tableColumns: [{ id: "score", title: "Score", forKinds: ["/Pod"],
+        source: { jsonPath: ".cpu" }, format: "number" }],
+    } } };
+    extensionInventory.plugins = [app];
+    podMetrics.mockResolvedValue({ metrics: [{ name: "web-1", namespace: "default", cpuMillicores: 12, memoryMiB: 64 }] });
+    resolveExtensionColumns.mockResolvedValue({ columns: app.manifest.contributions.tableColumns,
+      cells: [{ name: "web-1", namespace: "default", values: { score: "12" } }] });
+    const view = open("/k/pods");
+    await waitFor(() => expect(headers()).toContain("Score"));
+    await waitFor(() => expect(screen.getByText("12")).toBeTruthy());
+    await waitFor(() => expect(podMetrics).toHaveBeenCalled());
+    const completed = resolveExtensionColumns.mock.calls.length;
+    expect(completed).toBeGreaterThan(0);
+    view.rerender(<ConsoleProvider><Resources route="/k/pods" /><AskPeek /></ConsoleProvider>);
+    await act(async () => { await Promise.resolve(); });
+    expect(resolveExtensionColumns).toHaveBeenCalledTimes(completed);
+  });
   it("lists a kind's rows under its own title", async () => {
     open("/k/pods");
 
