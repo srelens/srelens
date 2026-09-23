@@ -112,7 +112,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 1, plugins: [] } as any);
   vi.mocked(configureExtensions).mockResolvedValue({} as any);
-  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: null, added: ["Grant k8s.listCustomResource", "Grant k8s.listEvents"], removed: [], unchanged: [] } });
   vi.mocked(listContexts).mockResolvedValue({ contexts: [] });
   vi.mocked(listExtensionCatalog).mockResolvedValue(catalog as any);
 });

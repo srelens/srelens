@@ -191,6 +191,10 @@ enum Configure {
         #[schemars(length(max = 262144))]
         manifest: String,
         grants: Vec<String>,
+        /// Revision displayed by the host preview. An update must name it so a
+        /// different version cannot be silently replaced after consent.
+        #[serde(default, rename = "reviewedRevision")]
+        reviewed_revision: Option<u64>,
     },
     #[serde(rename = "enable")]
     Enable { id: String, enabled: bool },
@@ -756,9 +760,18 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             manifest: source,
             grants,
             signature,
+            reviewed_revision,
         } => {
             let manifest = check_install(&source, &grants, signature.as_deref(), core)?;
             check_unsigned_policy(&manifest, signature.is_some(), state.allow_unsigned_apps)?;
+            let current_revision = state
+                .plugins
+                .iter()
+                .find(|app| app.manifest.id == manifest.id)
+                .map(|app| app.revision);
+            if current_revision != reviewed_revision {
+                return Err("App changed since permission review; review this update again".into());
+            }
             let checksum = format!(
                 "{:x}",
                 <sha2::Sha256 as sha2::Digest>::digest(source.as_bytes())
@@ -969,6 +982,111 @@ struct ValidateIn {
 struct ValidationReport {
     /// Empty when the manifest could be installed with these grants.
     errors: Vec<ValidationError>,
+    #[serde(rename = "permissionDiff", skip_serializing_if = "Option::is_none")]
+    permission_diff: Option<PermissionDiff>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct PermissionDiff {
+    previous_revision: Option<u64>,
+    added: Vec<String>,
+    removed: Vec<String>,
+    unchanged: Vec<String>,
+}
+
+// Canonicalise nested argument objects so a Cargo feature changing serde_json's map
+// ordering cannot turn an unchanged scope into a spurious removal and addition.
+fn canonical(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by_key(|(key, _)| *key);
+            format!(
+                "{{{}}}",
+                entries
+                    .iter()
+                    .map(|(key, value)| format!("{}:{}", serde_json::to_string(key).unwrap(), canonical(value)))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
+        Value::Array(items) => format!(
+            "[{}]",
+            items.iter().map(canonical).collect::<Vec<_>>().join(",")
+        ),
+        _ => value.to_string(),
+    }
+}
+
+fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTreeSet<String> {
+    let mut access = std::collections::BTreeSet::new();
+    for grant in grants {
+        access.insert(format!("Grant {grant}"));
+    }
+    for binding in &manifest.capabilities {
+        access.insert(format!(
+            "Read {} with {}",
+            binding.target,
+            canonical(&Value::Object(binding.arguments.clone()))
+        ));
+    }
+    for action in &manifest.actions {
+        let reader = manifest
+            .capabilities
+            .iter()
+            .find(|binding| binding.name == action.resource);
+        let scope = reader
+            .map(|binding| format!("{} {}", binding.target, canonical(&Value::Object(binding.arguments.clone()))))
+            .unwrap_or_else(|| action.resource.clone());
+        // Preconditions are enforced on the fresh object by the host action
+        // binding. Removing one broadens access even if its primitive and
+        // resource kind did not change. Reason text and predicate order do not.
+        let mut preconditions: Vec<_> = action
+            .preconditions
+            .iter()
+            .map(|predicate| {
+                let mut fields = serde_json::Map::new();
+                fields.insert("jsonPath".into(), Value::String(predicate.json_path.clone()));
+                if let Some(value) = &predicate.equals {
+                    fields.insert("equals".into(), value.clone());
+                }
+                if let Some(value) = &predicate.not_equals {
+                    fields.insert("notEquals".into(), value.clone());
+                }
+                if let Some(value) = predicate.present {
+                    fields.insert("present".into(), Value::Bool(value));
+                }
+                if let Some(value) = predicate.absent {
+                    fields.insert("absent".into(), Value::Bool(value));
+                }
+                canonical(&Value::Object(fields))
+            })
+            .collect();
+        preconditions.sort();
+        access.insert(format!(
+            "Action {} on {} with {} preconditions [{}]",
+            action.target,
+            scope,
+            canonical(&Value::Object(action.arguments.clone())),
+            preconditions.join(",")
+        ));
+    }
+    access
+}
+
+fn permission_diff(
+    previous: Option<(&Manifest, &[String], u64)>,
+    manifest: &Manifest,
+    grants: &[String],
+) -> PermissionDiff {
+    let current = access_items(manifest, grants);
+    let old = previous.map(|(manifest, grants, _)| access_items(manifest, grants)).unwrap_or_default();
+    PermissionDiff {
+        previous_revision: previous.map(|(_, _, revision)| revision),
+        added: current.difference(&old).cloned().collect(),
+        removed: old.difference(&current).cloned().collect(),
+        unchanged: current.intersection(&old).cloned().collect(),
+    }
 }
 pub fn register(
     reg: &mut Registry,
@@ -1024,13 +1142,19 @@ pub fn register(
                 let state = tokio::task::spawn_blocking(move || read(&p))
                     .await.map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)?;
-                let errors = match check_install(&input.manifest, &input.grants, input.signature.as_deref(), c) {
-                    Err(problems) => problems.0,
-                    Ok(manifest) => check_unsigned_policy(&manifest, input.signature.is_some(), state.allow_unsigned_apps)
-                        .err().map(|reason| vec![ValidationError::new(Code::InvalidValue, "actions", reason)])
-                        .unwrap_or_default(),
+                let (errors, permission_diff) = match check_install(&input.manifest, &input.grants, input.signature.as_deref(), c) {
+                    Err(problems) => (problems.0, None),
+                    Ok(manifest) => {
+                        let errors = check_unsigned_policy(&manifest, input.signature.is_some(), state.allow_unsigned_apps)
+                            .err().map(|reason| vec![ValidationError::new(Code::InvalidValue, "actions", reason)])
+                            .unwrap_or_default();
+                        let previous = state.plugins.iter().find(|app| app.manifest.id == manifest.id)
+                            .map(|app| (&app.manifest, app.grants.as_slice(), app.revision));
+                        let diff = errors.is_empty().then(|| permission_diff(previous, &manifest, &input.grants));
+                        (errors, diff)
+                    },
                 };
-                Ok::<_, CapabilityError>(ValidationReport { errors })
+                Ok::<_, CapabilityError>(ValidationReport { errors, permission_diff })
             }
         },
     ));
@@ -1174,7 +1298,9 @@ mod tests {
                 json!({"manifest": manifest, "grants": grants}),
             )
         };
-        assert_eq!(validate(manifest()).await.unwrap(), json!({"errors": []}));
+        let valid = validate(manifest()).await.unwrap();
+        assert_eq!(valid["errors"], json!([]));
+        assert!(valid["permissionDiff"].is_object());
 
         let mut value: Value = serde_json::from_str(&manifest()).unwrap();
         // One manifest rule and two host rules, each independent of the others.
@@ -1363,8 +1489,8 @@ mod tests {
                 json!({"manifest": manifest(), "grants": grants})
             )
             .await
-            .unwrap(),
-            json!({"errors": []})
+            .unwrap()["errors"],
+            json!([])
         );
         reg.invoke(
             "extensions.configure",
@@ -1477,9 +1603,18 @@ mod tests {
             signature: Some(include_bytes!("../tests/fixtures/argocd-manifest.sig").to_vec()),
             manifest: include_str!("../tests/fixtures/argocd-manifest.json").into(),
             grants: vec!["k8s.listCustomResource".into()],
+            reviewed_revision: None,
         }
     }
     pub(super) fn configure(path: &Path, input: Value) -> Result<Inventory, String> {
+        let mut input = input;
+        if input["action"] == "install" && input.get("reviewedRevision").is_none() {
+            if let Some(id) = input["manifest"].as_str().and_then(|source| Manifest::parse(source).ok()).map(|manifest| manifest.id) {
+                if let Some(app) = read(path)?.plugins.iter().find(|app| app.manifest.id == id) {
+                    input["reviewedRevision"] = json!(app.revision);
+                }
+            }
+        }
         let input = serde_json::from_value::<Configure>(input).map_err(|e| e.to_string())?;
         mutate(path, fake_core(), input)
     }
@@ -1488,6 +1623,69 @@ mod tests {
         let mut value: Value = serde_json::from_str(&manifest()).unwrap();
         value["version"] = json!(version);
         value.to_string()
+    }
+    #[test]
+    fn update_preview_separates_added_removed_and_unchanged_access() {
+        let mut old: Manifest = serde_json::from_str(&manifest()).unwrap();
+        let mut new = old.clone();
+        old.permissions.push("k8s.listEvents".into());
+        new.permissions.push("k8s.annotate".into());
+        let preview = permission_diff(Some((&old, &["k8s.listCustomResource".into(), "k8s.listEvents".into()][..], 7)), &new, &["k8s.listCustomResource".into(), "k8s.annotate".into()]);
+        assert_eq!(preview.previous_revision, Some(7));
+        assert!(preview.added.iter().any(|entry| entry.contains("k8s.annotate")));
+        assert!(preview.removed.iter().any(|entry| entry.contains("k8s.listEvents")));
+        assert!(preview.unchanged.iter().any(|entry| entry.contains("k8s.listCustomResource")));
+    }
+    #[test]
+    fn changing_a_reader_kind_or_bound_action_is_an_access_change_even_with_same_grants() {
+        let mut old: Manifest = serde_json::from_str(&manifest()).unwrap();
+        old.actions.push(serde_json::from_value(json!({"name":"renew","title":"Renew","target":"k8s.annotate","resource":"applications","arguments":{"key":"old"}})).unwrap());
+        let mut next = old.clone();
+        next.capabilities[0].arguments.insert("kind".into(), json!("OtherApplication"));
+        next.actions[0].arguments.insert("key".into(), json!("new"));
+        let grants = ["k8s.listCustomResource".into(), "k8s.annotate".into()];
+        let diff = permission_diff(Some((&old, &grants, 4)), &next, &grants);
+        assert_eq!(diff.added.len(), 2, "reader kind and action scope changed: {diff:?}");
+        assert_eq!(diff.removed.len(), 2, "the old reader and action scopes were removed: {diff:?}");
+        assert_eq!(diff.unchanged.len(), 2, "grant names alone did not change: {diff:?}");
+    }
+    #[test]
+    fn removing_an_enforced_action_precondition_is_reported_as_broader_access() {
+        let mut guarded: Manifest = serde_json::from_str(&manifest()).unwrap();
+        guarded.actions.push(serde_json::from_value(json!({
+            "name":"reconcile", "title":"Reconcile", "target":"k8s.annotate",
+            "resource":"applications", "arguments":{"key":"reconcile"},
+            "preconditions":[{"jsonPath":".spec.suspend","notEquals":true,"reason":"Resume first"}]
+        })).unwrap());
+        let mut unguarded = guarded.clone();
+        unguarded.actions[0].preconditions.clear();
+        let grants = ["k8s.listCustomResource".into(), "k8s.annotate".into()];
+        let diff = permission_diff(Some((&guarded, &grants, 3)), &unguarded, &grants);
+        assert_eq!(diff.added.len(), 1, "unguarded action must be new access: {diff:?}");
+        assert_eq!(diff.removed.len(), 1, "guarded action must be removed: {diff:?}");
+    }
+    #[tokio::test]
+    async fn validation_previews_installed_access_and_stale_review_cannot_replace_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let old_revision = install(&path, fake_core());
+        let mut next: Value = serde_json::from_str(&manifest()).unwrap();
+        next["version"] = json!("0.3.0");
+        let source = next.to_string();
+        let reg = setup(&path);
+        let preview = reg.invoke("extensions.validate", json!({"manifest":source,"grants":["k8s.listCustomResource"]})).await.unwrap();
+        assert_eq!(preview["errors"], json!([]));
+        assert_eq!(preview["permissionDiff"]["previousRevision"], old_revision);
+        let before = fs::read(&path).unwrap();
+        let refused = reg.invoke("extensions.configure", json!({"action":"install","manifest":source,"grants":["k8s.listCustomResource"]})).await;
+        assert!(refused.is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let installed = reg.invoke("extensions.configure", json!({"action":"install","manifest":source,"grants":["k8s.listCustomResource"],"reviewedRevision":old_revision})).await.unwrap();
+        assert_eq!(installed["plugins"][0]["manifest"]["version"], "0.3.0");
+        let before = fs::read(&path).unwrap();
+        let stale = reg.invoke("extensions.configure", json!({"action":"install","manifest":source,"grants":["k8s.listCustomResource"],"reviewedRevision":old_revision})).await;
+        assert!(stale.is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
     #[test]
     fn update_then_rollback_restores_the_previous_manifest_and_grants_under_a_new_revision() {
@@ -1571,7 +1769,7 @@ mod tests {
         fs::write(path.with_extension("catalog.json"), serde_json::to_vec(&json!({
             "catalog": release, "fetchedAt": 0, "stale": false, "error": null, "incompatible": []
         })).unwrap()).unwrap();
-        mutate(&path, fake_core(), Configure::Install { manifest: source, signature: None, grants: vec!["k8s.listCustomResource".into()] }).unwrap();
+        mutate(&path, fake_core(), Configure::Install { manifest: source, signature: None, grants: vec!["k8s.listCustomResource".into()], reviewed_revision: None }).unwrap();
         let state = read(&path).unwrap();
         assert!(find(&state, "org.example.catalog").source == Source::Catalog);
         assert!(find(&state, "org.example.argocd").source == Source::Local);
@@ -2314,6 +2512,7 @@ mod tests {
                 signature: None,
                 manifest: source.to_string(),
                 grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision: None,
             }
         };
         let state = mutate(
@@ -2501,6 +2700,9 @@ mod tests {
         core.register(cap);
     }
     pub(super) fn install(path: &Path, core: Arc<Registry>) -> u64 {
+        let reviewed_revision = read(path).unwrap().plugins.iter()
+            .find(|app| app.manifest.id == "org.example.argocd")
+            .map(|app| app.revision);
         mutate(
             path,
             core,
@@ -2508,6 +2710,7 @@ mod tests {
                 signature: None,
                 manifest: manifest(),
                 grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision,
             },
         )
         .unwrap()
@@ -2624,6 +2827,7 @@ mod tests {
         let core = fake_core();
         install(&path, core.clone());
         let before = fs::read(&path).unwrap();
+        let reviewed_revision = Some(read(&path).unwrap().plugins[0].revision);
         for (field, value) in [
             ("target", json!("k8s.deleteResource")),
             ("inputs", json!(["context", "group"])),
@@ -2637,7 +2841,8 @@ mod tests {
                 Configure::Install {
                     signature: None,
                     manifest: source.to_string(),
-                    grants: vec!["k8s.listCustomResource".into()]
+                    grants: vec!["k8s.listCustomResource".into()],
+                    reviewed_revision,
                 }
             )
             .is_err());
@@ -2660,7 +2865,8 @@ mod tests {
                 Configure::Install {
                     signature: None,
                     manifest: source.to_string(),
-                    grants: vec!["k8s.listCustomResource".into()]
+                    grants: vec!["k8s.listCustomResource".into()],
+                    reviewed_revision,
                 }
             )
             .is_err());
@@ -2744,6 +2950,7 @@ mod tests {
                             signature: None,
                             manifest: source.to_string(),
                             grants: vec!["k8s.listCustomResource".into()],
+                            reviewed_revision: None,
                         },
                     )
                     .unwrap();
@@ -2874,6 +3081,7 @@ mod tests {
             signature: None,
             manifest: manifest.into(),
             grants: vec!["k8s.listCustomResource".into()],
+            reviewed_revision: None,
         };
         let refused = mutate(&path, core.clone(), unsigned(official))
             .err()

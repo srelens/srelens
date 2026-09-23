@@ -13,6 +13,7 @@ import {
   validateExtension,
   type ExtensionChange,
   type ExtensionValidationError,
+  type ExtensionPermissionDiff,
   type InstalledExtension,
 } from "@srelens/core";
 
@@ -51,6 +52,7 @@ export function ExtensionManager() {
     id: number;
     /** Undefined while the host is still checking the manifest. */
     errors?: ExtensionValidationError[];
+    permissionDiff?: ExtensionPermissionDiff;
     /** Why the check itself failed, as opposed to the problems it found. */
     checkError?: string;
     /**
@@ -111,8 +113,8 @@ export function ExtensionManager() {
       text,
     });
     try {
-      const { errors } = await validateExtension(manifest, permissions, signature);
-      setReview((current) => (current?.request === request ? { ...current, errors } : current));
+      const { errors, permissionDiff } = await validateExtension(manifest, permissions, signature);
+      setReview((current) => (current?.request === request ? { ...current, errors, permissionDiff } : current));
     } catch (e) {
       // The check did not run, which says nothing about the manifest: keep the review
       // open with the reason and a retry, and do not offer to install.
@@ -170,9 +172,7 @@ export function ExtensionManager() {
                   then either. */}
               {review.errors?.length === 0 ? (
                 <>
-                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned manifest"}) requests:{" "}
-                  {review.permissions.map(plainText).join(", ") || "no permissions"}. Installing an existing ID
-                  replaces its manifest and refreshes its open pages.
+                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned manifest"}) {!review.permissionDiff ? "could not have its access changes compared" : review.permissionDiff.previousRevision == null ? "requests a new installation" : "updates the installed app"}.
                 </>
               ) : (
                 <>
@@ -181,11 +181,32 @@ export function ExtensionManager() {
                 </>
               )}
             </p>
-            {/* What each permission covers, under the same rule as the name: drawn only once
-                the host has accepted the manifest. The full text can be read at any time,
-                with its invisible characters escaped. */}
-            {review.errors?.length === 0 && (
-              <ExtensionBindings manifest={review.manifest} permissions={review.permissions} />
+            {review.errors?.length === 0 && review.permissionDiff && (
+              <div aria-label="Access changes" className="extension-access-diff">
+                <strong>{review.permissionDiff.previousRevision == null ? "Requested access" : "Access changes"}</strong>
+                <ul aria-label="Added access">
+                  {review.permissionDiff.added.map((entry) => <li key={entry}>Added: {plainText(entry)}</li>)}
+                </ul>
+                {review.permissionDiff.removed.length > 0 && <ul aria-label="Removed access">
+                  {review.permissionDiff.removed.map((entry) => <li key={entry}>Removed: {plainText(entry)}</li>)}
+                </ul>}
+                {review.permissionDiff.unchanged.length > 0 && <details>
+                  <summary>{review.permissionDiff.unchanged.length} unchanged access item{review.permissionDiff.unchanged.length === 1 ? "" : "s"}</summary>
+                  <ul>{review.permissionDiff.unchanged.map((entry) => <li key={entry}>{plainText(entry)}</li>)}</ul>
+                </details>}
+              </div>
+            )}
+            {/* The incoming bindings follow the change summary, so an update's
+                new and removed access is visible before the full permission list. */}
+            {review.errors?.length === 0 && review.permissionDiff && (
+              review.permissionDiff.previousRevision == null ? (
+                <ExtensionBindings manifest={review.manifest} permissions={review.permissions} />
+              ) : (
+                <details>
+                  <summary>Complete incoming bindings</summary>
+                  <ExtensionBindings manifest={review.manifest} permissions={review.permissions} />
+                </details>
+              )
             )}
             <ReviewManifest key={review.id} text={review.text} />
             {review.checkError ? (
@@ -210,6 +231,8 @@ export function ExtensionManager() {
                   ))}
                 </ul>
               </div>
+            ) : !review.permissionDiff ? (
+              <ErrorNotice title="Could not review access changes" message="The host did not return an access comparison. Review this manifest again." retry={() => void reviewManifest(review.source, review.signature)} />
             ) : (
               <Button
                 disabled={busy}
@@ -219,10 +242,11 @@ export function ExtensionManager() {
                     manifest: review.source,
                     ...(review.signature ? {signature: review.signature} : {}),
                     grants: review.permissions,
+                    ...(review.permissionDiff?.previousRevision == null ? {} : { reviewedRevision: review.permissionDiff.previousRevision }),
                   })
                 }
               >
-                Install and grant permissions
+                {review.permissionDiff.previousRevision == null ? "Install and grant permissions" : "Update and grant permissions"}
               </Button>
             )}
             <Button variant="secondary" onClick={() => setReview(null)}>

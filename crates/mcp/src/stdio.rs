@@ -44,6 +44,33 @@ fn err(id: Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+/// A failed host preflight is still an attempted mutating tool call. Record the
+/// refusal with the same redaction as the normal audited invocation.
+fn rejected_tool_call(
+    server: &McpServer,
+    id: Value,
+    transport: Transport,
+    name: &str,
+    args: &Value,
+    sensitive: bool,
+    message: String,
+) -> Value {
+    let redacted_args = crate::audit::redact(args, sensitive);
+    let (app, cluster, resource) = crate::audit::describe_call_target(name, args, &redacted_args);
+    server.audit().record(crate::audit::AuditRecord {
+        source: transport.into(),
+        tool: name.to_string(),
+        app,
+        cluster,
+        resource,
+        error: Some(crate::audit::redact_call_error(name, &message, args, &redacted_args)),
+        args: redacted_args,
+        decision: "auto",
+        outcome: crate::audit::OUTCOME_REJECTED,
+    });
+    ok(id, json!({"content":[{"type":"text","text":message}],"isError":true}))
+}
+
 /// A `notifications/resources/updated` message. Carries only the URI — the
 /// client re-reads to get content, which is what MCP specifies and what lets a
 /// summary-level watch back a manifest subscription.
@@ -153,19 +180,51 @@ pub async fn handle_request(
             let sensitive = server.is_sensitive(name);
             let mut decision = "auto";
 
-            if let Some(request) = server.consent_request(name, &raw_args) {
+            if let Some(mut request) = server.consent_request(name, &raw_args) {
+                if name == "extensions.configure" && args["action"] == "install" {
+                    // The host previews the exact manifest and current installed revision.
+                    // Caller-supplied prose or revision is never used for consent.
+                    let mut preview_args = json!({"manifest": args["manifest"], "grants": args["grants"]});
+                    if let Some(signature) = args.get("signature") {
+                        preview_args["signature"] = signature.clone();
+                    }
+                    let preview = match server.call_tool("extensions.validate", preview_args).await {
+                        Ok(value) => value,
+                        Err(error) => return Some(rejected_tool_call(server, id?, transport, name, &args, sensitive, format!("Could not review app access: {error}"))),
+                    };
+                    if preview["errors"].as_array().is_none_or(|errors| !errors.is_empty()) {
+                        return Some(rejected_tool_call(server, id?, transport, name, &args, sensitive, format!("App validation failed: {}", preview["errors"])));
+                    }
+                    let Some(diff) = preview.get("permissionDiff") else {
+                        return Some(rejected_tool_call(server, id?, transport, name, &args, sensitive, "Could not review app access: host returned no permission diff".into()));
+                    };
+                    if let Some(revision) = diff["previousRevision"].as_u64() {
+                        args["reviewedRevision"] = json!(revision);
+                    } else if let Some(object) = args.as_object_mut() {
+                        object.remove("reviewedRevision");
+                    }
+                    let describe = |field: &str| diff[field].as_array().map(|items| items.iter().filter_map(Value::as_str)
+                        .map(|item| item.chars().flat_map(char::escape_default).collect::<String>())
+                        .collect::<Vec<_>>().join(", ")).unwrap_or_default();
+                    let unchanged = diff["unchanged"].as_array().map_or(0, Vec::len);
+                    request.confirm_text = Some(format!(
+                        "Install app with access changes? Added: {}. Removed: {}. {unchanged} unchanged access item{}.",
+                        describe("added"), describe("removed"),
+                        if unchanged == 1 { "" } else { "s" }
+                    ));
+                }
                 if let crate::policy::Decision::Denied(reason) =
                     server.confirm_policy().confirm(&request).await
                 {
                     let redacted_args = crate::audit::redact(&args, sensitive);
-                    let (app, cluster, resource) = crate::audit::describe_target(&redacted_args);
+                    let (app, cluster, resource) = crate::audit::describe_call_target(name, &args, &redacted_args);
                     server.audit().record(crate::audit::AuditRecord {
                         source: transport.into(),
                         tool: name.to_string(),
                         app,
                         cluster,
                         resource,
-                        error: Some(crate::audit::redact_error(&reason, &args, &redacted_args)),
+                        error: Some(crate::audit::redact_call_error(name, &reason, &args, &redacted_args)),
                         args: redacted_args,
                         decision: "denied",
                         // Nothing ran: the refusal is the whole event.
@@ -1166,6 +1225,86 @@ mod tests {
         .await
         .expect("response");
         assert_eq!(resp["result"]["isError"], json!(false), "got {resp}");
+    }
+
+    #[tokio::test]
+    async fn extension_update_consent_uses_host_diff_and_executes_reviewed_revision() {
+        use srelens_capability::Annotations;
+        use std::sync::Mutex;
+        struct Yes(Arc<Mutex<Option<crate::policy::ConsentRequest>>>);
+        #[async_trait::async_trait]
+        impl crate::policy::ConfirmPolicy for Yes {
+            async fn confirm(&self, request: &crate::policy::ConsentRequest) -> crate::policy::Decision {
+                *self.0.lock().unwrap() = Some(request.clone());
+                crate::policy::Decision::Approved
+            }
+        }
+        let seen = Arc::new(Mutex::new(None));
+        let executed = Arc::new(Mutex::new(None));
+        let mut reg = Registry::new();
+        reg.register(Capability::read_only("extensions.validate", "preview", |_| async {
+            Ok(json!({"errors":[],"permissionDiff":{"previousRevision":7,"added":["Action k8s.annotate on Deployment"],"removed":["Read k8s.listEvents on Pod"],"unchanged":["Grant k8s.listCustomResource"]}}))
+        }));
+        let capture = executed.clone();
+        let mut configure = Capability::read_only("extensions.configure", "configure", move |args| {
+            let capture = capture.clone();
+            async move { *capture.lock().unwrap() = Some(args); Ok(json!({"done":true})) }
+        });
+        configure.annotations = Annotations::MUTATING;
+        reg.register(configure);
+        let server = McpServer::new(Arc::new(reg)).with_policy(Arc::new(Yes(seen.clone())));
+        let response = handle_request(&server, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":{"action":"install","manifest":"{}","grants":[],"reviewedRevision":999}}}), Transport::Stdio).await.unwrap();
+        assert_eq!(response["result"]["isError"], false);
+        let prompt = seen.lock().unwrap().clone().unwrap().prompt();
+        assert!(prompt.contains("Action k8s.annotate on Deployment"), "{prompt}");
+        assert!(prompt.contains("Read k8s.listEvents on Pod"), "{prompt}");
+        assert!(prompt.contains("1 unchanged access item"), "{prompt}");
+        assert!(!prompt.contains("Grant k8s.listCustomResource"), "{prompt}");
+        assert_eq!(executed.lock().unwrap().as_ref().unwrap()["reviewedRevision"], 7);
+    }
+
+    #[tokio::test]
+    async fn rejected_extension_preview_is_audited_without_running_install() {
+        use srelens_capability::Annotations;
+        use std::sync::Mutex;
+        struct Spy {
+            records: Mutex<Vec<crate::audit::AuditRecord>>,
+            log: crate::audit::JsonlAuditLog,
+        }
+        impl crate::audit::AuditSink for Spy {
+            fn record(&self, record: crate::audit::AuditRecord) {
+                <crate::audit::JsonlAuditLog as crate::audit::AuditSink>::record(&self.log, record.clone());
+                self.records.lock().unwrap().push(record);
+            }
+        }
+        let mut reg = Registry::new();
+        reg.register(Capability::read_only("extensions.validate", "preview", |_| async {
+            Ok(json!({"errors":[{"code":"EXTENSION_INVALID_VALUE","path":"manifest","message":"invalid credential hunter2"}]}))
+        }));
+        let mut configure = Capability::read_only("extensions.configure", "configure", |_| async {
+            panic!("install must not run after a failed preview");
+            #[allow(unreachable_code)]
+            Ok(json!({}))
+        });
+        configure.annotations = Annotations::MUTATING;
+        reg.register(configure);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let spy = Arc::new(Spy {
+            records: Mutex::new(Vec::new()),
+            log: crate::audit::JsonlAuditLog::new(path.clone(), 1024 * 1024),
+        });
+        let server = McpServer::new(Arc::new(reg)).with_audit(spy.clone());
+        let response = handle_request(&server, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":{"action":"install","manifest":"{\"id\":\"org.example.app\",\"credential\":\"hunter2\"}","grants":[]}}}), Transport::Http).await.unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        let records = spy.records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].outcome, crate::audit::OUTCOME_REJECTED);
+        assert_eq!(records[0].tool, "extensions.configure");
+        assert_eq!(records[0].args["manifest"], "<redacted>");
+        assert_eq!(records[0].resource.as_deref(), Some("org.example.app"));
+        assert!(!records[0].error.as_deref().unwrap_or("").contains("hunter2"));
+        assert!(!std::fs::read_to_string(path).unwrap().contains("hunter2"));
     }
 
     #[tokio::test]

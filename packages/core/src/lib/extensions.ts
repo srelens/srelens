@@ -136,7 +136,7 @@ export interface ExtensionInventory {
 }
 export type ExtensionChange =
   | { action: "unsignedApps"; allowUnsignedApps: boolean }
-  | { action: "install"; manifest: string; grants: string[]; signature?: number[] }
+  | { action: "install"; manifest: string; grants: string[]; signature?: number[]; reviewedRevision?: number }
   | { action: "enable"; id: string; enabled: boolean }
   | { action: "remove"; id: string }
   /** Restores a kept version; `grants` are what the user reviewed and grants again. */
@@ -175,9 +175,16 @@ export interface ExtensionValidationError {
   path: string;
   message: string;
 }
+/** Host-computed access changes for the exact manifest and installed revision reviewed. */
+export interface ExtensionPermissionDiff {
+  previousRevision: number | null;
+  added: string[];
+  removed: string[];
+  unchanged: string[];
+}
 /** Checks a manifest exactly as installing it with these grants would, without installing. */
 export const validateExtension = (manifest: string, grants: string[], signature?: number[]) =>
-  invokeCapability<{ errors: ExtensionValidationError[] }>("extensions.validate", {
+  invokeCapability<{ errors: ExtensionValidationError[]; permissionDiff?: ExtensionPermissionDiff }>("extensions.validate", {
     manifest,
     grants,
     ...(signature ? { signature } : {}),
