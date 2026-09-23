@@ -102,17 +102,28 @@ fn dashboard_cards_of_every_type_and_size_parse() {
     let cards = &parsed.contributions.dashboard_cards;
     assert_eq!(
         cards.iter().map(|c| c.card_type).collect::<Vec<_>>(),
-        [CardType::Count, CardType::CountByStatus, CardType::Metric, CardType::List]
+        [
+            CardType::Count,
+            CardType::CountByStatus,
+            CardType::Metric,
+            CardType::List
+        ]
     );
     assert_eq!(
         cards.iter().map(|c| c.size).collect::<Vec<_>>(),
         [CardSize::S, CardSize::M, CardSize::M, CardSize::L]
     );
-    assert_eq!(cards[2].metric.as_ref().unwrap().aggregate, CardAggregate::Sum);
+    assert_eq!(
+        cards[2].metric.as_ref().unwrap().aggregate,
+        CardAggregate::Sum
+    );
     assert_eq!(cards[0].target.as_ref().unwrap().page, "applications");
     // Round-trips to the same JSON: a stored manifest is re-verified from its own bytes.
     let again: Value = serde_json::to_value(&parsed).unwrap();
-    assert_eq!(again["contributions"]["dashboardCards"], with_cards()["contributions"]["dashboardCards"]);
+    assert_eq!(
+        again["contributions"]["dashboardCards"],
+        with_cards()["contributions"]["dashboardCards"]
+    );
 }
 
 #[test]
@@ -122,7 +133,10 @@ fn a_card_with_an_unknown_type_or_size_is_a_schema_error_at_its_field() {
         manifest["contributions"]["dashboardCards"][0][field] = json!(value);
         let errors = errors(&manifest);
         assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(errors[0].path, format!("contributions.dashboardCards[0].{field}"));
+        assert_eq!(
+            errors[0].path,
+            format!("contributions.dashboardCards[0].{field}")
+        );
         assert!(errors[0].message.contains(value), "{}", errors[0].message);
     }
 }
@@ -143,15 +157,42 @@ fn card_rules_are_reported_at_the_field_that_has_to_change() {
     assert_eq!(
         problems(&errors(&value)),
         expected(&[
-            ("EXTENSION_UNRESOLVED_CAPABILITY", "contributions.dashboardCards[0].source"),
-            ("EXTENSION_INVALID_BINDING", "contributions.dashboardCards[0].predicate"),
-            ("EXTENSION_UNRESOLVED_PAGE", "contributions.dashboardCards[0].target.page"),
-            ("EXTENSION_DUPLICATE_IDENTIFIER", "contributions.dashboardCards[1].id"),
-            ("EXTENSION_INVALID_VALUE", "contributions.dashboardCards[1].title"),
-            ("EXTENSION_INVALID_BINDING", "contributions.dashboardCards[1].metric"),
-            ("EXTENSION_INVALID_BINDING", "contributions.dashboardCards[2].metric"),
-            ("EXTENSION_INVALID_VALUE", "contributions.dashboardCards[3].list.limit"),
-            ("EXTENSION_INVALID_VALUE", "contributions.dashboardCards[3].list.jsonPath"),
+            (
+                "EXTENSION_UNRESOLVED_CAPABILITY",
+                "contributions.dashboardCards[0].source"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.dashboardCards[0].predicate"
+            ),
+            (
+                "EXTENSION_UNRESOLVED_PAGE",
+                "contributions.dashboardCards[0].target.page"
+            ),
+            (
+                "EXTENSION_DUPLICATE_IDENTIFIER",
+                "contributions.dashboardCards[1].id"
+            ),
+            (
+                "EXTENSION_INVALID_VALUE",
+                "contributions.dashboardCards[1].title"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.dashboardCards[1].metric"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.dashboardCards[2].metric"
+            ),
+            (
+                "EXTENSION_INVALID_VALUE",
+                "contributions.dashboardCards[3].list.limit"
+            ),
+            (
+                "EXTENSION_INVALID_VALUE",
+                "contributions.dashboardCards[3].list.jsonPath"
+            ),
         ])
     );
 }
@@ -183,7 +224,10 @@ fn a_card_source_is_a_custom_resource_reader_and_its_target_a_page_over_it() {
     value["capabilities"].as_array_mut().unwrap().push(json!({
         "name":"projects","title":"Projects","target":"k8s.listCustomResource",
         "arguments":{"group":"argoproj.io"},"inputs":["context","namespace"]}));
-    value["contributions"]["pages"].as_array_mut().unwrap().push(json!(
+    value["contributions"]["pages"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(
         {"id":"projects","title":"Projects","capability":"projects"}));
     let cards = &mut value["contributions"]["dashboardCards"];
     cards[1]["source"] = json!("events");
@@ -192,8 +236,14 @@ fn a_card_source_is_a_custom_resource_reader_and_its_target_a_page_over_it() {
     assert_eq!(
         problems(&errors(&value)),
         expected(&[
-            ("EXTENSION_UNRESOLVED_CAPABILITY", "contributions.dashboardCards[1].source"),
-            ("EXTENSION_INVALID_BINDING", "contributions.dashboardCards[0].target.page"),
+            (
+                "EXTENSION_UNRESOLVED_CAPABILITY",
+                "contributions.dashboardCards[1].source"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.dashboardCards[0].target.page"
+            ),
         ])
     );
 }
@@ -209,7 +259,10 @@ fn a_manifest_declares_at_most_sixteen_cards() {
         problems(&errors(&value)),
         expected(&[("EXTENSION_INVALID_VALUE", "contributions.dashboardCards")])
     );
-    value["contributions"]["dashboardCards"].as_array_mut().unwrap().pop();
+    value["contributions"]["dashboardCards"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
     assert!(Manifest::parse(&value.to_string()).is_ok());
 }
 

@@ -102,7 +102,9 @@ fn evaluate(operator: Operator<'_>, found: Option<&Value>, now: i64) -> bool {
             let edge = now.saturating_add(window);
             (now.min(edge)..=now.max(edge)).contains(&at)
         }),
-        Operator::Before(offset) => timestamp(found).is_some_and(|at| at < now.saturating_add(offset)),
+        Operator::Before(offset) => {
+            timestamp(found).is_some_and(|at| at < now.saturating_add(offset))
+        }
     }
 }
 
@@ -239,9 +241,7 @@ impl CardPredicate {
             return Err("`absent` is written `true`".into());
         }
         if operator == Operator::Within(0) {
-            return Err(
-                "`within` needs a window of some length; `0d` matches nothing".into(),
-            );
+            return Err("`within` needs a window of some length; `0d` matches nothing".into());
         }
         Ok(operator)
     }

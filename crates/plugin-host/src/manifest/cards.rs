@@ -136,26 +136,34 @@ pub(super) fn card_problems(manifest: &Manifest, problems: &mut ValidationErrors
     unique(
         problems,
         cards.iter().enumerate().map(|(index, card)| {
-            (format!("contributions.dashboardCards[{index}].id"), card.id.as_str())
+            (
+                format!("contributions.dashboardCards[{index}].id"),
+                card.id.as_str(),
+            )
         }),
     );
     for (index, card) in cards.iter().enumerate() {
         let at = format!("contributions.dashboardCards[{index}]");
         if !identifier(&card.id) {
-            problems.push(Code::InvalidValue, format!("{at}.id"), "Must be 1–64 letters, digits and -");
+            problems.push(
+                Code::InvalidValue,
+                format!("{at}.id"),
+                "Must be 1–64 letters, digits and -",
+            );
         }
         if !label(&card.title) {
             problems.push(Code::InvalidValue, format!("{at}.title"), LABEL);
         }
-        if !manifest
-            .capabilities
-            .iter()
-            .any(|binding| binding.name == card.source && binding.target == "k8s.listCustomResource")
-        {
+        if !manifest.capabilities.iter().any(|binding| {
+            binding.name == card.source && binding.target == "k8s.listCustomResource"
+        }) {
             problems.push(
                 Code::UnresolvedCapability,
                 format!("{at}.source"),
-                format!("\"{}\" is not a declared k8s.listCustomResource reader", card.source),
+                format!(
+                    "\"{}\" is not a declared k8s.listCustomResource reader",
+                    card.source
+                ),
             );
         }
         if let Some(Err(why)) = card.predicate.as_ref().map(CardPredicate::check) {
@@ -207,7 +215,10 @@ pub(super) fn card_problems(manifest: &Manifest, problems: &mut ValidationErrors
         }
         match (card.card_type, &card.list) {
             (CardType::List, Some(list)) => {
-                if list.limit.is_some_and(|limit| limit == 0 || limit > MAX_CARD_LIST_ROWS) {
+                if list
+                    .limit
+                    .is_some_and(|limit| limit == 0 || limit > MAX_CARD_LIST_ROWS)
+                {
                     problems.push(
                         Code::InvalidValue,
                         format!("{at}.list.limit"),

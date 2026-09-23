@@ -251,7 +251,13 @@ pub(super) async fn reader_objects(
         .find(|binding| binding.name == reader && binding.target == "k8s.listCustomResource")
         .ok_or_else(|| CapabilityError::Handler("Declared reader is unavailable".into()))?;
     crd::require(core, context, binding).await?;
-    let key = reader_key(&plugin.manifest.id, plugin.revision, context, namespace, reader);
+    let key = reader_key(
+        &plugin.manifest.id,
+        plugin.revision,
+        context,
+        namespace,
+        reader,
+    );
     let argument = |key: &str| {
         binding
             .arguments

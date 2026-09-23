@@ -52,7 +52,10 @@ fn within_a_positive_window_holds_from_now_until_that_far_ahead() {
     let soon = predicate(json!({"jsonPath": ".status.notAfter", "within": "14d"}));
     assert!(soon.check().is_ok());
     assert!(soon.holds_at(&certificate(&at(3 * DAY)), NOW));
-    assert!(soon.holds_at(&certificate(&at(14 * DAY)), NOW), "the edge is inside");
+    assert!(
+        soon.holds_at(&certificate(&at(14 * DAY)), NOW),
+        "the edge is inside"
+    );
     assert!(!soon.holds_at(&certificate(&at(15 * DAY)), NOW));
     assert!(
         !soon.holds_at(&certificate(&at(-DAY)), NOW),
@@ -66,7 +69,10 @@ fn within_a_negative_window_holds_for_the_recent_past() {
     let failed = |offset: i64| json!({"status": {"lastFailure": at(offset)}});
     assert!(recent.holds_at(&failed(-30 * 60), NOW));
     assert!(!recent.holds_at(&failed(-2 * 3_600), NOW));
-    assert!(!recent.holds_at(&failed(60), NOW), "the future is not the recent past");
+    assert!(
+        !recent.holds_at(&failed(60), NOW),
+        "the future is not the recent past"
+    );
 }
 
 #[test]
@@ -74,7 +80,10 @@ fn before_holds_for_anything_earlier_than_the_offset_including_the_past() {
     let expiring = predicate(json!({"jsonPath": ".status.notAfter", "before": "14d"}));
     assert!(expiring.holds_at(&certificate(&at(-30 * DAY)), NOW));
     assert!(expiring.holds_at(&certificate(&at(13 * DAY)), NOW));
-    assert!(!expiring.holds_at(&certificate(&at(14 * DAY)), NOW), "strictly before");
+    assert!(
+        !expiring.holds_at(&certificate(&at(14 * DAY)), NOW),
+        "strictly before"
+    );
     let expired = predicate(json!({"jsonPath": ".status.notAfter", "before": "0d"}));
     assert!(expired.holds_at(&certificate(&at(-1)), NOW));
     assert!(!expired.holds_at(&certificate(&at(1)), NOW));
@@ -102,7 +111,8 @@ fn a_date_operator_fails_closed_on_a_value_that_is_not_a_timestamp() {
 fn equals_and_absent_mean_what_they_mean_for_actions() {
     let failing = predicate(json!({"jsonPath": ".status.conditions[0].status", "equals": "False"}));
     let unset = predicate(json!({"jsonPath": ".spec.suspend", "absent": true}));
-    let object = json!({"spec": {"suspend": null}, "status": {"conditions": [{"status": "False"}]}});
+    let object =
+        json!({"spec": {"suspend": null}, "status": {"conditions": [{"status": "False"}]}});
     assert!(failing.holds_at(&object, NOW));
     assert!(unset.holds_at(&object, NOW));
     assert!(!failing.holds_at(&json!({"status": {"conditions": []}}), NOW));
@@ -113,14 +123,29 @@ fn equals_and_absent_mean_what_they_mean_for_actions() {
 fn exactly_one_operator_is_declared() {
     for (value, why) in [
         (json!({"jsonPath": ".a"}), "no operator"),
-        (json!({"jsonPath": ".a", "equals": 1, "absent": true}), "two operators"),
-        (json!({"jsonPath": ".a", "within": "1d", "before": "1d"}), "two dates"),
-        (json!({"jsonPath": ".a", "absent": false}), "absent is written true"),
-        (json!({"jsonPath": ".a", "equals": {"x": 1}}), "a literal comparand"),
+        (
+            json!({"jsonPath": ".a", "equals": 1, "absent": true}),
+            "two operators",
+        ),
+        (
+            json!({"jsonPath": ".a", "within": "1d", "before": "1d"}),
+            "two dates",
+        ),
+        (
+            json!({"jsonPath": ".a", "absent": false}),
+            "absent is written true",
+        ),
+        (
+            json!({"jsonPath": ".a", "equals": {"x": 1}}),
+            "a literal comparand",
+        ),
     ] {
         let declared = predicate(value);
         assert!(declared.check().is_err(), "{why}");
-        assert!(!declared.holds_at(&json!({"a": 1}), NOW), "{why} must not hold");
+        assert!(
+            !declared.holds_at(&json!({"a": 1}), NOW),
+            "{why} must not hold"
+        );
     }
 }
 
@@ -130,7 +155,19 @@ fn a_duration_is_a_signed_count_of_one_unit_and_bounded() {
         let declared = predicate(json!({"jsonPath": ".a", "before": good}));
         assert!(declared.check().is_ok(), "{good}");
     }
-    for bad in ["14", "d", "1.5d", "1d2h", "+1d", "1y", "P14D", "3651d", "", " 1d", "99999999d"] {
+    for bad in [
+        "14",
+        "d",
+        "1.5d",
+        "1d2h",
+        "+1d",
+        "1y",
+        "P14D",
+        "3651d",
+        "",
+        " 1d",
+        "99999999d",
+    ] {
         let declared = predicate(json!({"jsonPath": ".a", "before": bad}));
         let error = declared.check().expect_err(bad);
         assert!(error.contains("duration"), "{bad}: {error}");
@@ -160,8 +197,7 @@ fn unknown_fields_are_refused() {
         json!({"jsonPath": ".a", "equals": 1, "reason": "cards carry no reason"})
     )
     .is_err());
-    assert!(serde_json::from_value::<CardPredicate>(
-        json!({"jsonPath": ".a", "notEquals": 1})
-    )
-    .is_err());
+    assert!(
+        serde_json::from_value::<CardPredicate>(json!({"jsonPath": ".a", "notEquals": 1})).is_err()
+    );
 }

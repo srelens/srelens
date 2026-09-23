@@ -5,9 +5,7 @@
 //! dashboard with three cards over one reader lists it once, and a card that
 //! cannot be read says why on that card alone.
 use super::*;
-use srelens_plugin_host::{
-    Binding, CardAggregate, CardOrder, CardType, DashboardCard,
-};
+use srelens_plugin_host::{Binding, CardAggregate, CardOrder, CardType, DashboardCard};
 
 /// Most namespaces one call may narrow to. The dashboard's selection is a
 /// person's pick from a list, not an export of the cluster.
@@ -54,7 +52,11 @@ pub(super) fn check_input(input: &ResolveCards) -> Result<(), CapabilityError> {
             "Narrow to at most {MAX_NAMESPACES} namespaces"
         )));
     }
-    if !input.namespaces.iter().all(|namespace| namespace_name(namespace)) {
+    if !input
+        .namespaces
+        .iter()
+        .all(|namespace| namespace_name(namespace))
+    {
         return Err(CapabilityError::InvalidInput(
             "Each namespace must be a Kubernetes namespace name".into(),
         ));
@@ -109,10 +111,14 @@ pub(super) enum Resolved {
         rows: Vec<ListRow>,
     },
     /// The card's source could not be read, or its figure could not be made.
-    Error { reason: String },
+    Error {
+        reason: String,
+    },
     /// The host cannot make this card's figure at all yet, and reading again
     /// will not change that.
-    Unavailable { reason: String },
+    Unavailable {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Serialize, JsonSchema, PartialEq)]
@@ -129,6 +135,9 @@ pub(super) struct ListRow {
     value: Option<String>,
 }
 
+/// One call's reads, by reader and namespace: the objects, or why they could not be listed.
+type ReadsThisCall = std::collections::HashMap<(String, String), Result<Arc<Vec<Value>>, String>>;
+
 /// How an app's objects map to a status word.
 pub(super) type StatusResolver = dyn Fn(&Value) -> Option<String> + Send + Sync;
 
@@ -137,10 +146,7 @@ pub(super) type StatusResolver = dyn Fn(&Value) -> Option<String> + Send + Sync;
 /// This host has none yet, so a `countByStatus` card says it is unavailable
 /// rather than counting by the deprecated `statusColumns`, whose printer-column
 /// indices describe a page's table and not a status.
-pub(super) fn status_resolver(
-    _manifest: &Manifest,
-    _source: &str,
-) -> Option<Box<StatusResolver>> {
+pub(super) fn status_resolver(_manifest: &Manifest, _source: &str) -> Option<Box<StatusResolver>> {
     None
 }
 
@@ -247,7 +253,12 @@ pub(super) fn resolve_card(
                         Some(number) => numbers.push(number),
                         None => {
                             return Resolved::Error {
-                                reason: format!("{} on {}/{} is not a number this host can add", metric.json_path, namespace_of(object), name_of(object)),
+                                reason: format!(
+                                    "{} on {}/{} is not a number this host can add",
+                                    metric.json_path,
+                                    namespace_of(object),
+                                    name_of(object)
+                                ),
                             }
                         }
                     },
@@ -270,11 +281,15 @@ pub(super) fn resolve_card(
             };
             if value.is_some_and(|value| !value.is_finite()) {
                 return Resolved::Error {
-                    reason: format!("The {} of {} is too large to show", match metric.aggregate {
-                        CardAggregate::Sum => "sum",
-                        CardAggregate::Min => "minimum",
-                        CardAggregate::Max => "maximum",
-                    }, metric.json_path),
+                    reason: format!(
+                        "The {} of {} is too large to show",
+                        match metric.aggregate {
+                            CardAggregate::Sum => "sum",
+                            CardAggregate::Min => "minimum",
+                            CardAggregate::Max => "maximum",
+                        },
+                        metric.json_path
+                    ),
                 };
             }
             Resolved::Metric {
@@ -283,7 +298,10 @@ pub(super) fn resolve_card(
             }
         }
         CardType::List => {
-            let path = card.list.as_ref().and_then(|list| list.json_path.as_deref());
+            let path = card
+                .list
+                .as_ref()
+                .and_then(|list| list.json_path.as_deref());
             let descending = card
                 .list
                 .as_ref()
@@ -296,14 +314,23 @@ pub(super) fn resolve_card(
                 .unwrap_or_else(|| card.size.default_rows())
                 .min(srelens_plugin_host::MAX_CARD_LIST_ROWS);
             let mut rows: Vec<(&Value, Option<&Value>)> = matched
-                .map(|object| (object, path.and_then(|path| srelens_capability::resolve(object, path))))
+                .map(|object| {
+                    (
+                        object,
+                        path.and_then(|path| srelens_capability::resolve(object, path)),
+                    )
+                })
                 .collect();
             let total = rows.len();
-            let identity = |object: &Value| (namespace_of(object).to_owned(), name_of(object).to_owned());
+            let identity =
+                |object: &Value| (namespace_of(object).to_owned(), name_of(object).to_owned());
             rows.sort_by(|(a, a_value), (b, b_value)| {
                 let by_value = if descending {
                     // Missing values stay last either way round.
-                    match (a_value.filter(|v| !v.is_null()), b_value.filter(|v| !v.is_null())) {
+                    match (
+                        a_value.filter(|v| !v.is_null()),
+                        b_value.filter(|v| !v.is_null()),
+                    ) {
                         (Some(_), Some(_)) => compare_values(*b_value, *a_value),
                         _ => compare_values(*a_value, *b_value),
                     }
@@ -354,7 +381,9 @@ fn reason(error: &CapabilityError) -> String {
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 /// The installed app a request names, when it may be used for it: enabled, at
@@ -371,7 +400,9 @@ fn usable_app<'a>(
         .plugins
         .iter()
         .find(|plugin| plugin.manifest.id == id)
-        .ok_or_else(|| CapabilityError::Handler("Extension was removed; refresh the view".into()))?;
+        .ok_or_else(|| {
+            CapabilityError::Handler("Extension was removed; refresh the view".into())
+        })?;
     if let Some(reason) = &plugin.policy_blocked {
         return Err(CapabilityError::Handler(reason.clone()));
     }
@@ -433,7 +464,13 @@ pub(super) async fn card_rows(
         .collect();
     let (read_in, selection) = read_scope(binding, &selected);
     let objects = columns::reader_objects(
-        snapshots, client_cache, core, plugin, &card.source, context, &read_in,
+        snapshots,
+        client_cache,
+        core,
+        plugin,
+        &card.source,
+        context,
+        &read_in,
     )
     .await?;
     Ok(matching(card, &objects, selection, now())
@@ -473,8 +510,7 @@ pub(super) fn register(
                 // Each reader is read once per call, whatever it answers: the shared
                 // snapshot keeps a success for five seconds but lets a later caller
                 // retry a failure, which would otherwise be one failed list per card.
-                let mut reads: std::collections::HashMap<(String, String), Result<Arc<Vec<Value>>, String>> =
-                    std::collections::HashMap::new();
+                let mut reads: ReadsThisCall = std::collections::HashMap::new();
                 let mut cards = Vec::new();
                 for card in &plugin.manifest.contributions.dashboard_cards {
                     let status = status_resolver(&plugin.manifest, &card.source);
@@ -521,8 +557,11 @@ mod tests {
     const NOW: i64 = 1_790_121_600;
 
     fn card(value: Value) -> DashboardCard {
-        let mut base = json!({"id":"card","title":"Card","size":"m","type":"count","source":"certificates"});
-        base.as_object_mut().unwrap().extend(value.as_object().unwrap().clone());
+        let mut base =
+            json!({"id":"card","title":"Card","size":"m","type":"count","source":"certificates"});
+        base.as_object_mut()
+            .unwrap()
+            .extend(value.as_object().unwrap().clone());
         serde_json::from_value(base).unwrap()
     }
 
@@ -547,16 +586,28 @@ mod tests {
     #[test]
     fn count_is_the_objects_the_predicate_holds_for() {
         let soon = card(json!({"predicate":{"jsonPath":".status.notAfter","within":"14d"}}));
-        assert_eq!(resolved(&soon, &certificates(), None), json!({"state":"count","count":2}));
+        assert_eq!(
+            resolved(&soon, &certificates(), None),
+            json!({"state":"count","count":2})
+        );
         // No predicate counts every object.
-        assert_eq!(resolved(&card(json!({})), &certificates(), None)["count"], 4);
+        assert_eq!(
+            resolved(&card(json!({})), &certificates(), None)["count"],
+            4
+        );
     }
 
     #[test]
     fn zero_is_an_answer_not_an_absence() {
         let never = card(json!({"predicate":{"jsonPath":".status.notAfter","before":"-3650d"}}));
-        assert_eq!(resolved(&never, &certificates(), None), json!({"state":"count","count":0}));
-        assert_eq!(resolved(&card(json!({})), &[], None), json!({"state":"count","count":0}));
+        assert_eq!(
+            resolved(&never, &certificates(), None),
+            json!({"state":"count","count":0})
+        );
+        assert_eq!(
+            resolved(&card(json!({})), &[], None),
+            json!({"state":"count","count":0})
+        );
     }
 
     #[test]
@@ -576,25 +627,50 @@ mod tests {
     #[test]
     fn metric_reduces_the_numbers_of_matching_objects() {
         let metric = |aggregate: &str| {
-            card(json!({"type":"metric","metric":{"jsonPath":".report.critical","aggregate":aggregate}}))
+            card(
+                json!({"type":"metric","metric":{"jsonPath":".report.critical","aggregate":aggregate}}),
+            )
         };
-        assert_eq!(resolved(&metric("sum"), &certificates(), None), json!({"state":"metric","value":10.0,"counted":3}));
-        assert_eq!(resolved(&metric("min"), &certificates(), None)["value"], 0.0);
-        assert_eq!(resolved(&metric("max"), &certificates(), None)["value"], 7.0);
+        assert_eq!(
+            resolved(&metric("sum"), &certificates(), None),
+            json!({"state":"metric","value":10.0,"counted":3})
+        );
+        assert_eq!(
+            resolved(&metric("min"), &certificates(), None)["value"],
+            0.0
+        );
+        assert_eq!(
+            resolved(&metric("max"), &certificates(), None)["value"],
+            7.0
+        );
         // Nothing to reduce: a sum of nothing is zero, a minimum of nothing is no value.
-        assert_eq!(resolved(&metric("sum"), &[], None), json!({"state":"metric","value":0.0,"counted":0}));
-        assert_eq!(resolved(&metric("min"), &[], None), json!({"state":"metric","value":null,"counted":0}));
+        assert_eq!(
+            resolved(&metric("sum"), &[], None),
+            json!({"state":"metric","value":0.0,"counted":0})
+        );
+        assert_eq!(
+            resolved(&metric("min"), &[], None),
+            json!({"state":"metric","value":null,"counted":0})
+        );
     }
 
     #[test]
     fn a_metric_over_a_value_that_is_not_a_number_is_an_error_naming_the_object() {
-        let sum = card(json!({"type":"metric","metric":{"jsonPath":".report.critical","aggregate":"sum"}}));
+        let sum = card(
+            json!({"type":"metric","metric":{"jsonPath":".report.critical","aggregate":"sum"}}),
+        );
         let mut objects = certificates();
         objects.push(cert("team", "odd", "2026-09-25T00:00:00Z", json!("three")));
         let out = resolved(&sum, &objects, None);
         assert_eq!(out["state"], "error", "{out}");
-        assert!(out["reason"].as_str().unwrap().contains("team/odd"), "{out}");
-        assert!(out.get("value").is_none(), "a failed metric carries no figure: {out}");
+        assert!(
+            out["reason"].as_str().unwrap().contains("team/odd"),
+            "{out}"
+        );
+        assert!(
+            out.get("value").is_none(),
+            "a failed metric carries no figure: {out}"
+        );
     }
 
     #[test]
@@ -617,14 +693,21 @@ mod tests {
             "list":{"jsonPath":".report.critical","order":"desc","limit":2}}));
         let out = resolved(&latest, &certificates(), None);
         assert_eq!(out["total"], 4);
-        assert_eq!(out["rows"], json!([
-            {"namespace":"prod","name":"shop","value":"7"},
-            {"namespace":"team","name":"web","value":"3"},
-        ]));
+        assert_eq!(
+            out["rows"],
+            json!([
+                {"namespace":"prod","name":"shop","value":"7"},
+                {"namespace":"team","name":"web","value":"3"},
+            ])
+        );
         // No value path: by namespace, then name.
         let plain = card(json!({"type":"list","size":"s"}));
         let names: Vec<_> = resolved(&plain, &certificates(), None)["rows"]
-            .as_array().unwrap().iter().map(|row| row["name"].clone()).collect();
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].clone())
+            .collect();
         assert_eq!(names, [json!("old"), json!("shop"), json!("api")]);
     }
 
@@ -633,8 +716,14 @@ mod tests {
         let by_status = card(json!({"type":"countByStatus"}));
         let out = resolved(&by_status, &certificates(), None);
         assert_eq!(out["state"], "unavailable", "{out}");
-        assert!(out["reason"].as_str().unwrap().contains("status resolver"), "{out}");
-        assert!(out.get("count").is_none() && out.get("total").is_none(), "{out}");
+        assert!(
+            out["reason"].as_str().unwrap().contains("status resolver"),
+            "{out}"
+        );
+        assert!(
+            out.get("count").is_none() && out.get("total").is_none(),
+            "{out}"
+        );
     }
 
     #[test]
@@ -647,10 +736,20 @@ mod tests {
                 None => None,
             }
         };
-        let out = serde_json::to_value(resolve_card(&by_status, &certificates(), None, NOW, Some(&resolver))).unwrap();
-        assert_eq!(out, json!({"state":"countByStatus","total":4,"statuses":[
-            {"status":"Degraded","count":2},{"status":"Healthy","count":1},{"status":"Unknown","count":1}
-        ]}));
+        let out = serde_json::to_value(resolve_card(
+            &by_status,
+            &certificates(),
+            None,
+            NOW,
+            Some(&resolver),
+        ))
+        .unwrap();
+        assert_eq!(
+            out,
+            json!({"state":"countByStatus","total":4,"statuses":[
+                {"status":"Degraded","count":2},{"status":"Healthy","count":1},{"status":"Unknown","count":1}
+            ]})
+        );
     }
 
     #[test]
@@ -663,22 +762,30 @@ mod tests {
     fn caller_payload_uses_the_wrappers_spelling_and_is_bounded() {
         let input: ResolveCards = serde_json::from_value(json!({
             "id":"org.example.argocd","revision":2,"context":"prod","namespaces":["team","prod"]}))
-            .unwrap();
+        .unwrap();
         assert!(check_input(&input).is_ok());
         assert!(serde_json::from_value::<ResolveCards>(json!({
-            "id":"org.example.argocd","revision":2,"context":"prod","namespace":"team"})).is_err());
+            "id":"org.example.argocd","revision":2,"context":"prod","namespace":"team"}))
+        .is_err());
         let too_many = ResolveCards {
             namespaces: (0..=MAX_NAMESPACES).map(|i| format!("ns-{i}")).collect(),
             ..input
         };
-        assert!(check_input(&too_many).unwrap_err().to_string().contains("namespaces"));
+        assert!(check_input(&too_many)
+            .unwrap_err()
+            .to_string()
+            .contains("namespaces"));
         for bad in ["Team", "-team", &"x".repeat(64)] {
-            let input = ResolveCards { namespaces: vec![bad.to_owned()], ..serde_json::from_value(
-                json!({"id":"a.b","revision":1,"context":"prod"})).unwrap() };
+            let input = ResolveCards {
+                namespaces: vec![bad.to_owned()],
+                ..serde_json::from_value(json!({"id":"a.b","revision":1,"context":"prod"})).unwrap()
+            };
             assert!(check_input(&input).is_err(), "{bad}");
         }
-        let blank = ResolveCards { context: " ".into(), ..serde_json::from_value(
-            json!({"id":"a.b","revision":1,"context":"prod"})).unwrap() };
+        let blank = ResolveCards {
+            context: " ".into(),
+            ..serde_json::from_value(json!({"id":"a.b","revision":1,"context":"prod"})).unwrap()
+        };
         assert!(check_input(&blank).is_err());
     }
 
@@ -706,11 +813,17 @@ mod tests {
                 if reader.read_line(&mut line).is_err() {
                     continue;
                 }
-                record.lock().unwrap().push(line.split(' ').nth(1).unwrap_or("").to_owned());
+                record
+                    .lock()
+                    .unwrap()
+                    .push(line.split(' ').nth(1).unwrap_or("").to_owned());
                 // Drain the headers; these requests carry no body.
                 loop {
                     let mut header = String::new();
-                    if reader.read_line(&mut header).is_err() || header == "\r\n" || header.is_empty() {
+                    if reader.read_line(&mut header).is_err()
+                        || header == "\r\n"
+                        || header.is_empty()
+                    {
                         break;
                     }
                 }
@@ -783,38 +896,56 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cards_read_their_source_over_http_once_and_follow_one_selected_namespace() {
-        let (port, paths) = api_server(200, application_list(vec![
-            application("team", "web", "Degraded"),
-            application("team", "api", "Healthy"),
-            application("team", "db", "Degraded"),
-        ]));
+        let (port, paths) = api_server(
+            200,
+            application_list(vec![
+                application("team", "web", "Degraded"),
+                application("team", "api", "Healthy"),
+                application("team", "db", "Degraded"),
+            ]),
+        );
         let (_dir, registry, revision) = installed(port, super::super::tests::fake_core());
         let out = registry
-            .invoke("extensions.resolveCards", cards_payload(revision, json!(["team"])))
+            .invoke(
+                "extensions.resolveCards",
+                cards_payload(revision, json!(["team"])),
+            )
             .await
             .unwrap();
         let cards = out["cards"].as_array().unwrap();
         assert_eq!(cards[0], json!({"id":"degraded","state":"count","count":2}));
         assert_eq!(cards[1]["state"], "list");
         assert_eq!(cards[1]["total"], 3);
-        assert_eq!(cards[1]["rows"][0], json!({"namespace":"team","name":"api"}));
+        assert_eq!(
+            cards[1]["rows"][0],
+            json!({"namespace":"team","name":"api"})
+        );
         assert_eq!(cards[2]["state"], "unavailable");
         let paths = paths.lock().unwrap().clone();
         // Three cards over one reader in one namespace: one list request.
         assert_eq!(paths.len(), 1, "{paths:?}");
-        assert!(paths[0].starts_with("/apis/argoproj.io/v1alpha1/namespaces/team/applications"), "{paths:?}");
+        assert!(
+            paths[0].starts_with("/apis/argoproj.io/v1alpha1/namespaces/team/applications"),
+            "{paths:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn several_selected_namespaces_read_every_namespace_and_keep_the_selected() {
-        let (port, paths) = api_server(200, application_list(vec![
-            application("team", "web", "Degraded"),
-            application("prod", "shop", "Degraded"),
-            application("other", "noise", "Degraded"),
-        ]));
+        let (port, paths) = api_server(
+            200,
+            application_list(vec![
+                application("team", "web", "Degraded"),
+                application("prod", "shop", "Degraded"),
+                application("other", "noise", "Degraded"),
+            ]),
+        );
         let (_dir, registry, revision) = installed(port, super::super::tests::fake_core());
         let out = registry
-            .invoke("extensions.resolveCards", cards_payload(revision, json!(["team", "prod"])))
+            .invoke(
+                "extensions.resolveCards",
+                cards_payload(revision, json!(["team", "prod"])),
+            )
             .await
             .unwrap();
         assert_eq!(out["cards"][0]["count"], 2, "{out}");
@@ -823,17 +954,29 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_refused_read_is_an_error_on_each_card_with_the_reason_never_a_zero() {
-        let (port, _paths) = api_server(403, json!({"apiVersion":"v1","kind":"Status","status":"Failure",
-            "code":403,"reason":"Forbidden","message":"applications.argoproj.io is forbidden"}));
+        let (port, _paths) = api_server(
+            403,
+            json!({"apiVersion":"v1","kind":"Status","status":"Failure",
+            "code":403,"reason":"Forbidden","message":"applications.argoproj.io is forbidden"}),
+        );
         let (_dir, registry, revision) = installed(port, super::super::tests::fake_core());
         let out = registry
-            .invoke("extensions.resolveCards", cards_payload(revision, json!([])))
+            .invoke(
+                "extensions.resolveCards",
+                cards_payload(revision, json!([])),
+            )
             .await
             .unwrap();
         for card in out["cards"].as_array().unwrap().iter().take(2) {
             assert_eq!(card["state"], "error", "{card}");
-            assert!(card["reason"].as_str().unwrap().contains("forbidden"), "{card}");
-            assert!(card.get("count").is_none() && card.get("rows").is_none(), "{card}");
+            assert!(
+                card["reason"].as_str().unwrap().contains("forbidden"),
+                "{card}"
+            );
+            assert!(
+                card.get("count").is_none() && card.get("rows").is_none(),
+                "{card}"
+            );
         }
         // A card this host cannot make at all says so rather than blaming the cluster.
         assert_eq!(out["cards"][2]["state"], "unavailable");
@@ -844,20 +987,35 @@ mod tests {
         // Every page says more remain, so the host stops at its 2,000-object cap.
         let (port, paths) = paged_api_server(200, |n| {
             let mut page = application_list(
-                (0..500).map(|i| application("team", &format!("app-{n}-{i}"), "Degraded")).collect(),
+                (0..500)
+                    .map(|i| application("team", &format!("app-{n}-{i}"), "Degraded"))
+                    .collect(),
             );
             page["metadata"]["continue"] = json!(format!("page-{n}"));
             page
         });
         let (_dir, registry, revision) = installed(port, super::super::tests::fake_core());
         let out = registry
-            .invoke("extensions.resolveCards", cards_payload(revision, json!(["team"])))
+            .invoke(
+                "extensions.resolveCards",
+                cards_payload(revision, json!(["team"])),
+            )
             .await
             .unwrap();
         assert_eq!(out["cards"][0]["state"], "error", "{out}");
-        assert!(out["cards"][0]["reason"].as_str().unwrap().contains("2,000"), "{out}");
+        assert!(
+            out["cards"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("2,000"),
+            "{out}"
+        );
         assert!(out["cards"][0].get("count").is_none());
-        assert_eq!(paths.lock().unwrap().len(), 4, "bounded to the cap, not the cluster");
+        assert_eq!(
+            paths.lock().unwrap().len(),
+            4,
+            "bounded to the cap, not the cluster"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -865,11 +1023,20 @@ mod tests {
         let (port, _paths) = api_server(200, application_list(vec![]));
         let core = super::super::tests::fake_core();
         let (dir, registry, revision) = installed(port, core.clone());
-        mutate(&dir.path().join("extensions.json"), core, Configure::Enable {
-            id: "org.example.argocd".into(), enabled: false,
-        }).unwrap();
+        mutate(
+            &dir.path().join("extensions.json"),
+            core,
+            Configure::Enable {
+                id: "org.example.argocd".into(),
+                enabled: false,
+            },
+        )
+        .unwrap();
         let error = registry
-            .invoke("extensions.resolveCards", cards_payload(revision, json!([])))
+            .invoke(
+                "extensions.resolveCards",
+                cards_payload(revision, json!([])),
+            )
             .await
             .unwrap_err();
         assert!(error.to_string().contains("disabled"), "{error}");
@@ -877,20 +1044,25 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_target_page_read_keeps_only_what_the_card_counted() {
-        let (port, _paths) = api_server(200, application_list(vec![
-            application("team", "web", "Degraded"),
-            application("team", "api", "Healthy"),
-        ]));
+        let (port, _paths) = api_server(
+            200,
+            application_list(vec![
+                application("team", "web", "Degraded"),
+                application("team", "api", "Healthy"),
+            ]),
+        );
         // The page's own summary read, as `k8s.listCustomResource` answers it.
         let mut core = (*super::super::tests::fake_core()).clone();
         let mut list = core.get("k8s.listCustomResource").unwrap().clone();
-        list.handler = Arc::new(|_| Box::pin(async {
-            Ok(json!({"items":[
-                {"name":"web","namespace":"team","age":"1d","columns":["Degraded"]},
-                {"name":"api","namespace":"team","age":"1d","columns":["Healthy"]},
-                {"name":"new","namespace":"team","age":"1s","columns":["Degraded"]}
-            ]}))
-        }));
+        list.handler = Arc::new(|_| {
+            Box::pin(async {
+                Ok(json!({"items":[
+                    {"name":"web","namespace":"team","age":"1d","columns":["Degraded"]},
+                    {"name":"api","namespace":"team","age":"1d","columns":["Healthy"]},
+                    {"name":"new","namespace":"team","age":"1s","columns":["Degraded"]}
+                ]}))
+            })
+        });
         core.register(list);
         let (_dir, registry, revision) = installed(port, Arc::new(core));
         let read = |card: Option<&str>| {
@@ -902,7 +1074,12 @@ mod tests {
             registry.invoke("extensions.read", payload)
         };
         let names = |out: &Value| -> Vec<String> {
-            out["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap().to_owned()).collect()
+            out["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["name"].as_str().unwrap().to_owned())
+                .collect()
         };
         assert_eq!(names(&read(None).await.unwrap()), ["web", "api", "new"]);
         // `new` is not in the card's snapshot, so it is not shown as something the card counted.
@@ -913,12 +1090,18 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_target_read_whose_card_cannot_be_evaluated_fails_rather_than_showing_everything() {
-        let (port, _paths) = api_server(403, json!({"apiVersion":"v1","kind":"Status","status":"Failure",
-            "code":403,"reason":"Forbidden","message":"forbidden"}));
+        let (port, _paths) = api_server(
+            403,
+            json!({"apiVersion":"v1","kind":"Status","status":"Failure",
+            "code":403,"reason":"Forbidden","message":"forbidden"}),
+        );
         let (_dir, registry, revision) = installed(port, super::super::tests::fake_core());
         let error = registry
-            .invoke("extensions.read", json!({"id":"org.example.argocd","revision":revision,
-                "capability":"applications","context":"mock","namespace":"team","card":"degraded"}))
+            .invoke(
+                "extensions.read",
+                json!({"id":"org.example.argocd","revision":revision,
+                "capability":"applications","context":"mock","namespace":"team","card":"degraded"}),
+            )
             .await
             .unwrap_err();
         assert!(error.to_string().contains("forbidden"), "{error}");
@@ -927,15 +1110,29 @@ mod tests {
     #[test]
     fn a_read_namespace_follows_the_selection_rule_of_the_resource_lists() {
         let binding = |namespaced: bool| srelens_plugin_host::Binding {
-            name: "r".into(), title: "R".into(), target: "k8s.listCustomResource".into(),
-            arguments: json!({"namespaced":namespaced}).as_object().unwrap().clone(),
+            name: "r".into(),
+            title: "R".into(),
+            target: "k8s.listCustomResource".into(),
+            arguments: json!({"namespaced":namespaced})
+                .as_object()
+                .unwrap()
+                .clone(),
             inputs: vec!["context".into(), "namespace".into()],
         };
         let one = ["team".to_owned()];
         let two = ["team".to_owned(), "prod".to_owned()];
-        assert_eq!(read_scope(&binding(true), &one), ("team".to_owned(), Some(&one[..])));
-        assert_eq!(read_scope(&binding(true), &two), (String::new(), Some(&two[..])));
-        assert_eq!(read_scope(&binding(true), &[]), (String::new(), Some(&[][..])));
+        assert_eq!(
+            read_scope(&binding(true), &one),
+            ("team".to_owned(), Some(&one[..]))
+        );
+        assert_eq!(
+            read_scope(&binding(true), &two),
+            (String::new(), Some(&two[..]))
+        );
+        assert_eq!(
+            read_scope(&binding(true), &[]),
+            (String::new(), Some(&[][..]))
+        );
         assert_eq!(read_scope(&binding(false), &one), (String::new(), None));
     }
 }
