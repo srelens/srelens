@@ -169,3 +169,44 @@ it("distinguishes stable cluster routes from literal context-name routes", async
   expect(parseExtensionRoute(extensionRoute(id, "org.test.app", "page"))).not.toHaveProperty("clusterId");
   expect(parseExtensionRoute(extensionClusterResourceRoute(id, "org.test.app", "page", "team", "resource"))?.resourceName).toBe("resource");
 });
+
+describe("dashboard cards (#540)", () => {
+  it("resolves an app's cards with the host's camelCase payload", async () => {
+    const { resolveDashboardCards } = await import("./extensions");
+    vi.mocked(invokeCapability).mockClear();
+    await resolveDashboardCards("org.test.app", 3, "/kube/config#prod", ["team", "prod"]);
+    expect(invokeCapability).toHaveBeenLastCalledWith("extensions.resolveCards", {
+      id: "org.test.app", revision: 3, context: "/kube/config#prod", namespaces: ["team", "prod"],
+    });
+  });
+
+  it("narrows a page read to a card only when one is named", async () => {
+    vi.mocked(invokeCapability).mockClear();
+    await readExtension("org.test.app", 2, "list", "cluster/a", "ns", true, "expiring");
+    expect(invokeCapability).toHaveBeenLastCalledWith("extensions.read", {
+      id: "org.test.app", revision: 2, capability: "list", context: "cluster/a", namespace: "ns",
+      useCrdColumns: true, card: "expiring",
+    });
+    await readExtension("org.test.app", 2, "list", "cluster/a", "ns", true);
+    expect(vi.mocked(invokeCapability).mock.lastCall?.[1]).not.toHaveProperty("card");
+  });
+
+  it("gives a card's target its own route, pinned to the cluster, carrying the card", async () => {
+    const { extensionCardRoute, extensionClusterRoute } = await import("./extensions");
+    const id = "/kube/config#prod";
+    const route = extensionCardRoute(id, "org.test.app", "certificates", "team", "expiring soon");
+    expect(parseExtensionRoute(route)).toEqual({
+      context: id, clusterId: id, id: "org.test.app", page: "certificates", namespace: "team", card: "expiring soon",
+    });
+    // A filtered page is a different tab from the unfiltered one, and from another card's.
+    expect(route).not.toBe(extensionClusterRoute(id, "org.test.app", "certificates", "team"));
+    expect(route).not.toBe(extensionCardRoute(id, "org.test.app", "certificates", "team", "expired"));
+    expect(parseExtensionRoute(extensionClusterRoute(id, "org.test.app", "certificates", "team"))).not.toHaveProperty("card");
+  });
+
+  it("refuses a card on a resource route, an empty card and an unknown parameter", () => {
+    expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/team/name?card=x")).toBeNull();
+    expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/team?card=")).toBeNull();
+    expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/team?other=x")).toBeNull();
+  });
+});

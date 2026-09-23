@@ -39,6 +39,34 @@ export interface ExtensionTableColumn {
   sortable?: boolean;
   filterable?: boolean;
 }
+/**
+ * What a dashboard card counts: one operator about one value of each object.
+ * `within` and `before` read the value as an RFC 3339 timestamp against now:
+ * `within: "14d"` is from now until 14 days ahead, `"-1h"` the last hour;
+ * `before: "14d"` is anything earlier than 14 days from now, past included.
+ */
+export interface ExtensionCardPredicate {
+  jsonPath: string;
+  equals?: unknown;
+  absent?: boolean;
+  within?: string;
+  before?: string;
+}
+/** A card on the cluster dashboard (#540). The host reads, counts and draws it. */
+export interface ExtensionDashboardCard {
+  id: string;
+  /** App text: drawn as plain text, never markup. */
+  title: string;
+  size: "s" | "m" | "l";
+  type: "count" | "countByStatus" | "metric" | "list";
+  /** A `k8s.listCustomResource` binding's name. */
+  source: string;
+  predicate?: ExtensionCardPredicate;
+  /** The page the card opens, with its predicate applied as the page's filter. */
+  target?: { page: string };
+  metric?: { jsonPath: string; aggregate: "sum" | "min" | "max" };
+  list?: { jsonPath?: string; order?: "asc" | "desc"; limit?: number };
+}
 export interface ExtensionManifest {
   /** Editor metadata naming the manifest's JSON Schema; the host ignores it. */
   $schema?: string;
@@ -90,6 +118,7 @@ export interface ExtensionManifest {
     detailLinks: ExtensionDetailLink[];
     joins?: ExtensionJoin[];
     tableColumns?: ExtensionTableColumn[];
+    dashboardCards?: ExtensionDashboardCard[];
   };
 }
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */
@@ -209,6 +238,8 @@ export const readExtension = <T = ExtensionResourceResult>(
   context: string,
   namespace = "",
   useCrdColumns = false,
+  /** A dashboard card's id: only the rows that card counted. */
+  card?: string,
 ) =>
   invokeCapability<T>("extensions.read", {
     id,
@@ -217,6 +248,26 @@ export const readExtension = <T = ExtensionResourceResult>(
     context,
     namespace,
     ...(useCrdColumns ? {useCrdColumns:true} : {}),
+    ...(card ? { card } : {}),
+  });
+/**
+ * One dashboard card's answer. `error` is a read that failed and may succeed
+ * on retry; `unavailable` is a card this host cannot make at all yet. Neither
+ * carries a figure, so neither can be drawn as zero.
+ */
+export type ResolvedDashboardCard = { id: string } & (
+  | { state: "count"; count: number }
+  | { state: "countByStatus"; total: number; statuses: Array<{ status: string; count: number }> }
+  /** `value` is null when no matching object carried a number to take a minimum or maximum of. */
+  | { state: "metric"; value: number | null; counted: number }
+  | { state: "list"; total: number; rows: Array<{ namespace: string; name: string; value?: string }> }
+  | { state: "error"; reason: string }
+  | { state: "unavailable"; reason: string }
+);
+/** Every card an enabled app declares, for one cluster and the dashboard's namespace selection. */
+export const resolveDashboardCards = (id: string, revision: number, context: string, namespaces: string[]) =>
+  invokeCapability<{ cards: ResolvedDashboardCard[] }>("extensions.resolveCards", {
+    id, revision, context, namespaces,
   });
 export interface ExtensionColumnRow {
   uid?: string;
@@ -250,8 +301,18 @@ export function extensionClusterRoute(clusterId: string, id: string, page: strin
 export function extensionClusterResourceRoute(clusterId: string, id: string, page: string, namespace: string, name: string) {
   return `${extensionClusterRoute(clusterId, id, page, namespace)}/${encodeURIComponent(name)}`;
 }
+/**
+ * A dashboard card's target: its app page, filtered to what the card counted.
+ * The card is in the route because the route is the tab's identity — the
+ * filtered page and the whole page are two things a reader can have open.
+ */
+export function extensionCardRoute(clusterId: string, id: string, page: string, namespace: string, card: string) {
+  return `${extensionClusterRoute(clusterId, id, page, namespace)}?card=${encodeURIComponent(card)}`;
+}
 export function parseExtensionRoute(route: string) {
-  const pieces = route.split("/");
+  const query = route.indexOf("?");
+  const path = query < 0 ? route : route.slice(0, query);
+  const pieces = path.split("/");
   if ((pieces.length !== 6 && pieces.length !== 7) || !["extensions", "extension-clusters"].includes(pieces[1])) return null;
   try {
     const [context, id, page, namespace] = pieces
@@ -259,7 +320,14 @@ export function parseExtensionRoute(route: string) {
       .map(decodeURIComponent);
     const resourceName = pieces.length === 7 ? decodeURIComponent(pieces[6]) : undefined;
     if (pieces.length === 7 && !resourceName) return null;
-    return context && id && page ? { context, id, page, namespace, ...(pieces[1] === "extension-clusters" ? { clusterId: context } : {}), ...(resourceName ? { resourceName } : {}) } : null;
+    let card: string | undefined;
+    if (query >= 0) {
+      // A card narrows a page; nothing else rides in the query, and a resource has no card.
+      const params = new URLSearchParams(route.slice(query + 1));
+      card = params.get("card") ?? "";
+      if (!card || [...params.keys()].length !== 1 || resourceName) return null;
+    }
+    return context && id && page ? { context, id, page, namespace, ...(pieces[1] === "extension-clusters" ? { clusterId: context } : {}), ...(resourceName ? { resourceName } : {}), ...(card ? { card } : {}) } : null;
   } catch {
     return null;
   }

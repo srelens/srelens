@@ -13,6 +13,7 @@ type Presence<T> = { [K in keyof T]-?: {} extends Pick<T, K> ? "optional" : "req
 type Contributions = ExtensionManifest["contributions"];
 type Page = Contributions["pages"][number];
 type Dashboard = NonNullable<Page["dashboard"]>;
+type Card = NonNullable<Contributions["dashboardCards"]>[number];
 
 const tables: Record<string, Record<string, "required" | "optional">> = {
   Inventory: {
@@ -89,7 +90,18 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     detailLinks: "required",
     joins: "optional",
     tableColumns: "optional",
+    dashboardCards: "optional",
   } satisfies Presence<Contributions>,
+  DashboardCard: {
+    id: "required", title: "required", size: "required", type: "required", source: "required",
+    predicate: "optional", target: "optional", metric: "optional", list: "optional",
+  } satisfies Presence<Card>,
+  CardPredicate: {
+    jsonPath: "required", equals: "optional", absent: "optional", within: "optional", before: "optional",
+  } satisfies Presence<NonNullable<Card["predicate"]>>,
+  CardTarget: { page: "required" } satisfies Presence<NonNullable<Card["target"]>>,
+  CardMetric: { jsonPath: "required", aggregate: "required" } satisfies Presence<NonNullable<Card["metric"]>>,
+  CardList: { jsonPath: "optional", order: "optional", limit: "optional" } satisfies Presence<NonNullable<Card["list"]>>,
   Join: { id:"required", capability:"required", match:"required" } satisfies Presence<NonNullable<Contributions["joins"]>[number]>,
   JoinMatch: { label:"optional", kindLabel:"optional", ownerReference:"optional", annotation:"optional", name:"optional" } satisfies Presence<NonNullable<Contributions["joins"]>[number]["match"]>,
   TableColumn: { id:"required", title:"required", forKinds:"required", source:"required", format:"required", sortable:"optional", filterable:"optional" } satisfies Presence<NonNullable<Contributions["tableColumns"]>[number]>,
@@ -168,5 +180,18 @@ describe("extension TypeScript types match the Rust contract", () => {
 
   it("has the Rust manifest kinds", () => {
     expect(Object.keys(kinds).sort()).toEqual([...(schema.definitions.ManifestKind.enum ?? [])].sort());
+  });
+
+  it.each([
+    ["CardSize", { s: true, m: true, l: true } satisfies Record<Card["size"], true>],
+    ["CardType", { count: true, countByStatus: true, metric: true, list: true } satisfies Record<Card["type"], true>],
+    ["CardAggregate", { sum: true, min: true, max: true } satisfies Record<NonNullable<Card["metric"]>["aggregate"], true>],
+    ["CardOrder", { asc: true, desc: true } satisfies Record<NonNullable<NonNullable<Card["list"]>["order"]>, true>],
+  ])("has the Rust %s values", (name, values) => {
+    // A documented variant is its own `oneOf` branch rather than one `enum` entry.
+    const definition = schema.definitions[name] as ObjectSchema & { oneOf?: ObjectSchema[] };
+    const rust = definition.enum ?? (definition.oneOf ?? []).flatMap((branch) => branch.enum ?? []);
+    expect(rust.length).toBeGreaterThan(0);
+    expect(Object.keys(values).sort()).toEqual([...rust].sort());
   });
 });

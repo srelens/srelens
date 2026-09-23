@@ -679,6 +679,8 @@ mod tests {
             "extensions.configure",
             "extensions.validate",
             "extensions.read",
+            "extensions.resolveColumns",
+            "extensions.resolveCards",
         ] {
             assert!(reg.get(id).is_none());
         }
