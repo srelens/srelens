@@ -172,7 +172,7 @@ export function ExtensionManager() {
                   then either. */}
               {review.errors?.length === 0 ? (
                 <>
-                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned manifest"}) {review.permissionDiff?.previousRevision == null ? "requests a new installation" : "updates the installed app"}.
+                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned manifest"}) {!review.permissionDiff ? "could not have its access changes compared" : review.permissionDiff.previousRevision == null ? "requests a new installation" : "updates the installed app"}.
                 </>
               ) : (
                 <>
@@ -198,8 +198,8 @@ export function ExtensionManager() {
             )}
             {/* The incoming bindings follow the change summary, so an update's
                 new and removed access is visible before the full permission list. */}
-            {review.errors?.length === 0 && (
-              review.permissionDiff?.previousRevision == null ? (
+            {review.errors?.length === 0 && review.permissionDiff && (
+              review.permissionDiff.previousRevision == null ? (
                 <ExtensionBindings manifest={review.manifest} permissions={review.permissions} />
               ) : (
                 <details>

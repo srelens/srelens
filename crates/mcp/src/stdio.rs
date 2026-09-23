@@ -1267,11 +1267,14 @@ mod tests {
     async fn rejected_extension_preview_is_audited_without_running_install() {
         use srelens_capability::Annotations;
         use std::sync::Mutex;
-        #[derive(Default)]
-        struct Spy(Mutex<Vec<crate::audit::AuditRecord>>);
+        struct Spy {
+            records: Mutex<Vec<crate::audit::AuditRecord>>,
+            log: crate::audit::JsonlAuditLog,
+        }
         impl crate::audit::AuditSink for Spy {
             fn record(&self, record: crate::audit::AuditRecord) {
-                self.0.lock().unwrap().push(record);
+                <crate::audit::JsonlAuditLog as crate::audit::AuditSink>::record(&self.log, record.clone());
+                self.records.lock().unwrap().push(record);
             }
         }
         let mut reg = Registry::new();
@@ -1285,14 +1288,21 @@ mod tests {
         });
         configure.annotations = Annotations::MUTATING;
         reg.register(configure);
-        let spy = Arc::new(Spy::default());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let spy = Arc::new(Spy {
+            records: Mutex::new(Vec::new()),
+            log: crate::audit::JsonlAuditLog::new(path.clone(), 1024 * 1024),
+        });
         let server = McpServer::new(Arc::new(reg)).with_audit(spy.clone());
-        let response = handle_request(&server, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":{"action":"install","manifest":"{}","grants":[]}}}), Transport::Http).await.unwrap();
+        let response = handle_request(&server, &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"extensions.configure","arguments":{"action":"install","manifest":"{\"credential\":\"hunter2\"}","grants":[]}}}), Transport::Http).await.unwrap();
         assert_eq!(response["result"]["isError"], true);
-        let records = spy.0.lock().unwrap();
+        let records = spy.records.lock().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].outcome, crate::audit::OUTCOME_REJECTED);
         assert_eq!(records[0].tool, "extensions.configure");
+        assert_eq!(records[0].args["manifest"], "<redacted>");
+        assert!(!std::fs::read_to_string(path).unwrap().contains("hunter2"));
     }
 
     #[tokio::test]

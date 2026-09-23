@@ -96,6 +96,20 @@ it("shows update access additions and removals before unchanged access and insta
   fireEvent.click(within(review).getByRole("button", { name: /Update and grant permissions/ }));
   await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions, reviewedRevision: 7 }));
 });
+it("keeps a missing access comparison distinct from a new installation", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 8, plugins: [{ ...plugin, revision: 7 }] } as any);
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  render(<ExtensionManager />);
+  fireEvent.change(await screen.findByLabelText("Local app manifest (JSON)"), {
+    target: { value: JSON.stringify({ ...plugin.manifest, version: "0.2.0" }) },
+  });
+  fireEvent.click(screen.getByText("Review manifest"));
+  const review = await screen.findByLabelText("Review app permissions");
+  expect(await within(review).findByText("Could not review access changes")).toBeTruthy();
+  expect(within(review).queryByText(/requests a new installation/)).toBeNull();
+  expect(within(review).queryByText("Complete incoming bindings")).toBeNull();
+  expect(within(review).queryByRole("button", { name: /grant permissions/ })).toBeNull();
+});
 it("shows backend errors and retries instead of claiming no apps", async () => {
   vi.mocked(listExtensions).mockRejectedValueOnce(new Error("disk unreadable"));
   render(<ExtensionManager />);

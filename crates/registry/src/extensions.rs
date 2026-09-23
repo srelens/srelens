@@ -1044,9 +1044,21 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
             .preconditions
             .iter()
             .map(|predicate| {
-                let mut value = serde_json::to_value(predicate).expect("predicate serializes");
-                value.as_object_mut().expect("predicate is an object").remove("reason");
-                canonical(&value)
+                let mut fields = serde_json::Map::new();
+                fields.insert("jsonPath".into(), Value::String(predicate.json_path.clone()));
+                if let Some(value) = &predicate.equals {
+                    fields.insert("equals".into(), value.clone());
+                }
+                if let Some(value) = &predicate.not_equals {
+                    fields.insert("notEquals".into(), value.clone());
+                }
+                if let Some(value) = predicate.present {
+                    fields.insert("present".into(), Value::Bool(value));
+                }
+                if let Some(value) = predicate.absent {
+                    fields.insert("absent".into(), Value::Bool(value));
+                }
+                canonical(&Value::Object(fields))
             })
             .collect();
         preconditions.sort();
@@ -2813,6 +2825,7 @@ mod tests {
         let core = fake_core();
         install(&path, core.clone());
         let before = fs::read(&path).unwrap();
+        let reviewed_revision = Some(read(&path).unwrap().plugins[0].revision);
         for (field, value) in [
             ("target", json!("k8s.deleteResource")),
             ("inputs", json!(["context", "group"])),
@@ -2827,7 +2840,7 @@ mod tests {
                     signature: None,
                     manifest: source.to_string(),
                     grants: vec!["k8s.listCustomResource".into()],
-                    reviewed_revision: None,
+                    reviewed_revision,
                 }
             )
             .is_err());
@@ -2851,7 +2864,7 @@ mod tests {
                     signature: None,
                     manifest: source.to_string(),
                     grants: vec!["k8s.listCustomResource".into()],
-                    reviewed_revision: None,
+                    reviewed_revision,
                 }
             )
             .is_err());

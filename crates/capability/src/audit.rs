@@ -197,14 +197,15 @@ pub fn redact(args: &Value, sensitive: bool) -> Value {
     /// secret material with no credential-shaped key inside it to catch:
     /// `data`/`stringData` on a Secret write (`k8s.updateConfigData` — a
     /// Secret's own keys are things like `username` and `ca.crt`), `yaml` on
-    /// `k8s.applyManifest` (one opaque string holding a whole manifest), and
+    /// `k8s.applyManifest` and `manifest` on `extensions.configure` (opaque
+    /// strings holding whole manifests), and
     /// `values` on the helm install/upgrade/template capabilities (user YAML
     /// that routinely holds registry credentials and database passwords).
     ///
     /// Matched EXACTLY, not as substrings, so `metadata` stays readable — the
     /// point is to keep the shape of a call auditable while dropping the part
     /// that carries secrets.
-    const PAYLOAD_FIELDS: [&str; 4] = ["data", "stringdata", "yaml", "values"];
+    const PAYLOAD_FIELDS: [&str; 5] = ["data", "stringdata", "yaml", "values", "manifest"];
     /// Fields holding a map of caller-chosen names to caller-chosen values,
     /// where the NAMES are the auditable shape and every VALUE is treated as a
     /// secret: `settings` on `extensions.configure` (#605). An app's settings
@@ -1167,6 +1168,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn redacts_opaque_extension_manifest_text_before_any_audit_sink_sees_it() {
+        let args = json!({
+            "action": "install",
+            "manifest": "{\"credential\":\"hunter2\"}",
+            "grants": ["k8s.listCustomResource"]
+        });
+        let out = redact(&args, false);
+        assert_eq!(out["action"], "install");
+        assert_eq!(out["manifest"], REDACTED);
+        assert!(!out.to_string().contains("hunter2"));
+    }
+
     /// A denied call is audited before its arguments are ever deserialized, so
     /// `settings` need not be the object the capability's schema demands. A
     /// scalar or array there is blanked whole rather than walked, where the
@@ -1264,9 +1278,9 @@ mod tests {
         );
     }
 
-    /// The other `extensions.configure` actions carry no settings, and their
-    /// audit shape is unchanged: an operator can still read which app was
-    /// installed with which grants, enabled, or limited to which clusters.
+    /// The other `extensions.configure` actions carry no settings. Keep the
+    /// action and grants visible while treating install manifests as opaque;
+    /// enabled state and cluster limits remain visible too.
     #[test]
     fn other_configure_actions_keep_their_audit_shape() {
         let install = redact(
@@ -1274,10 +1288,7 @@ mod tests {
             false,
         );
         assert_eq!(install["action"], json!("install"));
-        assert_eq!(
-            install["manifest"],
-            json!("{\"id\":\"org.example.argocd\"}")
-        );
+        assert_eq!(install["manifest"], REDACTED);
         assert_eq!(install["grants"], json!(["k8s.listCustomResource"]));
 
         let enable = redact(
