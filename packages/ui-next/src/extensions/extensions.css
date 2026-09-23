@@ -286,6 +286,9 @@
 .extension-catalog-entry > .extension-toolbar { border-bottom: 0; }
 .extension-catalog-entry .extension-catalog-meta { margin-top: 3px; }
 .extension-permission-review { background: var(--surface, var(--fl-color-surface)); }
+.extension-access-diff { min-width: 0; }
+.extension-access-diff ul { margin: 4px 0; padding-left: 18px; }
+.extension-access-diff li { max-width: 100%; overflow-x: auto; white-space: nowrap; font-family: var(--font-mono); }
 .extension-problems { color: var(--sev, var(--fl-color-danger)); }
 .extension-problems p { margin: 0; }
 .extension-problems ul { display: grid; gap: 4px; margin: 6px 0 0; padding-left: 18px; }

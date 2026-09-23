@@ -68,8 +68,33 @@ beforeEach(() => {
     plugins: [],
   } as any);
   vi.mocked(configureExtensions).mockResolvedValue({} as any);
-  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: null, added: ["Grant k8s.listCustomResource"], removed: [], unchanged: [] } });
   vi.mocked(listContexts).mockResolvedValue({ contexts: [] });
+});
+it("shows update access additions and removals before unchanged access and installs the reviewed revision", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 8, plugins: [{ ...plugin, revision: 7 }] } as any);
+  vi.mocked(validateExtension).mockResolvedValue({
+    errors: [],
+    permissionDiff: {
+      previousRevision: 7,
+      added: ["Action k8s.annotate on Deployment"],
+      removed: ["Read k8s.listEvents on Pod"],
+      unchanged: ["Grant k8s.listCustomResource"],
+    },
+  });
+  render(<ExtensionManager />);
+  const source = JSON.stringify({ ...plugin.manifest, version: "0.2.0" });
+  fireEvent.change(await screen.findByLabelText("Local app manifest (JSON)"), { target: { value: source } });
+  fireEvent.click(screen.getByText("Review manifest"));
+  const review = await screen.findByLabelText("Review app permissions");
+  expect(within(review).getByText(/Action k8s.annotate on Deployment/)).toBeTruthy();
+  expect(within(review).getByText(/Read k8s.listEvents on Pod/)).toBeTruthy();
+  const unchanged = within(review).getByText(/1 unchanged/).closest("details")!;
+  expect(unchanged.open).toBe(false);
+  const allBindings = within(review).getByText("Complete incoming bindings").closest("details")!;
+  expect(allBindings.open).toBe(false);
+  fireEvent.click(within(review).getByRole("button", { name: /Update and grant permissions/ }));
+  await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions, reviewedRevision: 7 }));
 });
 it("shows backend errors and retries instead of claiming no apps", async () => {
   vi.mocked(listExtensions).mockRejectedValueOnce(new Error("disk unreadable"));
@@ -174,7 +199,7 @@ it("reviews the exact manifest and reports rejected installs without claiming su
     nextRevision: 1,
     plugins: [],
   });
-  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: null, added: ["Grant k8s.listCustomResource"], removed: [], unchanged: [] } });
   vi.mocked(configureExtensions).mockRejectedValueOnce(
     new Error("Unsupported API version"),
   );
@@ -258,7 +283,7 @@ it("does not show a pasted manifest's name until the host has accepted it", asyn
   expect(review.textContent).toContain("This manifest");
 });
 it("shows the name of a manifest the host accepted", async () => {
-  vi.mocked(validateExtension).mockResolvedValue({ errors: [] });
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: null, added: ["Grant k8s.listCustomResource"], removed: [], unchanged: [] } });
   render(<ExtensionManager />);
   fireEvent.change(
     await screen.findByLabelText("Local app manifest (JSON)"),
@@ -1020,6 +1045,24 @@ it.each([undefined, [1,2,3]])("installs catalog bytes and signature %j only afte
   expect(readExtension).not.toHaveBeenCalled();
   fireEvent.click(install);
   await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions, ...(signature ? {signature} : {}) }));
+});
+it("reviews a signed catalog replacement against the installed revision before submitting it", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 8, plugins: [{ ...plugin, revision: 7 }] } as any);
+  const source = JSON.stringify({ ...plugin.manifest, version: "0.2.0" });
+  const signature = [1, 2, 3];
+  vi.mocked(reviewCatalogExtension).mockResolvedValue({ manifest: source, signature });
+  vi.mocked(listExtensionCatalog).mockResolvedValue({ catalog: { extensions: [{ id: plugin.manifest.id, name: "GitOps", description: "", repository: "https://example.com", license: "MIT", release: { version: "0.2.0", sha256: "digest", srelensApiVersion: "^0.1", prerelease: true } }] }, fetchedAt: 1, stale: false, error: null, hostApiVersions: ["0.1.0"], incompatible: [] } as any);
+  vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: 7, added: ["Action k8s.annotate on Widget"], removed: [], unchanged: ["Grant k8s.listCustomResource"] } });
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("tab", { name: "Catalog" }));
+  fireEvent.click(await screen.findByText("Review replacement"));
+  const review = await screen.findByLabelText("Review app permissions");
+  expect(within(review).getByText(/Action k8s.annotate on Widget/)).toBeTruthy();
+  fireEvent.click(within(review).getByRole("button", { name: "Cancel" }));
+  expect(configureExtensions).not.toHaveBeenCalled();
+  fireEvent.click(await screen.findByText("Review replacement"));
+  fireEvent.click(await screen.findByRole("button", { name: "Update and grant permissions" }));
+  await waitFor(() => expect(configureExtensions).toHaveBeenCalledWith({ action: "install", manifest: source, grants: plugin.manifest.permissions, signature, reviewedRevision: 7 }));
 });
 
 it("separates installed apps from the catalog and collapses local installation by default", async () => {
