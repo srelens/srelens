@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 
 // The real page and workspace. Only the capability wrappers are faked, and
@@ -90,6 +90,20 @@ beforeEach(async () => {
 });
 
 const cardRoute = extensionCardRoute("cluster/a", manifest.id, "certificates", "", "expiring", ["team", "prod"]);
+/**
+ * Everything the last interaction set in motion, finished: React's pending
+ * work is flushed, then every read the fake has been asked for has answered
+ * and its answer has rendered. No clock is involved, so "the rows did not
+ * change" means no read changed them, not that none had time to.
+ */
+async function settle() {
+  await act(async () => {});
+  await act(async () => {
+    await Promise.allSettled(vi.mocked(readExtension).mock.results.map((result) => result.value));
+  });
+  await act(async () => {});
+}
+
 const shownRows = () =>
   screen.queryAllByRole("button").map((b) => b.textContent).filter((t) => t?.endsWith("-tls")).sort();
 
@@ -119,7 +133,7 @@ it("leaves a single-namespace card route too, rather than showing the card's row
     extensionClusterRoute("cluster/a", manifest.id, "certificates", "prod"),
     { clusterName: "cluster/a" },
   );
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await settle();
   expect(shownRows()).toEqual(["web-tls"]);
 });
 
@@ -134,7 +148,7 @@ it("leaves the card route when the picker chooses another namespace, and keeps t
     { clusterName: "cluster/a" },
   );
   // This tab is still the card's route, so it still shows what the card counted.
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await settle();
   expect(shownRows()).toEqual(["shop-tls", "web-tls"]);
   expect(readExtension).not.toHaveBeenCalledWith(manifest.id, 4, "certificates", "cluster/a", "other", true, "expiring");
   const status = screen.getByText(/counted by/).closest("[role=status]") as HTMLElement;
