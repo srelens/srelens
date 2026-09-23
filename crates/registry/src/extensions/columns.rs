@@ -11,6 +11,7 @@ use std::{
 const CACHE_TTL: Duration = Duration::from_secs(5);
 const CACHE_LIMIT: usize = 32;
 type Snapshot = (Instant, Arc<Vec<Value>>);
+type SlotState = Result<Option<Snapshot>, CapabilityError>;
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct CacheKey {
     app: String,
@@ -19,7 +20,7 @@ struct CacheKey {
     namespace: String,
     reader: String,
 }
-type JoinCache = Arc<Mutex<HashMap<CacheKey, Arc<tokio::sync::Mutex<Option<Snapshot>>>>>>;
+type JoinCache = Arc<Mutex<HashMap<CacheKey, Arc<tokio::sync::Mutex<SlotState>>>>>;
 
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -100,7 +101,7 @@ fn check_input(input: &ResolveColumns) -> Result<(), CapabilityError> {
     Ok(())
 }
 
-fn cache_slot(cache: &JoinCache, key: CacheKey) -> Arc<tokio::sync::Mutex<Option<Snapshot>>> {
+fn cache_slot(cache: &JoinCache, key: CacheKey) -> Arc<tokio::sync::Mutex<SlotState>> {
     let mut map = cache.lock().expect("join cache lock poisoned");
     if !map.contains_key(&key) && map.len() >= CACHE_LIMIT {
         // An active caller holds another Arc; evicting its slot would let a second
@@ -114,8 +115,16 @@ fn cache_slot(cache: &JoinCache, key: CacheKey) -> Arc<tokio::sync::Mutex<Option
         }
     }
     map.entry(key)
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(Ok(None))))
         .clone()
+}
+
+fn copy_error(error: &CapabilityError) -> CapabilityError {
+    match error {
+        CapabilityError::NotFound(message) => CapabilityError::NotFound(message.clone()),
+        CapabilityError::InvalidInput(message) => CapabilityError::InvalidInput(message.clone()),
+        CapabilityError::Handler(message) => CapabilityError::Handler(message.clone()),
+    }
 }
 
 fn key_for_join(app: &str, revision: u64, context: &str, namespace: &str, join: &Join) -> CacheKey {
@@ -139,29 +148,42 @@ where
     Fut: Future<Output = Result<Vec<Value>, CapabilityError>>,
 {
     let slot = cache_slot(cache, key);
-    let mut snapshot = slot.lock().await;
-    if let Some((time, objects)) = &*snapshot {
+    // Hold a successful try_lock guard: otherwise a new load could slip in
+    // between our check and lock(), making a true waiter look like a retry.
+    let (mut state, waited) = match slot.try_lock() {
+        Ok(guard) => (guard, false),
+        Err(_) => (slot.lock().await, true),
+    };
+    if let Ok(Some((time, objects))) = &*state {
         if time.elapsed() < CACHE_TTL {
             return Ok(Arc::clone(objects));
         }
     }
+    if let Err(error) = &*state {
+        if waited {
+            return Err(copy_error(error));
+        }
+    }
     // Release an expired large list even if its replacement fails.
-    *snapshot = None;
-    let objects = Arc::new(load().await?);
+    *state = Ok(None);
+    let objects = match load().await {
+        Ok(objects) => Arc::new(objects),
+        Err(error) => {
+            *state = Err(copy_error(&error));
+            return Err(error);
+        }
+    };
     let loaded_at = Instant::now();
-    *snapshot = Some((loaded_at, Arc::clone(&objects)));
-    drop(snapshot);
+    *state = Ok(Some((loaded_at, Arc::clone(&objects))));
+    drop(state);
     // Idle cache entries must release their raw CRs after the TTL as well.
     let weak = Arc::downgrade(&slot);
     tokio::spawn(async move {
         tokio::time::sleep(CACHE_TTL).await;
         if let Some(slot) = weak.upgrade() {
-            let mut snapshot = slot.lock().await;
-            if snapshot
-                .as_ref()
-                .is_some_and(|(time, _)| *time == loaded_at)
-            {
-                *snapshot = None;
+            let mut state = slot.lock().await;
+            if matches!(&*state, Ok(Some((time, _))) if *time == loaded_at) {
+                *state = Ok(None);
             }
         }
     });
@@ -519,6 +541,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_failed_join_load_is_shared_but_a_later_request_can_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache: JoinCache = Arc::new(Mutex::new(HashMap::new()));
+        let join = Join {
+            id: "by-name".into(),
+            capability: "reports".into(),
+            match_by: JoinMatch {
+                label: None,
+                kind_label: None,
+                owner_reference: false,
+                annotation: None,
+                name: true,
+            },
+        };
+        let key = key_for_join("app", 2, "prod", "team", &join);
+        let calls = AtomicUsize::new(0);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let first = cached_objects(&cache, key.clone(), || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            entered_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            Err(CapabilityError::Handler("cluster offline".into()))
+        });
+        let second = cached_objects(&cache, key.clone(), || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(CapabilityError::Handler("second read".into()))
+        });
+        let release = async {
+            entered_rx.await.unwrap();
+            release_tx.send(()).unwrap();
+        };
+        let (first_result, second_result, ()) = tokio::join!(first, second, release);
+        assert_eq!(
+            first_result.unwrap_err().to_string(),
+            "handler error: cluster offline"
+        );
+        assert_eq!(
+            second_result.unwrap_err().to_string(),
+            "handler error: cluster offline"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let objects = cached_objects(&cache, key, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![json!({"metadata":{"name":"report"}})])
+        })
+        .await
+        .unwrap();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn expired_snapshot_is_released_even_when_reloading_fails() {
         let cache: JoinCache = Arc::new(Mutex::new(HashMap::new()));
         let join = Join {
@@ -534,16 +610,18 @@ mod tests {
         };
         let key = key_for_join("app", 2, "prod", "team", &join);
         let slot = cache_slot(&cache, key.clone());
-        *slot.lock().await = Some((
+        *slot.lock().await = Ok(Some((
             Instant::now() - CACHE_TTL - Duration::from_secs(1),
             Arc::new(vec![json!({"large":"old"})]),
-        ));
+        )));
         assert!(cached_objects(&cache, key, || async {
             Err(CapabilityError::Handler("offline".into()))
         })
         .await
         .is_err());
-        assert!(slot.lock().await.is_none());
+        assert!(
+            matches!(&*slot.lock().await, Err(CapabilityError::Handler(message)) if message == "offline")
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -567,12 +645,12 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(slot.lock().await.is_some());
+        assert!(matches!(&*slot.lock().await, Ok(Some(_))));
         drop(objects);
         tokio::task::yield_now().await;
         tokio::time::advance(CACHE_TTL).await;
         tokio::task::yield_now().await;
-        assert!(slot.lock().await.is_none());
+        assert!(matches!(&*slot.lock().await, Ok(None)));
     }
 
     #[test]
