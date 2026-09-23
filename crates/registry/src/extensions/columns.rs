@@ -11,7 +11,7 @@ use std::{
 const CACHE_TTL: Duration = Duration::from_secs(5);
 const CACHE_LIMIT: usize = 32;
 type Snapshot = (Instant, Arc<Vec<Value>>);
-type SlotState = Result<Option<Snapshot>, CapabilityError>;
+type SlotState = Result<Option<Snapshot>, (Instant, CapabilityError)>;
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct CacheKey {
     app: String,
@@ -147,20 +147,19 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<Vec<Value>, CapabilityError>>,
 {
+    let started_at = Instant::now();
     let slot = cache_slot(cache, key);
-    // Hold a successful try_lock guard: otherwise a new load could slip in
-    // between our check and lock(), making a true waiter look like a retry.
-    let (mut state, waited) = match slot.try_lock() {
-        Ok(guard) => (guard, false),
-        Err(_) => (slot.lock().await, true),
-    };
+    let mut state = slot.lock().await;
     if let Ok(Some((time, objects))) = &*state {
         if time.elapsed() < CACHE_TTL {
             return Ok(Arc::clone(objects));
         }
     }
-    if let Err(error) = &*state {
-        if waited {
+    if let Err((failed_at, error)) = &*state {
+        // A caller that began before this failure shares the in-flight read's
+        // error; a later caller retries even if unrelated lock contention made
+        // it wait for the slot.
+        if *failed_at > started_at {
             return Err(copy_error(error));
         }
     }
@@ -169,7 +168,7 @@ where
     let objects = match load().await {
         Ok(objects) => Arc::new(objects),
         Err(error) => {
-            *state = Err(copy_error(&error));
+            *state = Err((Instant::now(), copy_error(&error)));
             return Err(error);
         }
     };
@@ -595,6 +594,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn contention_after_an_old_failure_still_retries_the_reader() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache: JoinCache = Arc::new(Mutex::new(HashMap::new()));
+        let join = Join {
+            id: "by-name".into(),
+            capability: "reports".into(),
+            match_by: JoinMatch {
+                label: None,
+                kind_label: None,
+                owner_reference: false,
+                annotation: None,
+                name: true,
+            },
+        };
+        let key = key_for_join("app", 2, "prod", "team", &join);
+        let error = cached_objects(&cache, key.clone(), || async {
+            Err(CapabilityError::Handler("earlier outage".into()))
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("earlier outage"));
+
+        let slot = cache_slot(&cache, key.clone());
+        let guard = slot.lock().await;
+        let calls = AtomicUsize::new(0);
+        let later = cached_objects(&cache, key, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![json!({"metadata":{"name":"recovered"}})])
+        });
+        let release = async {
+            tokio::task::yield_now().await;
+            drop(guard);
+        };
+        let (result, ()) = tokio::join!(later, release);
+        assert_eq!(result.unwrap()[0]["metadata"]["name"], "recovered");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn expired_snapshot_is_released_even_when_reloading_fails() {
         let cache: JoinCache = Arc::new(Mutex::new(HashMap::new()));
         let join = Join {
@@ -620,7 +658,7 @@ mod tests {
         .await
         .is_err());
         assert!(
-            matches!(&*slot.lock().await, Err(CapabilityError::Handler(message)) if message == "offline")
+            matches!(&*slot.lock().await, Err((_, CapabilityError::Handler(message))) if message == "offline")
         );
     }
 
