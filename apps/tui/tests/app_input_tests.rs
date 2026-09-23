@@ -540,6 +540,80 @@ async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
 }
 
 #[tokio::test]
+async fn tick_schedules_argo_detail_refreshes_silently() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+        "my-app".to_string(),
+        "argocd".to_string(),
+        None,
+    );
+
+    let mut app_data = srelens_kube::argo::ArgoApplication::from_json(&serde_json::json!({
+        "metadata": { "name": "my-app", "namespace": "argocd" },
+        "status": {
+            "health": { "status": "Degraded", "message": "1 pod crashing" },
+            "sync": { "status": "OutOfSync" }
+        }
+    }));
+    state.set_application(app_data.clone());
+    app.active_view = ActiveView::ArgoDetail(state);
+
+    // 1. First tick triggers silent refresh
+    app.handle_tick();
+    assert_eq!(app.argo_tick_counter, 1);
+    assert!(
+        app.argo_refreshing,
+        "argo_refreshing must be true while detail fetch is in-flight"
+    );
+
+    if let ActiveView::ArgoDetail(detail) = &app.active_view {
+        assert!(
+            !detail.is_loading,
+            "silent background refresh must not trigger loading spinner flicker"
+        );
+        assert_eq!(
+            detail.application.as_ref().unwrap().health_status,
+            "Degraded"
+        );
+    } else {
+        panic!("expected ArgoDetail view");
+    }
+
+    // 2. Updated application payload arrives (e.g. app recovered to Healthy & Synced)
+    app_data.health_status = "Healthy".to_string();
+    app_data.sync_status = "Synced".to_string();
+    app.handle_argo_detail_result("fake-cluster", "argocd", "my-app", Ok(app_data));
+
+    assert!(
+        !app.argo_refreshing,
+        "argo_refreshing is cleared after result is applied"
+    );
+    if let ActiveView::ArgoDetail(detail) = &app.active_view {
+        assert_eq!(
+            detail.application.as_ref().unwrap().health_status,
+            "Healthy"
+        );
+        assert_eq!(detail.application.as_ref().unwrap().sync_status, "Synced");
+    } else {
+        panic!("expected ArgoDetail view");
+    }
+
+    // 3. Advancing 40 ticks triggers the next periodic background refresh
+    for _ in 0..39 {
+        app.handle_tick();
+    }
+    assert_eq!(app.argo_tick_counter, 40);
+    app.handle_tick();
+    assert_eq!(app.argo_tick_counter, 41);
+    assert!(
+        app.argo_refreshing,
+        "tick 41 triggers another periodic refresh"
+    );
+}
+
+#[tokio::test]
 async fn failed_helm_refresh_keeps_rows_stale_and_blocks_rollback_until_success() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;

@@ -177,7 +177,10 @@ fn highlight_text_matches_safely_handles_unicode_and_case_expansion_without_pani
         .collect();
     assert_eq!(
         parts,
-        vec![("Prefix ⚡ ", Some(Color::White)), ("Bolt", Some(Color::Yellow))]
+        vec![
+            ("Prefix ⚡ ", Some(Color::White)),
+            ("Bolt", Some(Color::Yellow))
+        ]
     );
 
     let spans = highlight_text_matches("café LATTE", "latte", base, hit);
@@ -187,7 +190,10 @@ fn highlight_text_matches_safely_handles_unicode_and_case_expansion_without_pani
         .collect();
     assert_eq!(
         parts,
-        vec![("café ", Some(Color::White)), ("LATTE", Some(Color::Yellow))]
+        vec![
+            ("café ", Some(Color::White)),
+            ("LATTE", Some(Color::Yellow))
+        ]
     );
 
     let spans = highlight_text_matches("CAFÉ Latte", "café", base, hit);
@@ -197,7 +203,10 @@ fn highlight_text_matches_safely_handles_unicode_and_case_expansion_without_pani
         .collect();
     assert_eq!(
         parts,
-        vec![("CAFÉ", Some(Color::Yellow)), (" Latte", Some(Color::White))]
+        vec![
+            ("CAFÉ", Some(Color::Yellow)),
+            (" Latte", Some(Color::White))
+        ]
     );
 
     // 2. German capital sharp S (ẞ) which lowercases to 'ß'
@@ -208,7 +217,10 @@ fn highlight_text_matches_safely_handles_unicode_and_case_expansion_without_pani
         .collect();
     assert_eq!(
         parts,
-        vec![("GROẞE", Some(Color::Yellow)), (" Halle", Some(Color::White))]
+        vec![
+            ("GROẞE", Some(Color::Yellow)),
+            (" Halle", Some(Color::White))
+        ]
     );
 
     // 3. Turkish dotted I (\u{0130}) where lowercasing expands from 2 bytes to 3 bytes
@@ -219,7 +231,11 @@ fn highlight_text_matches_safely_handles_unicode_and_case_expansion_without_pani
         .collect();
     assert_eq!(
         parts,
-        vec![("T", Some(Color::White)), ("\u{0130}", Some(Color::Yellow)), ("TLE", Some(Color::White))]
+        vec![
+            ("T", Some(Color::White)),
+            ("\u{0130}", Some(Color::Yellow)),
+            ("TLE", Some(Color::White))
+        ]
     );
 
     // 4. Multibyte with no matches
@@ -324,10 +340,23 @@ fn a_long_log_entry_scrolls_sideways_when_unwrapped() {
     state.push_line("after".to_string());
 
     let lines = common::render_lines(60, 8, |f| render_logs_view(f, f.area(), &state));
-    let before = lines.iter().position(|l| l.contains("before")).expect("before");
-    let after = lines.iter().position(|l| l.contains("after")).expect("after");
-    assert_eq!(after, before + 2, "the long entry takes exactly one row: {lines:#?}");
-    assert!(!lines.iter().any(|l| l.contains("END")), "the tail is off screen, not wrapped down");
+    let before = lines
+        .iter()
+        .position(|l| l.contains("before"))
+        .expect("before");
+    let after = lines
+        .iter()
+        .position(|l| l.contains("after"))
+        .expect("after");
+    assert_eq!(
+        after,
+        before + 2,
+        "the long entry takes exactly one row: {lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("END")),
+        "the tail is off screen, not wrapped down"
+    );
 
     // Sideways to the end of it.
     state.scroll_right(380);
@@ -542,9 +571,15 @@ fn logs_view_title_reports_zero_matches_and_wraps_long_lines_when_asked() {
     // Toggling wrap off cuts the 100-char line at the border without wrapping.
     state.toggle_wrap();
     let unwrapped = common::render_lines(60, 20, |f| render_logs_view(f, f.area(), &state));
-    assert!(unwrapped[1].starts_with("│    1 │ xxxx"), "{}", unwrapped[1]);
     assert!(
-        unwrapped[2].trim_matches(|c| c == '│' || c == ' ').is_empty(),
+        unwrapped[1].starts_with("│    1 │ xxxx"),
+        "{}",
+        unwrapped[1]
+    );
+    assert!(
+        unwrapped[2]
+            .trim_matches(|c| c == '│' || c == ' ')
+            .is_empty(),
         "{}",
         unwrapped[2]
     );
@@ -576,14 +611,22 @@ fn logs_view_horizontal_scroll_when_unwrapped() {
 #[test]
 fn logs_view_wrapped_follow_shows_bottom_rows() {
     let mut state = logs(); // wrapped by default
-    // In a 60-column terminal, inner width is 58. Gutter is 8. Message width is 50.
-    // Pushing a line of 120 chars wraps onto 3 visual lines.
+                            // In a 60-column terminal, inner width is 58. Gutter is 8. Message width is 50.
+                            // Pushing a line of 120 chars wraps onto 3 visual lines.
     state.push_line("START_".to_string() + &"a".repeat(110) + "_END");
     let lines = common::render_lines(60, 10, |f| render_logs_view(f, f.area(), &state));
     assert!(lines[1].contains("START_"), "row 1 has start: {}", lines[1]);
     assert!(lines[3].contains("_END"), "row 3 has end: {}", lines[3]);
-    assert!(lines[2].starts_with("│      │ "), "continuation has indent: {}", lines[2]);
-    assert!(lines[3].starts_with("│      │ "), "continuation has indent: {}", lines[3]);
+    assert!(
+        lines[2].starts_with("│      │ "),
+        "continuation has indent: {}",
+        lines[2]
+    );
+    assert!(
+        lines[3].starts_with("│      │ "),
+        "continuation has indent: {}",
+        lines[3]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2355,7 +2398,9 @@ fn an_off_screen_wall_of_a_cell_does_not_squeeze_the_rows_on_screen() {
     for i in 0..40 {
         items.push(json!({ "name": format!("filler-{i}"), "namespace": "prod", "status": "Running", "age": "1d" }));
     }
-    items.push(json!({ "name": "bad", "namespace": "prod", "status": "S".repeat(300), "age": "1d" }));
+    items.push(
+        json!({ "name": "bad", "namespace": "prod", "status": "S".repeat(300), "age": "1d" }),
+    );
     t.set_items(items, "");
 
     let buf = render_buffer(160, 12, |f| render_resource_table(f, f.area(), &t));
@@ -2363,10 +2408,19 @@ fn an_off_screen_wall_of_a_cell_does_not_squeeze_the_rows_on_screen() {
     let (_, r1) = row_containing(&rows, "web-1").expect("web-1 on screen");
     // Everything for the visible rows is still there, including a status
     // longer than its declared width -- the column grew to fit what is shown.
-    assert!(r1.contains("CrashLoopBackOff") && r1.contains("node-b") && r1.contains("1h"), "{r1}");
+    assert!(
+        r1.contains("CrashLoopBackOff") && r1.contains("node-b") && r1.contains("1h"),
+        "{r1}"
+    );
     let (_, r0) = row_containing(&rows, "web-0").expect("web-0 on screen");
-    assert!(r0.contains("10.0.0.1") && r0.contains("node-a") && r0.contains("2d"), "{r0}");
-    assert!(!rows.iter().any(|l| l.contains("SSSSSSSSSS")), "the wall is off screen");
+    assert!(
+        r0.contains("10.0.0.1") && r0.contains("node-a") && r0.contains("2d"),
+        "{r0}"
+    );
+    assert!(
+        !rows.iter().any(|l| l.contains("SSSSSSSSSS")),
+        "the wall is off screen"
+    );
 
     // Scroll down to the wall: it is clipped inside its column, one row high,
     // and the row's other cells survive it.
@@ -2377,7 +2431,10 @@ fn an_off_screen_wall_of_a_cell_does_not_squeeze_the_rows_on_screen() {
     let rows: Vec<String> = (0..buf.area.height).map(|y| buffer_row(&buf, y)).collect();
     let (_, bad) = row_containing(&rows, "bad").expect("bad on screen");
     assert!(bad.contains("SSSSSSSSSS"), "{bad}");
-    assert!(bad.contains("prod") && bad.contains("1d"), "other cells survive the wall: {bad}");
+    assert!(
+        bad.contains("prod") && bad.contains("1d"),
+        "other cells survive the wall: {bad}"
+    );
     let walls = rows.iter().filter(|l| l.contains("SSSSSSSSSS")).count();
     assert_eq!(walls, 1, "one row high, not wrapped: {rows:#?}");
 }
@@ -2713,5 +2770,40 @@ fn a_long_argo_sync_error_wraps_instead_of_clipping() {
     assert!(
         end > start,
         "the error should wrap onto a later row, not stay on one clipped line:\n{text}"
+    );
+}
+
+#[test]
+fn test_resource_table_renders_explicit_error_panel_when_crd_not_found() {
+    let crd_meta = CrdMeta {
+        crd_name: "clustersecretstores.external-secrets.io".to_string(),
+        group: "external-secrets.io".to_string(),
+        version: "v1beta1".to_string(),
+        kind: "ClusterSecretStore".to_string(),
+        plural: "clustersecretstores".to_string(),
+        singular: "clustersecretstore".to_string(),
+        namespaced: false,
+        short_names: vec!["css".to_string()],
+        printer_columns: Vec::new(),
+        created_at: None,
+    };
+    let mut state = ResourceTableState::new(ResourceKind::CustomResource(crd_meta));
+    state.set_error("Resource definition not found on cluster (404 Not Found)".to_string());
+
+    let rows = common::render_lines(100, 30, |f| {
+        render_resource_table(f, f.area(), &mut state);
+    });
+    let text = rows.join("\n");
+    assert!(
+        text.contains("Resource definition unavailable on this cluster"),
+        "error title should be rendered:\n{text}"
+    );
+    assert!(
+        text.contains("ClusterSecretStore is not installed or cannot be read"),
+        "error description should name the resource:\n{text}"
+    );
+    assert!(
+        !text.contains("No ClusterSecretStore found in this scope."),
+        "misleading empty state must NOT be rendered when error is present:\n{text}"
     );
 }

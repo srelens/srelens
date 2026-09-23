@@ -495,21 +495,35 @@ impl App {
             self.sync_port_forwards();
         }
 
-        // Periodically refresh Helm releases every ~3.5 seconds (35 ticks at 100ms)
+        // Periodically refresh Helm releases or Helm release detail every ~3.5 seconds (35 ticks at 100ms)
         if matches!(self.active_view, ActiveView::Helm(_)) {
             self.helm_tick_counter = self.helm_tick_counter.saturating_add(1);
             if self.helm_tick_counter % 35 == 1 && !self.helm_refreshing {
                 self.refresh_helm_releases();
             }
+        } else if let ActiveView::HelmDetail(detail) = &self.active_view {
+            self.helm_tick_counter = self.helm_tick_counter.saturating_add(1);
+            if self.helm_tick_counter % 35 == 1 && !self.helm_refreshing {
+                let name = detail.release_name.clone();
+                let ns = detail.namespace.clone();
+                self.refresh_helm_detail_silent(&name, &ns);
+            }
         } else {
             self.helm_tick_counter = 0;
         }
 
-        // Periodically refresh ArgoCD applications every ~4 seconds (40 ticks at 100ms)
+        // Periodically refresh ArgoCD applications or ArgoCD Application detail every ~4 seconds (40 ticks at 100ms)
         if matches!(self.active_view, ActiveView::Argo(_)) {
             self.argo_tick_counter = self.argo_tick_counter.saturating_add(1);
             if self.argo_tick_counter % 40 == 1 && !self.argo_refreshing {
                 self.refresh_argo_applications();
+            }
+        } else if let ActiveView::ArgoDetail(detail) = &self.active_view {
+            self.argo_tick_counter = self.argo_tick_counter.saturating_add(1);
+            if self.argo_tick_counter % 40 == 1 && !self.argo_refreshing {
+                let name = detail.app_name.clone();
+                let ns = detail.app_namespace.clone();
+                self.refresh_argo_detail_silent(&name, &ns);
             }
         } else {
             self.argo_tick_counter = 0;
@@ -1826,6 +1840,14 @@ impl App {
             d.k8s_version = "Connecting...".to_string();
             d.is_reachable = true;
             ov.set_data(d);
+        }
+        if let ActiveView::Table(table) = &mut self.active_view {
+            table.error = None;
+            table.raw_items.clear();
+            table.filtered_indices.clear();
+            table.selected_idx = 0;
+            table.scroll_offset = 0;
+            table.is_loading = true;
         }
         if let ActiveView::Helm(helm) = &mut self.active_view {
             helm.releases.clear();
@@ -10499,6 +10521,31 @@ impl App {
         });
     }
 
+    pub fn refresh_helm_detail_silent(&mut self, name: &str, namespace: &str) {
+        if self.helm_refreshing {
+            return;
+        }
+        self.helm_refreshing = true;
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let name_c = name.to_string();
+        let ns_c = namespace.to_string();
+
+        tokio::spawn(async move {
+            let res =
+                srelens_kube::helm::fetch_helm_release_detail(&cache, &ctx, &ns_c, &name_c, None)
+                    .await;
+            let _ = event_tx.send(crate::event::AppEvent::HelmDetailResult {
+                context: ctx,
+                namespace: ns_c,
+                name: name_c,
+                revision: None,
+                result: res,
+            });
+        });
+    }
+
     pub fn handle_helm_detail_result(
         &mut self,
         context: &str,
@@ -10507,6 +10554,7 @@ impl App {
         revision: Option<i64>,
         result: Result<srelens_kube::helm::HelmReleaseDetail, String>,
     ) {
+        self.helm_refreshing = false;
         if let ActiveView::HelmDetail(detail) = &mut self.active_view {
             if self.active_context == context
                 && detail.namespace == namespace
@@ -10761,6 +10809,48 @@ impl App {
         });
     }
 
+    pub fn refresh_argo_detail_silent(&mut self, name: &str, namespace: &str) {
+        if self.argo_refreshing {
+            return;
+        }
+        self.argo_refreshing = true;
+        let hub_ctx = if let ActiveView::ArgoDetail(detail) = &self.active_view {
+            detail.hub_context.clone()
+        } else {
+            self.argo_refreshing = false;
+            return;
+        };
+        let hub_kubeconfig = if hub_ctx.is_some() {
+            self.tui_config.resolved_argo_hub_kubeconfig()
+        } else {
+            None
+        };
+        let query_ctx = hub_ctx
+            .as_deref()
+            .unwrap_or(&self.active_context)
+            .to_string();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+        let name_c = name.to_string();
+        let ns_c = namespace.to_string();
+
+        tokio::spawn(async move {
+            if let Some(ref path) = hub_kubeconfig {
+                cache.ensure_paths(vec![path.clone()]).await;
+            }
+            let res = srelens_kube::argo::fetch_argo_application_detail(
+                &cache, &query_ctx, &name_c, &ns_c,
+            )
+            .await;
+            let _ = event_tx.send(crate::event::AppEvent::ArgoDetailResult {
+                context: query_ctx,
+                namespace: ns_c,
+                name: name_c,
+                result: res,
+            });
+        });
+    }
+
     pub fn handle_argo_detail_result(
         &mut self,
         context: &str,
@@ -10768,6 +10858,7 @@ impl App {
         name: &str,
         result: Result<srelens_kube::argo::ArgoApplication, String>,
     ) {
+        self.argo_refreshing = false;
         if let ActiveView::ArgoDetail(detail) = &mut self.active_view {
             let expected_ctx = detail
                 .hub_context
@@ -12777,10 +12868,26 @@ impl App {
         if let Some(err_msg) = payload.get("error").and_then(|v| v.as_str()) {
             if let Some(cur_ch) = &self.current_watch_channel {
                 if *cur_ch == channel {
+                    let clean_err = if err_msg.contains("404")
+                        || err_msg.to_ascii_lowercase().contains("not found")
+                    {
+                        "Resource definition not found on cluster (404 Not Found)".to_string()
+                    } else if err_msg.to_ascii_lowercase().contains("forbidden") {
+                        "Access forbidden by RBAC permissions (403 Forbidden)".to_string()
+                    } else {
+                        let first_line = err_msg.lines().next().unwrap_or(err_msg);
+                        first_line
+                            .split(" (Status {")
+                            .next()
+                            .unwrap_or(first_line)
+                            .trim()
+                            .to_string()
+                    };
+
                     if let ActiveView::Table(table) = &mut self.active_view {
-                        table.is_loading = false;
+                        table.set_error(clean_err.clone());
                     }
-                    self.set_toast(format!("Watch error: {}", err_msg), Theme::status_error());
+                    self.set_toast(format!("Watch error: {}", clean_err), Theme::status_error());
                 }
             }
             return;

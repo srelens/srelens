@@ -71,7 +71,10 @@ impl Drop for EnvGuard {
 pub fn isolate_settings() -> SettingsGuard {
     let mut env = lock();
     let dir = tempfile::tempdir().expect("scratch configuration directory");
-    env.set("SRELENS_AI_SETTINGS_PATH", dir.path().join("ai_settings.json"));
+    env.set(
+        "SRELENS_AI_SETTINGS_PATH",
+        dir.path().join("ai_settings.json"),
+    );
     env.set("SRELENS_TUI_CONFIG_PATH", dir.path().join("tui.json"));
     SettingsGuard {
         _env: env,

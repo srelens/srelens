@@ -131,9 +131,9 @@ impl WatchManager {
                 "events" => srelens_kube::watch::watch_events,
             );
             if let Err(msg) = result {
-                eprintln!("resource watch error: {msg}");
                 // Surface the failure on the same channel so a permanent
-                // (403/401) error stops the perpetual "Loading" state.
+                // (403/401/404) error stops the perpetual "Loading" state without
+                // polluting the raw terminal stream with unbuffered stderr prints.
                 sink.emit(&emit_channel, serde_json::json!({ "error": msg }));
             }
         });
@@ -181,7 +181,6 @@ impl WatchManager {
             )
             .await;
             if let Err(msg) = result {
-                eprintln!("custom resource watch error: {msg}");
                 sink.emit(&emit_channel, serde_json::json!({ "error": msg }));
             }
         });
