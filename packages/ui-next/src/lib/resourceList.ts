@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { watchResource, type WatchHandle, type WatchStatus } from "@srelens/core";
 import { rowKey, type KindDescriptor, type ListRow, type RowKey } from "./kinds/types";
 
@@ -266,6 +266,11 @@ export function useResourceList<Row extends ListRow>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [context, namespace, kind, descriptor, tick, files.join(",")]);
 
+  // Enrichment changes on its own cadence. Keep the merged array stable between
+  // list/metrics updates so consumers can key host reads to a real snapshot,
+  // rather than each consumer render creating another snapshot and read.
+  const rows = useMemo(() => mergeMetrics(state.rows as Row[], metrics), [state.rows, metrics]);
+
   // The gate itself. `reload` is handed back either way: it is stable, and a
   // caller must be able to retry the view it is asking about right now. The
   // remaining `setState`s in the effect are updater forms that spread the
@@ -277,7 +282,7 @@ export function useResourceList<Row extends ListRow>(
   }
 
   return {
-    rows: mergeMetrics(state.rows as Row[], metrics),
+    rows,
     status: deriveStatus(state.rows, state.error, state.loading),
     error: state.error,
     truncated: state.truncated,

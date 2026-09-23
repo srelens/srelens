@@ -25,6 +25,20 @@ export interface ExtensionDetailLink extends ExtensionContributionBase {
   /** Qualified Kubernetes kinds, e.g. `argoproj.io/Application`. */
   forKinds: string[];
 }
+export interface ExtensionJoin {
+  id: string;
+  capability: string;
+  match: { label?: string; kindLabel?: string; ownerReference?: boolean; annotation?: string; name?: boolean };
+}
+export interface ExtensionTableColumn {
+  id: string;
+  title: string;
+  forKinds: string[];
+  source: { join?: string; jsonPath: string };
+  format: "text" | "number" | "status" | "badge" | "date" | "duration";
+  sortable?: boolean;
+  filterable?: boolean;
+}
 export interface ExtensionManifest {
   /** Editor metadata naming the manifest's JSON Schema; the host ignores it. */
   $schema?: string;
@@ -74,6 +88,8 @@ export interface ExtensionManifest {
     pages: ExtensionPage[];
     detailTabs: ExtensionDetailTab[];
     detailLinks: ExtensionDetailLink[];
+    joins?: ExtensionJoin[];
+    tableColumns?: ExtensionTableColumn[];
   };
 }
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */
@@ -202,6 +218,23 @@ export const readExtension = <T = ExtensionResourceResult>(
     namespace,
     ...(useCrdColumns ? {useCrdColumns:true} : {}),
   });
+export interface ExtensionColumnRow {
+  uid?: string;
+  name: string;
+  namespace: string;
+  row: Record<string, unknown>;
+}
+export interface ExtensionColumnResult {
+  columns: ExtensionTableColumn[];
+  cells: Array<{ uid?: string | null; name: string; namespace: string;
+    values: Record<string, string | null>; errors?: Record<string, string> }>;
+}
+export const resolveExtensionColumns = (
+  id: string, revision: number, context: string, namespace: string, kind: string,
+  uids: ExtensionColumnRow[],
+) => invokeCapability<ExtensionColumnResult>("extensions.resolveColumns", {
+  id, revision, context, namespace, kind, uids,
+});
 export function extensionRoute(
   context: string,
   id: string,

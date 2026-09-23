@@ -9,6 +9,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   configureExtensions: vi.fn(),
   validateExtension: vi.fn(),
   readExtension: vi.fn(),
+  resolveExtensionColumns: vi.fn(),
   inspectExtensionResource: vi.fn(),
   actOnExtensionResource: vi.fn(),
   saveTextFile: vi.fn(),
@@ -21,6 +22,7 @@ import {
   configureExtensions,
   validateExtension,
   readExtension,
+  resolveExtensionColumns,
   saveTextFile,
   listContexts,
 } from "@srelens/core";
@@ -70,6 +72,45 @@ beforeEach(() => {
   vi.mocked(configureExtensions).mockResolvedValue({} as any);
   vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: null, added: ["Grant k8s.listCustomResource"], removed: [], unchanged: [] } });
   vi.mocked(listContexts).mockResolvedValue({ contexts: [] });
+  vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns: [], cells: [] });
+});
+
+it("shows a declared native table column on the app's own resource page", async () => {
+  const column = { id:"critical", title:"Critical CVEs", forKinds:["argoproj.io/Application"],
+    source:{ jsonPath:".critical" }, format:"number" as const, sortable:true };
+  const app = { ...plugin, manifest: { ...plugin.manifest,
+    capabilities:[{ name:"list", target:"k8s.listCustomResource", arguments:{ group:"argoproj.io", kind:"Application", namespaced:true } }],
+    contributions:{ ...plugin.manifest.contributions, tableColumns:[column] } } };
+  vi.mocked(readExtension).mockResolvedValue({ items:[{name:"apps",namespace:"team",age:"1d",columns:[]}], printerColumns:[] });
+  vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns:[column], cells:[{uid:null,name:"apps",namespace:"team",values:{critical:"4"}}] });
+  render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
+  expect(await screen.findByRole("columnheader", {name:"Critical CVEs"})).toBeTruthy();
+  expect(await screen.findByText("4")).toBeTruthy();
+  expect(resolveExtensionColumns).toHaveBeenCalledTimes(1);
+});
+it("sorts and searches opted-in app column values", async () => {
+  const column = { id:"score", title:"Score", forKinds:["argoproj.io/Application"],
+    source:{jsonPath:".score"}, format:"number" as const, sortable:true, filterable:true };
+  const app = { ...plugin, manifest: { ...plugin.manifest,
+    capabilities:[{name:"list", target:"k8s.listCustomResource", arguments:{group:"argoproj.io",kind:"Application",namespaced:true}}],
+    contributions:{...plugin.manifest.contributions, tableColumns:[column]} } };
+  vi.mocked(readExtension).mockResolvedValue({ items:[
+    {name:"alpha",namespace:"team",age:"1d",columns:[]},
+    {name:"beta",namespace:"team",age:"1d",columns:[]},
+  ], printerColumns:[] });
+  vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns:[column], cells:[
+    {uid:null,name:"alpha",namespace:"team",values:{score:"12"}},
+    {uid:null,name:"beta",namespace:"team",values:{score:"4"}},
+  ] });
+  const view = render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
+  expect(await screen.findByText("12")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", {name:"Sort by Score"}));
+  expect(within(screen.getByRole("table")).getAllByRole("row").slice(1).map((row) => row.textContent)).toEqual([
+    expect.stringContaining("beta"), expect.stringContaining("alpha"),
+  ]);
+  view.rerender(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" search="12" />);
+  expect(screen.getByText("alpha")).toBeTruthy();
+  expect(screen.queryByText("beta")).toBeNull();
 });
 it("shows update access additions and removals before unchanged access and installs the reviewed revision", async () => {
   vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 8, plugins: [{ ...plugin, revision: 7 }] } as any);

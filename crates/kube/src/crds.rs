@@ -151,7 +151,8 @@ fn version_printer_columns(version: &serde_json::Value) -> Vec<PrinterColumn> {
 ///
 /// Anything absent, null, or not a scalar renders empty — an empty cell reads
 /// better than a blob of JSON.
-fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
+/// Restricted scalar projection shared by CRD printer columns and host-owned app columns.
+pub fn resolve_json_path(value: &serde_json::Value, path: &str) -> String {
     let mut current = value;
     let mut rest = path.trim_start_matches('.');
     while !rest.is_empty() {
@@ -585,6 +586,31 @@ pub fn list_custom_resource_capability(cache: Arc<ClientCache>) -> Capability {
             }
         },
     )
+}
+
+/// Host-only join read. Raw resources stay in the broker and only resolved scalar cells
+/// leave `extensions.resolveColumns`; an app's reader capability still returns summaries.
+pub async fn list_custom_resource_join_objects(
+    cache: &ClientCache,
+    context: &str,
+    namespace: &str,
+    group: &str,
+    version: &str,
+    kind: &str,
+    plural: &str,
+    namespaced: bool,
+) -> Result<(Vec<serde_json::Value>, bool), CapabilityError> {
+    let client = cache.get(context).await.map_err(CapabilityError::Handler)?;
+    let ar = custom_api_resource(group, version, kind, plural);
+    let api: Api<DynamicObject> = if namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, namespace, &ar)
+    } else {
+        Api::all_with(client, &ar)
+    };
+    let (objects, truncated) = crate::list_cap::list_capped(&api, ListParams::default())
+        .await
+        .map_err(|error| error.into_capability_error("list joined custom resources"))?;
+    Ok((objects.iter().map(whole_object).collect(), truncated))
 }
 
 #[cfg(test)]
@@ -1042,6 +1068,110 @@ mod tests {
             }
         });
         (kube::Client::new(service, "default"), paths)
+    }
+
+    #[tokio::test]
+    async fn join_list_scopes_requests_and_reconstructs_complete_custom_resources() {
+        let object = serde_json::json!({"apiVersion":"example.io/v1","kind":"Widget",
+            "metadata":{"name":"report","namespace":"team","labels":{"target":"api"}},
+            "report":{"critical":3}});
+        let page = serde_json::json!({"apiVersion":"example.io/v1","kind":"WidgetList",
+            "metadata":{},"items":[object]});
+        for (namespace, namespaced, expected_path) in [
+            ("team", true, "/apis/example.io/v1/namespaces/team/widgets"),
+            ("team", false, "/apis/example.io/v1/widgets"),
+        ] {
+            let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+                vec![page.clone()],
+                std::time::Duration::ZERO,
+            );
+            let cache = ClientCache::new_many(vec![]);
+            cache.preload("fake", client).await;
+            let (objects, truncated) = list_custom_resource_join_objects(
+                &cache,
+                "fake",
+                namespace,
+                "example.io",
+                "v1",
+                "Widget",
+                "widgets",
+                namespaced,
+            )
+            .await
+            .unwrap();
+            assert!(!truncated);
+            assert_eq!(objects.len(), 1);
+            assert_eq!(objects[0]["apiVersion"], "example.io/v1");
+            assert_eq!(objects[0]["kind"], "Widget");
+            assert_eq!(objects[0]["metadata"]["labels"]["target"], "api");
+            assert_eq!(objects[0]["report"]["critical"], 3);
+            assert!(uris.lock().unwrap()[0].starts_with(expected_path));
+        }
+    }
+
+    #[tokio::test]
+    async fn join_list_reports_truncation_at_the_shared_list_cap() {
+        let page = |start: usize, next: Option<&str>| {
+            serde_json::json!({
+                "apiVersion":"example.io/v1","kind":"WidgetList",
+                "metadata":{"continue":next},
+                "items":(start..start+500).map(|i| serde_json::json!({
+                    "apiVersion":"example.io/v1","kind":"Widget","metadata":{"name":format!("w{i}")}
+                })).collect::<Vec<_>>(),
+            })
+        };
+        let (client, uris) = crate::list_cap::test_support::mock_slow_pages(
+            vec![
+                page(0, Some("p2")),
+                page(500, Some("p3")),
+                page(1000, Some("p4")),
+                page(1500, Some("p5")),
+            ],
+            std::time::Duration::ZERO,
+        );
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let (objects, truncated) = list_custom_resource_join_objects(
+            &cache,
+            "fake",
+            "",
+            "example.io",
+            "v1",
+            "Widget",
+            "widgets",
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(objects.len(), crate::list_cap::APP_LIST_CAP);
+        assert!(truncated);
+        assert_eq!(uris.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn join_list_preserves_api_failure_as_an_error() {
+        let (client, paths) = answering(403);
+        let cache = ClientCache::new_many(vec![]);
+        cache.preload("fake", client).await;
+        let error = list_custom_resource_join_objects(
+            &cache,
+            "fake",
+            "team",
+            "example.io",
+            "v1",
+            "Widget",
+            "widgets",
+            true,
+        )
+        .await
+        .err()
+        .expect("Forbidden must not become an empty list");
+        assert!(matches!(error, CapabilityError::Handler(_)));
+        assert!(error.to_string().contains("Forbidden"), "{error}");
+        assert_eq!(
+            paths.lock().unwrap()[0],
+            "/apis/example.io/v1/namespaces/team/widgets"
+        );
     }
 
     #[tokio::test]

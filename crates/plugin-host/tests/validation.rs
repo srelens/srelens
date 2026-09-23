@@ -46,6 +46,64 @@ fn expected(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 #[test]
+fn table_columns_and_joins_require_declared_readers_and_bounded_sources() {
+    let mut value = manifest();
+    value["contributions"]["joins"] = json!([{
+        "id":"vulns", "capability":"applications",
+        "match":{"label":"trivy-operator.resource.name","kindLabel":"trivy-operator.resource.kind"}
+    }]);
+    value["contributions"]["tableColumns"] = json!([{
+        "id":"critical", "title":"Critical CVEs", "forKinds":["apps/Deployment"],
+        "source":{"join":"vulns","jsonPath":".report.summary.criticalCount"},
+        "format":"number", "sortable":true, "filterable":true
+    }]);
+    let parsed = Manifest::parse(&value.to_string()).expect("a declared join and column are valid");
+    assert_eq!(parsed.contributions.joins[0].id, "vulns");
+    assert_eq!(parsed.contributions.table_columns[0].id, "critical");
+
+    value["contributions"]["joins"][0]["capability"] = json!("missing");
+    value["contributions"]["tableColumns"][0]["source"]["join"] = json!("absent");
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[
+            (
+                "EXTENSION_UNRESOLVED_CAPABILITY",
+                "contributions.joins[0].capability"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.tableColumns[0].source.join"
+            ),
+        ])
+    );
+}
+
+#[test]
+fn table_column_rejects_malformed_json_paths_instead_of_silently_blank_cells() {
+    let mut value = manifest();
+    value["contributions"]["tableColumns"] = json!([{
+        "id":"score", "title":"Score", "forKinds":["apps/Deployment"],
+        "source":{"jsonPath":".status..score"}, "format":"number"
+    }]);
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[(
+            "EXTENSION_INVALID_VALUE",
+            "contributions.tableColumns[0].source.jsonPath"
+        )])
+    );
+    value["contributions"]["tableColumns"][0]["source"]["jsonPath"] =
+        json!(".status['unterminated'");
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[(
+            "EXTENSION_INVALID_VALUE",
+            "contributions.tableColumns[0].source.jsonPath"
+        )])
+    );
+}
+
+#[test]
 fn independent_problems_are_all_reported_with_their_paths() {
     let mut value = manifest();
     value["id"] = json!("Not a domain");

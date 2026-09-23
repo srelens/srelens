@@ -170,12 +170,18 @@ describe("useResourceList", () => {
   it("merges metrics into the rows by their identity, without waiting for them", async () => {
     const enrich = vi.fn().mockResolvedValue(new Map([[rowKey({ name: "a", namespace: "shop" }), { cpu: 12 }]]));
     const d = { ...watched, enrich, enrichMs: 10000 } as const;
-    const { result } = renderHook(() => useResourceList("prod", "pods", d, "shop", []));
+    const { result, rerender } = renderHook(() => useResourceList("prod", "pods", d, "shop", []));
     await waitFor(() => expect(mockState.emitRows).not.toBeNull());
     act(() => mockState.emitRows!([{ name: "a", namespace: "shop" }, { name: "b", namespace: "shop" }]));
     expect(result.current.rows[0]).toMatchObject({ name: "a" }); // rows are on screen at once
     await waitFor(() => expect(result.current.rows[0]).toMatchObject({ name: "a", cpu: 12 }));
     expect(result.current.rows[1]).not.toHaveProperty("cpu");
+    const enrichedRows = result.current.rows;
+    rerender();
+    expect(result.current.rows).toBe(enrichedRows);
+    act(() => mockState.emitRows!([{ name: "a", namespace: "shop", phase: "Running" }]));
+    expect(result.current.rows).not.toBe(enrichedRows);
+    expect(result.current.rows[0]).toMatchObject({ phase: "Running", cpu: 12 });
   });
 
   /**

@@ -5,7 +5,7 @@
 
 Everything this server exposes over MCP, generated from the live registry so it cannot drift. Written for someone wiring an agent to srelens; the narrative reference is [MCP.md](MCP.md).
 
-## Tools (113)
+## Tools (114)
 
 Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
@@ -158,7 +158,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `toolbox.removePlugin` | medium | remove an installed krew plugin |
 | `toolbox.upgradePlugin` | medium | upgrade an installed krew plugin |
 
-### Server — read-only (8)
+### Server — read-only (9)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
@@ -166,6 +166,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `extensions.catalogManifest` | low | Download and checksum-verify a catalog manifest for permission review; does not install it |
 | `extensions.list` | low | List installed declarative extensions |
 | `extensions.read` | low | Read a declared custom-resource contribution from an enabled extension |
+| `extensions.resolveColumns` | low | Resolve native extension table columns in one batch |
 | `extensions.resource` | low | Inspect the selected resource of an enabled app |
 | `extensions.validate` | low | Check a declarative extension manifest exactly as installing it would and return every problem; does not install it |
 | `ping` | low | health check; echoes the input back as { pong: <input> } |

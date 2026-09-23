@@ -76,6 +76,14 @@
   font-weight: 600;
   background: var(--surface, var(--fl-color-surface));
 }
+.extension-column-sort {
+  all: unset;
+  cursor: pointer;
+}
+.extension-column-sort:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 
 .extension-error pre {

@@ -120,6 +120,12 @@ Why a new field needs a new minor even though it is optional: manifests are stri
 (see below), so a host that predates the field would reject it. Requiring the minor
 turns that into a clear "requires API 0.x" message.
 
+Pre-1.0 exception for #538: `contributions.joins` and `contributions.tableColumns`
+were added to API 0.3 in place while the extension platform is still being built.
+The existing signed Flux and Argo CD 0.3 manifests contain neither field and remain
+valid; a manifest using either field requires a host that includes #538. No alias or
+older API line is retained for this exception.
+
 The host enforces this for fields. `API_FIELDS` in `crates/plugin-host/src/manifest.rs`
 lists fields whose availability differs across supported API lines. It is empty while
 0.3 is the only supported line. A rename is a removal plus an addition.
@@ -259,6 +265,10 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ### 0.3.0
 
+- Table columns on native resource lists may declare `joins` over a granted
+  custom-resource reader and `tableColumns` with a row or joined `jsonPath`.
+  `extensions.resolveColumns` batches up to 1,000 rows per request and reports
+  failed reads explicitly (#538). See [Manifest reference](manifest.md#table-columns-and-joins).
 - Unsigned apps declaring write actions require the default-off inventory policy
   described above (#558). Turning it off disables affected installations without
   removing them; normal read-only declarative permission grants are unchanged.
