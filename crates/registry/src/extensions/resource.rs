@@ -31,6 +31,14 @@ async fn resolve(
         .await
         .map_err(|e| CapabilityError::Handler(e.to_string()))?
         .map_err(CapabilityError::Handler)?;
+    if let Some(reason) = state
+        .plugins
+        .iter()
+        .find(|p| p.manifest.id == selection.id)
+        .and_then(|p| p.policy_blocked.as_ref())
+    {
+        return Err(CapabilityError::Handler(reason.clone()));
+    }
     let plugin = state
         .plugins
         .iter()
@@ -287,6 +295,14 @@ mod tests {
             serde_json::from_str(include_str!("../../../../examples/extensions/argocd.json"))
                 .unwrap();
         manifest["id"] = json!("org.example.argocd");
+        mutate(
+            &path,
+            core.clone(),
+            Configure::UnsignedApps {
+                allow_unsigned_apps: true,
+            },
+        )
+        .unwrap();
         mutate(
             &path,
             core.clone(),

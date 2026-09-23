@@ -12,7 +12,7 @@
 //! some other way.
 //!
 //! Take this lock last. `new_app` takes it, so a test that holds it and then
-//! waits on another lock — the environment, `isolate_ai_settings` — deadlocks
+//! waits on another lock — `common::env::lock`, `isolate_settings` — deadlocks
 //! against a test that holds that lock and builds an app.
 
 use std::cell::Cell;

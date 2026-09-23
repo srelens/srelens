@@ -1,0 +1,35 @@
+/* Host-owned regions. Payloads cannot supply classes, layout or styling. */
+.native-component {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  color: var(--ink);
+  font-size: var(--text-body);
+}
+.native-component[data-fill] { height: 100%; }
+.native-component .native-machine {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+  overflow-x: auto;
+}
+.native-component .kv-k { white-space: pre; overflow-x: auto; }
+.native-component .kv-v { min-width: 0; overflow: hidden; }
+.native-component .card { margin: 0; max-width: none; border: 0; border-radius: 0; box-shadow: none; }
+.native-component-entry { padding: var(--pad-y) 12px; border-bottom: 1px solid var(--rule); }
+.native-component-entry p { margin: 4px 0; overflow-wrap: anywhere; }
+.native-component-entry time { color: var(--ink-muted); font-size: var(--text-meta); }
+.native-component-timeline { list-style: none; margin: 0; padding: 0; }
+.native-component-inset, .native-component-more { padding: 8px 12px; }
+.native-component-more { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--rule); }
+.native-component-prose { padding: 8px 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.native-component-prose p { margin: 8px 0; }
+.native-component-prose :is(h1,h2,h3,h4,h5,h6) { font-size: var(--text-body); font-weight: var(--weight-semibold); margin: 12px 0 4px; }
+.native-component-prose :is(ul,ol) { padding-left: 24px; }
+.native-component-prose ul { list-style: disc; }
+.native-component-prose ol { list-style: decimal; }
+.native-component-prose a { color: var(--accent); text-decoration: underline; }
+.native-component-prose code.native-machine { display: inline-block; vertical-align: bottom; }

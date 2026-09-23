@@ -201,7 +201,10 @@ async fn fake_cluster(routes: Vec<Route>) -> FakeCluster {
 /// An app whose *client cache* talks to `cluster`. `app.kubeconfig_paths` is
 /// left empty on purpose: watches and the kubectl fallbacks resolve nothing,
 /// so only the code paths under test reach the fake server.
-async fn app_on(cluster: &FakeCluster) -> (App, UnboundedReceiver<AppEvent>) {
+/// Bind the returned guard before the App so configuration stays isolated
+/// until after the App and its settings-sensitive work are dropped.
+async fn app_on(cluster: &FakeCluster) -> (common::env::SettingsGuard, App, UnboundedReceiver<AppEvent>) {
+    let settings = common::env::isolate_settings();
     let (mut app, rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.client_cache
         .set_paths(vec![cluster.kubeconfig.clone()])
@@ -210,7 +213,7 @@ async fn app_on(cluster: &FakeCluster) -> (App, UnboundedReceiver<AppEvent>) {
     // does not exist so any spawned kubectl fails immediately, on every OS and
     // whether or not kubectl is installed.
     app.kubeconfig_paths = vec![cluster.kubeconfig.with_file_name("no-such-kubeconfig")];
-    (app, rx)
+    (settings, app, rx)
 }
 
 /// Wait (bounded) for the `ActionResult` carrying `title`.
@@ -371,7 +374,7 @@ async fn a_reachable_apiserver_reports_its_version_and_node_and_pod_counts() {
         ),
     ])
     .await;
-    let (mut app, mut rx) = app_on(&cluster).await;
+    let (_settings, mut app, mut rx) = app_on(&cluster).await;
 
     app.refresh_cluster_info();
     let payload = action_result(&mut rx, "cluster_info_updated")
@@ -388,7 +391,7 @@ async fn a_reachable_apiserver_reports_its_version_and_node_and_pod_counts() {
 #[tokio::test]
 async fn a_version_call_that_fails_reports_the_apiserver_error_not_a_count() {
     let cluster = fake_cluster(vec![failing_route("/version", 500)]).await;
-    let (app, mut rx) = app_on(&cluster).await;
+    let (_settings, app, mut rx) = app_on(&cluster).await;
 
     app.refresh_cluster_info();
     let err = action_result(&mut rx, "cluster_info_failed")
@@ -405,7 +408,7 @@ async fn unlistable_nodes_and_pods_still_report_a_version_with_zero_counts() {
     // Only /version answers; the two metadata lists 404, and each falls back
     // to zero rather than failing the whole refresh.
     let cluster = fake_cluster(vec![route("/version", version_body())]).await;
-    let (app, mut rx) = app_on(&cluster).await;
+    let (_settings, app, mut rx) = app_on(&cluster).await;
 
     app.refresh_cluster_info();
     let payload = action_result(&mut rx, "cluster_info_updated")
@@ -475,7 +478,7 @@ async fn crd_discovery_picks_the_storage_version_its_columns_and_skips_groupless
         }),
     )])
     .await;
-    let (mut app, mut rx) = app_on(&cluster).await;
+    let (_settings, mut app, mut rx) = app_on(&cluster).await;
 
     app.refresh_crds();
     let payload = action_result(&mut rx, "crds_updated")
@@ -519,7 +522,7 @@ async fn crd_discovery_picks_the_storage_version_its_columns_and_skips_groupless
 #[tokio::test]
 async fn crd_discovery_stays_silent_when_the_definitions_cannot_be_listed() {
     let cluster = fake_cluster(vec![failing_route("/apis/apiextensions.k8s.io", 404)]).await;
-    let (mut app, mut rx) = app_on(&cluster).await;
+    let (_settings, mut app, mut rx) = app_on(&cluster).await;
 
     app.refresh_crds();
     tokio::task::yield_now().await;
@@ -621,7 +624,7 @@ async fn the_cluster_overview_rolls_up_nodes_pods_gpus_and_metrics_server_usage(
         route("/api/v1/pods", overview_pods()),
     ])
     .await;
-    let (mut app, mut rx) = app_on(&cluster).await;
+    let (_settings, mut app, mut rx) = app_on(&cluster).await;
 
     app.refresh_cluster_overview();
     let payload = action_result(&mut rx, "cluster_overview_updated")
@@ -668,7 +671,7 @@ async fn the_cluster_overview_falls_back_to_pod_requests_without_a_metrics_serve
         route("/api/v1/pods", overview_pods()),
     ])
     .await;
-    let (mut app, mut rx) = app_on(&cluster).await;
+    let (_settings, mut app, mut rx) = app_on(&cluster).await;
 
     app.refresh_cluster_overview();
     let payload = action_result(&mut rx, "cluster_overview_updated")
@@ -691,7 +694,7 @@ async fn an_unreachable_apiserver_still_publishes_an_overview_marked_unreachable
         route("/api/v1/pods", pod_list(vec![])),
     ])
     .await;
-    let (mut app, mut rx) = app_on(&cluster).await;
+    let (_settings, mut app, mut rx) = app_on(&cluster).await;
 
     app.refresh_cluster_overview();
     let payload = action_result(&mut rx, "cluster_overview_updated")
@@ -770,7 +773,7 @@ async fn custom_resource_instances_are_published_with_name_namespace_and_age() {
         ),
     ])
     .await;
-    let (mut app, mut rx) = app_on(&cluster).await;
+    let (_settings, mut app, mut rx) = app_on(&cluster).await;
 
     app.fetch_crd_instances(widget_crd());
     let payload = action_result(&mut rx, "crd_instances:Widget")
@@ -841,7 +844,7 @@ async fn pod_containers_come_from_the_api_when_the_informer_cache_has_nothing() 
         }),
     )])
     .await;
-    let (app, _rx) = app_on(&cluster).await;
+    let (_settings, app, _rx) = app_on(&cluster).await;
 
     let containers = app.get_pod_containers("web-0", Some("default")).await;
     assert_eq!(containers, vec!["app", "sidecar", "init", "debugger"]);
@@ -923,7 +926,7 @@ async fn the_yaml_view_serialises_the_live_object_for_builtin_and_custom_kinds()
         ),
     ])
     .await;
-    let (mut app, _rx) = app_on(&cluster).await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
     app.crds = vec![widget_crd(), gadget_crd()];
 
     app.open_yaml_view("web-0".into(), "Pod".into(), Some("default".into()))
@@ -960,6 +963,7 @@ async fn the_yaml_view_serialises_the_live_object_for_builtin_and_custom_kinds()
 
 #[tokio::test]
 async fn the_yaml_view_reports_the_kubectl_fallback_failing_when_nothing_can_serve_the_manifest() {
+    let _settings = common::env::isolate_settings();
     // No cluster and a KUBECONFIG that does not exist: the API path fails,
     // the kubectl fallback fails, and the view shows the error manifest.
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
@@ -1052,7 +1056,7 @@ async fn describing_a_service_renders_its_metadata_spec_and_events() {
         ),
     ])
     .await;
-    let (mut app, _rx) = app_on(&cluster).await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
 
     app.open_describe_view("web".into(), "Service".into(), Some("default".into()))
         .await;
@@ -1103,7 +1107,7 @@ async fn describing_a_cluster_scoped_object_without_events_says_none() {
         ),
     ])
     .await;
-    let (mut app, _rx) = app_on(&cluster).await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
 
     app.open_describe_view("node-a".into(), "Node".into(), None)
         .await;
@@ -1132,7 +1136,7 @@ async fn describing_a_resource_whose_events_cannot_be_listed_still_renders_the_o
         failing_route("/api/v1/namespaces/default/events", 500),
     ])
     .await;
-    let (mut app, _rx) = app_on(&cluster).await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
 
     app.open_describe_view(
         "settings".into(),
@@ -1153,6 +1157,7 @@ async fn describing_a_resource_whose_events_cannot_be_listed_still_renders_the_o
 
 #[tokio::test]
 async fn describing_something_no_backend_can_reach_reports_the_failure() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.kubeconfig_paths = vec![PathBuf::from("no-such-kubeconfig")];
 
@@ -1212,7 +1217,7 @@ async fn confirming_a_delete_drops_the_row_and_a_rejected_delete_toasts_the_erro
         failing_route("/api/v1/namespaces/default/pods/web-1", 409),
     ])
     .await;
-    let (mut app, _rx) = app_on(&cluster).await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
     pods_table(&mut app, &["web-0", "web-1"]);
 
     app.execute_modal_confirm("delete:Pod:default:web-0".into())
@@ -1245,7 +1250,7 @@ async fn delete_pod_in_node_inspector_removes_pod_from_view_details() {
         json!({ "apiVersion": "v1", "kind": "Pod", "metadata": { "name": "pod-1" } }),
     )])
     .await;
-    let (mut app, _rx) = app_on(&cluster).await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
     let mut ni = NodeInspectorState::new("node-1".into());
     let details = srelens_kube::node_inspector::NodeInspectorDetails {
         name: "node-1".into(),
@@ -1308,7 +1313,7 @@ async fn bulk_delete_deletes_all_marked_resources_and_cleans_table() {
         ),
     ])
     .await;
-    let (mut app, _rx) = app_on(&cluster).await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
     pods_table(&mut app, &["pod-1", "pod-2", "pod-3"]);
 
     if let ActiveView::Table(ref mut t) = app.active_view {
@@ -1351,7 +1356,7 @@ async fn bulk_delete_partial_failure_reports_and_retains_failed_rows() {
         failing_route("/api/v1/namespaces/default/pods/pod-fail", 409),
     ])
     .await;
-    let (mut app, _rx) = app_on(&cluster).await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
     pods_table(&mut app, &["pod-ok", "pod-fail"]);
 
     if let ActiveView::Table(ref mut t) = app.active_view {
@@ -1391,7 +1396,7 @@ async fn a_delete_resolves_custom_kinds_and_refuses_ones_it_cannot_place() {
         ),
     ])
     .await;
-    let (mut app, _rx) = app_on(&cluster).await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
     app.crds = vec![widget_crd(), gadget_crd()];
 
     app.execute_modal_confirm("delete:Widget:default:w-1".into())
@@ -1428,7 +1433,7 @@ async fn a_restart_patches_the_workload_and_reports_what_it_could_not_restart() 
         failing_route("/apis/apps/v1/namespaces/default/statefulsets/db", 404),
     ])
     .await;
-    let (mut app, _rx) = app_on(&cluster).await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
 
     app.execute_modal_confirm("restart:Deployment:default:web".into())
         .await;
@@ -1458,6 +1463,7 @@ async fn a_restart_patches_the_workload_and_reports_what_it_could_not_restart() 
 
 #[tokio::test]
 async fn a_confirmation_without_a_reachable_cluster_toasts_a_connection_error() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
 
     app.execute_modal_confirm("delete:Pod:default:web-0".into())
@@ -1494,7 +1500,7 @@ async fn scaling_patches_the_selected_workload_and_surfaces_a_rejection() {
         failing_route("/apis/apps/v1/namespaces/default/deployments/ghost", 404),
     ])
     .await;
-    let (mut app, _rx) = app_on(&cluster).await;
+    let (_settings, mut app, _rx) = app_on(&cluster).await;
 
     // The namespace comes from the selected row, not the active namespace.
     let mut table = ResourceTableState::new(ResourceKind::Deployments);
@@ -1593,7 +1599,7 @@ async fn cordoning_and_uncordoning_a_node_patches_it_and_reports_which_way_it_we
         json!({ "apiVersion": "v1", "kind": "Node", "metadata": { "name": "gpu-1" } }),
     )])
     .await;
-    let (mut app, mut rx) = app_on(&cluster).await;
+    let (_settings, mut app, mut rx) = app_on(&cluster).await;
 
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", false, false));
     app.handle_key_event(common::ch('c')).await;
@@ -1621,7 +1627,7 @@ async fn cordoning_and_uncordoning_a_node_patches_it_and_reports_which_way_it_we
 #[tokio::test]
 async fn a_cordon_the_apiserver_rejects_is_reported_as_an_error() {
     let cluster = fake_cluster(vec![failing_route("/api/v1/nodes/gpu-1", 409)]).await;
-    let (mut app, mut rx) = app_on(&cluster).await;
+    let (_settings, mut app, mut rx) = app_on(&cluster).await;
 
     app.active_view = ActiveView::NodeInspector(inspector("gpu-1", false, false));
     app.handle_key_event(common::ch('c')).await;
@@ -1636,6 +1642,7 @@ async fn a_cordon_the_apiserver_rejects_is_reported_as_an_error() {
 
 #[tokio::test]
 async fn the_node_inspector_describes_and_shows_yaml_for_the_node_or_the_highlighted_pod() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.kubeconfig_paths = vec![PathBuf::from("no-such-kubeconfig")];
 
@@ -1693,6 +1700,7 @@ async fn the_node_inspector_describes_and_shows_yaml_for_the_node_or_the_highlig
 
 #[tokio::test]
 async fn the_node_inspector_offers_a_debug_shell_command_and_an_action_palette() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
 
     // With a pod highlighted, 's' opens the pod's shell
@@ -1755,6 +1763,7 @@ async fn the_node_inspector_offers_a_debug_shell_command_and_an_action_palette()
 
 #[tokio::test]
 async fn table_keys_open_yaml_describe_and_the_editor_for_the_selected_row() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.kubeconfig_paths = vec![PathBuf::from("no-such-kubeconfig")];
 
@@ -1786,6 +1795,7 @@ async fn table_keys_open_yaml_describe_and_the_editor_for_the_selected_row() {
 
 #[tokio::test]
 async fn on_an_events_table_yaml_and_describe_follow_the_involved_object() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.kubeconfig_paths = vec![PathBuf::from("no-such-kubeconfig")];
 
@@ -1854,6 +1864,7 @@ fn tree_view() -> TreeViewState {
 
 #[tokio::test]
 async fn tree_keys_copy_a_node_the_whole_tree_and_open_the_selection() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.kubeconfig_paths = vec![PathBuf::from("no-such-kubeconfig")];
 
@@ -1910,6 +1921,7 @@ async fn tree_keys_copy_a_node_the_whole_tree_and_open_the_selection() {
 
 #[tokio::test]
 async fn port_forward_keys_copy_the_local_url_a_deep_link_and_confirm_a_stop() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     let mut pf = PortForwardViewState::new();
     pf.set_forwards(vec![PortForwardEntry {
@@ -1951,6 +1963,7 @@ async fn port_forward_keys_copy_the_local_url_a_deep_link_and_confirm_a_stop() {
 
 #[tokio::test]
 async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.kubeconfig_paths = vec![PathBuf::from("no-such-kubeconfig")];
     let helm = || {
@@ -2107,6 +2120,7 @@ async fn helm_keys_copy_a_deep_link_and_open_the_values_and_manifest() {
 
 #[tokio::test]
 async fn toolbox_keys_move_the_cursor_and_copy_the_tool_path_or_name() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.active_view = ActiveView::Toolbox(ToolboxViewState {
         tools: vec![
@@ -2150,6 +2164,7 @@ async fn toolbox_keys_move_the_cursor_and_copy_the_tool_path_or_name() {
 
 #[tokio::test]
 async fn assistant_chords_clear_the_conversation_and_toggle_tool_chips() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.active_view = ActiveView::Assistant;
     app.assistant_state
@@ -2176,6 +2191,7 @@ async fn assistant_chords_clear_the_conversation_and_toggle_tool_chips() {
 
 #[tokio::test]
 async fn ctrl_c_in_the_assistant_copies_the_last_answer() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.active_view = ActiveView::Assistant;
     app.assistant_state
@@ -2188,6 +2204,7 @@ async fn ctrl_c_in_the_assistant_copies_the_last_answer() {
 
 #[tokio::test]
 async fn ctrl_c_in_the_assistant_without_messages_warns_and_does_not_exit() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.active_view = ActiveView::Assistant;
     app.assistant_state.messages.clear();
@@ -2203,6 +2220,7 @@ async fn ctrl_c_in_the_assistant_without_messages_warns_and_does_not_exit() {
 
 #[tokio::test]
 async fn a_full_watch_pool_evicts_its_oldest_channel_when_a_workloads_view_opens() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     for i in 0..20 {
         let channel = format!("watch:filler:{}", i);
@@ -2260,7 +2278,7 @@ async fn a_metrics_server_feeds_the_pod_table_and_the_node_history() {
         ),
     ])
     .await;
-    let (mut app, mut rx) = app_on(&cluster).await;
+    let (_settings, mut app, mut rx) = app_on(&cluster).await;
     pods_table(&mut app, &["web-0"]);
 
     app.refresh_pod_metrics();
@@ -2298,7 +2316,7 @@ async fn a_metrics_server_feeds_the_pod_table_and_the_node_history() {
 #[tokio::test]
 async fn a_cluster_without_a_metrics_server_publishes_no_metrics_at_all() {
     let cluster = fake_cluster(vec![failing_route("/apis/metrics.k8s.io", 404)]).await;
-    let (app, mut rx) = app_on(&cluster).await;
+    let (_settings, app, mut rx) = app_on(&cluster).await;
 
     app.refresh_pod_metrics();
     app.refresh_node_metrics();
@@ -2324,6 +2342,7 @@ async fn a_cluster_without_a_metrics_server_publishes_no_metrics_at_all() {
 
 #[tokio::test]
 async fn a_command_nothing_can_explain_toasts_that_it_is_unknown() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
 
     app.execute_colon_command("qqqqqqqqqq").await;
@@ -2335,6 +2354,7 @@ async fn a_command_nothing_can_explain_toasts_that_it_is_unknown() {
 
 #[tokio::test]
 async fn enter_on_a_plain_table_row_describes_it() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.kubeconfig_paths = vec![PathBuf::from("no-such-kubeconfig")];
 
@@ -2359,6 +2379,7 @@ async fn enter_on_a_plain_table_row_describes_it() {
 
 #[tokio::test]
 async fn a_command_only_a_crd_short_name_can_explain_still_opens_that_crd() {
+    let _settings = common::env::isolate_settings();
     // Resolution never looks at CRD short names for a two-letter prefix, but
     // the suggestion list does and scores it well above the confidence bar, so
     // the app runs the top suggestion instead of complaining.
@@ -2398,6 +2419,7 @@ async fn settle() {
 
 #[tokio::test]
 async fn copying_from_a_table_covers_one_row_a_marked_set_and_a_whole_manifest() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     pods_table(&mut app, &["web-0", "web-1", "web-2"]);
 
@@ -2425,6 +2447,7 @@ async fn copying_from_a_table_covers_one_row_a_marked_set_and_a_whole_manifest()
 
 #[tokio::test]
 async fn copying_an_event_summary_a_tree_a_forward_link_and_a_tool_path_reaches_the_clipboard() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
 
     let mut table = ResourceTableState::new(ResourceKind::Events);
@@ -2492,6 +2515,7 @@ async fn copying_an_event_summary_a_tree_a_forward_link_and_a_tool_path_reaches_
 
 #[tokio::test]
 async fn releasing_a_drag_in_the_yaml_view_copies_the_dragged_lines() {
+    let _settings = common::env::isolate_settings();
     use crossterm::event::{MouseButton, MouseEventKind};
 
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
@@ -2534,6 +2558,7 @@ async fn releasing_a_drag_in_the_yaml_view_copies_the_dragged_lines() {
 
 #[tokio::test]
 async fn a_mouse_event_the_node_inspector_has_no_use_for_leaves_it_alone() {
+    let _settings = common::env::isolate_settings();
     use crossterm::event::MouseEventKind;
 
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
@@ -2567,6 +2592,7 @@ fn palette_titles(app: &App) -> Vec<String> {
 
 #[tokio::test]
 async fn the_ingress_action_palette_offers_the_tree_describe_yaml_and_delete() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
 
     app.open_action_palette("ingresses".into(), "web".into(), Some("default".into()));
@@ -2597,6 +2623,7 @@ async fn the_ingress_action_palette_offers_the_tree_describe_yaml_and_delete() {
 
 #[tokio::test]
 async fn tab_in_the_assistant_completes_the_highlighted_slash_command() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     app.active_view = ActiveView::Assistant;
 
@@ -2631,6 +2658,7 @@ async fn tab_in_the_assistant_completes_the_highlighted_slash_command() {
 
 #[tokio::test]
 async fn yaml_error_reverts_editor_content_and_reports_error() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     let original = "apiVersion: external-secrets.io/v1beta1\nkind: ClusterSecretStore\nmetadata:\n  name: vault\nspec:\n  provider: {}\n";
     let mut yaml_view = srelens_tui::views::yaml_view::YamlViewState::new(
@@ -2662,6 +2690,7 @@ async fn yaml_error_reverts_editor_content_and_reports_error() {
 
 #[tokio::test]
 async fn yaml_applied_invalidates_cache_and_commits_content() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "default").await;
     let initial = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n";
     let mut yaml_view = srelens_tui::views::yaml_view::YamlViewState::new(
@@ -2703,6 +2732,7 @@ async fn yaml_applied_invalidates_cache_and_commits_content() {
 
 #[tokio::test]
 async fn yaml_applied_invalidates_cache_in_all_namespaces_view() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with(FAKE_CONTEXT, "").await;
     app.active_namespace = String::new(); // all namespaces
 

@@ -143,6 +143,14 @@ export function ExtensionManager() {
           Refresh
         </Button>
       </div>
+      <div className="extension-install">
+        <label>
+          <input type="checkbox" checked={state.allowUnsignedApps ?? false} disabled={busy}
+            onChange={(event) => void change({ action: "unsignedApps", allowUnsignedApps: event.target.checked })} />{" "}
+          Allow unsigned apps to modify clusters and run code
+        </label>
+        <p className="extension-message">Off by default. Read-only declarative apps need only their permission grants. Turning this off disables affected apps and keeps their settings. Turning it on does not re-enable them. Executable apps are not supported by this host.</p>
+      </div>
       {error && (
         <p role="alert" className="extension-error">
           {error}
@@ -162,13 +170,13 @@ export function ExtensionManager() {
                   then either. */}
               {review.errors?.length === 0 ? (
                 <>
-                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) requests:{" "}
+                  <strong>{plainText(review.name)}</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned manifest"}) requests:{" "}
                   {review.permissions.map(plainText).join(", ") || "no permissions"}. Installing an existing ID
                   replaces its manifest and refreshes its open pages.
                 </>
               ) : (
                 <>
-                  <strong>This manifest</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned local manifest"}) has
+                  <strong>This manifest</strong> ({review.signature ? "Signature verified · srelens" : "Unsigned manifest"}) has
                   not passed the host's checks, so its name and the permissions it requests are not shown.
                 </>
               )}
@@ -263,13 +271,13 @@ export function ExtensionManager() {
           <div className="extension-toolbar">
             <ExtensionLogo id={plugin.manifest.id} name={label(plugin)} size={24} />
             <strong>{label(plugin)}</strong>
-            <span>{plugin.manifest.version} · {!plugin.signatureProof ? "Unsigned local" : plugin.quarantined ? "Signature not verified" : "Signed by srelens"}</span>
+            <span>{plugin.manifest.version} · {!plugin.signatureProof ? (plugin.source === "catalog" ? "Unsigned · Catalog" : "Unsigned local") : plugin.quarantined ? "Signature not verified" : "Signed by srelens"}</span>
             <label>
               <input
                 aria-label={`Enable ${label(plugin)}`}
                 type="checkbox"
                 checked={plugin.enabled}
-                disabled={busy || Boolean(plugin.quarantined)}
+                disabled={busy || Boolean(plugin.quarantined) || Boolean(plugin.policyBlocked)}
                 onChange={(e) =>
                   void change({
                     action: "enable",
@@ -311,6 +319,12 @@ export function ExtensionManager() {
             </Button>
           </div>
           <p className="extension-message">{plugin.manifest.id}</p>
+          {!plugin.quarantined && plugin.policyBlocked && (
+            <p className="extension-error">Disabled: {plugin.policyBlocked}.</p>
+          )}
+          {!plugin.quarantined && !plugin.signatureProof && (plugin.manifest.actions?.length ?? 0) > 0 && (
+            <p className="extension-message">Requires permission to run unsigned apps that modify clusters.</p>
+          )}
           {plugin.quarantined && (
             <p className="extension-error">
               Disabled: {plugin.quarantined}. Remove it or reinstall it from the Catalog.

@@ -92,6 +92,8 @@ export interface InstalledExtension {
   signatureProof?: {manifest:string;signature:number[]};
   /** Set by the host when a stored app failed re-verification; the app is disabled. */
   quarantined?: string;
+  /** Host-computed unsigned-app policy denial; the affected app is disabled. */
+  policyBlocked?: string;
   manifest: ExtensionManifest;
   enabled: boolean;
   revision: number;
@@ -110,11 +112,14 @@ export interface InstalledExtension {
   contexts?: string[];
 }
 export interface ExtensionInventory {
+  /** Missing in older inventories means false. */
+  allowUnsignedApps?: boolean;
   schemaVersion: number;
   nextRevision: number;
   plugins: InstalledExtension[];
 }
 export type ExtensionChange =
+  | { action: "unsignedApps"; allowUnsignedApps: boolean }
   | { action: "install"; manifest: string; grants: string[]; signature?: number[] }
   | { action: "enable"; id: string; enabled: boolean }
   | { action: "remove"; id: string }

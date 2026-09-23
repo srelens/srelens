@@ -1192,34 +1192,15 @@ fn an_explicit_api_key_produces_a_provider_config_and_cursor_never_does() {
     assert_ne!(s.get_api_key(AiProvider::OpenAi).as_deref(), Some("   "));
 }
 
-/// The only test in this binary that touches process environment variables, so
-/// it cannot race with a sibling test. Each variable is restored afterwards.
 #[test]
 fn settings_paths_and_key_lookups_follow_the_environment() {
-    struct Restore(Vec<(&'static str, Option<String>)>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            for (k, v) in &self.0 {
-                match v {
-                    Some(v) => std::env::set_var(k, v),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
-    }
-    let vars = [
-        "SRELENS_AI_SETTINGS_PATH",
-        "SRELENS_CONFIG_DIR",
-        "GEMINI_API_KEY",
-        "OPENAI_COMPATIBLE_API_KEY",
-    ];
-    let _restore = Restore(vars.iter().map(|k| (*k, std::env::var(k).ok())).collect());
+    let mut env = common::env::lock();
 
     // 1. Explicit settings file: save then load round-trips.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("nested").join("ai.json");
-    std::env::set_var("SRELENS_AI_SETTINGS_PATH", &file);
-    std::env::remove_var("SRELENS_CONFIG_DIR");
+    env.set("SRELENS_AI_SETTINGS_PATH", &file);
+    env.remove("SRELENS_CONFIG_DIR");
     assert_eq!(AiSettings::config_path(), file);
 
     let mut s = AiSettings::default();
@@ -1232,14 +1213,14 @@ fn settings_paths_and_key_lookups_follow_the_environment() {
     assert_eq!(AiSettings::load(), s);
 
     // 2. A config dir puts the file at <dir>/ai_settings.json; the explicit path wins over it.
-    std::env::set_var("SRELENS_CONFIG_DIR", dir.path());
+    env.set("SRELENS_CONFIG_DIR", dir.path());
     assert_eq!(AiSettings::config_path(), file);
-    std::env::set_var("SRELENS_AI_SETTINGS_PATH", "   ");
+    env.set("SRELENS_AI_SETTINGS_PATH", "   ");
     assert_eq!(
         AiSettings::config_path(),
         dir.path().join("ai_settings.json")
     );
-    std::env::remove_var("SRELENS_AI_SETTINGS_PATH");
+    env.remove("SRELENS_AI_SETTINGS_PATH");
     assert_eq!(
         AiSettings::config_path(),
         dir.path().join("ai_settings.json")
@@ -1247,13 +1228,13 @@ fn settings_paths_and_key_lookups_follow_the_environment() {
 
     // 3. Key lookup: stored key first, then the provider's env var, else none.
     let mut s = AiSettings::default();
-    std::env::remove_var("GEMINI_API_KEY");
+    env.remove("GEMINI_API_KEY");
     assert_eq!(s.get_api_key(AiProvider::Gemini), None);
     assert!(
         s.resolve_provider_config(AiProvider::Gemini).is_none(),
         "no key, no config"
     );
-    std::env::set_var("GEMINI_API_KEY", "g-env");
+    env.set("GEMINI_API_KEY", "g-env");
     assert_eq!(s.get_api_key(AiProvider::Gemini).as_deref(), Some("g-env"));
     assert_eq!(
         s.resolve_provider_config(AiProvider::Gemini)
@@ -1266,7 +1247,7 @@ fn settings_paths_and_key_lookups_follow_the_environment() {
         s.get_api_key(AiProvider::Gemini).as_deref(),
         Some("g-stored")
     );
-    std::env::set_var("GEMINI_API_KEY", "   ");
+    env.set("GEMINI_API_KEY", "   ");
     s.api_keys.remove("gemini");
     assert_eq!(
         s.get_api_key(AiProvider::Gemini),
@@ -1275,7 +1256,7 @@ fn settings_paths_and_key_lookups_follow_the_environment() {
     );
 
     // 4. OpenAI-compatible endpoints need no key: "ollama" is substituted.
-    std::env::remove_var("OPENAI_COMPATIBLE_API_KEY");
+    env.remove("OPENAI_COMPATIBLE_API_KEY");
     let cfg = s
         .resolve_provider_config(AiProvider::OpenAiCompatible)
         .expect("keyless config");
@@ -1946,25 +1927,13 @@ fn crd_suggestions_are_scored_by_exact_prefix_alias_and_group() {
 
 #[test]
 fn tui_config_file_paths_clamping_and_round_trip() {
-    struct Restore(Vec<(&'static str, Option<String>)>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            for (k, v) in &self.0 {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
-    }
-    let vars = ["SRELENS_TUI_CONFIG_PATH", "SRELENS_CONFIG_DIR"];
-    let _restore = Restore(vars.iter().map(|k| (*k, std::env::var(k).ok())).collect());
+    let mut env = common::env::lock();
 
     // 1. Explicit path override
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("nested").join("tui.json");
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &file);
-    std::env::remove_var("SRELENS_CONFIG_DIR");
+    env.set("SRELENS_TUI_CONFIG_PATH", &file);
+    env.remove("SRELENS_CONFIG_DIR");
     assert_eq!(TuiConfig::config_file_path(), file);
 
     // 2. Round trip save and load
@@ -1983,8 +1952,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
     assert_eq!(TuiConfig::load(), cfg);
 
     // 3. Fallback to SRELENS_CONFIG_DIR
-    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
-    std::env::set_var("SRELENS_CONFIG_DIR", dir.path());
+    env.remove("SRELENS_TUI_CONFIG_PATH");
+    env.set("SRELENS_CONFIG_DIR", dir.path());
     assert_eq!(TuiConfig::config_file_path(), dir.path().join("tui.json"));
 
     // 4. Clamping out-of-range values
@@ -2024,14 +1993,15 @@ fn tui_config_file_paths_clamping_and_round_trip() {
 
     // 5. Corrupt file gracefully falls back to default
     std::fs::write(&file, "{ corrupt json").unwrap();
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &file);
+    env.set("SRELENS_TUI_CONFIG_PATH", &file);
     assert_eq!(TuiConfig::load(), TuiConfig::default());
 }
 
 #[test]
 fn crd_cache_persistence_and_sanitization() {
+    let mut env = common::env::lock();
     let temp_dir = tempfile::tempdir().unwrap();
-    std::env::set_var("SRELENS_CACHE_DIR", temp_dir.path());
+    env.set("SRELENS_CACHE_DIR", temp_dir.path());
 
     // 1. Empty context returns None
     assert_eq!(crd_cache_path(""), None);
@@ -2094,6 +2064,4 @@ fn crd_cache_persistence_and_sanitization() {
     std::fs::create_dir_all(corrupt_path.parent().unwrap()).unwrap();
     std::fs::write(&corrupt_path, "{ not valid json").unwrap();
     assert!(load_cached_crds(corrupt_ctx).is_empty());
-
-    std::env::remove_var("SRELENS_CACHE_DIR");
 }

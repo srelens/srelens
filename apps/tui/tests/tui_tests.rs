@@ -8,37 +8,6 @@ mod tests {
     };
     use srelens_tui::views::ResourceTableState;
 
-    fn isolate_ai_settings() -> SettingsGuard {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = tempfile::tempdir().expect("a scratch directory for AI settings");
-        let previous = std::env::var("SRELENS_AI_SETTINGS_PATH").ok();
-        std::env::set_var(
-            "SRELENS_AI_SETTINGS_PATH",
-            dir.path().join("ai_settings.json"),
-        );
-        SettingsGuard {
-            _lock: lock,
-            _dir: dir,
-            previous,
-        }
-    }
-
-    struct SettingsGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        _dir: tempfile::TempDir,
-        previous: Option<String>,
-    }
-
-    impl Drop for SettingsGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => std::env::set_var("SRELENS_AI_SETTINGS_PATH", value),
-                None => std::env::remove_var("SRELENS_AI_SETTINGS_PATH"),
-            }
-        }
-    }
-
     #[test]
     fn test_resolve_command_aliases() {
         assert!(matches!(
@@ -411,7 +380,7 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::mpsc::unbounded_channel;
 
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
         let (tx, _rx) = unbounded_channel();
 
         let client_cache = ClientCache::new(PathBuf::from("/nonexistent"));
@@ -1338,6 +1307,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_port_forward_lifecycle_and_view_sync() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::ActiveView;
         use srelens_tui::commands::ResourceKind;
@@ -1408,6 +1378,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pod_port_forward_indication_and_close_key() {
+        let _settings = crate::common::env::isolate_settings();
         let _theme = crate::common::theme::lock();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
@@ -1531,6 +1502,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mouse_click_close_port_forward_button() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
@@ -2769,6 +2741,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cluster_events_stream_and_warning_triage() {
+        let _settings = crate::common::env::isolate_settings();
         use srelens_tui::app::ActiveView;
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -2914,6 +2887,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_crd_dynamic_printer_columns_kubectl_parity() {
+        let _settings = crate::common::env::isolate_settings();
         use srelens_tui::app::ActiveView;
         use srelens_tui::commands::{resolve_command_with_crds, CrdMeta, PrinterColumn};
         use srelens_tui::views::resource_table::extract_field_str;
@@ -4481,6 +4455,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_slash_commands_and_ai_playbooks() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::ai_skills::expand_slash_command;
         use srelens_tui::app::ActiveView;
@@ -4585,6 +4560,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_action_palette_playbooks() {
+        let _settings = crate::common::env::isolate_settings();
         use srelens_tui::app::ActiveView;
         use srelens_tui::ui::dialogs::{Modal, QuickActionId};
 
@@ -4671,6 +4647,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unreachable_cluster_timeout_triggers_cracked_lens() {
+        let _settings = crate::common::env::isolate_settings();
         let _theme = crate::common::theme::lock();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
@@ -4736,6 +4713,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_overview_summarise_cluster_health_hotkey() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::ActiveView;
         use srelens_tui::views::overview_view::{ClusterOverviewData, OverviewViewState};
@@ -4794,6 +4772,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_event_reason_rail_inline_and_modal_filtering() {
+        let _settings = crate::common::env::isolate_settings();
         let _theme = crate::common::theme::lock();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
@@ -4872,6 +4851,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_panel_modal_and_timeline() {
+        let _settings = crate::common::env::isolate_settings();
         let _theme = crate::common::theme::lock();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use ratatui::backend::TestBackend;
@@ -4971,7 +4951,7 @@ mod tests {
         use srelens_tui::ai_skills::CavemanLevel;
         use srelens_tui::app::ActiveView;
 
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -5055,7 +5035,7 @@ mod tests {
         use srelens_tui::ai_skills::CavemanLevel;
         use srelens_tui::app::ActiveView;
 
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -5112,7 +5092,7 @@ mod tests {
         use srelens_tui::ai_skills::CavemanLevel;
         use srelens_tui::app::ActiveView;
 
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
         let _theme = crate::common::theme::lock();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -5156,7 +5136,7 @@ mod tests {
         use srelens_tui::ai_skills::CavemanLevel;
         use srelens_tui::app::ActiveView;
 
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::common::theme::new_app(
@@ -5207,6 +5187,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_assistant_typing_character_n_and_other_keys() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::ActiveView;
 
@@ -6380,7 +6361,7 @@ mod tests {
     async fn test_theme_picker_live_preview_revert_and_commit() {
         // Committing a theme saves AI settings. Without this the save wrote the
         // developer's real ai_settings.json (#671).
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
         // The environment before the theme: `new_app` takes the theme lock, so
         // the other order deadlocks against a test that isolated its settings
         // and then built an app.
@@ -6460,6 +6441,11 @@ mod tests {
         assert!(app.modal.is_none());
         assert_eq!(Theme::active_index(), 3); // Committed!
         assert_eq!(app.ai_settings.theme, Some("nord".to_string()));
+        assert_eq!(
+            srelens_tui::ai_config::AiSettings::load().theme,
+            Some("nord".to_string()),
+            "the commit was saved to the isolated settings file"
+        );
     }
 
     /// `App::new` applies the theme its AI settings name. A test builds its
@@ -6471,7 +6457,7 @@ mod tests {
         use srelens_tui::ai_config::AiSettings;
         use srelens_tui::theme::Theme;
 
-        let _ai_guard = isolate_ai_settings();
+        let _settings = crate::common::env::isolate_settings();
         AiSettings {
             theme: Some("nord".to_string()),
             ..AiSettings::default()
@@ -6506,6 +6492,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_autocomplete_navigation_and_selection() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::ActiveView;
         use srelens_tui::commands::{CrdMeta, ResourceKind};
@@ -6612,6 +6599,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_crd_settings_vs_ai_settings_autocomplete_and_resolution() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::ActiveView;
         use srelens_tui::commands::{
@@ -6769,6 +6757,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_inspector_cordon_typed_confirmation_and_streamlined_hints() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::ActiveView;
         use srelens_tui::ui::dialogs::Modal;
@@ -7888,6 +7877,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_helm_views_navigation_and_interactions() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::app::ActiveView;
         use srelens_tui::ui::Modal;
@@ -8164,6 +8154,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_views_navigation_and_interactions() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::ActiveView;
@@ -8379,7 +8370,10 @@ mod tests {
         use srelens_tui::tui_config::TuiConfig;
         use std::path::PathBuf;
 
-        // When unset
+        // When unset — in the environment too, whatever the developer's shell exports.
+        let mut env = crate::common::env::lock();
+        env.remove("SRELENS_ARGO_HUB_CONTEXT");
+        env.remove("SRELENS_ARGO_HUB_KUBECONFIG");
         let mut cfg = TuiConfig::default();
         assert_eq!(cfg.resolved_argo_hub_context(), None);
         assert_eq!(cfg.resolved_argo_hub_kubeconfig(), None);
@@ -8397,8 +8391,8 @@ mod tests {
         );
 
         // Environment variables override config
-        std::env::set_var("SRELENS_ARGO_HUB_CONTEXT", "env-override-hub");
-        std::env::set_var("SRELENS_ARGO_HUB_KUBECONFIG", "/env/kubeconfig");
+        env.set("SRELENS_ARGO_HUB_CONTEXT", "env-override-hub");
+        env.set("SRELENS_ARGO_HUB_KUBECONFIG", "/env/kubeconfig");
         assert_eq!(
             cfg.resolved_argo_hub_context(),
             Some("env-override-hub".to_string())
@@ -8408,9 +8402,9 @@ mod tests {
             Some(PathBuf::from("/env/kubeconfig"))
         );
 
-        // Clean up environment variables
-        std::env::remove_var("SRELENS_ARGO_HUB_CONTEXT");
-        std::env::remove_var("SRELENS_ARGO_HUB_KUBECONFIG");
+        // Unset again: back to the config
+        env.remove("SRELENS_ARGO_HUB_CONTEXT");
+        env.remove("SRELENS_ARGO_HUB_KUBECONFIG");
         assert_eq!(
             cfg.resolved_argo_hub_context(),
             Some("platform-mgmt".to_string())
@@ -8419,6 +8413,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_colon_command_with_namespace_argument() {
+        let _settings = crate::common::env::isolate_settings();
         use srelens_tui::app::ActiveView;
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -8452,6 +8447,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_confirm_modal_with_eks_arn_context() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_tui::ui::dialogs::Modal;
 
@@ -8517,6 +8513,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_view_renders_loading_error_empty_hub_and_table_states() {
+        let _settings = crate::common::env::isolate_settings();
         use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::ActiveView;
         use srelens_tui::views::argo_view::ArgoViewState;
@@ -8590,6 +8587,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_detail_view_renders_all_tabs() {
+        let _settings = crate::common::env::isolate_settings();
         use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::ActiveView;
         use srelens_tui::views::argo_detail_view::{ArgoDetailTab, ArgoDetailViewState};
@@ -8684,6 +8682,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_sync_and_toggle_auto_confirm_modals_render() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::ActiveView;
@@ -8753,6 +8752,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_argo_list_and_detail_key_handlers_exercise_side_panels_safely() {
+        let _settings = crate::common::env::isolate_settings();
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use srelens_kube::argo::ArgoApplication;
         use srelens_tui::app::ActiveView;

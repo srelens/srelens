@@ -7,6 +7,7 @@
 
 #![allow(dead_code)]
 
+pub mod env;
 pub mod theme;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};

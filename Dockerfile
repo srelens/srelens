@@ -28,6 +28,8 @@ RUN pnpm install --frozen-lockfile
 COPY packages/core packages/core
 COPY packages/ui-kit packages/ui-kit
 COPY packages/ui-next packages/ui-next
+# Core validates native components against the canonical schema at build/runtime.
+COPY schemas schemas
 COPY apps/desktop apps/desktop
 RUN pnpm --filter @srelens/desktop build
 
