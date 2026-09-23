@@ -519,8 +519,10 @@ it.each([
   } else {
     vi.mocked(listNamespaces).mockResolvedValue({namespaces:["prod","team","other"]} as any);
   }
+  const onLeaveCard = vi.fn();
   render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging"
-    namespace={namespace} card="suspended" cardNamespaces={cardNamespaces ? [...cardNamespaces] : undefined} />);
+    namespace={namespace} card="suspended" cardNamespaces={cardNamespaces ? [...cardNamespaces] : undefined}
+    onLeaveCard={onLeaveCard} />);
   // Settled once the credential's scope, if any, is known: the picker is drawn then.
   const picker = await screen.findByRole("combobox",{name:"App namespace"});
   await waitFor(()=>expect(picker.textContent).toContain(label));
@@ -529,6 +531,19 @@ it.each([
   for (const call of cardReads) expect(call.slice(4)).toEqual(read);
   // Never the credential's own namespace in place of the card's.
   if (restricted) expect(cardReads.some(call=>call[4]==="team")).toBe(false);
+  // One option per label: the card's scope is named once, so a reader never
+  // has two identical choices that do different things.
+  fireEvent.click(picker);
+  const labels = (await screen.findAllByRole("option")).map((option)=>option.textContent?.trim());
+  expect(labels.filter((text)=>text===label)).toHaveLength(1);
+  expect(new Set(labels).size).toBe(labels.length);
+  // Choosing the card's own scope stays on the card; any other namespace leaves it.
+  fireEvent.click(screen.getByRole("option",{name:label}));
+  expect(onLeaveCard).not.toHaveBeenCalled();
+  fireEvent.click(picker);
+  const other = restricted ? "team" : "other";
+  fireEvent.click(await screen.findByRole("option",{name:other}));
+  expect(onLeaveCard).toHaveBeenCalledWith(other);
 });
 
 it("carries the selected namespace into group navigation", async () => {

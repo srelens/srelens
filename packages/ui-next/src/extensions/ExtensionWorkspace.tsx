@@ -412,8 +412,13 @@ export function ExtensionWorkspace({
           }}
           options={[
             ...(cardScope ? [{ value: CARD_SCOPE, label: cardScope }] : []),
-            ...(scope ? [] : [{ value: "", label: "All namespaces" }]),
-            ...(namespaces ?? []).map(n=>({value:n,label:n})),
+            // The card's scope is named once: an ordinary entry with the same
+            // label (`prod`, or "All namespaces") would be a second, identical
+            // choice that left the card for the plain page.
+            ...[
+              ...(scope ? [] : [{ value: "", label: "All namespaces" }]),
+              ...(namespaces ?? []).map(n=>({value:n,label:n})),
+            ].filter((option) => option.label !== cardScope),
           ]}
           placeholder={
             namespaces === null
