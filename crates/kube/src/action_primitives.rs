@@ -2067,8 +2067,10 @@ mod tests {
     async fn a_predicate_the_host_cannot_evaluate_never_reaches_the_cluster() {
         let (client, requests) = mock(object(json!({})));
         let mut input = reconcile();
+        // `[?(@.type=='Ready')]` is the one filter form the host evaluates
+        // (#541); any other filter addresses a set of values and is refused.
         input["preconditions"] = json!([{
-            "jsonPath": ".status.conditions[?(@.type=='Ready')].status",
+            "jsonPath": ".status.conditions[?(@.type!='Ready')].status",
             "equals": "True", "reason": "Wait for readiness"
         }]);
         let refused = annotate(client, annotate_in(input))
