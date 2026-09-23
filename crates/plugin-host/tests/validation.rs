@@ -292,6 +292,53 @@ fn table_column_rejects_malformed_json_paths_instead_of_silently_blank_cells() {
 }
 
 #[test]
+fn detail_panels_accept_declared_fields_conditions_and_joins() {
+    let mut value = manifest();
+    value["contributions"]["joins"] = json!([{
+        "id":"reports", "capability":"applications", "match":{"name":true}
+    }]);
+    value["contributions"]["detailPanels"] = json!([{
+        "id":"certificate", "title":"Certificate", "forKinds":["cert-manager.io/Certificate"],
+        "sections":[
+            {"type":"fields", "fields":[
+                {"label":"Not after", "jsonPath":".status.notAfter", "format":"date"},
+                {"label":"Issuer", "join":"reports", "jsonPath":".spec.issuerRef.name"}
+            ]},
+            {"type":"conditions", "jsonPath":".status.conditions"}
+        ]
+    }]);
+    let parsed = Manifest::parse(&value.to_string()).expect("declared panels should parse");
+    let serialized = serde_json::to_value(parsed).unwrap();
+    assert_eq!(
+        serialized["contributions"]["detailPanels"][0]["id"],
+        "certificate"
+    );
+    assert_eq!(
+        serialized["contributions"]["detailPanels"][0]["sections"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn conditions_path_must_be_one_the_host_can_read() {
+    let mut value = manifest();
+    value["contributions"]["detailPanels"] = json!([{
+        "id":"health", "title":"Health", "forKinds":["argoproj.io/Application"],
+        "sections":[{"type":"conditions","jsonPath":".status['conditions']"}]
+    }]);
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[(
+            "EXTENSION_INVALID_VALUE",
+            "contributions.detailPanels[0].sections[0].jsonPath"
+        )])
+    );
+}
+
+#[test]
 fn independent_problems_are_all_reported_with_their_paths() {
     let mut value = manifest();
     value["id"] = json!("Not a domain");

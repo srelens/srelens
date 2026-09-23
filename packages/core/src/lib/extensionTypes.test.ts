@@ -91,6 +91,7 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     joins: "optional",
     tableColumns: "optional",
     dashboardCards: "optional",
+    detailPanels: "optional",
   } satisfies Presence<Contributions>,
   DashboardCard: {
     id: "required", title: "required", size: "required", type: "required", source: "required",
@@ -106,6 +107,8 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
   JoinMatch: { label:"optional", kindLabel:"optional", ownerReference:"optional", annotation:"optional", name:"optional" } satisfies Presence<NonNullable<Contributions["joins"]>[number]["match"]>,
   TableColumn: { id:"required", title:"required", forKinds:"required", source:"required", format:"required", sortable:"optional", filterable:"optional" } satisfies Presence<NonNullable<Contributions["tableColumns"]>[number]>,
   ColumnSource: { join:"optional", jsonPath:"required" } satisfies Presence<NonNullable<Contributions["tableColumns"]>[number]["source"]>,
+  DetailPanel: { id:"required", title:"required", forKinds:"required", sections:"required" } satisfies Presence<NonNullable<Contributions["detailPanels"]>[number]>,
+  DetailField: { label:"required", jsonPath:"required", join:"optional", format:"optional" } satisfies Presence<Extract<NonNullable<Contributions["detailPanels"]>[number]["sections"][number], {type:"fields"}>["fields"][number]>,
   Page: {
     id: "required",
     title: "required",

@@ -209,7 +209,7 @@ where
     Ok(objects)
 }
 
-async fn join_objects(
+pub(super) async fn join_objects(
     cache: &JoinCache,
     client_cache: &srelens_kube::client_cache::ClientCache,
     core: &Registry,
@@ -277,7 +277,7 @@ pub(super) async fn reader_objects(
         ).await?;
         if truncated {
             return Err(CapabilityError::Handler(
-                "Resource list reached its 2,000-object limit; column values and dashboard figures read from it would be incomplete".into(),
+                "Resource list reached its 2,000-object limit; joined values and dashboard figures read from it would be incomplete".into(),
             ));
         }
         Ok(objects)
@@ -360,6 +360,14 @@ pub(super) fn register(
     client_cache: Arc<srelens_kube::client_cache::ClientCache>,
     cache: JoinCache,
 ) {
+    // Panels, columns and dashboard cards share one snapshot of each reader.
+    super::panels::register(
+        reg,
+        path.clone(),
+        core.clone(),
+        client_cache.clone(),
+        cache.clone(),
+    );
     reg.register(Capability::typed::<ResolveColumns, ResolvedColumns, _, _>(
         "extensions.resolveColumns",
         "Resolve native extension table columns in one batch",
@@ -371,33 +379,16 @@ pub(super) fn register(
             let cache = cache.clone();
             async move {
                 check_input(&input)?;
-                let resolved = request_context(&client_cache, &input.context).await;
-                let state = tokio::task::spawn_blocking(move || read(&path))
-                    .await
-                    .map_err(|error| CapabilityError::Handler(error.to_string()))?
-                    .map_err(CapabilityError::Handler)?;
-                let plugin = state
-                    .plugins
-                    .iter()
-                    .find(|plugin| plugin.manifest.id == input.id)
-                    .ok_or_else(|| {
-                        CapabilityError::Handler("Extension was removed; refresh the view".into())
-                    })?;
-                if let Some(reason) = &plugin.policy_blocked {
-                    return Err(CapabilityError::Handler(reason.clone()));
-                }
-                if !plugin.enabled || plugin.revision != input.revision {
-                    return Err(CapabilityError::Handler(
-                        "Extension was disabled or updated; refresh the view".into(),
-                    ));
-                }
-                plugin.check_scope(&resolved)?;
-                validate_app(&plugin.manifest, &plugin.grants, core.clone())
-                    .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
-                let context = resolved
-                    .ok()
-                    .and_then(|context| context.pinned_id())
-                    .unwrap_or(input.context);
+                let (state, index, context) = resolver_app(
+                    path,
+                    &core,
+                    &client_cache,
+                    &input.id,
+                    input.revision,
+                    input.context,
+                )
+                .await?;
+                let plugin = &state.plugins[index];
                 let columns: Vec<_> = plugin
                     .manifest
                     .contributions
@@ -539,6 +530,23 @@ fn joined<'a>(
         (Some(Some(position)), None) | (None, Some(Some(position))) => Ok(objects.get(*position)),
         (None, None) => Ok(None),
     }
+}
+
+pub(super) fn match_joined<'a>(
+    rule: &JoinMatch,
+    objects: &'a [Value],
+    uid: Option<&str>,
+    name: &str,
+    namespace: &str,
+    kind: &str,
+) -> Result<Option<&'a Value>, ()> {
+    let row = ColumnRow {
+        uid: uid.map(str::to_owned),
+        name: name.to_owned(),
+        namespace: namespace.to_owned(),
+        row: Value::Null,
+    };
+    joined(rule, objects, &index_join(rule, objects), &row, kind)
 }
 
 #[cfg(test)]

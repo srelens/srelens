@@ -43,7 +43,7 @@ before publishing.
 | `permissions` | Yes | The exact host capability IDs the bindings use. |
 | `capabilities` | Yes | 1–32 bindings, below. |
 | `actions` | No | Up to 32 declared mutations, below. |
-| `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns` and `dashboardCards`, below. |
+| `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns`, `detailPanels` and `dashboardCards`, below. |
 
 Unknown fields are errors at every level. A manifest is at most 256 KiB.
 
@@ -292,6 +292,34 @@ the reason instead of choosing an arbitrary resource; other cells still resolve.
 A scalar over 1,024 bytes is also reported on its cell. The host resolves up to
 1,000 rows in one call and caches each joined list for five seconds, sharing an
 in-flight read. A joined list beyond 2,000 objects fails as incomplete.
+
+### `detailPanels`
+
+An app can add native sections after the Inspector's host sections for a
+matching built-in or custom resource:
+
+```json
+"detailPanels": [{
+  "id": "certificate", "title": "Certificate", "forKinds": ["cert-manager.io/Certificate"],
+  "sections": [
+    {"type": "fields", "fields": [
+      {"label": "Not after", "jsonPath": ".status.notAfter", "format": "date"},
+      {"label": "Issuer", "jsonPath": ".spec.issuerRef.name"}
+    ]},
+    {"type": "conditions", "jsonPath": ".status.conditions"}
+  ]
+}]
+```
+
+At most 16 panels may be declared, each with a unique `id`, a valid `title`,
+1–32 group-qualified `forKinds`, and 1–8 sections. A `fields` section holds
+1–32 labelled scalar paths; each may use a declared `join` and one of the
+table-column formats. A missing scalar renders `—`; an oversized scalar or an
+ambiguous join shows its reason on that field. A `conditions` section reads at
+most 1,000 conditions from plain dot-separated object keys, and may also use
+a declared join. Invalid condition data and failed joined reads show an error
+with Retry. Paths are validated when the app is installed, and the host
+rechecks its revision, grants and cluster scope on every resolution.
 
 ### Dashboard cards
 

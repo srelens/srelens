@@ -329,6 +329,48 @@ pub struct Contributions {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub dashboard_cards: Vec<DashboardCard>,
+    #[serde(
+        default,
+        rename = "detailPanels",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub detail_panels: Vec<DetailPanel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DetailPanel {
+    pub id: String,
+    pub title: String,
+    #[serde(rename = "forKinds")]
+    pub for_kinds: Vec<String>,
+    pub sections: Vec<DetailSection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum DetailSection {
+    Fields {
+        fields: Vec<DetailField>,
+    },
+    Conditions {
+        #[serde(rename = "jsonPath")]
+        json_path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        join: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DetailField {
+    pub label: String,
+    #[serde(rename = "jsonPath")]
+    pub json_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ColumnFormat>,
 }
 
 /// A single granted custom-resource list used to enrich native table rows.
@@ -619,6 +661,19 @@ fn column_json_path(path: &str) -> bool {
         }
     }
     true
+}
+
+/// Conditions resolve to an array, so their path stays on plain object keys.
+fn condition_json_path(path: &str) -> bool {
+    column_json_path(path)
+        && path.strip_prefix('.').is_some_and(|tail| {
+            tail.split('.').all(|key| {
+                !key.is_empty()
+                    && key
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+            })
+        })
 }
 
 fn schema_error(error: &serde_path_to_error::Error<serde_json::Error>) -> ValidationError {
@@ -1277,6 +1332,100 @@ impl Manifest {
                     format!("{at}.source.jsonPath"),
                     "jsonPath must be a valid absolute scalar path of at most 256 characters",
                 );
+            }
+        }
+        if self.contributions.detail_panels.len() > 16 {
+            problems.push(
+                Code::InvalidValue,
+                "contributions.detailPanels",
+                "Declare at most 16 detail panels",
+            );
+        }
+        unique(
+            &mut problems,
+            self.contributions
+                .detail_panels
+                .iter()
+                .enumerate()
+                .map(|(index, panel)| {
+                    (
+                        format!("contributions.detailPanels[{index}].id"),
+                        panel.id.as_str(),
+                    )
+                }),
+        );
+        for (index, panel) in self.contributions.detail_panels.iter().enumerate() {
+            let at = format!("contributions.detailPanels[{index}]");
+            if !identifier(&panel.id) {
+                problems.push(Code::InvalidValue, format!("{at}.id"), IDENTIFIER);
+            }
+            if !label(&panel.title) {
+                problems.push(Code::InvalidValue, format!("{at}.title"), LABEL);
+            }
+            kinds(&mut problems, &format!("{at}.forKinds"), &panel.for_kinds);
+            if panel.sections.is_empty() || panel.sections.len() > 8 {
+                problems.push(
+                    Code::InvalidValue,
+                    format!("{at}.sections"),
+                    "Declare 1–8 sections",
+                );
+            }
+            for (section_index, section) in panel.sections.iter().enumerate() {
+                let section_at = format!("{at}.sections[{section_index}]");
+                let check_source = |problems: &mut ValidationErrors,
+                                    path: &str,
+                                    join: &Option<String>,
+                                    field_at: &str| {
+                    if !column_json_path(path) {
+                        problems.push(
+                            Code::InvalidValue,
+                            format!("{field_at}.jsonPath"),
+                            "jsonPath must be a valid absolute path of at most 256 characters",
+                        );
+                    }
+                    if join
+                        .as_ref()
+                        .is_some_and(|id| !join_ids.contains(id.as_str()))
+                    {
+                        problems.push(
+                            Code::InvalidBinding,
+                            format!("{field_at}.join"),
+                            "Panel source must name a declared join",
+                        );
+                    }
+                };
+                match section {
+                    DetailSection::Fields { fields } => {
+                        if fields.is_empty() || fields.len() > 32 {
+                            problems.push(
+                                Code::InvalidValue,
+                                format!("{section_at}.fields"),
+                                "Declare 1–32 fields",
+                            );
+                        }
+                        for (field_index, field) in fields.iter().enumerate() {
+                            let field_at = format!("{section_at}.fields[{field_index}]");
+                            if !label(&field.label) {
+                                problems.push(
+                                    Code::InvalidValue,
+                                    format!("{field_at}.label"),
+                                    LABEL,
+                                );
+                            }
+                            check_source(&mut problems, &field.json_path, &field.join, &field_at);
+                        }
+                    }
+                    DetailSection::Conditions { json_path, join } => {
+                        check_source(&mut problems, json_path, join, &section_at);
+                        if column_json_path(json_path) && !condition_json_path(json_path) {
+                            problems.push(
+                                Code::InvalidValue,
+                                format!("{section_at}.jsonPath"),
+                                "Conditions jsonPath must use plain dot-separated object keys",
+                            );
+                        }
+                    }
+                }
             }
         }
         cards::card_problems(self, &mut problems);

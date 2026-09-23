@@ -120,10 +120,11 @@ Why a new field needs a new minor even though it is optional: manifests are stri
 (see below), so a host that predates the field would reject it. Requiring the minor
 turns that into a clear "requires API 0.x" message.
 
-Pre-1.0 exception for #538: `contributions.joins` and `contributions.tableColumns`
+Pre-1.0 exception for #538 and #539: `contributions.joins`,
+`contributions.tableColumns`, and `contributions.detailPanels`
 were added to API 0.3 in place while the extension platform is still being built.
-The existing signed Flux and Argo CD 0.3 manifests contain neither field and remain
-valid; a manifest using either field requires a host that includes #538. No alias or
+Earlier signed Flux and Argo CD 0.3 releases without these fields remain valid;
+a manifest using `detailPanels` requires a host that includes #539. No alias or
 older API line is retained for this exception.
 
 The same pre-1.0 exception covers `contributions.dashboardCards` (#540): added to API
@@ -273,6 +274,10 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   custom-resource reader and `tableColumns` with a row or joined `jsonPath`.
   `extensions.resolveColumns` batches up to 1,000 rows per request and reports
   failed reads explicitly (#538). See [Manifest reference](manifest.md#table-columns-and-joins).
+- Apps may declare `detailPanels` with fields and conditions for matching
+  resources. `extensions.resolvePanels` rechecks the installed app's revision,
+  grants and cluster scope (#539). These manifests require a host with #539;
+  see the [manifest reference](manifest.md#detailpanels).
 - The cluster overview draws `dashboardCards` (`count`, `countByStatus`, `metric`,
   `list`) over a granted custom-resource reader, with `equals`, `absent`, and date
   `within` / `before` predicates. `extensions.resolveCards` answers one app's cards per

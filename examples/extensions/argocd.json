@@ -48,6 +48,23 @@
         "capability": "applications"
       }
     ],
+    "detailPanels": [
+      {
+        "id": "application-summary",
+        "title": "Application",
+        "forKinds": ["argoproj.io/Application"],
+        "sections": [
+          {"type": "fields", "fields": [
+            {"label": "Project", "jsonPath": ".spec.project"},
+            {"label": "Repository", "jsonPath": ".spec.source.repoURL"},
+            {"label": "Path", "jsonPath": ".spec.source.path"},
+            {"label": "Destination namespace", "jsonPath": ".spec.destination.namespace"},
+            {"label": "Health", "jsonPath": ".status.health.status", "format": "status"},
+            {"label": "Sync", "jsonPath": ".status.sync.status", "format": "status"}
+          ]}
+        ]
+      }
+    ],
     "detailTabs": [
       {
         "id": "namespace-resources",

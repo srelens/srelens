@@ -281,6 +281,12 @@
           },
           "type": "array"
         },
+        "detailPanels": {
+          "items": {
+            "$ref": "#/definitions/DetailPanel"
+          },
+          "type": "array"
+        },
         "detailTabs": {
           "items": {
             "$ref": "#/definitions/DetailTab"
@@ -432,6 +438,38 @@
       ],
       "type": "object"
     },
+    "DetailField": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ColumnFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "join": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "jsonPath": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "jsonPath",
+        "label"
+      ],
+      "type": "object"
+    },
     "DetailLink": {
       "additionalProperties": false,
       "description": "An entry in a resource detail view's app links menu that opens a read-only results panel. It never writes to the cluster; the name `rowActions` is reserved for declared mutations.",
@@ -459,6 +497,87 @@
         "title"
       ],
       "type": "object"
+    },
+    "DetailPanel": {
+      "additionalProperties": false,
+      "properties": {
+        "forKinds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/definitions/DetailSection"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "forKinds",
+        "id",
+        "sections",
+        "title"
+      ],
+      "type": "object"
+    },
+    "DetailSection": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "fields": {
+              "items": {
+                "$ref": "#/definitions/DetailField"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "fields"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "fields",
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "join": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "jsonPath": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "conditions"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "jsonPath",
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "DetailTab": {
       "additionalProperties": false,
