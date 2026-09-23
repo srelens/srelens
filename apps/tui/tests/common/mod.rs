@@ -7,6 +7,8 @@
 
 #![allow(dead_code)]
 
+pub mod env;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::backend::TestBackend;
 use ratatui::{Frame, Terminal};

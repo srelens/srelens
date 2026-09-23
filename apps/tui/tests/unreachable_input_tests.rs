@@ -7,6 +7,7 @@ use crossterm::event::KeyCode;
 use srelens_tui::{app::App, event::AppEvent, ui::Modal};
 
 async fn recovery_controls_remain_responsive(stalled: bool) {
+    let _settings = common::env::isolate_settings();
     // Dropping the listener models a deleted cluster. Keeping it open without
     // answering models a stopped Docker VM whose API endpoint never replies.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

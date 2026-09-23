@@ -2327,6 +2327,7 @@ fn brackets_without_a_url_and_escaped_asterisks_stay_literal() {
 
 #[tokio::test]
 async fn the_app_draws_the_help_overlay_and_closes_it_on_escape() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.show_help = true;
     let text = common::render_app(&mut app, 160, 60);
@@ -2340,6 +2341,7 @@ async fn the_app_draws_the_help_overlay_and_closes_it_on_escape() {
 
 #[tokio::test]
 async fn the_app_draws_whatever_modal_is_open_over_the_current_view() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.modal = Some(confirm(true));
     let text = common::render_app(&mut app, 120, 40);
@@ -2358,6 +2360,7 @@ async fn the_app_draws_whatever_modal_is_open_over_the_current_view() {
 
 #[tokio::test]
 async fn the_app_renders_the_assistant_view_with_the_active_context_in_its_title() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Assistant;
     app.assistant_state.caveman_level = Some(CavemanLevel::Lite);

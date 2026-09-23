@@ -34,8 +34,6 @@ use common::{ch, ctrl, key, shift, type_str};
 // Local helpers
 // ---------------------------------------------------------------------------
 
-static TUI_CONFIG_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 async fn press(app: &mut App, k: KeyEvent) {
     app.handle_key_event(k).await;
 }
@@ -162,6 +160,7 @@ async fn await_action_result(
 
 #[tokio::test]
 async fn new_with_an_explicit_namespace_opens_the_pods_table_and_starts_its_watch() {
+    let _settings = common::env::isolate_settings();
     let (app, _rx) = common::app().await;
     assert_eq!(app.active_context, "test-cluster");
     assert_eq!(app.active_namespace, "default");
@@ -194,6 +193,7 @@ async fn new_with_an_explicit_namespace_opens_the_pods_table_and_starts_its_watc
 
 #[tokio::test]
 async fn new_without_a_namespace_opens_namespaces_and_all_namespaces_clears_the_namespace() {
+    let _settings = common::env::isolate_settings();
     let (tx, _rx) = unbounded_channel();
     let app = App::new(None, None, true, None, vec![], tx)
         .await
@@ -231,6 +231,7 @@ async fn new_without_a_namespace_opens_namespaces_and_all_namespaces_clears_the_
 
 #[tokio::test]
 async fn new_reads_contexts_from_kubeconfig_and_prefers_the_current_one() {
+    let _settings = common::env::isolate_settings();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("config");
     std::fs::write(
@@ -291,6 +292,7 @@ users:
 
 #[tokio::test]
 async fn startup_background_fetches_report_failures_that_the_handlers_apply() {
+    let _settings = common::env::isolate_settings();
     let (mut app, mut rx) = common::app().await;
 
     let info = await_action_result(&mut rx, "cluster_info_failed").await;
@@ -320,6 +322,7 @@ async fn startup_background_fetches_report_failures_that_the_handlers_apply() {
 
 #[tokio::test]
 async fn any_keypress_dismisses_the_drag_to_copy_selection() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.screen_selection = Some(((0, 0), (5, 5)));
     app.screen_selecting = true;
@@ -334,6 +337,7 @@ async fn any_keypress_dismisses_the_drag_to_copy_selection() {
 
 #[tokio::test]
 async fn tick_expires_toasts_and_marks_the_cluster_unreachable_after_the_grace_period() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.toast = Some(("old".to_string(), ago(4), Style::default()));
     app.handle_tick();
@@ -356,6 +360,7 @@ async fn tick_expires_toasts_and_marks_the_cluster_unreachable_after_the_grace_p
 
 #[tokio::test]
 async fn tick_schedules_metric_refreshes_for_pod_and_node_views_and_modals() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.handle_tick();
     assert_eq!(
@@ -408,6 +413,7 @@ async fn tick_schedules_metric_refreshes_for_pod_and_node_views_and_modals() {
 
 #[tokio::test]
 async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     let mut helm_state = srelens_tui::views::helm_view::HelmViewState::new();
@@ -535,6 +541,7 @@ async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
 
 #[tokio::test]
 async fn failed_helm_refresh_keeps_rows_stale_and_blocks_rollback_until_success() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Helm(srelens_tui::views::helm_view::HelmViewState::new());
     let release = srelens_kube::helm::HelmReleaseSummary {
@@ -580,6 +587,7 @@ async fn failed_helm_refresh_keeps_rows_stale_and_blocks_rollback_until_success(
 
 #[tokio::test]
 async fn helm_refresh_in_flight_survives_namespace_switch_and_refetches_new_target() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Helm(srelens_tui::views::helm_view::HelmViewState::new());
     app.active_context = "test-cluster".into();
@@ -645,6 +653,7 @@ async fn helm_refresh_in_flight_survives_namespace_switch_and_refetches_new_targ
 
 #[tokio::test]
 async fn pod_metrics_update_fills_the_table_the_cache_and_an_open_timeline() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(&mut app, ResourceKind::Pods, pods(&["pod-a", "pod-b"]));
     app.resource_cache.insert(
@@ -693,6 +702,7 @@ async fn pod_metrics_update_fills_the_table_the_cache_and_an_open_timeline() {
 
 #[tokio::test]
 async fn pod_metrics_update_only_touches_pod_rows_of_the_workloads_table() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(
         &mut app,
@@ -719,6 +729,7 @@ async fn pod_metrics_update_only_touches_pod_rows_of_the_workloads_table() {
 
 #[tokio::test]
 async fn pod_metrics_history_is_capped_at_720_samples() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Assistant;
     let payload =
@@ -732,6 +743,7 @@ async fn pod_metrics_history_is_capped_at_720_samples() {
 
 #[tokio::test]
 async fn node_metrics_update_feeds_the_node_inspector_and_an_open_timeline() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::NodeInspector(NodeInspectorState::new("node-1".into()));
 
@@ -775,6 +787,7 @@ async fn node_metrics_update_feeds_the_node_inspector_and_an_open_timeline() {
 
 #[tokio::test]
 async fn cluster_info_update_marks_the_cluster_connected_and_fills_the_overview() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.handle_cluster_info_update("garbage");
     assert!(!app.is_connected);
@@ -802,6 +815,7 @@ async fn cluster_info_update_marks_the_cluster_connected_and_fills_the_overview(
 
 #[tokio::test]
 async fn cluster_info_failure_only_marks_unreachable_after_the_grace_period() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.is_connected = true;
     app.handle_cluster_info_failure("boom");
@@ -817,6 +831,7 @@ async fn cluster_info_failure_only_marks_unreachable_after_the_grace_period() {
 
 #[tokio::test]
 async fn cluster_overview_update_ignores_other_contexts_and_applies_its_own() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut other = ClusterOverviewData::default();
     other.context_name = "somewhere-else".into();
@@ -849,6 +864,7 @@ async fn cluster_overview_update_ignores_other_contexts_and_applies_its_own() {
 
 #[tokio::test]
 async fn crd_updates_populate_the_registry_and_instances_fill_the_crd_table() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.handle_crds_update("[nonsense");
     assert!(app.crds.is_empty());
@@ -906,6 +922,7 @@ async fn crd_updates_populate_the_registry_and_instances_fill_the_crd_table() {
 
 #[tokio::test]
 async fn switch_namespace_updates_state_toast_and_watch_channel() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.switch_namespace("kube-system".into()).await;
     assert_eq!(app.active_namespace, "kube-system");
@@ -933,6 +950,7 @@ async fn switch_namespace_updates_state_toast_and_watch_channel() {
 
 #[tokio::test]
 async fn switch_context_swaps_assistant_state_and_resets_cluster_info() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.contexts = vec![
         ctx("test-cluster", "c-test", ""),
@@ -989,6 +1007,7 @@ async fn switch_context_swaps_assistant_state_and_resets_cluster_info() {
 
 #[tokio::test]
 async fn switch_context_while_on_the_overview_resets_the_panel() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.contexts = vec![ctx("prod", "c-prod", "")];
     app.switch_view_to_kind(ResourceKind::Overview).await;
@@ -1006,6 +1025,7 @@ async fn switch_context_while_on_the_overview_resets_the_panel() {
 
 #[tokio::test]
 async fn function_keys_switch_to_the_nth_context() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.contexts = vec![ctx("test-cluster", "a", ""), ctx("second", "b", "")];
     press(&mut app, key(KeyCode::F(2))).await;
@@ -1021,6 +1041,7 @@ async fn function_keys_switch_to_the_nth_context() {
 
 #[tokio::test]
 async fn ctrl_a_toggles_between_all_namespaces_and_the_last_one() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     press(&mut app, ctrl('a')).await;
     assert_eq!(app.active_namespace, "");
@@ -1039,6 +1060,7 @@ async fn ctrl_a_toggles_between_all_namespaces_and_the_last_one() {
 
 #[tokio::test]
 async fn ctrl_x_opens_the_context_picker_whose_keys_navigate_filter_and_select() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.contexts = vec![
         ctx("alpha", "c-alpha", ""),
@@ -1103,6 +1125,7 @@ async fn ctrl_x_opens_the_context_picker_whose_keys_navigate_filter_and_select()
 
 #[tokio::test]
 async fn namespace_picker_filters_navigates_and_switches() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.namespaces = vec!["default".into(), "kube-system".into(), "monitoring".into()];
     let sel = |app: &App| match &app.modal {
@@ -1183,6 +1206,7 @@ async fn namespace_picker_filters_navigates_and_switches() {
 
 #[tokio::test]
 async fn pressing_colon_enters_command_mode_and_esc_leaves_it() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     press(&mut app, ch(':')).await;
     assert_eq!(app.input_mode, InputMode::Command);
@@ -1198,6 +1222,7 @@ async fn pressing_colon_enters_command_mode_and_esc_leaves_it() {
 
 #[tokio::test]
 async fn command_mode_tab_and_arrow_keys_cycle_the_suggestions() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     press(&mut app, ch(':')).await;
     let suggestions = command_suggestions_with_crds("s", &app.crds);
@@ -1248,6 +1273,7 @@ async fn command_mode_tab_and_arrow_keys_cycle_the_suggestions() {
 
 #[tokio::test]
 async fn command_mode_editing_keys_delete_words_clear_and_backspace_out() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     press(&mut app, ch(':')).await;
     type_str(&mut app, "get pods").await;
@@ -1317,6 +1343,7 @@ async fn command_mode_editing_keys_delete_words_clear_and_backspace_out() {
 
 #[tokio::test]
 async fn command_enter_runs_the_command_and_unknown_commands_toast() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     press(&mut app, ch(':')).await;
     type_str(&mut app, "zzzz").await;
@@ -1363,6 +1390,7 @@ async fn command_enter_runs_the_command_and_unknown_commands_toast() {
 
 #[tokio::test]
 async fn command_tab_then_enter_executes_the_completed_command() {
+    let _settings = common::env::isolate_settings();
     for query in ["serv", "s"] {
         let (mut app, _rx) = common::app().await;
         press(&mut app, ch(':')).await;
@@ -1391,6 +1419,7 @@ async fn command_tab_then_enter_executes_the_completed_command() {
 
 #[tokio::test]
 async fn command_completion_preserves_crd_identity_across_alias_and_group_collisions() {
+    let _settings = common::env::isolate_settings();
     for group in ["management.cattle.io", "example.io"] {
         let (mut app, _rx) = common::app().await;
         app.crds = ["management.cattle.io", "example.io"]
@@ -1443,6 +1472,7 @@ async fn command_completion_preserves_crd_identity_across_alias_and_group_collis
 
 #[tokio::test]
 async fn empty_command_enter_runs_highlighted_suggestion_and_arrow_selection() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     // 1. ':' + Esc returns to Normal with no view change
@@ -1504,6 +1534,7 @@ async fn empty_command_enter_runs_highlighted_suggestion_and_arrow_selection() {
 
 #[tokio::test]
 async fn colon_commands_that_need_a_selection_warn_when_the_table_is_empty() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     for (cmd, expected) in [
         (
@@ -1533,6 +1564,7 @@ async fn colon_commands_that_need_a_selection_warn_when_the_table_is_empty() {
 
 #[tokio::test]
 async fn colon_commands_open_tree_palette_metrics_and_reasons_for_the_selection() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(&mut app, ResourceKind::Pods, pods(&["pod-a"]));
 
@@ -1599,6 +1631,7 @@ async fn colon_commands_open_tree_palette_metrics_and_reasons_for_the_selection(
 
 #[tokio::test]
 async fn slash_filter_narrows_the_table_and_esc_clears_it() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(
         &mut app,
@@ -1638,6 +1671,7 @@ async fn slash_filter_narrows_the_table_and_esc_clears_it() {
 
 #[tokio::test]
 async fn filter_editing_keys_delete_words_clear_backspace_and_paste() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(
         &mut app,
@@ -1676,6 +1710,7 @@ async fn filter_editing_keys_delete_words_clear_backspace_and_paste() {
 
 #[tokio::test]
 async fn slash_in_text_views_seeds_the_filter_with_the_current_search() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
 
     let mut yaml = YamlViewState::new(
@@ -1731,6 +1766,7 @@ async fn slash_in_text_views_seeds_the_filter_with_the_current_search() {
 
 #[tokio::test]
 async fn n_and_shift_n_step_through_search_matches_in_text_views() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let text = "x1\ny\nx2\nx3\n";
     let idx = |app: &App| match &app.active_view {
@@ -1773,6 +1809,7 @@ async fn n_and_shift_n_step_through_search_matches_in_text_views() {
 
 #[tokio::test]
 async fn esc_in_text_views_clears_selection_and_search_before_popping_the_view() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.switch_view_to_kind(ResourceKind::Nodes).await;
     let base_depth = app.nav_stack.len();
@@ -1839,6 +1876,7 @@ async fn esc_in_text_views_clears_selection_and_search_before_popping_the_view()
 
 #[tokio::test]
 async fn q_in_logs_view_exits_and_stops_stream() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let logs = LogsViewState::new("pod-1".into(), "default".into(), None, "logs:q-test".into());
     let prev = std::mem::replace(&mut app.active_view, ActiveView::Logs(logs));
@@ -1855,6 +1893,7 @@ async fn q_in_logs_view_exits_and_stops_stream() {
 
 #[tokio::test]
 async fn switch_namespace_while_in_logs_stops_stream_and_returns_to_table() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let logs = LogsViewState::new(
         "istio-pod".into(),
@@ -1877,6 +1916,7 @@ async fn switch_namespace_while_in_logs_stops_stream_and_returns_to_table() {
 
 #[tokio::test]
 async fn switch_view_to_kind_while_in_logs_stops_stream() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let logs = LogsViewState::new(
         "test-pod".into(),
@@ -1898,6 +1938,7 @@ async fn switch_view_to_kind_while_in_logs_stops_stream() {
 
 #[tokio::test]
 async fn switch_context_while_in_logs_stops_stream() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let logs = LogsViewState::new(
         "test-pod".into(),
@@ -1918,6 +1959,7 @@ async fn switch_context_while_in_logs_stops_stream() {
 
 #[tokio::test]
 async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
     app.active_view = ActiveView::Argo(argo_state);
@@ -2049,6 +2091,7 @@ async fn switch_context_while_in_argo_view_handles_stale_results_and_refreshes()
 
 #[tokio::test]
 async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_is_set() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_context = "cluster-local".to_string();
     app.tui_config.argo_hub_context = Some("tools-hub".to_string());
@@ -2189,6 +2232,7 @@ async fn argo_view_prioritizes_local_argocd_when_installed_even_if_hub_context_i
 
 #[tokio::test]
 async fn test_argo_app_handlers_and_interactions() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_context = "test-cluster".to_string();
     app.active_view = ActiveView::Argo(srelens_tui::views::argo_view::ArgoViewState::new());
@@ -2311,6 +2355,7 @@ async fn test_argo_app_handlers_and_interactions() {
 
 #[tokio::test]
 async fn assistant_view_cursor_navigation_and_word_skipping() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_view = ActiveView::Assistant;
     app.active_namespace = "default".to_string();
@@ -2415,6 +2460,7 @@ async fn assistant_view_cursor_navigation_and_word_skipping() {
 
 #[tokio::test]
 async fn question_mark_opens_help_and_esc_q_or_question_mark_close_it() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     press(&mut app, ch('?')).await;
     assert!(app.show_help);
@@ -2434,6 +2480,7 @@ async fn question_mark_opens_help_and_esc_q_or_question_mark_close_it() {
 
 #[tokio::test]
 async fn ctrl_c_stops_the_app_even_inside_a_modal_or_help() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.show_help = true;
     app.modal = Some(Modal::Confirm {
@@ -2449,6 +2496,7 @@ async fn ctrl_c_stops_the_app_even_inside_a_modal_or_help() {
 
 #[tokio::test]
 async fn a_toast_older_than_four_seconds_is_dropped_on_the_next_keypress() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.toast = Some(("stale".into(), ago(5), Style::default()));
     press(&mut app, ch('?')).await;
@@ -2460,6 +2508,7 @@ async fn a_toast_older_than_four_seconds_is_dropped_on_the_next_keypress() {
 
 #[tokio::test]
 async fn tab_toggles_the_assistant_drawer_and_its_esc_clears_suggestions_and_selection() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     press(&mut app, key(KeyCode::Tab)).await;
     assert!(matches!(app.active_view, ActiveView::Assistant));
@@ -2538,6 +2587,7 @@ async fn tab_toggles_the_assistant_drawer_and_its_esc_clears_suggestions_and_sel
 
 #[tokio::test]
 async fn tab_on_workloads_cycles_segments_and_on_wide_events_focuses_the_reason_rail() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(
         &mut app,
@@ -2577,6 +2627,7 @@ async fn tab_on_workloads_cycles_segments_and_on_wide_events_focuses_the_reason_
 
 #[tokio::test]
 async fn settings_view_lets_colon_open_the_prompt_unless_a_field_is_being_edited() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.switch_view_to_kind(ResourceKind::Settings).await;
     press(&mut app, ch(':')).await;
@@ -2600,6 +2651,7 @@ async fn settings_view_lets_colon_open_the_prompt_unless_a_field_is_being_edited
 
 #[tokio::test]
 async fn ctrl_d_asks_to_confirm_deletion_and_n_cancels_while_y_runs_it() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     press(&mut app, ctrl('d')).await;
     assert!(app.modal.is_none(), "nothing selected, nothing to delete");
@@ -2659,6 +2711,7 @@ async fn ctrl_d_asks_to_confirm_deletion_and_n_cancels_while_y_runs_it() {
 
 #[tokio::test]
 async fn r_on_a_workload_asks_to_confirm_a_rollout_restart() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(
         &mut app,
@@ -2715,6 +2768,7 @@ async fn r_on_a_workload_asks_to_confirm_a_rollout_restart() {
 
 #[tokio::test]
 async fn r_on_an_empty_or_unreachable_table_retries_the_connection() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.cluster_unreachable = true;
     app.connection_attempt_start = ago(30);
@@ -2729,6 +2783,7 @@ async fn r_on_an_empty_or_unreachable_table_retries_the_connection() {
 
 #[tokio::test]
 async fn ctrl_s_opens_the_scale_dialog_which_digits_backspace_and_enter_drive() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(
         &mut app,
@@ -2790,6 +2845,7 @@ async fn ctrl_s_opens_the_scale_dialog_which_digits_backspace_and_enter_drive() 
 
 #[tokio::test]
 async fn f_opens_port_forward_with_the_detected_port_and_enter_starts_it() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(
         &mut app,
@@ -2866,6 +2922,7 @@ async fn f_opens_port_forward_with_the_detected_port_and_enter_starts_it() {
 
 #[tokio::test]
 async fn container_picker_cycles_and_enter_opens_logs_or_a_shell() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let multi = vec![json!({
         "name": "multi",
@@ -2944,6 +3001,7 @@ async fn container_picker_cycles_and_enter_opens_logs_or_a_shell() {
 
 #[tokio::test]
 async fn l_and_s_on_a_single_container_pod_go_straight_to_logs_and_shell() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     seed_table(&mut app, ResourceKind::Pods, pods(&["pod-a"]));
     press(&mut app, ch('l')).await;
@@ -3015,6 +3073,7 @@ async fn l_and_s_on_a_single_container_pod_go_straight_to_logs_and_shell() {
 
 #[tokio::test]
 async fn action_palette_opens_with_x_filters_navigates_and_runs_the_chosen_action() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     seed_table(&mut app, ResourceKind::Pods, pods(&["pod-a"]));
     let palette = |app: &App| match &app.modal {
@@ -3126,6 +3185,7 @@ async fn action_palette_opens_with_x_filters_navigates_and_runs_the_chosen_actio
 
 #[tokio::test]
 async fn action_palette_offers_kind_specific_actions_for_workloads_and_nodes() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     seed_table(
         &mut app,
@@ -3215,6 +3275,7 @@ async fn action_palette_offers_kind_specific_actions_for_workloads_and_nodes() {
 
 #[tokio::test]
 async fn m_opens_the_metrics_timeline_and_keys_change_its_range() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(&mut app, ResourceKind::Pods, pods(&["pod-a"]));
     let panel = |app: &App| match &app.modal {
@@ -3293,6 +3354,7 @@ fn events() -> Vec<Value> {
 
 #[tokio::test]
 async fn shift_r_on_a_narrow_events_table_opens_the_reason_rail_modal() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(&mut app, ResourceKind::Events, events());
     let rail = |app: &App| match &app.modal {
@@ -3342,6 +3404,7 @@ async fn shift_r_on_a_narrow_events_table_opens_the_reason_rail_modal() {
 
 #[tokio::test]
 async fn shift_r_on_a_wide_events_table_focuses_the_rail_whose_keys_pick_a_reason() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(&mut app, ResourceKind::Events, events());
     table_mut(&mut app).last_area_width.set(120);
@@ -3403,6 +3466,7 @@ async fn shift_r_on_a_wide_events_table_focuses_the_rail_whose_keys_pick_a_reaso
 
 #[tokio::test]
 async fn w_toggles_warning_triage_on_the_events_table() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(&mut app, ResourceKind::Events, events());
     press(&mut app, ch('w')).await;
@@ -3423,6 +3487,7 @@ async fn w_toggles_warning_triage_on_the_events_table() {
 
 #[tokio::test]
 async fn events_table_keys_act_on_the_involved_object() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     seed_table(&mut app, ResourceKind::Events, events());
 
@@ -3513,6 +3578,7 @@ async fn events_table_keys_act_on_the_involved_object() {
 
 #[tokio::test]
 async fn table_navigation_keys_move_page_and_mark_rows() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(
         &mut app,
@@ -3558,6 +3624,7 @@ async fn table_navigation_keys_move_page_and_mark_rows() {
 
 #[tokio::test]
 async fn c_copies_the_selection_or_marked_names_and_shift_c_copies_yaml() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     press(&mut app, ch('c')).await;
     assert!(app.toast.is_none(), "nothing to copy on an empty table");
@@ -3592,6 +3659,7 @@ async fn c_copies_the_selection_or_marked_names_and_shift_c_copies_yaml() {
 
 #[tokio::test]
 async fn enter_drills_into_namespaces_crds_controllers_and_nodes() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(
         &mut app,
@@ -3689,6 +3757,7 @@ async fn enter_drills_into_namespaces_crds_controllers_and_nodes() {
 
 #[tokio::test]
 async fn esc_pops_the_navigation_stack_after_clearing_filters() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(&mut app, ResourceKind::Pods, pods(&["a", "b"]));
     app.switch_view_to_kind(ResourceKind::Nodes).await;
@@ -3737,6 +3806,7 @@ async fn esc_pops_the_navigation_stack_after_clearing_filters() {
 
 #[tokio::test]
 async fn yaml_view_keys_scroll_copy_and_flag_an_edit() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let content: String = (0..40).map(|i| format!("line-{}\n", i)).collect();
     app.active_view = ActiveView::Yaml(YamlViewState::new(
@@ -3779,6 +3849,7 @@ async fn yaml_view_keys_scroll_copy_and_flag_an_edit() {
 
 #[tokio::test]
 async fn restart_active_watch_primes_from_the_cache_and_keeps_channels_pooled() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.resource_cache.insert(
         ("test-cluster".into(), "default".into(), "pods".into()),
@@ -3817,6 +3888,7 @@ async fn restart_active_watch_primes_from_the_cache_and_keeps_channels_pooled() 
 
 #[tokio::test]
 async fn the_watch_pool_evicts_its_oldest_channel_past_twenty() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     app.active_watch_pool = (0..20)
         .map(|i| format!("watch:test-cluster:default:fake{}", i))
@@ -3838,6 +3910,7 @@ async fn the_watch_pool_evicts_its_oldest_channel_past_twenty() {
 
 #[tokio::test]
 async fn the_workloads_view_watches_every_constituent_kind_and_rebuilds_from_the_cache() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     press(&mut app, ch(':')).await;
     type_str(&mut app, "wl").await;
@@ -3895,6 +3968,7 @@ async fn the_workloads_view_watches_every_constituent_kind_and_rebuilds_from_the
 
 #[tokio::test]
 async fn test_nodes_table_press_s_triggers_node_shell() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     seed_table(
         &mut app,
@@ -3912,6 +3986,7 @@ async fn test_nodes_table_press_s_triggers_node_shell() {
 
 #[tokio::test]
 async fn test_node_inspector_press_s_on_selected_pod() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut ni = NodeInspectorState::new("node-1".into());
     let details = srelens_kube::node_inspector::NodeInspectorDetails {
@@ -3947,6 +4022,7 @@ async fn test_node_inspector_press_s_on_selected_pod() {
 
 #[tokio::test]
 async fn test_node_inspector_press_s_when_no_pods_triggers_node_shell() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut ni = NodeInspectorState::new("node-empty".into());
     let details = srelens_kube::node_inspector::NodeInspectorDetails {
@@ -3969,6 +4045,7 @@ async fn test_node_inspector_press_s_when_no_pods_triggers_node_shell() {
 
 #[tokio::test]
 async fn test_node_inspector_press_capital_s_triggers_node_shell_even_with_pods() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut ni = NodeInspectorState::new("node-2".into());
     let details = srelens_kube::node_inspector::NodeInspectorDetails {
@@ -4003,6 +4080,7 @@ async fn test_node_inspector_press_capital_s_triggers_node_shell_even_with_pods(
 
 #[tokio::test]
 async fn non_pod_and_custom_resources_reject_pod_actions() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let secret_store_crd = ResourceKind::CustomResource(CrdMeta {
         crd_name: "secretstores.external-secrets.io".to_string(),
@@ -4074,6 +4152,7 @@ async fn non_pod_and_custom_resources_reject_pod_actions() {
 
 #[tokio::test]
 async fn helm_detail_manifest_search_and_navigation_input_flow() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut detail_state =
         srelens_tui::views::HelmDetailViewState::new("my-release".into(), "default".into());
@@ -4157,10 +4236,10 @@ async fn helm_detail_manifest_search_and_navigation_input_flow() {
 
 #[tokio::test]
 async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
-    let _config_guard = TUI_CONFIG_ENV_LOCK.lock().await;
+    let mut env = common::env::lock();
     let temp = tempfile::tempdir().unwrap();
     let config_path = temp.path().join("tui.json");
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_path);
+    env.set("SRELENS_TUI_CONFIG_PATH", &config_path);
 
     let (tx, _rx) = unbounded_channel();
     let mut app = App::new(
@@ -4281,16 +4360,14 @@ async fn config_command_opens_tui_config_view_and_keys_adjust_values() {
     // Press Esc pops back to table view
     press(&mut app, key(KeyCode::Esc)).await;
     assert!(matches!(app.active_view, ActiveView::Table(_)));
-
-    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
 }
 
 #[tokio::test]
 async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
-    let _config_guard = TUI_CONFIG_ENV_LOCK.lock().await;
+    let mut env = common::env::lock();
     let tmp = tempfile::tempdir().unwrap();
     let config_file = tmp.path().join("tui.json");
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", &config_file);
+    env.set("SRELENS_TUI_CONFIG_PATH", &config_file);
 
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
@@ -4411,12 +4488,11 @@ async fn feature_banner_modal_interactive_navigation_toggle_and_jump() {
 
     press(&mut app, ch('i')).await;
     assert!(matches!(app.modal, Some(Modal::AddCluster { .. })));
-
-    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
 }
 
 #[tokio::test]
 async fn bgp_view_keys_open_yaml_and_describe_with_correct_crd_kind() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
     // Navigate to :bgp
@@ -4511,6 +4587,7 @@ async fn bgp_view_keys_open_yaml_and_describe_with_correct_crd_kind() {
 
 #[tokio::test]
 async fn bgp_view_namespaced_metallb_peer_and_pool_drilldown() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
     // Open BGP view directly
@@ -4613,6 +4690,7 @@ async fn bgp_view_namespaced_metallb_peer_and_pool_drilldown() {
 
 #[tokio::test]
 async fn node_inspector_press_b_jumps_to_bgp_dashboard() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
     app.open_node_inspector("node-1".to_string());
@@ -4625,9 +4703,10 @@ async fn node_inspector_press_b_jumps_to_bgp_dashboard() {
 
 #[tokio::test]
 async fn tui_config_hub_dialog_left_right_cursor_and_paste() {
+    let mut env = common::env::lock();
     let tmp = tempfile::tempdir().unwrap();
     let cfg_path = tmp.path().join("tui.json");
-    std::env::set_var("SRELENS_TUI_CONFIG_PATH", cfg_path.to_str().unwrap());
+    env.set("SRELENS_TUI_CONFIG_PATH", &cfg_path);
 
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
@@ -4701,12 +4780,11 @@ async fn tui_config_hub_dialog_left_right_cursor_and_paste() {
         assert!(!cfg.is_editing);
     }
     assert!(app.tui_config.argo_hub_context.is_some());
-
-    std::env::remove_var("SRELENS_TUI_CONFIG_PATH");
 }
 
 #[tokio::test]
 async fn argo_detail_view_managed_resources_enter_opens_describe_and_esc_returns() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
     let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
@@ -4888,6 +4966,7 @@ async fn argo_detail_managed_resources_renders_long_kind_without_truncation() {
 
 #[tokio::test]
 async fn argo_view_x_opens_action_palette_with_ai_diagnose_and_actions() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
     let mut argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
@@ -5007,6 +5086,7 @@ async fn argo_view_x_opens_action_palette_with_ai_diagnose_and_actions() {
 
 #[tokio::test]
 async fn argo_view_x_playbook_argo_progressing_seeds_assistant() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
     let mut argo_state = srelens_tui::views::argo_view::ArgoViewState::new();
@@ -5066,6 +5146,7 @@ async fn argo_view_x_playbook_argo_progressing_seeds_assistant() {
 
 #[tokio::test]
 async fn argo_detail_view_x_opens_action_palette_for_resource_and_app() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
     let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
@@ -5201,6 +5282,7 @@ async fn argo_view_column_prioritization_and_no_clipping() {
 
 #[tokio::test]
 async fn argo_view_key_bindings_and_actions() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
     let app1 = srelens_kube::argo::ArgoApplication::from_json(&serde_json::json!({
@@ -5316,6 +5398,7 @@ async fn argo_view_key_bindings_and_actions() {
 
 #[tokio::test]
 async fn argo_detail_view_key_navigation_and_actions() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
     let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
@@ -5480,6 +5563,7 @@ async fn argo_detail_view_key_navigation_and_actions() {
 
 #[tokio::test]
 async fn argo_modal_confirm_and_action_results() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
     // 1. Sync confirm execution
@@ -5549,6 +5633,7 @@ fn confirm_payload(app: &App, prefix: &str) -> Value {
 
 #[tokio::test]
 async fn argo_confirmations_carry_the_listed_applications_uid_and_resource_version() {
+    let _settings = common::env::isolate_settings();
     // #620: the confirmation named the Application by namespace and name only,
     // so one deleted and recreated while the dialog was open received the
     // confirmed write. Every Argo write confirmation now carries the listed
@@ -5600,6 +5685,7 @@ async fn argo_confirmations_carry_the_listed_applications_uid_and_resource_versi
 
 #[tokio::test]
 async fn palette_sync_of_an_application_no_longer_listed_is_refused() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
     app.active_view = argo_view_with_reviewed_app("team", "billing");
     press(&mut app, ch('x')).await;
@@ -5631,6 +5717,7 @@ async fn palette_sync_of_an_application_no_longer_listed_is_refused() {
 
 #[tokio::test]
 async fn argo_writes_without_a_reviewed_identity_are_refused() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
     for (action, expected) in [
@@ -5662,6 +5749,7 @@ async fn argo_writes_without_a_reviewed_identity_are_refused() {
 
 #[tokio::test]
 async fn a_write_refused_as_stale_reloads_the_applications() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
     app.active_view = argo_view_with_reviewed_app("team", "billing");
 
@@ -5691,6 +5779,7 @@ async fn a_write_refused_as_stale_reloads_the_applications() {
 
 #[tokio::test]
 async fn node_ssh_modal_keys_and_submit() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
 
     app.modal = Some(Modal::NodeSsh {
@@ -5776,6 +5865,12 @@ async fn node_ssh_modal_keys_and_submit() {
 
 #[tokio::test]
 async fn tui_config_view_key_interactions() {
+    // Every adjustment below saves. With no path of its own this test wrote the
+    // developer's real `tui.json` (#671).
+    let mut env = common::env::lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("tui.json");
+    env.set("SRELENS_TUI_CONFIG_PATH", &cfg_path);
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
     app.tui_config = srelens_tui::tui_config::TuiConfig::default();
 
@@ -5848,6 +5943,8 @@ async fn tui_config_view_key_interactions() {
     if let ActiveView::TuiConfig(ref c) = app.active_view {
         assert!(!c.is_editing);
     }
+    let saved = std::fs::read_to_string(&cfg_path).expect("the save landed in the test's own file");
+    assert!(saved.contains(r#""argoHubContext": "x""#), "{saved}");
 
     // 4. Exit config view with 'q'
     press(&mut app, ch('q')).await;
@@ -5856,6 +5953,7 @@ async fn tui_config_view_key_interactions() {
 
 #[tokio::test]
 async fn test_node_inspector_ctrl_d_deletes_selected_pod_and_updates_view() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut ni = NodeInspectorState::new("node-1".into());
     let details = srelens_kube::node_inspector::NodeInspectorDetails {
@@ -5928,6 +6026,7 @@ async fn test_node_inspector_ctrl_d_deletes_selected_pod_and_updates_view() {
 
 #[tokio::test]
 async fn test_node_inspector_ctrl_d_when_no_pods_safely_noops() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     let mut ni = NodeInspectorState::new("node-empty".into());
     let details = srelens_kube::node_inspector::NodeInspectorDetails {
@@ -5945,6 +6044,7 @@ async fn test_node_inspector_ctrl_d_when_no_pods_safely_noops() {
 
 #[tokio::test]
 async fn test_table_ctrl_d_bulk_delete_tagged_pods_opens_confirm_modal() {
+    let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app().await;
     set_table(
         &mut app,

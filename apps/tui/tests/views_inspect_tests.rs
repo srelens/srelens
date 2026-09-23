@@ -796,8 +796,8 @@ fn render_settings(width: u16, height: u16, state: &SettingsViewState) -> String
 
 #[test]
 fn settings_view_new_selects_the_configured_default_provider() {
-    // `new` loads whatever the machine has on disk; the invariant that holds
-    // regardless is that the cursor starts on the default provider.
+    let _settings = common::env::isolate_settings();
+    // The cursor starts on the default provider loaded from isolated settings.
     let state = SettingsViewState::new();
     assert_eq!(state.current_provider(), state.settings.default_provider);
     assert_eq!(state.selected_field, SettingField::ProviderToggle);
@@ -1053,6 +1053,7 @@ fn settings_view_timeout_edits_are_parsed_and_clamped() {
 
 #[test]
 fn settings_view_renders_the_active_provider_summary_and_every_provider_card() {
+    let _env = common::env::lock();
     let mut state = settings_state();
     state.settings.default_provider = AiProvider::Gemini;
     state.selected_provider_idx = 2;
@@ -1108,6 +1109,9 @@ fn settings_view_renders_the_active_provider_summary_and_every_provider_card() {
 
 #[test]
 fn settings_view_masks_stored_api_keys_and_flags_missing_ones() {
+    let mut env = common::env::lock();
+    env.remove("OPENAI_API_KEY");
+    env.remove("OPENAI_COMPATIBLE_API_KEY");
     let mut state = settings_state();
     state.settings.api_keys.insert(
         "anthropic".to_string(),
@@ -1136,27 +1140,22 @@ fn settings_view_masks_stored_api_keys_and_flags_missing_ones() {
         "{text}"
     );
     assert!(!text.contains("short"), "{text}");
-    // A blank stored key counts as unset. (Guarded: a developer's shell may
-    // export the key, which legitimately takes the env branch instead.)
-    if std::env::var("OPENAI_API_KEY").is_err() {
-        assert!(
-            text.contains("API Key: no key set (press 'e' to set or export OPENAI_API_KEY)"),
-            "{text}"
-        );
-    }
-    if std::env::var("OPENAI_COMPATIBLE_API_KEY").is_err() {
-        assert!(text.contains("API Key: optional (local Ollama)"), "{text}");
-    }
+    // A blank stored key counts as unset, regardless of the developer's shell.
+    assert!(
+        text.contains("API Key: no key set (press 'e' to set or export OPENAI_API_KEY)"),
+        "{text}"
+    );
+    assert!(text.contains("API Key: optional (local Ollama)"), "{text}");
 }
 
 #[test]
 fn settings_view_reports_an_api_key_that_comes_from_the_environment() {
-    // Only this test touches GEMINI_API_KEY, and no other test in this file
-    // asserts on Gemini's key line, so the parallel runner cannot race it.
-    std::env::set_var("GEMINI_API_KEY", "from-env");
+    // Dropping the guard puts back any key the developer's shell exports.
+    let mut env = common::env::lock();
+    env.set("GEMINI_API_KEY", "from-env");
     let state = settings_state();
     let text = render_settings(120, 40, &state);
-    std::env::remove_var("GEMINI_API_KEY");
+    drop(env);
     assert!(
         text.contains("API Key: [env: GEMINI_API_KEY set]"),
         "{text}"
@@ -1169,6 +1168,7 @@ fn settings_view_reports_an_api_key_that_comes_from_the_environment() {
 
 #[test]
 fn settings_view_highlights_the_focused_field_on_the_selected_card() {
+    let _env = common::env::lock();
     let mut state = settings_state();
     state.selected_provider_idx = 1;
     state.selected_field = SettingField::Model;
@@ -1236,6 +1236,7 @@ fn settings_view_highlights_the_focused_field_on_the_selected_card() {
 
 #[test]
 fn settings_view_renders_base_url_for_openai_compatible_provider() {
+    let _env = common::env::lock();
     let state = settings_state();
     let lines = common::render_lines(120, 40, |f| render_settings_view(f, f.area(), &state));
     let oai_compat_row = row_of(&lines, "4. OpenAI-Compatible / Ollama (Local)");
@@ -1249,6 +1250,7 @@ fn settings_view_renders_base_url_for_openai_compatible_provider() {
 
 #[test]
 fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
+    let _env = common::env::lock();
     let mut state = settings_state();
     state.selected_provider_idx = 1;
     state.selected_field = SettingField::Model;
@@ -1315,6 +1317,7 @@ fn settings_view_edit_modal_names_the_field_and_shows_the_buffer() {
 
 #[test]
 fn settings_view_narrow_terminal_still_shows_the_header_and_first_cards() {
+    let _env = common::env::lock();
     let state = settings_state();
     let text = render_settings(60, 20, &state);
     assert!(text.contains("SRElens AI & Assistant Settings"), "{text}");
@@ -1881,10 +1884,11 @@ fn yaml_view_scrolling_stays_within_the_document() {
 fn yaml_view_spawn_editor_reports_a_missing_editor_without_running_anything() {
     // Point $EDITOR at a binary that cannot exist so the spawn fails fast.
     // The quoted form also exercises the shlex split.
-    std::env::set_var("EDITOR", "\"srelens-no-such-editor-0x5b\" --wait");
+    let mut env = common::env::lock();
+    env.set("EDITOR", "\"srelens-no-such-editor-0x5b\" --wait");
     let state = yaml_state(POD_YAML);
     let result = state.spawn_editor();
-    std::env::remove_var("EDITOR");
+    drop(env);
     let err = result.expect_err("a nonexistent editor cannot be spawned");
     assert!(
         err.starts_with("Failed to spawn editor '\"srelens-no-such-editor-0x5b\" --wait':"),
