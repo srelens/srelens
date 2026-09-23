@@ -52,6 +52,7 @@ pub enum ActiveView {
     GpuInfo(gpu_view::GpuViewState),
     Bgp(bgp_view::BgpViewState),
     Top(top_view::TopViewState),
+    Changed(changed_view::ChangedViewState),
 }
 
 pub struct App {
@@ -104,6 +105,8 @@ pub struct App {
     pub helm_refreshing: bool,
     pub argo_tick_counter: usize,
     pub argo_refreshing: bool,
+    pub changed_tick_counter: usize,
+    pub changed_refreshing: bool,
     pub node_metrics_history:
         HashMap<String, std::collections::VecDeque<srelens_kube::metrics::MetricSample>>,
     pub pod_metrics_history:
@@ -381,6 +384,8 @@ impl App {
             helm_refreshing: false,
             argo_tick_counter: 0,
             argo_refreshing: false,
+            changed_tick_counter: 0,
+            changed_refreshing: false,
             node_metrics_history: HashMap::new(),
             pod_metrics_history: HashMap::new(),
             cluster_overview_data: None,
@@ -527,6 +532,16 @@ impl App {
             }
         } else {
             self.argo_tick_counter = 0;
+        }
+
+        // Periodically refresh Changed triage report every ~3 seconds (30 ticks at 100ms)
+        if matches!(self.active_view, ActiveView::Changed(_)) {
+            self.changed_tick_counter = self.changed_tick_counter.saturating_add(1);
+            if self.changed_tick_counter % 30 == 1 && !self.changed_refreshing {
+                self.refresh_changed_triage();
+            }
+        } else {
+            self.changed_tick_counter = 0;
         }
     }
 
@@ -4000,6 +4015,9 @@ impl App {
                         self.filter_buffer = detail.search_query.clone()
                     }
                     ActiveView::Bgp(bgp) => self.filter_buffer = bgp.search_query.clone(),
+                    ActiveView::Changed(changed) => {
+                        self.filter_buffer = changed.filter_query.clone()
+                    }
                     _ => {}
                 }
             }
@@ -4179,6 +4197,10 @@ impl App {
                 }
                 if let ActiveView::ArgoDetail(ref mut detail) = self.active_view {
                     detail.next_tab();
+                    return;
+                }
+                if let ActiveView::Changed(ref mut changed) = self.active_view {
+                    changed.toggle_tab();
                     return;
                 }
                 if let Some(seg_name) = cycled_segment {
@@ -7177,6 +7199,186 @@ impl App {
                 },
                 _ => {}
             },
+            ActiveView::Changed(changed) => match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    if let Some(prev) = self.nav_stack.pop() {
+                        self.active_view = prev;
+                    } else {
+                        self.switch_view_to_kind(ResourceKind::Deployments).await;
+                    }
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    changed.toggle_tab();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    changed.select_prev();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    changed.select_next();
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    changed.select_first();
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    changed.select_last();
+                }
+                KeyCode::Char('[') => {
+                    changed.prev_window();
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char(']') => {
+                    changed.next_window();
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('1') => {
+                    changed.set_window_by_str("15m");
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('2') => {
+                    changed.set_window_by_str("30m");
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('3') => {
+                    changed.set_window_by_str("1h");
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('4') => {
+                    changed.set_window_by_str("3h");
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('5') => {
+                    changed.set_window_by_str("24h");
+                    self.refresh_changed_triage();
+                }
+                KeyCode::Char('f') => {
+                    changed.cycle_verdict_filter();
+                }
+                KeyCode::Char('/') => {
+                    self.input_mode = InputMode::Filter;
+                    self.filter_buffer = changed.filter_query.clone();
+                }
+                KeyCode::Char('r') => {
+                    self.refresh_changed_triage();
+                    self.set_toast(
+                        "Refreshed changed triage report".to_string(),
+                        Theme::status_ok(),
+                    );
+                }
+                KeyCode::Char('R') => {
+                    let target = changed
+                        .selected_deployment()
+                        .map(|d| (d.app_name.clone(), d.namespace.clone()));
+                    if let Some((name, ns)) = target {
+                        self.modal = Some(Modal::Confirm {
+                            title: format!("Restart Workload [{}]", name),
+                            message: format!(
+                                "Trigger zero-downtime rollout restart for Deployment '{}' in namespace '{}'?",
+                                name, ns
+                            ),
+                            action_name: format!("restart:Deployment:{}:{}", ns, name),
+                            is_destructive: false,
+                        });
+                    }
+                }
+                KeyCode::Enter | KeyCode::Char('d') => match changed.active_tab {
+                    changed_view::ChangedTab::Deployments => {
+                        let target = changed
+                            .selected_deployment()
+                            .map(|d| (d.app_name.clone(), d.namespace.clone()));
+                        if let Some((name, ns)) = target {
+                            self.open_describe_view(name, "Deployment".to_string(), Some(ns))
+                                .await;
+                        }
+                    }
+                    changed_view::ChangedTab::Infra => {
+                        let target = changed
+                            .selected_infra()
+                            .map(|i| (i.name.clone(), i.kind.clone(), i.namespace.clone()));
+                        if let Some((name, kind, ns)) = target {
+                            self.open_describe_view(name, kind, Some(ns)).await;
+                        }
+                    }
+                },
+                KeyCode::Char('y') => match changed.active_tab {
+                    changed_view::ChangedTab::Deployments => {
+                        let target = changed
+                            .selected_deployment()
+                            .map(|d| (d.app_name.clone(), d.namespace.clone()));
+                        if let Some((name, ns)) = target {
+                            self.open_yaml_view(name, "Deployment".to_string(), Some(ns))
+                                .await;
+                        }
+                    }
+                    changed_view::ChangedTab::Infra => {
+                        let target = changed
+                            .selected_infra()
+                            .map(|i| (i.name.clone(), i.kind.clone(), i.namespace.clone()));
+                        if let Some((name, kind, ns)) = target {
+                            self.open_yaml_view(name, kind, Some(ns)).await;
+                        }
+                    }
+                },
+                KeyCode::Char('l') => {
+                    let target = changed.selected_deployment().map(|d| {
+                        (
+                            d.app_name.clone(),
+                            d.namespace.clone(),
+                            d.failing_pod_names.first().cloned(),
+                        )
+                    });
+                    if let Some((app_name, ns, pod_opt)) = target {
+                        if let Some(pod_name) = pod_opt {
+                            self.prompt_pod_logs(pod_name, Some(ns)).await;
+                        } else {
+                            self.set_toast(
+                                format!("No failing pods listed for {} to tail logs", app_name),
+                                Theme::status_warn(),
+                            );
+                        }
+                    }
+                }
+                KeyCode::Char('a') => {
+                    let prompt_opt = changed.selected_deployment().map(|d| {
+                        let symptoms_str = if d.primary_symptoms.is_empty() {
+                            "None".to_string()
+                        } else {
+                            d.primary_symptoms.join("; ")
+                        };
+                        let failing_str = if d.failing_pod_names.is_empty() {
+                            "None".to_string()
+                        } else {
+                            d.failing_pod_names.join(", ")
+                        };
+                        format!(
+                            "Analyze deployment incident for {}/{}:\nVerdict: {} ({})\nRevision: {} (previous: {:?})\nImage Diff: {}\nReplicas: {}/{} Ready\nSymptoms: {}\nFailing Pods: {}\nWhat is the root cause, and what steps should I take to remediate or rollback?",
+                            d.namespace,
+                            d.app_name,
+                            d.verdict.label(),
+                            d.verdict_reason,
+                            d.current_revision,
+                            d.previous_revision,
+                            d.image_diff,
+                            d.ready_replicas,
+                            d.desired_replicas,
+                            symptoms_str,
+                            failing_str,
+                        )
+                    });
+                    if let Some(prompt) = prompt_opt {
+                        let old = std::mem::replace(&mut self.active_view, ActiveView::Assistant);
+                        self.nav_stack.push(old);
+                        self.submit_assistant_query(prompt.clone(), prompt);
+                        self.set_toast(
+                            "Diagnosing deployment failure with AI Assistant...".to_string(),
+                            Theme::status_ok(),
+                        );
+                    }
+                }
+                KeyCode::Char('e') => {
+                    self.switch_view_to_kind(ResourceKind::Events).await;
+                }
+                _ => {}
+            },
             ActiveView::HelmDetail(detail) => match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
                     if let Some(prev) = self.nav_stack.pop() {
@@ -8030,6 +8232,13 @@ impl App {
                 bgp.search_query = filter;
                 bgp.clamp_selection();
             }
+            ActiveView::Changed(changed) => {
+                changed.filter_query = filter;
+                let count = changed.filtered_deployments().len();
+                if changed.selected_idx >= count {
+                    changed.selected_idx = count.saturating_sub(1);
+                }
+            }
             _ => {}
         }
     }
@@ -8069,6 +8278,9 @@ impl App {
             ActiveView::Bgp(bgp) => {
                 bgp.search_query.clear();
                 bgp.clamp_selection();
+            }
+            ActiveView::Changed(changed) => {
+                changed.filter_query.clear();
             }
             _ => {}
         }
@@ -8325,6 +8537,13 @@ impl App {
                 if !arg.is_empty() {
                     if let ActiveView::Argo(ref mut argo) = self.active_view {
                         argo.filter_query = arg.to_string();
+                    } else if let ActiveView::Changed(ref mut changed) = self.active_view {
+                        if srelens_kube::changed::parse_duration(arg).is_ok() {
+                            changed.set_window_by_str(arg);
+                            self.refresh_changed_triage();
+                        } else {
+                            changed.filter_query = arg.to_string();
+                        }
                     }
                 }
             }
@@ -9076,6 +9295,36 @@ impl App {
                 let (pods, nodes) = self.build_top_rows();
                 top_state.set_data(pods, nodes);
                 ActiveView::Top(top_state)
+            }
+            ResourceKind::Changed => {
+                let changed_state = changed_view::ChangedViewState::new();
+                let window = changed_state.current_window();
+                let ctx = self.active_context.clone();
+                let ns = if self.active_namespace.is_empty() {
+                    None
+                } else {
+                    Some(self.active_namespace.clone())
+                };
+                let cache = self.client_cache.clone();
+                let event_tx = self.event_tx.clone();
+                self.changed_refreshing = true;
+
+                tokio::spawn(async move {
+                    let res = srelens_kube::changed::fetch_changed_triage(
+                        &cache,
+                        &ctx,
+                        ns.as_deref(),
+                        window,
+                    )
+                    .await;
+                    let _ = event_tx.send(crate::event::AppEvent::ChangedTriageResult {
+                        context: ctx,
+                        namespace: ns,
+                        result: res,
+                    });
+                });
+
+                ActiveView::Changed(changed_state)
             }
             _ => {
                 let mut table = ResourceTableState::new(kind.clone());
@@ -10406,6 +10655,63 @@ impl App {
                 match result {
                     Ok(summary) => bgp.set_summary(summary),
                     Err(err) => bgp.set_error(err),
+                }
+            }
+        }
+    }
+
+    pub fn refresh_changed_triage(&mut self) {
+        if self.changed_refreshing {
+            return;
+        }
+        let (window, ns) = if let ActiveView::Changed(changed) = &mut self.active_view {
+            if changed.report.is_none() {
+                changed.is_loading = true;
+            }
+            let ns = if self.active_namespace.is_empty() {
+                None
+            } else {
+                Some(self.active_namespace.clone())
+            };
+            (changed.current_window(), ns)
+        } else {
+            return;
+        };
+
+        self.changed_refreshing = true;
+        let ctx = self.active_context.clone();
+        let cache = self.client_cache.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            let res =
+                srelens_kube::changed::fetch_changed_triage(&cache, &ctx, ns.as_deref(), window)
+                    .await;
+            let _ = event_tx.send(crate::event::AppEvent::ChangedTriageResult {
+                context: ctx,
+                namespace: ns,
+                result: res,
+            });
+        });
+    }
+
+    pub fn handle_changed_triage_result(
+        &mut self,
+        context: &str,
+        namespace: Option<&str>,
+        result: Result<srelens_kube::changed::ChangedTriageReport, String>,
+    ) {
+        self.changed_refreshing = false;
+        if let ActiveView::Changed(changed) = &mut self.active_view {
+            let cur_ns = if self.active_namespace.is_empty() {
+                None
+            } else {
+                Some(self.active_namespace.as_str())
+            };
+            if self.active_context == context && cur_ns == namespace {
+                match result {
+                    Ok(report) => changed.set_report(report),
+                    Err(err) => changed.set_error(err),
                 }
             }
         }
@@ -13055,6 +13361,7 @@ impl App {
                 top_view::TopTab::Pods => "Top Pods Hotspots",
                 top_view::TopTab::Nodes => "Top Nodes Hotspots",
             },
+            ActiveView::Changed(_) => "Changed & Triage",
         };
 
         let active_pods_count = if let ActiveView::Table(t) = &self.active_view {
@@ -13142,6 +13449,7 @@ impl App {
             ActiveView::GpuInfo(gpu) => gpu_view::render(f, chunks[1], gpu),
             ActiveView::Bgp(bgp) => render_bgp_view(f, chunks[1], bgp),
             ActiveView::Top(top) => top_view::render_top_view(f, chunks[1], top),
+            ActiveView::Changed(changed) => render_changed_view(f, chunks[1], changed),
         }
 
         // 3. Render Status Bar
@@ -13192,6 +13500,26 @@ impl App {
                 true,
             ),
             ActiveView::ArgoDetail(_) => (0, 0, false),
+            ActiveView::Changed(changed) => match changed.active_tab {
+                changed_view::ChangedTab::Deployments => (
+                    changed.filtered_deployments().len(),
+                    changed
+                        .report
+                        .as_ref()
+                        .map(|r| r.deployments.len())
+                        .unwrap_or(0),
+                    false,
+                ),
+                changed_view::ChangedTab::Infra => (
+                    changed.filtered_infra().len(),
+                    changed
+                        .report
+                        .as_ref()
+                        .map(|r| r.infra_changes.len())
+                        .unwrap_or(0),
+                    false,
+                ),
+            },
             _ => (0, 0, false),
         };
 
@@ -13346,6 +13674,23 @@ impl App {
                     ("<d>", "Describe"),
                     ("<y>", "YAML"),
                     ("<r>", "Refresh"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            ActiveView::Changed(_) => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<Tab>", "Tab"),
+                    ("<j/k>", "Select"),
+                    ("</>", "Filter"),
+                    ("<Enter>", "Inspect"),
+                    ("<l>", "Logs"),
+                    ("<r>", "Refresh"),
+                    ("<y>", "YAML"),
+                    ("<a>", "AI RCA"),
+                    ("<[ / ]>", "Window"),
+                    ("<f>", "Verdict"),
                     ("<Esc>", "Back"),
                     ("<?>", "Help"),
                 ][..],

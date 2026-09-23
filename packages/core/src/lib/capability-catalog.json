@@ -360,6 +360,15 @@
     "confirm": null
   },
   {
+    "id": "k8s.listChanges",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "k8s.listClusterRoleBindings",
     "readOnly": true,
     "destructive": false,

@@ -447,6 +447,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AppEvent::BgpResult { context, result } => {
                     app.handle_bgp_result(&context, result);
                 }
+                AppEvent::ChangedTriageResult { context, namespace, result } => {
+                    app.handle_changed_triage_result(&context, namespace.as_deref(), result);
+                }
             }
 
             if !app.is_running {

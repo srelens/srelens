@@ -4764,6 +4764,78 @@ async fn bgp_view_namespaced_metallb_peer_and_pool_drilldown() {
 }
 
 #[tokio::test]
+async fn changed_view_command_and_interaction_flow() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+
+    // Type `:changed` to switch to Changed view
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "changed").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(matches!(app.active_view, ActiveView::Changed(_)));
+
+    if let ActiveView::Changed(ref mut changed) = app.active_view {
+        assert_eq!(changed.current_window_label(), "1h");
+        assert_eq!(
+            changed.active_tab,
+            srelens_tui::views::changed_view::ChangedTab::Deployments
+        );
+    } else {
+        panic!("expected ActiveView::Changed");
+    }
+
+    // Cycle duration window with ']' and '['
+    press(&mut app, ch(']')).await;
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert_eq!(changed.current_window_label(), "3h");
+    }
+
+    press(&mut app, ch('[')).await;
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert_eq!(changed.current_window_label(), "1h");
+    }
+
+    // Toggle tab with Tab
+    press(&mut app, key(KeyCode::Tab)).await;
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert_eq!(
+            changed.active_tab,
+            srelens_tui::views::changed_view::ChangedTab::Infra
+        );
+    }
+
+    press(&mut app, key(KeyCode::Tab)).await;
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert_eq!(
+            changed.active_tab,
+            srelens_tui::views::changed_view::ChangedTab::Deployments
+        );
+    }
+
+    // Cycle verdict filter with 'f'
+    press(&mut app, ch('f')).await;
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert_eq!(
+            changed.verdict_filter,
+            srelens_tui::views::changed_view::VerdictFilter::PageOnly
+        );
+    }
+
+    // Test `:changed 15m` argument handling
+    press(&mut app, ch(':')).await;
+    type_str(&mut app, "changed 15m").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    if let ActiveView::Changed(ref changed) = app.active_view {
+        assert_eq!(changed.current_window_label(), "15m");
+    }
+
+    // Press Esc to exit back to previous view (pops both :changed invocations)
+    press(&mut app, key(KeyCode::Esc)).await;
+    press(&mut app, key(KeyCode::Esc)).await;
+    assert!(!matches!(app.active_view, ActiveView::Changed(_)));
+}
+
+#[tokio::test]
 async fn node_inspector_press_b_jumps_to_bgp_dashboard() {
     let _settings = common::env::isolate_settings();
     let (mut app, _rx) = common::app_with("fake-cluster", "default").await;

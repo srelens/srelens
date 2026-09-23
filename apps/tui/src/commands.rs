@@ -47,6 +47,7 @@ pub enum ResourceKind {
     TopPods,
     TopNodes,
     BgpPeers,
+    Changed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -189,6 +190,7 @@ impl ResourceKind {
             Self::TopPods => "Top Pods",
             Self::TopNodes => "Top Nodes",
             Self::BgpPeers => "BGP Peering & Routes",
+            Self::Changed => "Changed & Triage",
         }
     }
 
@@ -463,6 +465,12 @@ pub const COMMAND_REGISTRY: &[CommandDef] = &[
         target: CommandTarget::Resource(ResourceKind::Events),
     },
     CommandDef {
+        name: "changed",
+        aliases: &["change", "chg", "recent", "triage"],
+        description: "Holistic deployment & change incident triage (:changed [duration], :chg, :recent)",
+        target: CommandTarget::Resource(ResourceKind::Changed),
+    },
+    CommandDef {
         name: "serviceaccounts",
         aliases: &["sa", "serviceaccount"],
         description: "Service account identities and RBAC token bindings",
@@ -682,6 +690,7 @@ impl DynamicCommandDef {
                 ResourceKind::Topology => "Topology",
                 ResourceKind::GpuInfo => "GPU / Hardware",
                 ResourceKind::TopPods | ResourceKind::TopNodes => "Hotspots",
+                ResourceKind::Changed => "Triage",
                 ResourceKind::CustomResource(_) => "Custom Resource",
             },
             CommandTarget::CustomResource(_) => "CRD",
@@ -698,6 +707,7 @@ impl DynamicCommandDef {
 
     pub fn syntax_hint(&self) -> &'static str {
         match &self.target {
+            CommandTarget::Resource(ResourceKind::Changed) => ":changed [duration]",
             CommandTarget::Resource(ResourceKind::Pods) => ":pods [namespace]",
             CommandTarget::Resource(ResourceKind::Deployments) => ":deployments [ns]",
             CommandTarget::Resource(ResourceKind::Services) => ":services [ns]",
