@@ -244,7 +244,7 @@ pub(super) async fn join_objects(
         ).await?;
         if truncated {
             return Err(CapabilityError::Handler(
-                "Joined resource list reached its 2,000-object limit; column values would be incomplete".into(),
+                "Joined resource list reached its 2,000-object limit; joined values would be incomplete".into(),
             ));
         }
         Ok(objects)
