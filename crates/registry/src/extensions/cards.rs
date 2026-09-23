@@ -114,11 +114,6 @@ pub(super) enum Resolved {
     Error {
         reason: String,
     },
-    /// The host cannot make this card's figure at all yet, and reading again
-    /// will not change that.
-    Unavailable {
-        reason: String,
-    },
 }
 
 #[derive(Debug, Serialize, JsonSchema, PartialEq)]
@@ -141,13 +136,18 @@ type ReadsThisCall = std::collections::HashMap<(String, String), Result<Arc<Vec<
 /// How an app's objects map to a status word.
 pub(super) type StatusResolver = dyn Fn(&Value) -> Option<String> + Send + Sync;
 
-/// The seam #541 fills: the status resolver an app declares for a source.
+/// The status an app's own rules (#541) give each object its `source` lists:
+/// the first rule that holds, or Unknown — the word the same object shows as
+/// a badge on the app's list, so the card and the page count alike.
 ///
-/// This host has none yet, so a `countByStatus` card says it is unavailable
-/// rather than counting by the deprecated `statusColumns`, whose printer-column
-/// indices describe a page's table and not a status.
-pub(super) fn status_resolver(_manifest: &Manifest, _source: &str) -> Option<Box<StatusResolver>> {
-    None
+/// `None` when the source's kind has no `statusResolvers`. Installation
+/// refuses a `countByStatus` card over such a source, and every read
+/// revalidates the app first, so a card never reaches here without rules.
+pub(super) fn status_resolver(manifest: &Manifest, source: &str) -> Option<Box<StatusResolver>> {
+    let rules = manifest.status_rules_for_binding(source)?.to_vec();
+    Some(Box::new(move |object| {
+        Some(srelens_capability::status::resolve_status(&rules, object).label)
+    }))
 }
 
 fn namespace_of(object: &Value) -> &str {
@@ -220,8 +220,10 @@ pub(super) fn resolve_card(
         },
         CardType::CountByStatus => {
             let Some(status) = status else {
-                return Resolved::Unavailable {
-                    reason: "Counting by status needs the app's status resolvers, which this version of srelens does not have yet".into(),
+                // Installation refuses this card without rules, so this is a
+                // manifest the host should not be holding: fail closed, never 0.
+                return Resolved::Error {
+                    reason: "This card's source has no status resolver to count by".into(),
                 };
             };
             let mut counts = std::collections::BTreeMap::<String, usize>::new();
@@ -553,29 +555,23 @@ pub(super) fn register(
                 let mut cards = Vec::new();
                 for card in &plugin.manifest.contributions.dashboard_cards {
                     let status = status_resolver(&plugin.manifest, &card.source);
-                    let resolved = if card.card_type == CardType::CountByStatus && status.is_none() {
-                        // Unavailable whatever the cluster says; reading it would only
-                        // let a cluster failure hide the real reason.
-                        resolve_card(card, &[], None, now, None)
-                    } else {
-                        match source_binding(plugin, &card.source) {
-                            Err(error) => Resolved::Error { reason: reason(&error) },
-                            Ok(binding) => {
-                                let (namespace, selection) = read_scope(binding, &input.namespaces);
-                                let key = (card.source.clone(), namespace);
-                                if !reads.contains_key(&key) {
-                                    let read = columns::reader_objects(
-                                        &snapshots, &client_cache, &core, plugin, &card.source,
-                                        &context, &key.1,
-                                    )
-                                    .await
-                                    .map_err(|error| reason(&error));
-                                    reads.insert(key.clone(), read);
-                                }
-                                match &reads[&key] {
-                                    Ok(objects) => resolve_card(card, objects, selection, now, status.as_deref()),
-                                    Err(reason) => Resolved::Error { reason: reason.clone() },
-                                }
+                    let resolved = match source_binding(plugin, &card.source) {
+                        Err(error) => Resolved::Error { reason: reason(&error) },
+                        Ok(binding) => {
+                            let (namespace, selection) = read_scope(binding, &input.namespaces);
+                            let key = (card.source.clone(), namespace);
+                            if !reads.contains_key(&key) {
+                                let read = columns::reader_objects(
+                                    &snapshots, &client_cache, &core, plugin, &card.source,
+                                    &context, &key.1,
+                                )
+                                .await
+                                .map_err(|error| reason(&error));
+                                reads.insert(key.clone(), read);
+                            }
+                            match &reads[&key] {
+                                Ok(objects) => resolve_card(card, objects, selection, now, status.as_deref()),
+                                Err(reason) => Resolved::Error { reason: reason.clone() },
                             }
                         }
                     };
@@ -751,10 +747,12 @@ mod tests {
     }
 
     #[test]
-    fn count_by_status_waits_for_status_resolvers_rather_than_guessing() {
+    fn count_by_status_without_rules_is_an_error_never_a_count() {
+        // Installation refuses this card, so only a manifest the host should not
+        // hold gets here; it fails closed rather than guessing a status.
         let by_status = card(json!({"type":"countByStatus"}));
         let out = resolved(&by_status, &certificates(), None);
-        assert_eq!(out["state"], "unavailable", "{out}");
+        assert_eq!(out["state"], "error", "{out}");
         assert!(
             out["reason"].as_str().unwrap().contains("status resolver"),
             "{out}"
@@ -792,9 +790,26 @@ mod tests {
     }
 
     #[test]
-    fn the_host_has_no_status_resolver_until_541_lands() {
-        let manifest: Manifest = serde_json::from_str(&super::super::tests::manifest()).unwrap();
-        assert!(status_resolver(&manifest, "applications").is_none());
+    fn the_status_resolver_is_the_apps_own_rules_for_the_sources_kind() {
+        let mut value: Value = serde_json::from_str(&super::super::tests::manifest()).unwrap();
+        let bare: Manifest = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            status_resolver(&bare, "applications").is_none(),
+            "no rules, no resolver"
+        );
+        value["contributions"]["statusResolvers"] = json!([{
+            "forKinds":["argoproj.io/Application"],
+            "rules":[{"when":[{"jsonPath":".spec.suspend","equals":true}],"status":"suspended","label":"Paused"}]
+        }]);
+        let manifest: Manifest = serde_json::from_value(value).unwrap();
+        let resolve =
+            status_resolver(&manifest, "applications").expect("the reader's kind has rules");
+        assert_eq!(
+            resolve(&json!({"spec":{"suspend":true}})).as_deref(),
+            Some("Paused")
+        );
+        // No rule holds: Unknown, as the same object's badge on the app's list says.
+        assert_eq!(resolve(&json!({"spec":{}})).as_deref(), Some("Unknown"));
     }
 
     #[test]
@@ -905,6 +920,15 @@ mod tests {
             {"id":"all","title":"Applications","size":"l","type":"list","source":"applications"},
             {"id":"by-status","title":"By status","size":"m","type":"countByStatus","source":"applications"}
         ]);
+        // The app's own status rules (#541) for the kind its reader lists.
+        manifest["contributions"]["statusResolvers"] = json!([{
+            "forKinds":["argoproj.io/Application"],
+            "rules":[
+                {"when":[{"jsonPath":".status.health.status","equals":"Healthy"}],"status":"healthy","label":"Healthy"},
+                {"when":[{"jsonPath":".status.health.status","equals":"Degraded"}],"status":"error","label":"Degraded"},
+                {"when":[],"status":"unknown","label":"Unknown"}
+            ]
+        }]);
         let path = dir.path().join("extensions.json");
         let revision = mutate(
             &path,
@@ -959,7 +983,13 @@ mod tests {
             cards[1]["rows"][0],
             json!({"namespace":"team","name":"api"})
         );
-        assert_eq!(cards[2]["state"], "unavailable");
+        // Counted by the app's own status rules, from the same one list.
+        assert_eq!(
+            cards[2],
+            json!({"id":"by-status","state":"countByStatus","total":3,"statuses":[
+                {"status":"Degraded","count":2},{"status":"Healthy","count":1}
+            ]})
+        );
         let paths = paths.lock().unwrap().clone();
         // Three cards over one reader in one namespace: one list request.
         assert_eq!(paths.len(), 1, "{paths:?}");
@@ -1017,8 +1047,9 @@ mod tests {
                 "{card}"
             );
         }
-        // A card this host cannot make at all says so rather than blaming the cluster.
-        assert_eq!(out["cards"][2]["state"], "unavailable");
+        // A status card reads the cluster too, and a refused read is its error, not a zero.
+        assert_eq!(out["cards"][2]["state"], "error", "{out}");
+        assert!(out["cards"][2].get("total").is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]

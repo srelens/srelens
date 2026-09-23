@@ -625,8 +625,7 @@
 }
 /* None is an answer, drawn quieter than a count but still a figure. */
 .dashboard-card[data-state="zero"] .dashboard-card-figure { color: var(--ink-muted, var(--fl-color-text-muted)); }
-.dashboard-card-caption,
-.dashboard-card-note {
+.dashboard-card-caption {
   margin: 0;
   font-size: 0.75rem;
   color: var(--ink-muted, var(--fl-color-text-muted));
@@ -650,7 +649,6 @@
 }
 .dashboard-card-error p { margin: 0; }
 .dashboard-card-error strong { color: var(--sev, var(--fl-color-danger)); }
-.dashboard-card-note strong { color: var(--ink-soft, inherit); }
 .dashboard-card-statuses,
 .dashboard-card-rows {
   margin: 0.25rem 0 0;

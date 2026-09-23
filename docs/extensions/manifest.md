@@ -454,9 +454,14 @@ overview's namespace selection: one selected namespace is read directly, and
 none or several read every namespace and keep the selected ones. A
 cluster-scoped source ignores the selection. A card whose source cannot be read
 shows the reason and a retry instead of a figure, as does one whose source
-reached the 2,000-object read limit. A `countByStatus` card says it is not
-available until status resolvers exist
-([#541](https://github.com/srelens/srelens/issues/541)); it never counts by
+reached the 2,000-object read limit.
+
+A `countByStatus` card counts its objects by the
+[status resolver](#status-resolvers-and-badges) for its source's kind: each object
+takes the label of the first rule that holds, or *Unknown*, the same word its badge
+shows on the app's list. A `countByStatus` card over a reader whose kind has no
+`statusResolvers` entry, or whose reader does not fix `group` and `kind`, is refused
+at install at `contributions.dashboardCards[i].type`. It never counts by
 `statusColumns`.
 
 ## Rules the desktop app adds

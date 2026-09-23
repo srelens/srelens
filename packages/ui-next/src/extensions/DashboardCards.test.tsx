@@ -153,16 +153,15 @@ describe("DashboardCards", () => {
     }
   });
 
-  it("marks a card this host cannot make yet as unavailable, with no retry and no figure", async () => {
+  it("says a status card with nothing to count is none, not a failure", async () => {
     installed(app([card({ id: "s", title: "By status", type: "countByStatus", size: "m" })]));
-    answer([{ id: "s", state: "unavailable", reason: "Counting by status needs the app's status resolvers" }]);
+    answer([{ id: "s", state: "countByStatus", total: 0, statuses: [] }]);
     render(<DashboardCards context={CTX} />);
-    await waitFor(() => expect((cardRegion("By status")).getAttribute("data-state")).toBe("unavailable"));
+    await waitFor(() => expect((cardRegion("By status")).getAttribute("data-state")).toBe("zero"));
     const region = cardRegion("By status");
-    expect((region).textContent).toMatch(/Not available yet/);
-    expect((region).textContent).toMatch(/status resolvers/);
-    expect(within(region).queryByRole("button", { name: /Retry/ })).toBeNull();
-    expect((region).textContent).not.toMatch(/\d/);
+    expect(region.querySelector(".dashboard-card-figure")?.textContent).toBe("0");
+    expect((region).textContent).toMatch(/None match/);
+    expect(within(region).queryByRole("alert")).toBeNull();
   });
 
   it("draws each card type, and its size", async () => {

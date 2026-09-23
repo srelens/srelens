@@ -166,6 +166,32 @@ pub(super) fn card_problems(manifest: &Manifest, problems: &mut ValidationErrors
                 ),
             );
         }
+        // A status card counts by the app's rules for its source's kind (#541).
+        // Whether there are any is known from the manifest alone, so a card that
+        // could never show a figure is refused here rather than drawn blank.
+        // A source that is not a custom-resource reader is reported at `source`.
+        let reader = manifest.capabilities.iter().find(|binding| {
+            binding.name == card.source && binding.target == "k8s.listCustomResource"
+        });
+        if card.card_type == CardType::CountByStatus
+            && reader.is_some()
+            && manifest.status_rules_for_binding(&card.source).is_none()
+        {
+            let kind = reader.and_then(Manifest::reader_kind);
+            problems.push(
+                Code::InvalidBinding,
+                format!("{at}.type"),
+                match kind {
+                    Some(kind) => format!(
+                        "countByStatus counts by the status rules for {kind}; declare them in statusResolvers, or use count"
+                    ),
+                    None => format!(
+                        "countByStatus needs \"{}\" to fix its group and kind, so statusResolvers can name it",
+                        card.source
+                    ),
+                },
+            );
+        }
         if let Some(Err(why)) = card.predicate.as_ref().map(CardPredicate::check) {
             problems.push(Code::InvalidBinding, format!("{at}.predicate"), why);
         }

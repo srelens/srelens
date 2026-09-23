@@ -2686,6 +2686,23 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         .unwrap_or_else(|| panic!("the Flux example declares its card: {cards}"))
         .clone();
     assert_eq!(suspended["state"], "count", "{cards}");
+    // Counted by the example's own status resolver (#541): every object once.
+    let by_status = cards["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["id"] == "kustomizations-by-status")
+        .unwrap_or_else(|| panic!("the Flux example declares its status card: {cards}"))
+        .clone();
+    assert_eq!(by_status["state"], "countByStatus", "{cards}");
+    let per_status: u64 = by_status["statuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["count"].as_u64().unwrap())
+        .sum();
+    assert_eq!(per_status, by_status["total"].as_u64().unwrap(), "{cards}");
+    assert!(by_status["total"].as_u64().unwrap() >= 1, "{cards}");
     let counted = h
         .ok(
             "extensions.read",

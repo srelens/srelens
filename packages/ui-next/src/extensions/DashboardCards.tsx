@@ -25,12 +25,12 @@ import { extensionLabel, useExtensions } from "./inventoryStore";
  * The cluster dashboard's app cards (#540): one band of host-drawn figures,
  * each declared by an installed app over one of its granted readers.
  *
- * Every card is in exactly one of four states, and no two of them look
- * alike, because two of them are easy to confuse and the confusion is the
- * bug this repo keeps finding: **loading** has a spinner and no figure;
- * **couldn't read** has the reason and a retry, and no figure; **none** has a
- * figure, `0`, said as an answer; **not available yet** is a card this host
- * cannot make at all. A failed read is never drawn as zero.
+ * Every card is in exactly one of three states besides its figure, and no
+ * two of them look alike, because two of them are easy to confuse and the
+ * confusion is the bug this repo keeps finding: **loading** has a spinner and
+ * no figure; **couldn't read** has the reason and a retry, and no figure;
+ * **none** has a figure, `0`, said as an answer. A failed read is never drawn
+ * as zero.
  *
  * Nothing here renders app markup. Titles, names and values come from the
  * manifest or the cluster and are drawn through `plainText`.
@@ -174,13 +174,12 @@ function AppCards({
   );
 }
 
-type CardState = "loading" | "error" | "unavailable" | "zero" | "value";
+type CardState = "loading" | "error" | "zero" | "value";
 
 function stateOf(answer: ResolvedDashboardCard | undefined): CardState {
   if (!answer) return "loading";
   switch (answer.state) {
     case "error":
-    case "unavailable":
       return answer.state;
     case "count":
       return answer.count === 0 ? "zero" : "value";
@@ -262,12 +261,6 @@ function CardBody({
         </div>
       );
     }
-    case "unavailable":
-      return (
-        <p className="dashboard-card-note">
-          <strong>Not available yet</strong> · {plainText(answer.reason)}
-        </p>
-      );
     case "count":
       return (
         <>

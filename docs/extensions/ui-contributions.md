@@ -60,14 +60,15 @@ Failed reads keep their error and a retry; they never become zero-count summarie
 cards** band on the cluster overview, under the capacity strip, in the new design only.
 The band follows the cluster's namespace selection — the one the resource lists use —
 reads the cluster in focus by its stable ID, and has a **Refresh** action. Each card is
-in exactly one of four visibly different states:
+shows its figure or one of three visibly different states:
 
 - **Loading**: a spinner and no figure.
 - **Couldn't read**: the reason and a **Retry**, and no figure.
 - **None**: the figure `0` (or *No value* for an empty minimum or maximum), drawn
   quieter than a count.
-- **Not available yet**: a card this host cannot make at all, such as `countByStatus`
-  before status resolvers (#541); no retry, and no figure.
+
+A `countByStatus` card counts by the app's status resolver for its source's kind, one
+line per label, as the same objects' badges read on the app's list.
 
 A card with a `target` opens that app page narrowed to what the card counted; the page
 says so and offers the whole list. A card the app no longer declares is reported as

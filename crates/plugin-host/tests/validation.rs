@@ -715,7 +715,45 @@ fn with_cards() -> Value {
          "predicate":{"jsonPath":".status.notAfter","before":"30d"},
          "list":{"jsonPath":".status.notAfter","order":"asc","limit":5}}
     ]);
+    // A countByStatus card counts by the status rules for its source's kind (#541).
+    value["capabilities"][0]["arguments"] = json!({"group":"argoproj.io","kind":"Application"});
+    value["contributions"]["statusResolvers"] = json!([{
+        "forKinds":["argoproj.io/Application"],
+        "rules":[{"when":[],"status":"unknown","label":"Unknown"}]
+    }]);
     value
+}
+
+#[test]
+fn a_status_card_over_a_kind_with_no_status_rules_is_refused_at_install() {
+    // The manifest says statically whether the source's kind has rules; a card
+    // that could never show a figure is refused where the author can fix it.
+    let mut value = with_cards();
+    value["contributions"]["statusResolvers"] = json!([]);
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[(
+            "EXTENSION_INVALID_BINDING",
+            "contributions.dashboardCards[1].type"
+        )])
+    );
+    let error = errors(&value).remove(0);
+    assert!(
+        error.message.contains("argoproj.io/Application"),
+        "{}",
+        error.message
+    );
+    // A reader that does not fix its kind cannot have rules either.
+    let mut unkinded = with_cards();
+    unkinded["capabilities"][0]["arguments"] = json!({"group":"argoproj.io"});
+    unkinded["contributions"]["statusResolvers"] = json!([]);
+    assert_eq!(
+        problems(&errors(&unkinded)),
+        expected(&[(
+            "EXTENSION_INVALID_BINDING",
+            "contributions.dashboardCards[1].type"
+        )])
+    );
 }
 
 #[test]
@@ -888,4 +926,3 @@ fn a_manifest_declares_at_most_sixteen_cards() {
         .pop();
     assert!(Manifest::parse(&value.to_string()).is_ok());
 }
-

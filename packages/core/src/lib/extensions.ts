@@ -340,9 +340,9 @@ export const readExtension = <T = ExtensionResourceResult>(
     ...(card && namespaces?.length ? { namespaces } : {}),
   });
 /**
- * One dashboard card's answer. `error` is a read that failed and may succeed
- * on retry; `unavailable` is a card this host cannot make at all yet. Neither
- * carries a figure, so neither can be drawn as zero.
+ * One dashboard card's answer. `error` is a read that failed or a figure that
+ * could not be made, and carries no figure, so it can never be drawn as zero.
+ * `countByStatus` counts by the app's status rules (#541), one entry per label.
  */
 export type ResolvedDashboardCard = { id: string } & (
   | { state: "count"; count: number }
@@ -351,7 +351,6 @@ export type ResolvedDashboardCard = { id: string } & (
   | { state: "metric"; value: number | null; counted: number }
   | { state: "list"; total: number; rows: Array<{ namespace: string; name: string; value?: string }> }
   | { state: "error"; reason: string }
-  | { state: "unavailable"; reason: string }
 );
 /** Every card an enabled app declares, for one cluster and the dashboard's namespace selection. */
 export const resolveDashboardCards = (id: string, revision: number, context: string, namespaces: string[]) =>
