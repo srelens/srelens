@@ -1,4 +1,5 @@
 import { NativeComponent } from "../native-components/NativeComponent";
+import { Button } from "@srelens/ui-kit";
 import { contributionKind, extensionEnabledFor, resolveExtensionPanels,
   type ExtensionPanelFormat, type ExtensionResolvedPanel, type InstalledExtension } from "@srelens/core";
 import { plainText } from "./displayText";
@@ -29,10 +30,14 @@ export function ResolvedPanelView({ panel, onRetry }: { panel: ExtensionResolved
   return <section className="section extension-detail-panel" aria-label={panel.title}>
     <h4 className="extension-detail-heading">{plainText(panel.title)}</h4>
     {panel.sections.map((section, index) => section.type === "fields"
-      ? <NativeComponent key={index} label={`${panel.title} fields ${index + 1}`}
+      ? <div key={index}>
+        <NativeComponent label={`${panel.title} fields ${index + 1}`}
           payload={{ version:1, type:"KeyValue", data:{ items: section.fields.map(field => ({
             label: plainText(field.label), value: field.error ? `Couldn’t read: ${plainText(field.error)}` : shown(field.value, field.format),
           })) } }} onRetry={onRetry}/>
+        {section.fields.some(field => field.error) && <Button type="button" variant="ghost" size="sm"
+          onClick={onRetry}>Retry panel fields</Button>}
+      </div>
       : <NativeComponent key={index} label={`${panel.title} conditions ${index + 1}`}
           payload={{ version:1, type:"Conditions", data:{ items:section.items } }}
           state={section.error ? { status:"error", error:section.error } : undefined} onRetry={onRetry}/>

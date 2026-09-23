@@ -108,33 +108,16 @@ pub(super) fn register(
             let cache = cache.clone();
             async move {
                 check_input(&input)?;
-                let resolved = request_context(&client_cache, &input.context).await;
-                let state = tokio::task::spawn_blocking(move || read(&path))
-                    .await
-                    .map_err(|error| CapabilityError::Handler(error.to_string()))?
-                    .map_err(CapabilityError::Handler)?;
-                let plugin = state
-                    .plugins
-                    .iter()
-                    .find(|plugin| plugin.manifest.id == input.id)
-                    .ok_or_else(|| {
-                        CapabilityError::Handler("Extension was removed; refresh the view".into())
-                    })?;
-                if let Some(reason) = &plugin.policy_blocked {
-                    return Err(CapabilityError::Handler(reason.clone()));
-                }
-                if !plugin.enabled || plugin.revision != input.revision {
-                    return Err(CapabilityError::Handler(
-                        "Extension was disabled or updated; refresh the view".into(),
-                    ));
-                }
-                plugin.check_scope(&resolved)?;
-                validate_app(&plugin.manifest, &plugin.grants, core.clone())
-                    .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
-                let context = resolved
-                    .ok()
-                    .and_then(|context| context.pinned_id())
-                    .unwrap_or(input.context);
+                let (state, index, context) = resolver_app(
+                    path,
+                    &core,
+                    &client_cache,
+                    &input.id,
+                    input.revision,
+                    input.context,
+                )
+                .await?;
+                let plugin = &state.plugins[index];
                 let panels: Vec<_> = plugin
                     .manifest
                     .contributions
@@ -153,7 +136,7 @@ pub(super) fn register(
                         .ok_or_else(|| {
                             CapabilityError::Handler("Panel join is no longer declared".into())
                         })?;
-                    let objects = join_objects(
+                    let objects = match join_objects(
                         &cache,
                         &client_cache,
                         &core,
@@ -162,7 +145,14 @@ pub(super) fn register(
                         &context,
                         &input.namespace,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(objects) => objects,
+                        Err(error) => {
+                            sources.insert(join_id, Err(error.to_string()));
+                            continue;
+                        }
+                    };
                     let matched = match_joined(
                         &join.match_by,
                         &objects,
@@ -236,6 +226,8 @@ fn resolve_panel(panel: &DetailPanel, resource: &Value, sources: &PanelSources) 
                     json!({"type":"conditions","items":[],"error":"Conditions value is not an array"}),
                 Some(Value::Array(items)) if items.len() > 1_000 =>
                     json!({"type":"conditions","items":[],"error":"Conditions exceed the 1,000-item limit"}),
+                Some(Value::Array(items)) if items.iter().any(|item| !item.is_object()) =>
+                    json!({"type":"conditions","items":[],"error":"Conditions contain an entry that is not an object"}),
                 Some(Value::Array(items)) => json!({"type":"conditions","items":items.iter().map(|item| {
                     let mut condition = serde_json::Map::new();
                     for key in ["type","status","reason","message","lastTransitionTime","observedGeneration"] {
@@ -339,6 +331,15 @@ mod tests {
             resolved["sections"][0]["error"],
             "Conditions value is not an array"
         );
+        let resolved = resolve_panel(
+            &panel,
+            &json!({"status":{"conditions":["bad entry"]}}),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            resolved["sections"][0]["error"],
+            "Conditions contain an entry that is not an object"
+        );
     }
 
     #[tokio::test]
@@ -382,5 +383,60 @@ mod tests {
         let mut stale = input;
         stale["revision"] = json!(revision + 1);
         assert!(reg.invoke("extensions.resolvePanels", stale).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_join_preserves_fields_from_the_selected_resource() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let core = super::super::tests::fake_core();
+        let mut source: Value = serde_json::from_str(&super::super::tests::manifest()).unwrap();
+        source["contributions"]["joins"] = json!([{
+            "id":"related", "capability":"applications", "match":{"name":true}
+        }]);
+        source["contributions"]["detailPanels"] = json!([{
+            "id":"application", "title":"Application", "forKinds":["argoproj.io/Application"],
+            "sections":[{"type":"fields","fields":[
+                {"label":"Name","jsonPath":".metadata.name"},
+                {"label":"Related","join":"related","jsonPath":".metadata.name"}
+            ]}]
+        }]);
+        let revision = mutate(
+            &path,
+            core.clone(),
+            Configure::Install {
+                signature: None,
+                manifest: source.to_string(),
+                grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision: None,
+            },
+        )
+        .unwrap()
+        .plugins[0]
+            .revision;
+        let mut reg = Registry::new();
+        super::super::register(
+            &mut reg,
+            path,
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        let result = reg
+            .invoke(
+                "extensions.resolvePanels",
+                json!({
+                    "id":"org.example.argocd", "revision":revision, "context":"cluster/a",
+                    "namespace":"team", "kind":"argoproj.io/Application",
+                    "resource":{"apiVersion":"argoproj.io/v1alpha1","kind":"Application",
+                        "metadata":{"name":"app","namespace":"team"}}
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result["panels"][0]["sections"][0]["fields"][0]["value"],
+            "app"
+        );
+        assert!(result["panels"][0]["sections"][0]["fields"][1]["error"].is_string());
     }
 }

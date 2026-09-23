@@ -270,6 +270,10 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   custom-resource reader and `tableColumns` with a row or joined `jsonPath`.
   `extensions.resolveColumns` batches up to 1,000 rows per request and reports
   failed reads explicitly (#538). See [Manifest reference](manifest.md#table-columns-and-joins).
+- Apps may declare `detailPanels` with fields and conditions for matching
+  resources. `extensions.resolvePanels` rechecks the installed app's revision,
+  grants and cluster scope (#539). These manifests require a host with #539;
+  see the [manifest reference](manifest.md#detailpanels).
 - Unsigned apps declaring write actions require the default-off inventory policy
   described above (#558). Turning it off disables affected installations without
   removing them; normal read-only declarative permission grants are unchanged.

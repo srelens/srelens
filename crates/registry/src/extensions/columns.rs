@@ -345,33 +345,16 @@ pub(super) fn register(
             let cache = cache.clone();
             async move {
                 check_input(&input)?;
-                let resolved = request_context(&client_cache, &input.context).await;
-                let state = tokio::task::spawn_blocking(move || read(&path))
-                    .await
-                    .map_err(|error| CapabilityError::Handler(error.to_string()))?
-                    .map_err(CapabilityError::Handler)?;
-                let plugin = state
-                    .plugins
-                    .iter()
-                    .find(|plugin| plugin.manifest.id == input.id)
-                    .ok_or_else(|| {
-                        CapabilityError::Handler("Extension was removed; refresh the view".into())
-                    })?;
-                if let Some(reason) = &plugin.policy_blocked {
-                    return Err(CapabilityError::Handler(reason.clone()));
-                }
-                if !plugin.enabled || plugin.revision != input.revision {
-                    return Err(CapabilityError::Handler(
-                        "Extension was disabled or updated; refresh the view".into(),
-                    ));
-                }
-                plugin.check_scope(&resolved)?;
-                validate_app(&plugin.manifest, &plugin.grants, core.clone())
-                    .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
-                let context = resolved
-                    .ok()
-                    .and_then(|context| context.pinned_id())
-                    .unwrap_or(input.context);
+                let (state, index, context) = resolver_app(
+                    path,
+                    &core,
+                    &client_cache,
+                    &input.id,
+                    input.revision,
+                    input.context,
+                )
+                .await?;
+                let plugin = &state.plugins[index];
                 let columns: Vec<_> = plugin
                     .manifest
                     .contributions
