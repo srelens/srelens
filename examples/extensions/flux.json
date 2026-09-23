@@ -687,6 +687,36 @@
         "group": "Notifications"
       }
     ],
+    "detailPanels": [
+      {
+        "id": "kustomization-summary",
+        "title": "Kustomization",
+        "forKinds": ["kustomize.toolkit.fluxcd.io/Kustomization"],
+        "sections": [
+          {"type": "fields", "fields": [
+            {"label": "Source reference", "jsonPath": ".spec.sourceRef.name"},
+            {"label": "Path", "jsonPath": ".spec.path"},
+            {"label": "Suspended", "jsonPath": ".spec.suspend"},
+            {"label": "Prune", "jsonPath": ".spec.prune"},
+            {"label": "Wait for readiness", "jsonPath": ".spec.wait"}
+          ]}
+        ]
+      },
+      {
+        "id": "helm-release-summary",
+        "title": "Helm release",
+        "forKinds": ["helm.toolkit.fluxcd.io/HelmRelease"],
+        "sections": [
+          {"type": "fields", "fields": [
+            {"label": "Chart", "jsonPath": ".spec.chart.spec.chart"},
+            {"label": "Version", "jsonPath": ".spec.chart.spec.version"},
+            {"label": "Release name", "jsonPath": ".spec.releaseName"},
+            {"label": "Suspended", "jsonPath": ".spec.suspend"},
+            {"label": "Interval", "jsonPath": ".spec.interval"}
+          ]}
+        ]
+      }
+    ],
     "detailTabs": [
       {
         "id": "namespace-resources",

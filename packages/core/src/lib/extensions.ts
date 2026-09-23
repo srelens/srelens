@@ -39,6 +39,22 @@ export interface ExtensionTableColumn {
   sortable?: boolean;
   filterable?: boolean;
 }
+export type ExtensionPanelFormat = ExtensionTableColumn["format"];
+export interface ExtensionDetailField {
+  label: string;
+  jsonPath: string;
+  join?: string;
+  format?: ExtensionPanelFormat;
+}
+export type ExtensionDetailSection =
+  | { type: "fields"; fields: ExtensionDetailField[] }
+  | { type: "conditions"; jsonPath: string; join?: string };
+export interface ExtensionDetailPanel {
+  id: string;
+  title: string;
+  forKinds: string[];
+  sections: ExtensionDetailSection[];
+}
 export interface ExtensionManifest {
   /** Editor metadata naming the manifest's JSON Schema; the host ignores it. */
   $schema?: string;
@@ -90,6 +106,7 @@ export interface ExtensionManifest {
     detailLinks: ExtensionDetailLink[];
     joins?: ExtensionJoin[];
     tableColumns?: ExtensionTableColumn[];
+    detailPanels?: ExtensionDetailPanel[];
   };
 }
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */
@@ -234,6 +251,19 @@ export const resolveExtensionColumns = (
   uids: ExtensionColumnRow[],
 ) => invokeCapability<ExtensionColumnResult>("extensions.resolveColumns", {
   id, revision, context, namespace, kind, uids,
+});
+export type ExtensionResolvedPanel = {
+  id: string;
+  title: string;
+  sections: Array<
+    { type: "fields"; fields: Array<{ label: string; value: string | null; format?: ExtensionPanelFormat; error?: string }> }
+    | { type: "conditions"; items: Array<{ type: string; status: "True" | "False" | "Unknown"; reason?: string; message?: string; observedGeneration?: number; lastTransitionTime?: string }>; error?: string }
+  >;
+};
+export const resolveExtensionPanels = (
+  id: string, revision: number, context: string, namespace: string, kind: string, resource: object,
+) => invokeCapability<{ panels: ExtensionResolvedPanel[] }>("extensions.resolvePanels", {
+  id, revision, context, namespace, kind, resource,
 });
 export function extensionRoute(
   context: string,

@@ -13,14 +13,14 @@ const CACHE_LIMIT: usize = 32;
 type Snapshot = (Instant, Arc<Vec<Value>>);
 type SlotState = Result<Option<Snapshot>, (Instant, CapabilityError)>;
 #[derive(Clone, Hash, PartialEq, Eq)]
-struct CacheKey {
+pub(super) struct CacheKey {
     app: String,
     revision: u64,
     context: String,
     namespace: String,
     reader: String,
 }
-type JoinCache = Arc<Mutex<HashMap<CacheKey, Arc<tokio::sync::Mutex<SlotState>>>>>;
+pub(super) type JoinCache = Arc<Mutex<HashMap<CacheKey, Arc<tokio::sync::Mutex<SlotState>>>>>;
 
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -202,7 +202,7 @@ where
     Ok(objects)
 }
 
-async fn join_objects(
+pub(super) async fn join_objects(
     cache: &JoinCache,
     client_cache: &srelens_kube::client_cache::ClientCache,
     core: &Registry,
@@ -327,6 +327,13 @@ pub(super) fn register(
     client_cache: Arc<srelens_kube::client_cache::ClientCache>,
 ) {
     let cache: JoinCache = Arc::new(Mutex::new(HashMap::new()));
+    super::panels::register(
+        reg,
+        path.clone(),
+        core.clone(),
+        client_cache.clone(),
+        cache.clone(),
+    );
     reg.register(Capability::typed::<ResolveColumns, ResolvedColumns, _, _>(
         "extensions.resolveColumns",
         "Resolve native extension table columns in one batch",
@@ -506,6 +513,23 @@ fn joined<'a>(
         (Some(Some(position)), None) | (None, Some(Some(position))) => Ok(objects.get(*position)),
         (None, None) => Ok(None),
     }
+}
+
+pub(super) fn match_joined<'a>(
+    rule: &JoinMatch,
+    objects: &'a [Value],
+    uid: Option<&str>,
+    name: &str,
+    namespace: &str,
+    kind: &str,
+) -> Result<Option<&'a Value>, ()> {
+    let row = ColumnRow {
+        uid: uid.map(str::to_owned),
+        name: name.to_owned(),
+        namespace: namespace.to_owned(),
+        row: Value::Null,
+    };
+    joined(rule, objects, &index_join(rule, objects), &row, kind)
 }
 
 #[cfg(test)]

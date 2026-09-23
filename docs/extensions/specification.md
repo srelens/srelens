@@ -120,10 +120,11 @@ Why a new field needs a new minor even though it is optional: manifests are stri
 (see below), so a host that predates the field would reject it. Requiring the minor
 turns that into a clear "requires API 0.x" message.
 
-Pre-1.0 exception for #538: `contributions.joins` and `contributions.tableColumns`
+Pre-1.0 exception for #538 and #539: `contributions.joins`,
+`contributions.tableColumns`, and `contributions.detailPanels`
 were added to API 0.3 in place while the extension platform is still being built.
-The existing signed Flux and Argo CD 0.3 manifests contain neither field and remain
-valid; a manifest using either field requires a host that includes #538. No alias or
+Earlier signed Flux and Argo CD 0.3 releases without these fields remain valid;
+a manifest using `detailPanels` requires a host that includes #539. No alias or
 older API line is retained for this exception.
 
 The host enforces this for fields. `API_FIELDS` in `crates/plugin-host/src/manifest.rs`

@@ -3,8 +3,8 @@ import argoManifest from "../../../../examples/extensions/argocd.json";
 const declaredMeta = Object.fromEntries([...fluxManifest.actions.filter(action=>action.resource==="helmreleases").map(action=>({...action,name:action.name.replace("helmreleases-","")})),...argoManifest.actions].map(action=>[action.name,{title:action.title,availableWhen:("availableWhen" in action?action.availableWhen:[]) as import("@srelens/core").ActionPredicate[],impact:"medium" as const,confirm:null}]));
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn()}));
-import { inspectExtensionResource, actOnExtensionResource, listExtensions, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
+vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn(),resolveExtensionPanels:vi.fn()}));
+import { inspectExtensionResource, actOnExtensionResource, listExtensions, resolveExtensionPanels, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 const selection = {id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"cluster/a",namespace:"team",name:"apps"};
 const detail = {resource:{apiVersion:"kustomize.toolkit.fluxcd.io/v1",kind:"Kustomization",metadata:{name:"apps",namespace:"team",uid:"uid-a",resourceVersion:"12"},spec:{suspend:false,path:"./apps",sourceRef:{kind:"GitRepository",name:"platform-config"}},status:{conditions:[{type:"Ready",status:"False",reason:"BuildFailed",message:"Missing source"}],lastAppliedRevision:"main@sha1:abcdef"}},actions:["suspend","resume","reconcile"],actionMeta:declaredMeta};
@@ -15,7 +15,7 @@ it("shows overview and conditions, then confirms the exact pinned resource befor
  expect(screen.getByText("./apps")).toBeTruthy();
  // Like the real wrapper, an accepted action announces the resource; the view refreshes from that.
  vi.mocked(actOnExtensionResource).mockImplementation(async resource=>{window.dispatchEvent(new CustomEvent(EXTENSION_RESOURCE_CHANGED,{detail:resource}));return {requested:true};});
- expect(screen.getByText("Source reference")).toBeTruthy();
+ expect(screen.getByText("Source Ref")).toBeTruthy();
  expect(screen.getByText("platform-config")).toBeTruthy();
  expect(screen.queryByText("View fields")).toBeNull();
  fireEvent.click(screen.getByRole("button",{name:"Suspend"}));
@@ -229,6 +229,22 @@ function installedApps(plugins:unknown[]) {
  vi.mocked(listExtensions).mockResolvedValue({schemaVersion:1,nextRevision:1,plugins} as never);
 }
 const fluxApp={manifest:{id:"org.srelens.flux",name:"Flux Tools",version:"1.0.0",srelensApiVersion:"1",kind:"declarative",permissions:[],capabilities:[],contributions:{pages:[],detailTabs:[],detailLinks:[]}},enabled:true,revision:1,grants:[],settings:{},source:"local",installedAt:0,history:[]};
+
+it("renders a declared app panel after the host overview sections", async () => {
+ const app={...fluxApp,manifest:{...fluxApp.manifest,contributions:{...fluxApp.manifest.contributions,detailPanels:[{
+  id:"summary",title:"App summary",forKinds:["kustomize.toolkit.fluxcd.io/Kustomization"],
+  sections:[{type:"fields",fields:[{label:"Path",jsonPath:".spec.path"}]}],
+ }]}}};
+ installedApps([app]);
+ vi.mocked(resolveExtensionPanels).mockResolvedValue({panels:[{id:"summary",title:"App summary",sections:[
+  {type:"fields",fields:[{label:"Path",value:"./apps"},{label:"Missing",value:null}]},
+ ]}]});
+ render(<ExtensionResourceDetails selection={selection}/>);
+ expect(await screen.findByRole("heading",{name:"App summary"})).toBeTruthy();
+ expect(screen.getByText("Missing").parentElement?.textContent).toContain("—");
+ expect(resolveExtensionPanels).toHaveBeenCalledWith("org.srelens.flux",1,"cluster/a","team",
+  "kustomize.toolkit.fluxcd.io/Kustomization",detail.resource);
+});
 const withMeta={...detail,actionMeta:{...declaredMeta,suspend:{...declaredMeta.suspend,impact:"high" as const,confirm:"Suspend[ {resource}][ in cluster {cluster}]?"}}};
 afterEach(()=>{delete (window as unknown as Record<string,unknown>).__TAURI_INTERNALS__;});
 

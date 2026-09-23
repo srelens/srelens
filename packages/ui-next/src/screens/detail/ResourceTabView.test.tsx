@@ -35,6 +35,9 @@ const { descriptorFor } = vi.hoisted(() => ({
 }));
 
 vi.mock("../../lib/kinds/descriptors", () => ({ descriptorFor }));
+vi.mock("../../extensions/ExtensionPanelSlot", () => ({
+  ExtensionPanelSlot: ({resource}:{resource:K8sObject}) => <section className="section" data-testid="extension-panel-slot">{resource.kind} app panels</section>,
+}));
 
 import { ConsoleProvider } from "../../console";
 import { loadSectionFolds, setSectionOpen } from "../../lib/sectionFolds";
@@ -294,6 +297,13 @@ describe("ResourceTabView — the full tab the design draws", () => {
   });
 
   describe("Overview", () => {
+    it("places declared app panels after the host's Overview sections", async () => {
+      await openPod();
+      const slot = screen.getByTestId("extension-panel-slot");
+      expect(slot.textContent).toBe("Pod app panels");
+      const facts = document.querySelector("[data-slot='fact-grid']")!;
+      expect(facts.compareDocumentPosition(slot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
     it("lays the facts out as three columns of label-above-value, in a grid of its own", async () => {
       await openPod();
       // THIS SCREEN'S grid, built here — not the peek's rows restyled from
