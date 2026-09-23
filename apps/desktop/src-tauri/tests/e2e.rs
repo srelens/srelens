@@ -2667,6 +2667,40 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         .await;
     assert_eq!(columns["columns"], json!([]), "{columns}");
     assert_eq!(columns["cells"][0]["name"], KUSTOMIZATION, "{columns}");
+    // The dashboard card and its target page answer from one snapshot, so the
+    // page shows exactly as many rows as the card counted, whatever it counted.
+    let cards = h
+        .ok(
+            "extensions.resolveCards",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespaces": [NS],
+            }),
+        )
+        .await;
+    let suspended = cards["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["id"] == "suspended-kustomizations")
+        .unwrap_or_else(|| panic!("the Flux example declares its card: {cards}"))
+        .clone();
+    assert_eq!(suspended["state"], "count", "{cards}");
+    let counted = h
+        .ok(
+            "extensions.read",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "capability": "kustomizations", "context": ctx, "namespace": NS,
+                "card": "suspended-kustomizations",
+            }),
+        )
+        .await;
+    assert_eq!(
+        counted["items"].as_array().unwrap().len() as u64,
+        suspended["count"].as_u64().unwrap(),
+        "{counted}"
+    );
     for app in [&argocd_app] {
         let out = h
             .ok(

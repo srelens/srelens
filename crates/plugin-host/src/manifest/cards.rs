@@ -171,10 +171,18 @@ pub(super) fn card_problems(manifest: &Manifest, problems: &mut ValidationErrors
                 ),
                 // The target shows the card's objects filtered by its predicate, so it
                 // must list the same source; a dashboard page lists no objects at all.
-                Some(page) if page.capability != card.source || page.dashboard.is_some() => problems.push(
+                Some(page) if page.dashboard.is_some() => problems.push(
                     Code::InvalidBinding,
                     path,
-                    format!("Page \"{}\" does not list \"{}\", so it cannot show what this card counts", target.page, card.source),
+                    format!("Page \"{}\" is a dashboard, so it cannot show the objects this card counts", target.page),
+                ),
+                Some(page) if page.capability != card.source => problems.push(
+                    Code::InvalidBinding,
+                    path,
+                    format!(
+                        "Page \"{}\" lists \"{}\", not this card's source \"{}\"",
+                        target.page, page.capability, card.source
+                    ),
                 ),
                 Some(_) => {}
             }

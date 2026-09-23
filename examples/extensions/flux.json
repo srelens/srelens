@@ -706,6 +706,22 @@
           "/Namespace"
         ]
       }
+    ],
+    "dashboardCards": [
+      {
+        "id": "suspended-kustomizations",
+        "title": "Suspended Kustomizations",
+        "size": "s",
+        "type": "count",
+        "source": "kustomizations",
+        "predicate": {
+          "jsonPath": ".spec.suspend",
+          "equals": true
+        },
+        "target": {
+          "page": "kustomizations"
+        }
+      }
     ]
   },
   "actions": [
