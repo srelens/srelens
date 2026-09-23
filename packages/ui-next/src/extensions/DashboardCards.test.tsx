@@ -173,6 +173,7 @@ describe("DashboardCards", () => {
     // A minimum of nothing is no value, not zero.
     expect((cardRegion("Oldest")).getAttribute("data-state")).toBe("zero");
     expect((cardRegion("Oldest")).textContent).toMatch(/No value/);
+    expect((cardRegion("Oldest")).textContent).toMatch(/No matching resource has a number at \.report\.age/);
     expect((cardRegion("Oldest")).textContent).not.toMatch(/\b0\b/);
     const list = cardRegion("Soonest");
     expect((list).getAttribute("data-size")).toBe("l");

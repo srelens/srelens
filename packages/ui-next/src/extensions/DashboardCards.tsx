@@ -279,7 +279,9 @@ function CardBody({
         return (
           <>
             <p className="dashboard-card-figure">No value</p>
-            <p className="dashboard-card-caption">No matching resource carries a number to take the {aggregate.toLowerCase()} of</p>
+            <p className="dashboard-card-caption">
+              No matching resource has a number at <span className="path">{plainText(card.metric?.jsonPath ?? "")}</span>
+            </p>
           </>
         );
       }
