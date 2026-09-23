@@ -433,6 +433,9 @@ fn write(path: &Path, state: &Inventory) -> Result<(), String> {
     }
     crate::durable::replace(path, &raw).map_err(|e| format!("save extension inventory: {e}"))
 }
+/// The `k8s.listCustomResource` input the host fills from `statusResolvers`.
+const STATUS_RULES_ARGUMENT: &str = "statusRules";
+
 /// The manifest's own rules and this app's narrower ones, reporting every violation.
 fn validate_app(
     manifest: &Manifest,
@@ -551,6 +554,16 @@ fn validate_app(
                 );
             }
         }
+        // The host copies a kind's `statusResolvers` rules into the read it
+        // sends; a second spelling in the binding would leave two rule lists
+        // for one kind and the reader picking whichever it looked at.
+        if binding.arguments.contains_key(STATUS_RULES_ARGUMENT) {
+            problems.push(
+                Code::InvalidBinding,
+                format!("{at}.arguments.{STATUS_RULES_ARGUMENT}"),
+                "Status rules are declared in contributions.statusResolvers",
+            );
+        }
         match binding.arguments.get("namespaced") {
             Some(Value::Bool(true)) if !accepts("namespace") => problems.push(
                 Code::InvalidBinding,
@@ -603,6 +616,25 @@ fn validate_app(
                 at,
                 "This host does not provide the action primitive",
             );
+        }
+    }
+    // A badge sits on a row of a built-in table the host lists itself. The
+    // kind must be one this host reads in exactly that group, and never a
+    // Secret, whose metadata the host redacts on every ungated read.
+    for (index, badge) in manifest.contributions.badges.iter().enumerate() {
+        for (position, kind) in badge.for_kinds.iter().enumerate() {
+            let Some((group, name)) = kind.split_once('/') else {
+                continue; // Reported by the manifest's own rules.
+            };
+            let builtin = srelens_kube::manifest::gvk_for(name)
+                .is_some_and(|(gvk, _)| gvk.group == group && gvk.kind == name);
+            if !builtin || (group.is_empty() && name == "Secret") {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("contributions.badges[{index}].forKinds[{position}]"),
+                    format!("{kind} is not a built-in kind this host badges"),
+                );
+            }
         }
     }
     // Built-in groups such as apps are not custom resources, whatever their syntax.
@@ -1252,6 +1284,25 @@ pub fn register(
                 validate_app(&plugin.manifest, &plugin.grants, c.clone())
                     .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
                 let mut manifest = plugin.manifest.clone();
+                // The kind's status rules travel in the host's binding, copied
+                // out of `statusResolvers` the way an action's preconditions
+                // are: the reader evaluates them on the whole object, which
+                // never leaves it (#541).
+                if let Some(rules) = plugin
+                    .manifest
+                    .status_rules_for_binding(&input.capability)
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|e| CapabilityError::Handler(format!("status rules: {e}")))?
+                {
+                    if let Some(binding) = manifest.capabilities.iter_mut().find(|b| {
+                        b.name == input.capability && b.target == "k8s.listCustomResource"
+                    }) {
+                        binding
+                            .arguments
+                            .insert(STATUS_RULES_ARGUMENT.into(), rules);
+                    }
+                }
                 if input.use_crd_columns {
                     if let Some(binding) = manifest.capabilities.iter_mut().find(|b| {
                         b.name == input.capability && b.target == "k8s.listCustomResource"
@@ -2230,7 +2281,7 @@ mod tests {
         assert!(validate_app(&parsed, &grants, core.clone()).is_ok());
         assert!(validate_app(&parsed, &without_events, core.clone()).is_err());
         value["contributions"]["pages"][1]["capability"] = json!("events");
-        let invalid = Manifest::parse(&value.to_string()).unwrap();
+        let invalid = Manifest::decode(&value.to_string()).unwrap();
         assert!(validate_app(&invalid, &grants, core).is_err());
     }
 
@@ -2324,7 +2375,10 @@ mod tests {
         writing_reader["capabilities"][0]["arguments"] =
             json!({"key":"a.example.io/b","value":"$now"});
         writing_reader["permissions"] = json!(["k8s.annotate"]);
-        let parsed = Manifest::parse(&writing_reader.to_string()).unwrap();
+        // Decoded, not parsed: the manifest's own rules also refuse it now
+        // (its status resolver names a kind no reader lists), and this case
+        // is about what `validate_app` says of the reader's target.
+        let parsed = Manifest::decode(&writing_reader.to_string()).unwrap();
         let refused = validate_app(&parsed, &["k8s.annotate".into()], core.clone()).unwrap_err();
         assert!(
             refused
@@ -2756,6 +2810,108 @@ mod tests {
         .plugins[0]
             .revision
     }
+    /// The example manifest with a status resolver for its Application reader.
+    fn manifest_with_status() -> Value {
+        let mut value: Value = serde_json::from_str(&manifest()).unwrap();
+        value["contributions"]["statusResolvers"] = json!([{
+            "forKinds": ["argoproj.io/Application"],
+            "rules": [
+                {"when": [{"jsonPath": ".status.health.status", "equals": "Healthy"}],
+                 "status": "healthy", "label": "Healthy"},
+                {"when": [], "status": "unknown", "label": "Unknown"}
+            ]
+        }]);
+        value
+    }
+
+    #[tokio::test]
+    async fn a_read_binds_the_status_rules_declared_for_the_readers_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("extensions.json");
+        let core = fake_core();
+        let declared = manifest_with_status();
+        let revision = mutate(
+            &path,
+            core.clone(),
+            Configure::Install {
+                signature: None,
+                manifest: declared.to_string(),
+                grants: vec!["k8s.listCustomResource".into()],
+                reviewed_revision: None,
+            },
+        )
+        .unwrap()
+        .plugins[0]
+            .revision;
+        let mut reader = Registry::new();
+        register(
+            &mut reader,
+            path.clone(),
+            core.clone(),
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        // `fake_core`'s reader echoes what it was sent: the host's binding,
+        // with the rules copied out of the manifest under the reader's
+        // camelCase input name.
+        let sent = reader
+            .invoke(
+                "extensions.read",
+                json!({"id":"org.example.argocd","revision":revision,"capability":"applications",
+                    "context":"staging","namespace":"argo"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sent["statusRules"],
+            declared["contributions"]["statusResolvers"][0]["rules"]
+        );
+        // Without a resolver, nothing is bound.
+        let revision = install(&path, core.clone());
+        let sent = reader
+            .invoke(
+                "extensions.read",
+                json!({"id":"org.example.argocd","revision":revision,"capability":"applications",
+                    "context":"staging","namespace":"argo"}),
+            )
+            .await
+            .unwrap();
+        assert!(sent.get("statusRules").is_none(), "{sent}");
+    }
+
+    #[test]
+    fn status_rules_are_the_hosts_to_bind_and_badges_sit_on_built_in_kinds() {
+        let core = fake_core();
+        let grants = vec!["k8s.listCustomResource".to_owned()];
+        let paths = |value: &Value| {
+            let manifest: Manifest = serde_json::from_value(value.clone()).unwrap();
+            let mut found: Vec<String> = validate_app(&manifest, &grants, core.clone())
+                .err()
+                .map(|errors| errors.0.into_iter().map(|e| e.path).collect())
+                .unwrap_or_default();
+            found.sort();
+            found
+        };
+        let mut value = manifest_with_status();
+        assert_eq!(paths(&value), Vec::<String>::new());
+        // One spelling: an app does not bind the reader's rules itself.
+        value["capabilities"][0]["arguments"]["statusRules"] = json!([]);
+        assert_eq!(paths(&value), vec!["capabilities[0].arguments.statusRules"]);
+        let mut value = manifest_with_status();
+        value["contributions"]["badges"] = json!([{
+            "id": "argo", "forKinds": ["apps/Deployment", "/Secret", "argoproj.io/Application", "acme.io/Deployment"],
+            "rules": [{"when": [{"jsonPath": ".metadata.annotations['argocd.argoproj.io/tracking-id']", "present": true}],
+                "status": "healthy", "label": "Argo CD"}]
+        }]);
+        assert_eq!(
+            paths(&value),
+            vec![
+                "contributions.badges[0].forKinds[1]",
+                "contributions.badges[0].forKinds[2]",
+                "contributions.badges[0].forKinds[3]",
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn reads_are_bound_to_host_scope_and_revoked_across_registry_instances() {
         let dir = tempfile::tempdir().unwrap();

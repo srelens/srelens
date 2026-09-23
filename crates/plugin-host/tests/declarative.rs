@@ -272,6 +272,106 @@ fn gitops_examples_declare_curated_inspector_panels() {
 }
 
 #[test]
+fn the_gitops_examples_resolve_status_with_rules_and_badge_workloads() {
+    use srelens_capability::status::{first_match, resolve_status, NormalizedStatus as S};
+    let flux = Manifest::parse(include_str!("../../../examples/extensions/flux.json")).unwrap();
+    let argo = Manifest::parse(include_str!("../../../examples/extensions/argocd.json")).unwrap();
+    for manifest in [&flux, &argo] {
+        // Migrated: no page counts by printer-column index any more, and
+        // every custom-resource reader's kind has a resolver.
+        assert!(manifest
+            .contributions
+            .pages
+            .iter()
+            .all(|page| page.status_columns.is_none()));
+        for binding in &manifest.capabilities {
+            if let Some(kind) = Manifest::reader_kind(binding) {
+                assert!(
+                    manifest.status_rules_for(&kind).is_some(),
+                    "{} has no resolver for {kind}",
+                    manifest.id
+                );
+            }
+        }
+    }
+    let flux_rules = flux
+        .status_rules_for("helm.toolkit.fluxcd.io/HelmRelease")
+        .unwrap();
+    let ready = |status: &str, message: &str| {
+        json!({"spec":{},"status":{"conditions":[
+            {"type":"Reconciling","status":"False","message":"idle"},
+            {"type":"Ready","status":status,"message":message}]}})
+    };
+    let resolved = |rules, object: Value| {
+        let got = resolve_status(rules, &object);
+        (got.status, got.label, got.reason)
+    };
+    assert_eq!(
+        resolved(flux_rules, ready("True", "Release reconciliation succeeded")),
+        (S::Healthy, "Ready".into(), None)
+    );
+    assert_eq!(
+        resolved(flux_rules, ready("False", "install retries exhausted")),
+        (
+            S::Error,
+            "Not ready".into(),
+            Some("install retries exhausted".into())
+        )
+    );
+    let mut suspended = ready("True", "ok");
+    suspended["spec"]["suspend"] = json!(true);
+    assert_eq!(resolved(flux_rules, suspended).0, S::Suspended);
+    assert_eq!(resolved(flux_rules, json!({})).0, S::Unknown);
+
+    let argo_rules = argo.status_rules_for("argoproj.io/Application").unwrap();
+    let app = |health: &str, sync: &str| {
+        json!({"status":{"health":{"status":health,"message":"waiting for rollout"},
+            "sync":{"status":sync,"revision":"abc123"}}})
+    };
+    assert_eq!(resolved(argo_rules, app("Healthy", "Synced")).0, S::Healthy);
+    assert_eq!(
+        resolved(argo_rules, app("Healthy", "OutOfSync")),
+        (S::Warning, "Out of sync".into(), Some("abc123".into()))
+    );
+    assert_eq!(resolved(argo_rules, app("Degraded", "Synced")).0, S::Error);
+    assert_eq!(
+        resolved(argo_rules, app("Progressing", "Synced")).0,
+        S::Progressing
+    );
+    assert_eq!(resolved(argo_rules, app("Suspended", "Synced")).0, S::Suspended);
+
+    // GitOps ownership on built-in workloads: the exit criterion of #517.
+    let owned = |manifest: &Manifest, metadata: Value| {
+        let badge = &manifest.contributions.badges[0];
+        assert!(badge.for_kinds.iter().any(|kind| kind == "apps/Deployment"));
+        assert!(badge.join.is_none());
+        first_match(&badge.rules, &json!({ "metadata": metadata })).map(|b| (b.label, b.reason))
+    };
+    assert_eq!(
+        owned(&flux, json!({"labels":{"kustomize.toolkit.fluxcd.io/name":"apps"}})),
+        Some(("Flux".into(), Some("apps".into())))
+    );
+    assert_eq!(
+        owned(&flux, json!({"labels":{"helm.toolkit.fluxcd.io/name":"podinfo"}})),
+        Some(("Flux".into(), Some("podinfo".into())))
+    );
+    assert_eq!(
+        owned(&argo, json!({"annotations":{"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/guestbook"}})),
+        Some((
+            "Argo CD".into(),
+            Some("guestbook:apps/Deployment:team/guestbook".into())
+        ))
+    );
+    // `app.kubernetes.io/instance` alone is Helm's label too; it is not
+    // ownership by Argo CD.
+    assert_eq!(
+        owned(&argo, json!({"labels":{"app.kubernetes.io/instance":"guestbook"}})),
+        None
+    );
+    assert_eq!(owned(&flux, json!({})), None);
+}
+
+#[test]
 fn a_later_invalid_binding_does_not_partially_register() {
     let mut value = manifest();
     let mut second = value["capabilities"][0].clone();

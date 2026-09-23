@@ -11,9 +11,13 @@
 //!
 //! What a predicate can say is deliberately small. The comparand is a literal
 //! written into the manifest, the path is a fixed address into the object, and
-//! there is no way to name a second object, call a function or write a filter:
-//! a predicate is one question about one value, asked the same way every time.
-//! That is what makes it checkable at install rather than only when it runs.
+//! there is no way to name a second object, call a function or write a filter
+//! that selects more than one element: a predicate is one question about one
+//! value, asked the same way every time. That is what makes it checkable at
+//! install rather than only when it runs.
+//!
+//! Status rules (#541) ask their questions with [`Condition`], which is a
+//! predicate without the refusal sentence, evaluated by this same code.
 
 use crate::text::escape_invisible;
 use schemars::JsonSchema;
@@ -47,7 +51,8 @@ pub struct Predicate {
     /// The value this predicate asks about, as a bounded JSONPath subset:
     /// `.spec.suspend`, `.metadata.annotations['acme.io/pinned']`,
     /// `.status.conditions[0].status`. The grammar is the bounded subset the
-    /// module documents: no wildcard, filter or recursive descent.
+    /// module documents: no wildcard or recursive descent, and one filter
+    /// form, `[?(@.type=="Ready")]`, that selects the first matching element.
     #[serde(rename = "jsonPath")]
     pub json_path: String,
     /// The value at `jsonPath` must equal this literal.
@@ -69,6 +74,99 @@ pub struct Predicate {
     pub reason: String,
 }
 
+/// One question about one value, without a sentence to say when it fails.
+///
+/// A [`Predicate`] is a condition plus the reason an operator is told when it
+/// does not hold. A status rule (#541) asks which of its rules describes an
+/// object; nobody is refused, so there is no reason to give — but the
+/// operators, the paths and the evaluation are these, and are this code:
+///
+/// ```json
+/// {"jsonPath": ".spec.suspend", "equals": true}
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Condition {
+    /// The value this condition asks about, in the grammar [`resolve`] documents.
+    #[serde(rename = "jsonPath")]
+    pub json_path: String,
+    /// The value at `jsonPath` must equal this literal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<Value>,
+    /// The value at `jsonPath` must not equal this literal. An unset field is
+    /// not equal to anything, so this holds when it is absent.
+    #[serde(default, rename = "notEquals", skip_serializing_if = "Option::is_none")]
+    pub not_equals: Option<Value>,
+    /// `true`: the value at `jsonPath` must be set and not null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub present: Option<bool>,
+    /// `true`: the value at `jsonPath` must be unset or null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absent: Option<bool>,
+}
+
+impl Condition {
+    /// Every rule a declared condition must satisfy: a path this host
+    /// evaluates, exactly one operator, and a literal comparand.
+    pub fn check(&self) -> Result<(), String> {
+        test_of(
+            &self.json_path,
+            &self.equals,
+            &self.not_equals,
+            self.present,
+            self.absent,
+        )
+        .map(|_| ())
+    }
+
+    /// Whether this condition holds for `object`. One the host would refuse
+    /// never does.
+    pub fn holds(&self, object: &Value) -> bool {
+        test_of(
+            &self.json_path,
+            &self.equals,
+            &self.not_equals,
+            self.present,
+            self.absent,
+        )
+        .is_ok_and(|(operator, path)| evaluate(operator, &path, object))
+    }
+}
+
+/// Whether `path` is one this host evaluates, and if not, why.
+pub fn check_path(path: &str) -> Result<(), String> {
+    segments(path).map(|_| ())
+}
+
+/// A declared test's operator and parsed path, or why it is not one.
+fn test_of<'a>(
+    path: &str,
+    equals: &'a Option<Value>,
+    not_equals: &'a Option<Value>,
+    present: Option<bool>,
+    absent: Option<bool>,
+) -> Result<(Operator<'a>, Vec<Segment>), String> {
+    let parsed = segments(path)?;
+    let operator = operator_of(path, equals, not_equals, present, absent)?;
+    match operator {
+        Operator::Equals(value) | Operator::NotEquals(value) => literal(value)?,
+        Operator::Present | Operator::Absent => {}
+    }
+    Ok((operator, parsed))
+}
+
+fn evaluate(operator: Operator<'_>, path: &[Segment], object: &Value) -> bool {
+    // A null is how the API server spells a field nobody set, so the two
+    // are one answer here rather than a distinction an app must know.
+    let found = walk(object, path).filter(|value| !value.is_null());
+    match operator {
+        Operator::Equals(want) => found == Some(want),
+        Operator::NotEquals(want) => found != Some(want),
+        Operator::Present => found.is_some(),
+        Operator::Absent => found.is_none(),
+    }
+}
+
 /// The one operator a predicate carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operator<'a> {
@@ -83,6 +181,11 @@ enum Operator<'a> {
 enum Segment {
     Key(String),
     Index(usize),
+    /// `[?(@.key=="text")]`: the first element of a list that is an object
+    /// whose `key` holds exactly the string `text`. The first, and only one,
+    /// as a Kubernetes printer column reads the same path: a condition list
+    /// is keyed by `type`, so there is one answer to "the Ready condition".
+    First { key: String, equals: String },
 }
 
 impl Predicate {
@@ -92,11 +195,7 @@ impl Predicate {
     /// so there is one statement of each rule and no way to reach a cluster
     /// past it — the precedent `Capability::bound_arguments` sets.
     pub fn check(&self) -> Result<(), String> {
-        segments(&self.json_path)?;
-        match self.operator()? {
-            Operator::Equals(value) | Operator::NotEquals(value) => literal(value)?,
-            Operator::Present | Operator::Absent => {}
-        }
+        self.test()?;
         if self.reason.trim().is_empty() {
             return Err(format!(
                 "`{}` must carry a `reason`: it is what the operator is told when the check does not hold",
@@ -121,18 +220,8 @@ impl Predicate {
         if self.check().is_err() {
             return false;
         }
-        let (Ok(operator), Ok(path)) = (self.operator(), segments(&self.json_path)) else {
-            return false;
-        };
-        // A null is how the API server spells a field nobody set, so the two
-        // are one answer here rather than a distinction an app must know.
-        let found = walk(object, &path).filter(|value| !value.is_null());
-        match operator {
-            Operator::Equals(want) => found == Some(want),
-            Operator::NotEquals(want) => found != Some(want),
-            Operator::Present => found.is_some(),
-            Operator::Absent => found.is_none(),
-        }
+        self.test()
+            .is_ok_and(|(operator, path)| evaluate(operator, &path, object))
     }
 
     /// The declared reason, safe to show: it came from a manifest, so control
@@ -143,38 +232,53 @@ impl Predicate {
         escape_invisible(self.reason.trim())
     }
 
-    fn operator(&self) -> Result<Operator<'_>, String> {
-        let declared: Vec<Operator<'_>> = [
-            self.equals.as_ref().map(Operator::Equals),
-            self.not_equals.as_ref().map(Operator::NotEquals),
-            self.present.map(|_| Operator::Present),
-            self.absent.map(|_| Operator::Absent),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        let [operator] = declared[..] else {
-            return Err(format!(
-                "`{}` must declare exactly one of `equals`, `notEquals`, `present` and `absent`; `null` is not a comparand, so write `absent: true` for a field nobody set",
-                self.json_path
-            ));
-        };
-        // `present: false` would be a second spelling of `absent`, and a
-        // reader would have to hold both in mind to know what a manifest asks.
-        if matches!(operator, Operator::Present) && self.present != Some(true) {
-            return Err(
-                "`present` is written `true`; to require a field to be unset, write `absent: true`"
-                    .into(),
-            );
-        }
-        if matches!(operator, Operator::Absent) && self.absent != Some(true) {
-            return Err(
-                "`absent` is written `true`; to require a field to be set, write `present: true`"
-                    .into(),
-            );
-        }
-        Ok(operator)
+    fn test(&self) -> Result<(Operator<'_>, Vec<Segment>), String> {
+        test_of(
+            &self.json_path,
+            &self.equals,
+            &self.not_equals,
+            self.present,
+            self.absent,
+        )
     }
+}
+
+fn operator_of<'a>(
+    path: &str,
+    equals: &'a Option<Value>,
+    not_equals: &'a Option<Value>,
+    present: Option<bool>,
+    absent: Option<bool>,
+) -> Result<Operator<'a>, String> {
+    let declared: Vec<Operator<'_>> = [
+        equals.as_ref().map(Operator::Equals),
+        not_equals.as_ref().map(Operator::NotEquals),
+        present.map(|_| Operator::Present),
+        absent.map(|_| Operator::Absent),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let [operator] = declared[..] else {
+        return Err(format!(
+            "`{path}` must declare exactly one of `equals`, `notEquals`, `present` and `absent`; `null` is not a comparand, so write `absent: true` for a field nobody set"
+        ));
+    };
+    // `present: false` would be a second spelling of `absent`, and a
+    // reader would have to hold both in mind to know what a manifest asks.
+    if matches!(operator, Operator::Present) && present != Some(true) {
+        return Err(
+            "`present` is written `true`; to require a field to be unset, write `absent: true`"
+                .into(),
+        );
+    }
+    if matches!(operator, Operator::Absent) && absent != Some(true) {
+        return Err(
+            "`absent` is written `true`; to require a field to be set, write `present: true`"
+                .into(),
+        );
+    }
+    Ok(operator)
 }
 
 /// Only a literal is a comparand. A predicate compares one value to one
@@ -216,9 +320,15 @@ pub fn unmet<'a>(predicates: &'a [Predicate], object: &Value) -> Option<&'a Pred
 /// The value at a predicate's path, if the object holds one.
 ///
 /// A bounded JSONPath subset, not the grammar: an optional leading `$`, then
-/// `.key`, `['key']`, `["key"]` and `[0]`. No wildcard, no filter, no
-/// recursive descent, no function — each of those addresses a *set* of values,
-/// and "does this hold" over a set is a second question with its own quantifier.
+/// `.key`, `['key']`, `["key"]`, `[0]`, and one filter form,
+/// `[?(@.key=="text")]` (either quote), which selects the FIRST element of a
+/// list whose plain `key` holds exactly the string `text` (#541). No wildcard,
+/// no other filter, no recursive descent, no function — each of those
+/// addresses a *set* of values, and "does this hold" over a set is a second
+/// question with its own quantifier. The filter is admitted because it does
+/// not: it names one element, the one a Kubernetes printer column shows for
+/// the same path, and a filter that matches nothing is an unset field, read
+/// exactly as `.status.missing` is.
 ///
 /// `crates/kube`'s CRD printer-column walker is not reused here although it
 /// reads the same-looking paths: it renders display text and yields an empty
@@ -234,6 +344,10 @@ fn walk<'a>(object: &'a Value, path: &[Segment]) -> Option<&'a Value> {
         node = match segment {
             Segment::Key(key) => node.as_object()?.get(key)?,
             Segment::Index(index) => node.as_array()?.get(*index)?,
+            Segment::First { key, equals } => node
+                .as_array()?
+                .iter()
+                .find(|item| item.get(key).and_then(Value::as_str) == Some(equals.as_str()))?,
         };
     }
     Some(node)
@@ -252,7 +366,15 @@ fn segments(path: &str) -> Result<Vec<Segment>, String> {
     }
     let mut parsed = Vec::new();
     while !rest.is_empty() {
-        rest = if let Some(open) = rest.strip_prefix('[') {
+        rest = if let Some(open) = rest.strip_prefix("[?(") {
+            let Some((segment, after)) = filter(open) else {
+                return not_a_path(
+                    "the one filter this host evaluates is `[?(@.key==\"text\")]`: the first element whose plain key equals a quoted string",
+                );
+            };
+            parsed.push(segment);
+            after
+        } else if let Some(open) = rest.strip_prefix('[') {
             let Some(close) = open.find(']') else {
                 return not_a_path("a `[` has no `]`");
             };
@@ -288,6 +410,34 @@ fn segments(path: &str) -> Result<Vec<Segment>, String> {
         return not_a_path(&format!("it is deeper than {MAX_PATH_SEGMENTS} segments"));
     }
     Ok(parsed)
+}
+
+/// The rest of a `[?(` filter: `@.key==` then a quoted string and `)]`,
+/// returning the segment and what follows it. Nothing else is a filter here.
+fn filter(open: &str) -> Option<(Segment, &str)> {
+    let body = open.strip_prefix("@.")?;
+    let (key, comparand) = body.split_once("==")?;
+    if key.is_empty()
+        || !key
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+    {
+        return None;
+    }
+    let quote = comparand.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    let text = &comparand[1..];
+    let end = text.find(quote)?;
+    let (value, after) = (&text[..end], &text[end + 1..]);
+    let after = after.strip_prefix(")]")?;
+    (!value.is_empty() && value.chars().count() <= MAX_REASON_CHARS).then(|| {
+        (
+            Segment::First {
+                key: key.to_owned(),
+                equals: value.to_owned(),
+            },
+            after,
+        )
+    })
 }
 
 /// The inside of one `[...]`: an index, or a quoted key.

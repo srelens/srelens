@@ -1,6 +1,7 @@
 use super::*;
 use serde_json::Map;
-use srelens_plugin_host::{Join, JoinMatch, TableColumn};
+use srelens_capability::status::{self, ResolvedStatus};
+use srelens_plugin_host::{Badge, Join, JoinMatch, TableColumn};
 use std::{
     collections::HashMap,
     future::Future,
@@ -55,12 +56,20 @@ struct ResolvedCell {
     values: Map<String, Value>,
     #[serde(skip_serializing_if = "Map::is_empty")]
     errors: Map<String, Value>,
+    /// The badges shown on this row (#541), in declaration order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    badges: Vec<ResolvedBadge>,
+    /// Badge ids the host could not answer for this row, with why.
+    #[serde(skip_serializing_if = "Map::is_empty")]
+    badge_errors: Map<String, Value>,
 }
 
 #[derive(Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct ResolvedColumns {
     columns: Vec<TableColumn>,
+    /// The badges this app declares for the requested kind.
+    badges: Vec<Badge>,
     cells: Vec<ResolvedCell>,
 }
 
@@ -315,7 +324,97 @@ fn resolved_cells(
                 namespace: row.namespace.clone(),
                 values,
                 errors,
+                badges: Vec::new(),
+                badge_errors: Map::new(),
             })
+        })
+        .collect()
+}
+
+/// One badge on one row: the badge's id and what its rules resolved to.
+#[derive(Serialize, JsonSchema, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedBadge {
+    id: String,
+    #[serde(flatten)]
+    resolved: ResolvedStatus,
+}
+
+/// A row's badges, and the ids of badges that could not be answered with why.
+type RowBadges = (Vec<ResolvedBadge>, Map<String, Value>);
+
+/// Each row's badges (#541), in declaration order.
+///
+/// A direct badge reads the row's metadata from `metadata` (the host's list
+/// of the row kind); a joined one reads the resource the declared join
+/// matches, through the same index a joined column uses. No rule holding is no
+/// badge. A row the host's read does not hold, and a join that matches more
+/// than one resource, are errors for that badge on that row — never an absent
+/// badge, which would say the row is not managed when the host does not know.
+fn resolved_badges(
+    badges: &[Badge],
+    joins: &HashMap<String, (JoinMatch, Arc<Vec<Value>>)>,
+    metadata: Option<&[Value]>,
+    rows: &[ColumnRow],
+    kind: &str,
+) -> Vec<RowBadges> {
+    let indexed: HashMap<_, _> = joins
+        .iter()
+        .map(|(id, (rule, objects))| (id, index_join(rule, objects)))
+        .collect();
+    let own: HashMap<(&str, &str), &Value> = metadata
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|object| {
+            let meta = &object["metadata"];
+            Some((
+                (meta["namespace"].as_str().unwrap_or(""), meta["name"].as_str()?),
+                object,
+            ))
+        })
+        .collect();
+    rows.iter()
+        .map(|row| {
+            let mut shown = Vec::new();
+            let mut errors = Map::new();
+            for badge in badges {
+                let object = match &badge.join {
+                    None => match own.get(&(row.namespace.as_str(), row.name.as_str())) {
+                        Some(object) => Some(*object),
+                        None => {
+                            errors.insert(
+                                badge.id.clone(),
+                                Value::String("row is not in the host's metadata read; refresh".into()),
+                            );
+                            continue;
+                        }
+                    },
+                    Some(join_id) => match (joins.get(join_id), indexed.get(join_id)) {
+                        (Some((rule, objects)), Some(index)) => {
+                            match joined(rule, objects, index, row, kind) {
+                                Ok(object) => object,
+                                Err(()) => {
+                                    errors.insert(
+                                        badge.id.clone(),
+                                        Value::String("matched multiple joined resources".into()),
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => None,
+                    },
+                };
+                if let Some(resolved) =
+                    object.and_then(|object| status::first_match(&badge.rules, object))
+                {
+                    shown.push(ResolvedBadge {
+                        id: badge.id.clone(),
+                        resolved,
+                    });
+                }
+            }
+            (shown, errors)
         })
         .collect()
 }
@@ -363,10 +462,19 @@ pub(super) fn register(
                     .filter(|column| column.for_kinds.contains(&input.kind))
                     .cloned()
                     .collect();
+                let badges: Vec<_> = plugin
+                    .manifest
+                    .contributions
+                    .badges
+                    .iter()
+                    .filter(|badge| badge.for_kinds.contains(&input.kind))
+                    .cloned()
+                    .collect();
                 let mut joins = HashMap::new();
                 for join_id in columns
                     .iter()
                     .filter_map(|column| column.source.join.as_ref())
+                    .chain(badges.iter().filter_map(|badge| badge.join.as_ref()))
                 {
                     if joins.contains_key(join_id) {
                         continue;
@@ -392,8 +500,56 @@ pub(super) fn register(
                     .await?;
                     joins.insert(join_id.clone(), (join.match_by.clone(), objects));
                 }
-                let cells = resolved_cells(&columns, &joins, &input.uids, &input.kind)?;
-                Ok(ResolvedColumns { columns, cells })
+                // A direct badge reads the rows' own metadata, listed once per
+                // namespace through the same snapshot cache a join uses.
+                let metadata = if badges.iter().any(|badge| badge.join.is_none()) {
+                    let key = CacheKey {
+                        app: plugin.manifest.id.clone(),
+                        revision: plugin.revision,
+                        context: context.clone(),
+                        namespace: input.namespace.clone(),
+                        reader: format!("builtin:{}", input.kind),
+                    };
+                    Some(
+                        cached_objects(&cache, key, || async {
+                            let (objects, truncated) = srelens_kube::crds::list_builtin_metadata(
+                                &client_cache,
+                                &context,
+                                &input.namespace,
+                                &input.kind,
+                            )
+                            .await?;
+                            if truncated {
+                                return Err(CapabilityError::Handler(
+                                    "Row metadata reached its 2,000-object limit; badges would be incomplete".into(),
+                                ));
+                            }
+                            Ok(objects)
+                        })
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                let mut cells = resolved_cells(&columns, &joins, &input.uids, &input.kind)?;
+                if !badges.is_empty() {
+                    let resolved = resolved_badges(
+                        &badges,
+                        &joins,
+                        metadata.as_deref().map(Vec::as_slice),
+                        &input.uids,
+                        &input.kind,
+                    );
+                    for (cell, (shown, errors)) in cells.iter_mut().zip(resolved) {
+                        cell.badges = shown;
+                        cell.badge_errors = errors;
+                    }
+                }
+                Ok(ResolvedColumns {
+                    columns,
+                    badges,
+                    cells,
+                })
             }
         },
     ));
@@ -890,6 +1046,127 @@ mod tests {
         assert_eq!(cells[1].values["count"], "7");
     }
 
+    fn badge(value: Value) -> Badge {
+        serde_json::from_value(value).expect("a badge deserializes")
+    }
+
+    fn row(name: &str) -> ColumnRow {
+        ColumnRow {
+            uid: None,
+            name: name.into(),
+            namespace: "team".into(),
+            row: Value::Null,
+        }
+    }
+
+    /// Deployment metadata as `list_builtin_metadata` returns it.
+    fn deployment(name: &str, labels: Value, annotations: Value) -> Value {
+        json!({"metadata":{"name":name,"namespace":"team","labels":labels,"annotations":annotations}})
+    }
+
+    #[test]
+    fn a_direct_badge_reads_the_rows_metadata_first_hit_and_always_with_its_word() {
+        let flux = badge(json!({"id":"flux","forKinds":["apps/Deployment"],"rules":[
+            {"when":[{"jsonPath":".metadata.labels['kustomize.toolkit.fluxcd.io/name']","present":true}],
+             "status":"healthy","label":"Flux","reason":".metadata.labels['kustomize.toolkit.fluxcd.io/name']"},
+            {"when":[{"jsonPath":".metadata.labels['helm.toolkit.fluxcd.io/name']","present":true}],
+             "status":"healthy","label":"Flux Helm","reason":".metadata.labels['helm.toolkit.fluxcd.io/name']"}
+        ]}));
+        let argo = badge(json!({"id":"argo","forKinds":["apps/Deployment"],"rules":[
+            {"when":[{"jsonPath":".metadata.annotations['argocd.argoproj.io/tracking-id']","present":true}],
+             "status":"healthy","label":"Argo CD"},
+            {"when":[{"jsonPath":".metadata.labels['app.kubernetes.io/instance']","present":true}],
+             "status":"unknown","label":"Argo CD?","reason":".metadata.labels['app.kubernetes.io/instance']"}
+        ]}));
+        let metadata = vec![
+            deployment("api", json!({"kustomize.toolkit.fluxcd.io/name":"apps",
+                "helm.toolkit.fluxcd.io/name":"also"}), json!({})),
+            deployment("chart", json!({"helm.toolkit.fluxcd.io/name":"podinfo"}), json!({})),
+            deployment("guestbook", json!({"app.kubernetes.io/instance":"guestbook"}),
+                json!({"argocd.argoproj.io/tracking-id":"guestbook:apps/Deployment:team/guestbook"})),
+            deployment("legacy", json!({"app.kubernetes.io/instance":"legacy"}), json!({})),
+            deployment("plain", json!({}), json!({})),
+        ];
+        let rows = [row("api"), row("chart"), row("guestbook"), row("legacy"), row("plain")];
+        let resolved = resolved_badges(
+            &[flux, argo],
+            &HashMap::new(),
+            Some(&metadata),
+            &rows,
+            "apps/Deployment",
+        );
+        let shown = |index: usize| {
+            resolved[index]
+                .0
+                .iter()
+                .map(|b| (b.id.as_str(), b.resolved.label.as_str(), b.resolved.reason.as_deref()))
+                .collect::<Vec<_>>()
+        };
+        // First hit: api carries both Flux labels, and the kustomize rule is first.
+        assert_eq!(shown(0), vec![("flux", "Flux", Some("apps"))]);
+        assert_eq!(shown(1), vec![("flux", "Flux Helm", Some("podinfo"))]);
+        assert_eq!(shown(2), vec![("argo", "Argo CD", None)]);
+        assert_eq!(shown(3), vec![("argo", "Argo CD?", Some("legacy"))]);
+        // No rule holding is no badge — an answer, not an error.
+        assert!(shown(4).is_empty() && resolved[4].1.is_empty());
+        assert!(resolved.iter().flat_map(|(badges, _)| badges).all(|b| !b.resolved.label.trim().is_empty()));
+        let wire = serde_json::to_value(&resolved[0].0[0]).unwrap();
+        assert_eq!(wire, json!({"id":"flux","status":"healthy","label":"Flux","reason":"apps"}));
+    }
+
+    #[test]
+    fn a_row_the_host_could_not_read_is_an_error_not_an_absent_badge() {
+        let flux = badge(json!({"id":"flux","forKinds":["apps/Deployment"],"rules":[
+            {"when":[{"jsonPath":".metadata.labels['kustomize.toolkit.fluxcd.io/name']","present":true}],
+             "status":"healthy","label":"Flux"}]}));
+        let resolved = resolved_badges(
+            &[flux],
+            &HashMap::new(),
+            Some(&[]),
+            &[row("created-after-the-read")],
+            "apps/Deployment",
+        );
+        assert!(resolved[0].0.is_empty());
+        assert!(resolved[0].1["flux"].as_str().unwrap().contains("metadata"), "{:?}", resolved[0].1);
+    }
+
+    #[test]
+    fn a_joined_badge_reads_the_joined_resource_through_the_join_index() {
+        // Trivy-style: each report is labelled with the workload it describes.
+        let rule = JoinMatch {
+            label: Some("trivy-operator.resource.name".into()),
+            kind_label: Some("trivy-operator.resource.kind".into()),
+            owner_reference: false,
+            annotation: None,
+            name: false,
+        };
+        let report = |target: &str, name: &str, critical: u64| {
+            json!({"metadata":{"name":name,"namespace":"team","labels":{
+                "trivy-operator.resource.name":target,"trivy-operator.resource.kind":"Deployment"}},
+                "report":{"summary":{"criticalCount":critical}}})
+        };
+        let objects = Arc::new(vec![
+            report("api", "r-api", 0),
+            report("web", "r-web", 3),
+            report("dup", "r-dup-1", 1),
+            report("dup", "r-dup-2", 2),
+        ]);
+        let joins = HashMap::from([("vulns".to_owned(), (rule, objects))]);
+        let vulns = badge(json!({"id":"cves","forKinds":["apps/Deployment"],"join":"vulns","rules":[
+            {"when":[{"jsonPath":".report.summary.criticalCount","equals":0}],"status":"healthy","label":"No critical CVEs"},
+            {"when":[],"status":"error","label":"Critical CVEs","reason":".report.summary.criticalCount"}
+        ]}));
+        let rows = [row("api"), row("web"), row("dup"), row("unscanned")];
+        let resolved = resolved_badges(&[vulns], &joins, None, &rows, "apps/Deployment");
+        assert_eq!(resolved[0].0[0].resolved.label, "No critical CVEs");
+        assert_eq!(resolved[1].0[0].resolved.status, srelens_capability::status::NormalizedStatus::Error);
+        assert_eq!(resolved[1].0[0].resolved.reason.as_deref(), Some("3"));
+        assert!(resolved[2].0.is_empty());
+        assert!(resolved[2].1["cves"].as_str().unwrap().contains("multiple"));
+        // Nothing joined: no report, so no badge.
+        assert!(resolved[3].0.is_empty() && resolved[3].1.is_empty());
+    }
+
     #[test]
     fn a_long_scalar_is_an_explicit_read_error_not_an_unbounded_cell() {
         let column = TableColumn {
@@ -971,6 +1248,45 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("namespace"));
+    }
+
+    #[tokio::test]
+    async fn badges_are_resolved_in_the_same_batch_and_an_unread_row_kind_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.json");
+        let core = super::super::tests::fake_core();
+        let revision = super::super::tests::install(&path, core.clone());
+        let mut state = read(&path).unwrap();
+        state.plugins[0].manifest.contributions.badges.push(badge(json!({
+            "id":"argo","forKinds":["apps/Deployment"],"rules":[
+                {"when":[{"jsonPath":".metadata.annotations['argocd.argoproj.io/tracking-id']","present":true}],
+                 "status":"healthy","label":"Argo CD"}]})));
+        write(&path, &state).unwrap();
+        let mut registry = Registry::new();
+        register(
+            &mut registry,
+            path.clone(),
+            core,
+            srelens_kube::client_cache::ClientCache::new_many(vec![]),
+        );
+        let payload = |kind: &str| {
+            json!({"id":"org.example.argocd","revision":revision,"context":"cluster/a",
+                "namespace":"team","kind":kind,"uids":[{"name":"api","namespace":"team","row":{}}]})
+        };
+        // The host cannot reach this cluster, so it cannot say whether `api`
+        // is managed: that is an error the table shows with a retry, never an
+        // empty badge column that reads as "not managed".
+        assert!(registry
+            .invoke("extensions.resolveColumns", payload("apps/Deployment"))
+            .await
+            .is_err());
+        // A kind no badge or column names needs no read at all.
+        let out = registry
+            .invoke("extensions.resolveColumns", payload("apps/StatefulSet"))
+            .await
+            .unwrap();
+        assert_eq!(out["badges"], json!([]));
+        assert!(out["cells"][0].get("badges").is_none(), "{out}");
     }
 
     #[tokio::test]
