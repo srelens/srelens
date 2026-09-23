@@ -287,6 +287,10 @@ struct Read {
     #[serde(default)]
     #[schemars(length(max = 64))]
     card: Option<String>,
+    /// With `card` and no `namespace`: the several namespaces the card counted
+    /// in, so its target page shows exactly those rows (#540).
+    #[serde(default)]
+    namespaces: Vec<String>,
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1227,6 +1231,11 @@ pub fn register(
                         "A dashboard card id is at most 64 characters".into(),
                     ));
                 }
+                cards::check_card_namespaces(
+                    input.card.is_some(),
+                    &input.namespace,
+                    &input.namespaces,
+                )?;
                 if !input.namespace.is_empty()
                     && (input.namespace.len() > 63
                         || !input
@@ -1301,6 +1310,7 @@ pub fn register(
                             &input.capability,
                             &context,
                             &input.namespace,
+                            &input.namespaces,
                         )
                         .await?,
                     ),

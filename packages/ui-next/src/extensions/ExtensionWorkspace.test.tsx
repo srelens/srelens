@@ -316,6 +316,21 @@ it("asks the host for only a dashboard card's rows on its target page", async ()
   expect(readExtension).toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "flux-system", true, "suspended");
 });
 
+it("reads a card's rows over the several namespaces it counted in", async () => {
+  render(
+    <ExtensionWorkspace
+      plugin={plugin}
+      page={plugin.manifest.contributions.pages[1]}
+      context="staging"
+      card="suspended"
+      cardNamespaces={["prod", "team"]}
+    />,
+  );
+  await waitFor(() =>
+    expect(readExtension).toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "", true, "suspended", ["prod", "team"]),
+  );
+});
+
 it("filters resource rows without a second cluster read", async () => {
   render(
     <ExtensionWorkspace

@@ -254,11 +254,24 @@ describe("DashboardCards", () => {
     expect(within(cardRegion("No target")).queryByRole("button", { name: /Open/ })).toBeNull();
   });
 
-  it("opens the target across every namespace when the selection is not exactly one", async () => {
+  it("opens the target over exactly the namespaces the card counted in", async () => {
     const open = vi.spyOn(tabs, "openTab").mockImplementation(() => {});
     installed(app([card({ id: "expiring", title: "Expiring", target: { page: "certificates" } })]));
     answer([{ id: "expiring", state: "count", count: 2 }]);
     act(() => setNamespaces(CTX.stableId, ["team", "prod"]));
+    render(<DashboardCards context={CTX} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Open Expiring" }));
+    // Not every namespace: the page would show rows the card never counted.
+    expect(open).toHaveBeenCalledWith(
+      extensionCardRoute(CTX.stableId, "org.example.certs", "certificates", "", "expiring", ["team", "prod"]),
+      { clusterName: CTX.name },
+    );
+  });
+
+  it("opens the target across every namespace when nothing is selected", async () => {
+    const open = vi.spyOn(tabs, "openTab").mockImplementation(() => {});
+    installed(app([card({ id: "expiring", title: "Expiring", target: { page: "certificates" } })]));
+    answer([{ id: "expiring", state: "count", count: 2 }]);
     render(<DashboardCards context={CTX} />);
     await userEvent.click(await screen.findByRole("button", { name: "Open Expiring" }));
     expect(open).toHaveBeenCalledWith(

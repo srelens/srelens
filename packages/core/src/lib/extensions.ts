@@ -257,6 +257,8 @@ export const readExtension = <T = ExtensionResourceResult>(
   useCrdColumns = false,
   /** A dashboard card's id: only the rows that card counted. */
   card?: string,
+  /** With a card and no `namespace`: the several namespaces it counted in. */
+  namespaces?: string[],
 ) =>
   invokeCapability<T>("extensions.read", {
     id,
@@ -266,6 +268,7 @@ export const readExtension = <T = ExtensionResourceResult>(
     namespace,
     ...(useCrdColumns ? {useCrdColumns:true} : {}),
     ...(card ? { card } : {}),
+    ...(card && namespaces?.length ? { namespaces } : {}),
   });
 /**
  * One dashboard card's answer. `error` is a read that failed and may succeed
@@ -336,8 +339,13 @@ export function extensionClusterResourceRoute(clusterId: string, id: string, pag
  * The card is in the route because the route is the tab's identity — the
  * filtered page and the whole page are two things a reader can have open.
  */
-export function extensionCardRoute(clusterId: string, id: string, page: string, namespace: string, card: string) {
-  return `${extensionClusterRoute(clusterId, id, page, namespace)}?card=${encodeURIComponent(card)}`;
+export function extensionCardRoute(clusterId: string, id: string, page: string, namespace: string, card: string, namespaces: string[] = []) {
+  // One namespace is the path's, as on every app route. Several are the card's
+  // selection, sorted so one selection is one tab whatever order it was picked in.
+  const several = namespace ? [] : namespaces.length === 1 ? [] : [...new Set(namespaces)].sort();
+  const path = extensionClusterRoute(clusterId, id, page, namespace || (namespaces.length === 1 ? namespaces[0] : ""));
+  const query = `card=${encodeURIComponent(card)}${several.length ? `&namespaces=${several.map(encodeURIComponent).join(",")}` : ""}`;
+  return `${path}?${query}`;
 }
 export function parseExtensionRoute(route: string) {
   const query = route.indexOf("?");
@@ -351,13 +359,21 @@ export function parseExtensionRoute(route: string) {
     const resourceName = pieces.length === 7 ? decodeURIComponent(pieces[6]) : undefined;
     if (pieces.length === 7 && !resourceName) return null;
     let card: string | undefined;
+    let namespaces: string[] | undefined;
     if (query >= 0) {
-      // A card narrows a page; nothing else rides in the query, and a resource has no card.
+      // A card narrows a page, over one namespace or a list of them; nothing else
+      // rides in the query, and a resource has no card.
       const params = new URLSearchParams(route.slice(query + 1));
       card = params.get("card") ?? "";
-      if (!card || [...params.keys()].length !== 1 || resourceName) return null;
+      const listed = params.get("namespaces");
+      const known = listed === null ? ["card"] : ["card", "namespaces"];
+      if (!card || resourceName || [...params.keys()].some((key) => !known.includes(key))) return null;
+      if (listed !== null) {
+        namespaces = listed.split(",").filter(Boolean);
+        if (!namespaces.length || namespace) return null;
+      }
     }
-    return context && id && page ? { context, id, page, namespace, ...(pieces[1] === "extension-clusters" ? { clusterId: context } : {}), ...(resourceName ? { resourceName } : {}), ...(card ? { card } : {}) } : null;
+    return context && id && page ? { context, id, page, namespace, ...(pieces[1] === "extension-clusters" ? { clusterId: context } : {}), ...(resourceName ? { resourceName } : {}), ...(card ? { card } : {}), ...(namespaces ? { namespaces } : {}) } : null;
   } catch {
     return null;
   }

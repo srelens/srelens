@@ -273,6 +273,7 @@ export function ExtensionWorkspace({
   onPage,
   onNamespace,
   card,
+  cardNamespaces,
 }: {
   plugin: InstalledExtension;
   page: ExtensionPage;
@@ -282,6 +283,8 @@ export function ExtensionWorkspace({
   onNamespace?(namespace: string): void;
   /** A dashboard card whose rows the page shows (#540); the whole list when absent. */
   card?: string;
+  /** The several namespaces the card counted in, when it counted in more than one. */
+  cardNamespaces?: string[];
 }) {
   const { Button, Combobox } = useContext(ExtensionControls);
   const [localPage, setLocalPage] = useState(page.id);
@@ -423,6 +426,7 @@ export function ExtensionWorkspace({
           refresh={refresh}
           hideToolbar
           card={card}
+          cardNamespaces={namespace ? undefined : cardNamespaces}
         />
       )}
       </ExtensionRequirements>

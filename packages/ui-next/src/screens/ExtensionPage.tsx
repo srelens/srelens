@@ -105,12 +105,14 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
             <div role="status" className="extension-card-filter">
               <span>
                 Showing the {plainText(page.title)} counted by <strong>{plainText(card.title)}</strong>
+                {target.namespaces && ` in ${target.namespaces.slice(0, -1).join(", ")} and ${target.namespaces[target.namespaces.length - 1]}`}
               </span>
               <Button variant="ghost" size="sm" onClick={showAll}>Show all {plainText(page.title)}</Button>
             </div>
           )}
           {target.resourceName ? <ExtensionResourceDetails fullPage key={route} selection={{id:target.id,revision:plugin.revision,capability:page.capability,context:clusterId,namespace:target.namespace,name:target.resourceName}}/> : <ExtensionWorkspace
             card={card?.id}
+            cardNamespaces={target.namespaces}
             plugin={plugin}
             page={page}
             onPage={(id, namespace) =>

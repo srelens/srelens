@@ -426,6 +426,39 @@ fn source_binding<'a>(plugin: &'a Installed, source: &str) -> Result<&'a Binding
         .ok_or_else(|| CapabilityError::Handler("The card's reader is no longer declared".into()))
 }
 
+/// The rules for the namespace list a page read may carry: only with a card,
+/// only instead of a single namespace, and as bounded as the card's own read.
+pub(super) fn check_card_namespaces(
+    card: bool,
+    namespace: &str,
+    namespaces: &[String],
+) -> Result<(), CapabilityError> {
+    if namespaces.is_empty() {
+        return Ok(());
+    }
+    if !card {
+        return Err(CapabilityError::InvalidInput(
+            "A namespace list narrows a dashboard card's rows; name the card".into(),
+        ));
+    }
+    if !namespace.is_empty() {
+        return Err(CapabilityError::InvalidInput(
+            "Name one namespace or a list of them, not both".into(),
+        ));
+    }
+    if namespaces.len() > MAX_NAMESPACES {
+        return Err(CapabilityError::InvalidInput(format!(
+            "Narrow to at most {MAX_NAMESPACES} namespaces"
+        )));
+    }
+    if !namespaces.iter().all(|namespace| namespace_name(namespace)) {
+        return Err(CapabilityError::InvalidInput(
+            "Each namespace must be a Kubernetes namespace name".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Which of a page's rows a card counted, by namespace and name: what its
 /// target route shows (#540). The same snapshot and predicate the card read,
 /// so the page and the card agree on what "matching" meant.
@@ -439,6 +472,7 @@ pub(super) async fn card_rows(
     capability: &str,
     context: &str,
     namespace: &str,
+    namespaces: &[String],
 ) -> Result<std::collections::HashSet<(String, String)>, CapabilityError> {
     let card = plugin
         .manifest
@@ -457,11 +491,16 @@ pub(super) async fn card_rows(
         )));
     }
     let binding = source_binding(plugin, &card.source)?;
-    let selected: Vec<String> = [namespace]
-        .into_iter()
-        .filter(|namespace| !namespace.is_empty())
-        .map(str::to_owned)
-        .collect();
+    // The same selection the card counted in: one namespace, several, or all.
+    let selected: Vec<String> = if namespaces.is_empty() {
+        [namespace]
+            .into_iter()
+            .filter(|namespace| !namespace.is_empty())
+            .map(str::to_owned)
+            .collect()
+    } else {
+        namespaces.to_vec()
+    };
     let (read_in, selection) = read_scope(binding, &selected);
     let objects = columns::reader_objects(
         snapshots,
@@ -1086,6 +1125,94 @@ mod tests {
         assert_eq!(names(&read(Some("degraded")).await.unwrap()), ["web"]);
         let missing = read(Some("gone")).await.unwrap_err();
         assert!(missing.to_string().contains("gone"), "{missing}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_target_read_over_several_namespaces_keeps_exactly_what_the_card_counted() {
+        let (port, _paths) = api_server(
+            200,
+            application_list(vec![
+                application("team", "web", "Degraded"),
+                application("prod", "shop", "Degraded"),
+                application("other", "noise", "Degraded"),
+            ]),
+        );
+        let mut core = (*super::super::tests::fake_core()).clone();
+        let mut list = core.get("k8s.listCustomResource").unwrap().clone();
+        list.handler = Arc::new(|_| {
+            Box::pin(async {
+                Ok(json!({"items":[
+                    {"name":"web","namespace":"team","age":"1d","columns":[]},
+                    {"name":"shop","namespace":"prod","age":"1d","columns":[]},
+                    {"name":"noise","namespace":"other","age":"1d","columns":[]}
+                ]}))
+            })
+        });
+        core.register(list);
+        let (_dir, registry, revision) = installed(port, Arc::new(core));
+        let payload = json!({"id":"org.example.argocd","revision":revision,"capability":"applications",
+            "context":"mock","namespace":"","card":"degraded","namespaces":["team","prod"]});
+        let cards = registry
+            .invoke(
+                "extensions.resolveCards",
+                cards_payload(revision, json!(["team", "prod"])),
+            )
+            .await
+            .unwrap();
+        let out = registry.invoke("extensions.read", payload).await.unwrap();
+        let mut names: Vec<_> = out["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap().to_owned())
+            .collect();
+        names.sort();
+        // `noise` matches the predicate too, but in a namespace the card did not count.
+        assert_eq!(names, ["shop", "web"]);
+        assert_eq!(cards["cards"][0]["count"], names.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_namespace_list_narrows_only_a_cards_read_and_is_bounded() {
+        let (port, _paths) = api_server(200, application_list(vec![]));
+        let (_dir, registry, revision) = installed(port, super::super::tests::fake_core());
+        let read = |extra: Value| {
+            let mut payload = json!({"id":"org.example.argocd","revision":revision,
+                "capability":"applications","context":"mock"});
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            registry.invoke("extensions.read", payload)
+        };
+        for (extra, why) in [
+            (
+                json!({"namespaces":["team","prod"]}),
+                "a namespace list without a card",
+            ),
+            (
+                json!({"card":"degraded","namespace":"team","namespaces":["team","prod"]}),
+                "one namespace and a list",
+            ),
+            (
+                json!({"card":"degraded","namespaces":["Team"]}),
+                "a name that is not a namespace",
+            ),
+            (
+                json!({"card":"degraded","namespaces":(0..=MAX_NAMESPACES).map(|i| format!("n{i}")).collect::<Vec<_>>()}),
+                "too many",
+            ),
+        ] {
+            let error = read(extra).await.unwrap_err();
+            assert!(
+                matches!(error, CapabilityError::InvalidInput(_)),
+                "{why}: {error}"
+            );
+            assert!(
+                !error.to_string().contains("unknown field"),
+                "{why}: refused for its own reason, not the schema's: {error}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

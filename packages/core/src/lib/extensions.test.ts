@@ -204,6 +204,31 @@ describe("dashboard cards (#540)", () => {
     expect(parseExtensionRoute(extensionClusterRoute(id, "org.test.app", "certificates", "team"))).not.toHaveProperty("card");
   });
 
+  it("carries a card's several namespaces in its route and its read", async () => {
+    const { extensionCardRoute } = await import("./extensions");
+    const id = "/kube/config#prod";
+    const route = extensionCardRoute(id, "org.test.app", "certificates", "", "expiring", ["team", "prod"]);
+    expect(parseExtensionRoute(route)).toEqual({
+      context: id, clusterId: id, id: "org.test.app", page: "certificates", namespace: "",
+      card: "expiring", namespaces: ["prod", "team"],
+    });
+    // One selection, one tab, whatever order it was picked in.
+    expect(route).toBe(extensionCardRoute(id, "org.test.app", "certificates", "", "expiring", ["prod", "team"]));
+    expect(route).not.toBe(extensionCardRoute(id, "org.test.app", "certificates", "", "expiring"));
+    // One namespace stays in the path, as every other app route has it.
+    expect(extensionCardRoute(id, "org.test.app", "certificates", "team", "expiring", ["team"])).toBe(
+      extensionCardRoute(id, "org.test.app", "certificates", "team", "expiring"),
+    );
+    vi.mocked(invokeCapability).mockClear();
+    await readExtension("org.test.app", 2, "list", "cluster/a", "", true, "expiring", ["prod", "team"]);
+    expect(invokeCapability).toHaveBeenLastCalledWith("extensions.read", {
+      id: "org.test.app", revision: 2, capability: "list", context: "cluster/a", namespace: "",
+      useCrdColumns: true, card: "expiring", namespaces: ["prod", "team"],
+    });
+    expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/?namespaces=a,b")).toBeNull();
+    expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/team?card=x&namespaces=a,b")).toBeNull();
+  });
+
   it("refuses a card on a resource route, an empty card and an unknown parameter", () => {
     expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/team/name?card=x")).toBeNull();
     expect(parseExtensionRoute("/extension-clusters/c/org.test.app/page/team?card=")).toBeNull();

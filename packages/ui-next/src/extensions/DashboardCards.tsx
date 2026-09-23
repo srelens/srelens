@@ -136,7 +136,7 @@ function AppCards({
     () => false,
   );
   const appName = extensionLabel(plugin);
-  // The page a target opens reads one namespace or all of them, as the lists do.
+  // The target page reads the one namespace in its path, or all of them narrowed to the selection.
   const namespace = selection.length === 1 ? selection[0] : "";
   return (
     <>
@@ -162,7 +162,7 @@ function AppCards({
             open={
               target
                 ? () =>
-                    openTab(extensionCardRoute(context.stableId, id, target.page, namespace, card.id), {
+                    openTab(extensionCardRoute(context.stableId, id, target.page, namespace, card.id, selection), {
                       clusterName: context.name,
                     })
                 : undefined
