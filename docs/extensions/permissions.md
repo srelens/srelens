@@ -35,6 +35,15 @@ version, plural, kind and scope, plus explicitly granted `k8s.listEvents` reader
   inspection and action first confirms that a CustomResourceDefinition named
   `{plural}.{group}` serves the bound version on the cluster, so a dotted built-in
   group such as `networking.k8s.io`, or an aggregated API, is refused there.
+- A badge without a join ([#541](https://github.com/srelens/srelens/issues/541)) is the
+  one place the host reads a built-in kind on an app's behalf, and it needs no grant:
+  when a built-in table the user opened shows that kind, the host lists the same kind
+  in the same namespace, with the user's credentials, and keeps only each object's
+  name, namespace, UID, labels, annotations and owner references. The badge's rules
+  may address only `.metadata`, so no spec or status is read for an app. Secrets are
+  refused outright, because their annotation values are redacted on every ungated
+  read. What the app gets is its own word, drawn by the host; no app code sees the
+  metadata.
 - The app receives no kubeconfig or token.
 - Reads remain subject to the selected cluster's RBAC. RBAC and discovery failures are
   shown as errors, never as empty results.

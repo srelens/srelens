@@ -12,7 +12,7 @@ import {
   listNamespaces,
   type InstalledExtension,
 } from "@srelens/core";
-import { ExtensionWorkspace, resourceStatus } from "./ExtensionWorkspace";
+import { ExtensionWorkspace } from "./ExtensionWorkspace";
 // jsdom omits the browser layout APIs used by the shared searchable picker.
 if (!("ResizeObserver" in globalThis)) {
   (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver =
@@ -79,15 +79,33 @@ beforeEach(async () => {
     ],
   });
 });
-it("classifies statuses without counting suspended or reconciling as ready", () => {
-  const columns = { ready: 0, suspended: 1, progressing: 2 };
-  expect(resourceStatus(["True", "true", "False"], columns)).toBe("Suspended");
-  expect(resourceStatus(["True", "false", "True"], columns)).toBe(
-    "In progress",
-  );
-  expect(resourceStatus(["True", "false", "False"], columns)).toBe("Ready");
-  expect(resourceStatus(["False"], columns)).toBe("Not ready");
-  expect(resourceStatus([], columns)).toBe("Unknown");
+it("counts a resolver-backed page by the host's resolved statuses, in words", async () => {
+  // Flux after #541: no statusColumns; the host resolves each row's status.
+  const migrated = {
+    ...plugin,
+    manifest: {
+      ...plugin.manifest,
+      capabilities: [{ name: "apps", target: "k8s.listCustomResource",
+        arguments: { group: "kustomize.toolkit.fluxcd.io", kind: "Kustomization" } }],
+      contributions: {
+        ...plugin.manifest.contributions,
+        pages: plugin.manifest.contributions.pages.map(({ statusColumns: _unused, ...page }) => page),
+        statusResolvers: [{ forKinds: ["kustomize.toolkit.fluxcd.io/Kustomization"], rules: [] }],
+      },
+    },
+  } as unknown as InstalledExtension;
+  vi.mocked(readExtension).mockResolvedValue({ items: [
+    { name: "a", namespace: "flux-system", age: "1d", columns: [], status: { status: "healthy", label: "Ready" } },
+    { name: "b", namespace: "flux-system", age: "1d", columns: [], status: { status: "suspended", label: "Suspended" } },
+    { name: "c", namespace: "flux-system", age: "1d", columns: [], status: { status: "error", label: "Not ready" } },
+    { name: "d", namespace: "flux-system", age: "1d", columns: [], status: { status: "error", label: "Not ready" } },
+  ] });
+  render(<ExtensionWorkspace plugin={migrated} page={migrated.manifest.contributions.pages[0]} context="staging" />);
+  expect(await screen.findByText("Healthy: 1")).toBeTruthy();
+  expect(screen.getByText("Error: 2")).toBeTruthy();
+  expect(screen.getByText("Suspended: 1")).toBeTruthy();
+  // Every status is listed, zero included, so an absent colour is never the answer.
+  for (const word of ["Warning: 0", "Progressing: 0", "Unknown: 0"]) expect(screen.getByText(word)).toBeTruthy();
 });
 it("shows dashboard counts and navigates to grouped resource pages on the pinned cluster", async () => {
   const onPage = vi.fn();
@@ -99,7 +117,7 @@ it("shows dashboard counts and navigates to grouped resource pages on the pinned
       onPage={onPage}
     />,
   );
-  expect(await screen.findByText("Ready: 1")).toBeTruthy();
+  expect(await screen.findByText("Healthy: 1")).toBeTruthy();
   expect(readExtension).toHaveBeenCalledWith(
     "org.test.flux",
     3,
@@ -119,7 +137,7 @@ it("refreshes dashboard counts when an action on one of their resources is accep
       context="staging"
     />,
   );
-  expect(await screen.findByText("Ready: 1")).toBeTruthy();
+  expect(await screen.findByText("Healthy: 1")).toBeTruthy();
   const before = vi.mocked(readExtension).mock.calls.length;
   const changed = (detail: object) =>
     window.dispatchEvent(new CustomEvent(EXTENSION_RESOURCE_CHANGED, { detail }));
@@ -143,7 +161,7 @@ it("reports failed summaries instead of displaying zero healthy resources", asyn
     />,
   );
   expect((await screen.findByRole("alert")).textContent).toContain("Forbidden");
-  expect(screen.queryByText("Ready: 0")).toBeNull();
+  expect(screen.queryByText("Healthy: 0")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   await waitFor(() => expect(readExtension).toHaveBeenCalledTimes(2));
 });

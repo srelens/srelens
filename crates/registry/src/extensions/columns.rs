@@ -435,7 +435,7 @@ pub(super) fn register(
     );
     reg.register(Capability::typed::<ResolveColumns, ResolvedColumns, _, _>(
         "extensions.resolveColumns",
-        "Resolve native extension table columns in one batch",
+        "Resolve native extension table columns and badges in one batch",
         Annotations::READ_ONLY,
         move |input| {
             let path = path.clone();

@@ -7,44 +7,28 @@ import {
   loadKubeconfigFiles,
   onExtensionResourceChanged,
   readExtension,
+  itemStatuses,
   type ExtensionPage,
   type InstalledExtension,
   type EventSummary,
+  type NormalizedStatus,
 } from "@srelens/core";
+import { STATUS_WORD } from "./StatusBadge";
 import { ExtensionControls } from "./ExtensionControls";
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
 
-const statuses = [
-  "Ready",
-  "Not ready",
-  "In progress",
-  "Suspended",
-  "Unknown",
-] as const;
-type Status = (typeof statuses)[number];
-export function resourceStatus(
-  values: string[],
-  columns: NonNullable<ExtensionPage["statusColumns"]>,
-): Status {
-  const truth = (index?: number) =>
-    index !== undefined && values[index]?.toLowerCase() === "true";
-  if (truth(columns.suspended)) return "Suspended";
-  if (truth(columns.progressing)) return "In progress";
-  const ready = values[columns.ready]?.toLowerCase();
-  return ready === "true"
-    ? "Ready"
-    : ready === "false"
-      ? "Not ready"
-      : "Unknown";
-}
-const colors = [
-  "var(--ok, var(--fl-color-success, #388b5d))",
-  "var(--sev, var(--fl-color-danger, #d15f54))",
-  "var(--warn, var(--fl-color-warning, #bf8e32))",
-  "var(--info, var(--fl-color-info, #518dcc))",
-  "var(--ink-muted, var(--fl-color-text-muted, #85818f))",
-];
+// The six normalized statuses (#541), each counted and listed by its word:
+// the legend names every one, zero included, so no colour is the only signal.
+const statuses: NormalizedStatus[] = ["healthy", "warning", "error", "progressing", "suspended", "unknown"];
+const colors: Record<NormalizedStatus, string> = {
+  healthy: "var(--ok, var(--fl-color-success, #388b5d))",
+  warning: "var(--warn, var(--fl-color-warning, #bf8e32))",
+  error: "var(--sev, var(--fl-color-danger, #d15f54))",
+  progressing: "var(--info, var(--fl-color-info, #518dcc))",
+  suspended: "var(--ink-muted, var(--fl-color-text-muted, #85818f))",
+  unknown: "var(--rule, var(--fl-color-border, #b9b5c0))",
+};
 function Summary({
   plugin,
   page,
@@ -94,19 +78,17 @@ function Summary({
       }),
     [plugin.manifest.id, context, page.capability, namespace, reload],
   );
-  const counts = statuses.map(
-    (status) =>
-      (data.data?.items ?? []).filter(
-        (row) => resourceStatus(row.columns, page.statusColumns!) === status,
-      ).length,
-  );
+  // The host's resolved status per row; a page still on the deprecated
+  // `statusColumns` is read through the same mapping (`itemStatus`).
+  const resolved = itemStatuses(data.data?.items ?? [], page.statusColumns);
+  const counts = statuses.map((status) => resolved.filter((found) => found === status).length);
   const total = counts.reduce((a, b) => a + b, 0);
   let offset = 0;
   const gradient = counts
     .map((count, i) => {
       const start = offset;
       offset += total ? (count / total) * 100 : 0;
-      return `${colors[i]} ${start}% ${offset}%`;
+      return `${colors[statuses[i]]} ${start}% ${offset}%`;
     })
     .join(",");
   return (
@@ -134,8 +116,8 @@ function Summary({
           <ul>
             {statuses.map((status, i) => (
               <li key={status}>
-                <i aria-hidden="true" style={{ background: colors[i] }} />
-                {status}: {counts[i]}
+                <i aria-hidden="true" style={{ background: colors[status] }} />
+                {STATUS_WORD[status]}: {counts[i]}
               </li>
             ))}
           </ul>

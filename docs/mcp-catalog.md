@@ -166,7 +166,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `extensions.catalogManifest` | low | Download and checksum-verify a catalog manifest for permission review; does not install it |
 | `extensions.list` | low | List installed declarative extensions |
 | `extensions.read` | low | Read a declared custom-resource contribution from an enabled extension |
-| `extensions.resolveColumns` | low | Resolve native extension table columns in one batch |
+| `extensions.resolveColumns` | low | Resolve native extension table columns and badges in one batch |
 | `extensions.resolvePanels` | low | Resolve declarative app panels for a resource Inspector |
 | `extensions.resource` | low | Inspect the selected resource of an enabled app |
 | `extensions.validate` | low | Check a declarative extension manifest exactly as installing it would and return every problem; does not install it |

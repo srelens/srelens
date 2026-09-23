@@ -155,7 +155,7 @@ value:
 
 | Field | Meaning |
 |---|---|
-| `jsonPath` | The value to ask about. An optional leading `$`, then `.key`, `['key']`, `["key"]` and `[0]`, at most 8 segments and 256 characters. No wildcard, filter, recursive descent or function — each addresses a *set* of values, and "does this hold" over a set is a different question. |
+| `jsonPath` | The value to ask about. An optional leading `$`, then `.key`, `['key']`, `["key"]`, `[0]`, and one filter form, `[?(@.key=="text")]` (either quote), at most 8 segments and 256 characters. The filter selects the **first** element of a list whose plain `key` holds exactly the string `text` — the element a Kubernetes printer column shows for the same path — so `.status.conditions[?(@.type=="Ready")].status` reads the Ready condition wherever it sits in the list. A filter that matches nothing is an unset field, as `.status.missing` is. No wildcard, other filter, recursive descent or function — each addresses a *set* of values, and "does this hold" over a set is a different question. |
 | `equals` / `notEquals` | The value must (not) be this string, number or boolean **literal**. An object or a list is not a comparand. A field nobody set is not equal to anything, so `notEquals` holds when it is absent. |
 | `present` / `absent` | Written `true`. The value must be set, or unset. `null` counts as unset, which is also why `null` is not a comparand: write `absent: true`. |
 | `reason` | Required, at most 200 characters. Shown to the operator, so it says what to do next. |
@@ -238,8 +238,8 @@ contribution names a declared capability.
 |---|---|
 | `id`, `title`, `capability` | Identity, navigation label, and the binding that lists the page's resources. |
 | `group` | Optional navigation group label, held to the same rules as `name`. |
-| `statusColumns` | Optional `{ ready, suspended?, progressing? }`: zero-based indices into the binding's `printerColumns`, each below 64. |
-| `dashboard` | Optional `{ pages, events? }`. `pages` references 1–12 resource pages that have `statusColumns` and are not dashboards. `events` is `{ capability, apiGroups }`, where `capability` binds `k8s.listEvents` and `apiGroups` lists 1–32 dotted groups. |
+| `statusColumns` | **Deprecated** in favour of [`statusResolvers`](#status-resolvers-and-badges); still accepted on the 0.3 line. Optional `{ ready, suspended?, progressing? }`: zero-based indices into the binding's `printerColumns`, each below 64. |
+| `dashboard` | Optional `{ pages, events? }`. `pages` references 1–12 resource pages that are not dashboards and whose binding's kind has a status resolver (or, deprecated, that have `statusColumns`). `events` is `{ capability, apiGroups }`, where `capability` binds `k8s.listEvents` and `apiGroups` lists 1–32 dotted groups. |
 
 ### `detailTabs` and `detailLinks`
 
@@ -293,6 +293,59 @@ A scalar over 1,024 bytes is also reported on its cell. The host resolves up to
 1,000 rows in one call and caches each joined list for five seconds, sharing an
 in-flight read. A joined list beyond 2,000 objects fails as incomplete.
 
+### Status resolvers and badges
+
+An app says what status its custom resources have, and puts words on built-in rows
+(#541):
+
+```json
+"statusResolvers": [{ "forKinds": ["helm.toolkit.fluxcd.io/HelmRelease"], "rules": [
+  { "when": [{ "jsonPath": ".spec.suspend", "equals": true }], "status": "suspended", "label": "Suspended" },
+  { "when": [{ "jsonPath": ".status.conditions[?(@.type==\"Ready\")].status", "equals": "True" }],
+    "status": "healthy", "label": "Ready" },
+  { "when": [], "status": "unknown", "label": "Unknown" }
+]}],
+"badges": [{ "id": "flux-managed", "forKinds": ["apps/Deployment"], "rules": [
+  { "when": [{ "jsonPath": ".metadata.labels['kustomize.toolkit.fluxcd.io/name']", "present": true }],
+    "status": "healthy", "label": "Flux",
+    "reason": ".metadata.labels['kustomize.toolkit.fluxcd.io/name']" }
+]}]
+```
+
+A **rule** holds when every condition in `when` holds; an empty `when` always holds,
+which is how a last catch-all rule is written. Rules match **first-hit**: the first
+rule that holds is the answer, whatever later rules say. Each list has 1–16 rules and
+each rule at most 8 conditions.
+
+| Field | Meaning |
+|---|---|
+| `when` | Conditions: a [predicate](#preconditions-and-availability) without `reason` — the same operators, the same path grammar (including the one filter form), evaluated by the same code. |
+| `status` | One of `healthy`, `warning`, `error`, `progressing`, `suspended`, `unknown`. |
+| `label` | Required: 1–40 characters, no control or invisible format characters. The word shown. Colour is never the only signal, so a status or badge always carries its word. |
+| `reason` | Optional path whose scalar value is shown as the reason (a condition's `message`, a label's value). At most 200 characters are shown; objects, lists and empty strings are no reason. |
+
+`statusResolvers` (at most 16) name 1–32 `forKinds`, each the `group/Kind` of a
+declared `k8s.listCustomResource` reader, and each kind has one resolver. The host
+evaluates the rules on the whole object as it lists it — `extensions.read` binds them
+to the reader as `statusRules` — and returns each row's `status`. When no rule holds
+the host says `unknown`. The app's own tables show a **Status** column, and app
+dashboards count by these six statuses. A binding may not fix `statusRules` itself.
+
+`badges` (at most 16) have a unique `id` and 1–32 `forKinds`, each a built-in kind
+the host lists in exactly that group (`apps/Deployment`, `/Pod`); `/Secret` is refused.
+Without a `join`, the rules read the row's own **metadata only**: every path in `when`
+and `reason` starts with `.metadata`, and the host lists just the kind's names,
+labels, annotations and owner references (up to 2,000 per namespace, cached five
+seconds). With a declared `join`, the rules read the joined resource, through the same
+index a joined table column uses. When no rule holds there is no badge. A row the
+host's metadata read does not contain, or a join that matches more than one resource,
+shows *Couldn't read* on that badge rather than no badge; a failed read fails the
+table's batch with a retry. Badges are resolved in the same `extensions.resolveColumns`
+call as table columns.
+
+Labels and reasons are app and cluster text: the host escapes control and format
+characters and draws them as text.
+
 ### `detailPanels`
 
 An app can add native sections after the Inspector's host sections for a
@@ -344,6 +397,10 @@ The desktop app accepts a narrower surface than the developer broker:
   `namespace`.
 - Every page, detail tab and detail link references a `k8s.listCustomResource` binding.
 - `statusColumns` indices point at declared `printerColumns`.
+- A `k8s.listCustomResource` binding does not fix `statusRules`; the host binds them
+  from `statusResolvers`.
+- Badge `forKinds` are built-in kinds this host lists, in exactly their API group, and
+  never `/Secret`.
 
 Settings → Apps checks these rules together with the manifest's own before it offers
 to install, and lists every problem with its path. See

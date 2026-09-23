@@ -88,6 +88,34 @@ it("shows a declared native table column on the app's own resource page", async 
   expect(await screen.findByText("4")).toBeTruthy();
   expect(resolveExtensionColumns).toHaveBeenCalledTimes(1);
 });
+it("shows the host-resolved status as a word in its own column, searchable, when the kind has a resolver", async () => {
+  const app = { ...plugin, manifest: { ...plugin.manifest,
+    capabilities:[{ name:"list", target:"k8s.listCustomResource", arguments:{ group:"argoproj.io", kind:"Application", namespaced:true } }],
+    contributions:{ ...plugin.manifest.contributions, statusResolvers:[{ forKinds:["argoproj.io/Application"],
+      rules:[{ when:[], status:"unknown", label:"Unknown" }] }] } } };
+  vi.mocked(readExtension).mockResolvedValue({ items:[
+    { name:"guestbook", namespace:"team", age:"1d", columns:[], status:{ status:"healthy", label:"Healthy" } },
+    { name:"billing", namespace:"team", age:"1d", columns:[], status:{ status:"warning", label:"Out of sync", reason:"abc123" } },
+    { name:"legacy", namespace:"team", age:"1d", columns:[] },
+  ], printerColumns:[] });
+  const view = render(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" />);
+  expect(await screen.findByRole("columnheader", { name:"Status" })).toBeTruthy();
+  const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
+  expect(within(rows[0]).getByText("Healthy")).toBeTruthy();
+  expect(within(rows[1]).getByText("Out of sync")).toBeTruthy();
+  expect(within(rows[1]).getByText("abc123")).toBeTruthy();
+  // A row the host returned no status for says so, rather than borrowing a word.
+  expect(within(rows[2]).getByText("—")).toBeTruthy();
+  view.rerender(<ExtensionResults plugin={app} capability="list" context="prod" namespace="team" search="out of sync" />);
+  expect(screen.getByText("billing")).toBeTruthy();
+  expect(screen.queryByText("guestbook")).toBeNull();
+});
+it("draws no status column for a kind without a resolver", async () => {
+  vi.mocked(readExtension).mockResolvedValue({ items:[{ name:"apps", namespace:"team", age:"1d", columns:["True"] }], printerColumns:[{ name:"Ready", jsonPath:".r" }] });
+  render(<ExtensionResults plugin={plugin} capability="list" context="prod" namespace="team" />);
+  expect(await screen.findByText("apps")).toBeTruthy();
+  expect(screen.queryByRole("columnheader", { name:"Status" })).toBeNull();
+});
 it("sorts and searches opted-in app column values", async () => {
   const column = { id:"score", title:"Score", forKinds:["argoproj.io/Application"],
     source:{jsonPath:".score"}, format:"number" as const, sortable:true, filterable:true };
