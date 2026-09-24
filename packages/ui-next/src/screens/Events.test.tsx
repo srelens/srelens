@@ -342,7 +342,8 @@ describe("Events", () => {
     expect(routes()).toContain("/k/Node/-/node-3");
   });
 
-  it("inherits the workspace's namespace selection", async () => {
+  it("reads its own tab's namespace selection", async () => {
+    store.openTab("/events");
     setNamespaces("prod", ["shop"]);
     open();
     // A namespaced event is narrowed; a cluster-scoped one — which belongs to
@@ -550,6 +551,7 @@ describe("Events", () => {
     const user = userEvent.setup();
     // billing holds one event and it is a Warning, so asking for the Normal
     // ones leaves the screen — table and rail alike — with nothing to show.
+    store.openTab("/events");
     setNamespaces("prod", ["billing"]);
     open();
     await waitFor(() => expect(reasons()).toEqual(["BackOff"]));

@@ -142,6 +142,7 @@ import type { ClusterContext, CrdRef, K8sObject } from "@srelens/core";
 import { ResourceDetailScreen, Resources } from "./Resources";
 import { ConsoleProvider, useConsole } from "../console";
 import * as store from "../lib/tabsStore";
+import { TabScope } from "../lib/tabScope";
 import { defaultState } from "../lib/tabs";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { hiddenColumns, loadColumnPrefs, toggleColumn } from "../lib/columnPrefs";
@@ -154,7 +155,7 @@ import {
   loadPeekWidth,
 } from "../lib/peekWidth";
 import { resetListCache } from "../lib/resourceList";
-import { getView, resetView, setNamespaces } from "../lib/workspace";
+import { resetView, setNamespaces } from "../lib/workspace";
 
 const CTX: ClusterContext = {
   name: "prod-eu",
@@ -299,6 +300,12 @@ function AskPeek() {
  * same `ConsoleProvider` the real shell mounts at the root, since a row's ask
  * chip now reaches `useConsole()`.
  */
+/** The active tab's namespace selection for a cluster — where a screen outside any `TabScope` reads and writes it. */
+const selectionOf = (clusterId: string) => {
+  const w = store.currentWorkspace();
+  return w.tabs.find((t) => t.id === w.activeId)?.namespaces?.[clusterId];
+};
+
 function open(route: string) {
   store.openTab(route);
   return render(
@@ -872,8 +879,8 @@ describe("Resources", () => {
 
     open("/k/pods");
 
-    // Written to the workspace store, so every screen on this cluster follows.
-    await waitFor(() => expect(getView().namespaces.prod).toEqual(["team-a"]));
+    // Written to this tab's selection, so the picker shows the scope.
+    await waitFor(() => expect(selectionOf("prod")).toEqual(["team-a"]));
     await waitFor(() =>
       expect(watchResource.mock.calls.some((call) => call[1] === "team-a")).toBe(true),
     );
@@ -881,6 +888,7 @@ describe("Resources", () => {
 
   it("explains a remembered selection that no longer exists, rather than showing an empty table with no reason", async () => {
     useNamespaceOptions.mockReturnValue({ namespaces: ["default", "billing"], scope: "", error: "" });
+    store.openTab("/k/pods");
     act(() => setNamespaces(CTX.stableId, ["deleted-ns"]));
 
     open("/k/pods");
@@ -891,7 +899,36 @@ describe("Resources", () => {
     // The alert's dismiss action is the recovery: back to "all namespaces",
     // written through the same store a manual clear would use.
     await userEvent.click(screen.getByRole("button", { name: "Show all namespaces" }));
-    await waitFor(() => expect(getView().namespaces.prod).toEqual([]));
+    await waitFor(() => expect(selectionOf("prod")).toEqual([]));
+  });
+
+  it("keeps a namespace pick in its own tab — another tab on the same cluster does not follow", async () => {
+    useNamespaceOptions.mockReturnValue({ namespaces: ["default", "billing"], scope: "", error: "" });
+    store.openTab("/k/pods");
+    store.openTab("/k/deployments");
+    const tabIdOf = (route: string) => store.currentWorkspace().tabs.find((t) => t.route === route)!.id;
+    const pods = tabIdOf("/k/pods");
+    const deployments = tabIdOf("/k/deployments");
+    // Both mounted at once, each in its own scope — the way `Window` mounts every tab.
+    render(
+      <ConsoleProvider>
+        <div data-testid="pods">
+          <TabScope.Provider value={pods}><Resources route="/k/pods" /></TabScope.Provider>
+        </div>
+        <div data-testid="deployments">
+          <TabScope.Provider value={deployments}><Resources route="/k/deployments" /></TabScope.Provider>
+        </div>
+      </ConsoleProvider>,
+    );
+    const podsPane = within(screen.getByTestId("pods"));
+    await userEvent.click(await podsPane.findByRole("combobox", { name: "Namespaces" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Only billing" }));
+
+    const tab = (id: string) => store.currentWorkspace().tabs.find((t) => t.id === id)!;
+    await waitFor(() => expect(tab(pods).namespaces).toEqual({ [CTX.stableId]: ["billing"] }));
+    expect(tab(deployments).namespaces).toBeUndefined();
+    // And the other tab's watch was never narrowed to it.
+    expect(watchResource.mock.calls.some((call) => call[2] === "deployments" && call[1] === "billing")).toBe(false);
   });
 
   it("does not warn about a selection that is merely empty of this kind right now", async () => {
@@ -1040,7 +1077,7 @@ describe("Resources", () => {
     // The fixture's own premise, asserted rather than assumed: neither cluster
     // has a namespace selection, so both are on "all namespaces" and the
     // selection this screen watches cannot change identity below.
-    expect(getView().namespaces).toEqual({});
+    expect(store.currentWorkspace().tabs.every((t) => t.namespaces === undefined)).toBe(true);
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select default/web-1" }));
     await screen.findByText("1 selected");
