@@ -2474,6 +2474,8 @@ mod tests {
             "name":"refresh", "title":"Refresh", "target":"k8s.annotate", "resource":"applications",
             "arguments":{"key":"argocd.argoproj.io/refresh","value":"normal"}
         }]);
+        // The example's palette commands name the actions replaced above.
+        value["contributions"]["commands"] = json!([]);
         let grants = vec!["k8s.listCustomResource".into(), "k8s.annotate".into()];
         let parsed = Manifest::parse(&value.to_string()).unwrap();
         validate_app(&parsed, &grants, core.clone()).unwrap();

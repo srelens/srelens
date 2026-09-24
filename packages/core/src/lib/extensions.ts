@@ -166,6 +166,18 @@ export interface ExtensionSetting {
 export interface ExtensionSecretReference {
   secretRef: string;
 }
+/**
+ * A command palette entry (#544). The host shows it under the app's name. A page
+ * command opens one of the app's pages; an action command runs one of its declared
+ * actions on the resource open in an app resource tab, through the host confirmation.
+ */
+export interface ExtensionCommand {
+  id: string;
+  title: string;
+  target: { page: string } | { action: string };
+  /** Action commands only: the qualified kind of the reader binding the action acts on. */
+  forKinds?: string[];
+}
 export interface ExtensionManifest {
   /** Editor metadata naming the manifest's JSON Schema; the host ignores it. */
   $schema?: string;
@@ -223,6 +235,7 @@ export interface ExtensionManifest {
     detailPanels?: ExtensionDetailPanel[];
     statusResolvers?: ExtensionStatusResolver[];
     badges?: ExtensionBadge[];
+    commands?: ExtensionCommand[];
   };
 }
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */

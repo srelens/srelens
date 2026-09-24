@@ -120,10 +120,11 @@ Why a new field needs a new minor even though it is optional: manifests are stri
 (see below), so a host that predates the field would reject it. Requiring the minor
 turns that into a clear "requires API 0.x" message.
 
-Pre-1.0 exception for #538, #539 and #541: `contributions.joins`,
+Pre-1.0 exception for #538, #539, #541 and #544: `contributions.joins`,
 `contributions.tableColumns`, `contributions.detailPanels`,
-`contributions.statusResolvers` and `contributions.badges` were added to API 0.3 in
-place while the extension platform is still being built, and so was the one predicate
+`contributions.statusResolvers`, `contributions.badges` and `contributions.commands`
+were added to API 0.3 in place while the extension platform is still being built, and
+so was the one predicate
 path filter form, `[?(@.key=="text")]` (#541), which widens what a path accepts without
 changing what an accepted path means. Earlier signed Flux and Argo CD 0.3 releases
 without these fields remain valid — including their `statusColumns` — and a manifest
@@ -308,6 +309,9 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   `k8s.setStatusCondition`'s `message`), and is checked at install, on save and on
   every request. A `secret-reference` value never enters the inventory (#542). See
   [Manifest reference](manifest.md#settings).
+- Apps may declare `commands` for the new design's command palette: open a declared
+  page, or open the host confirmation for a declared action on a resource of the
+  action's kind (#544). See the [manifest reference](manifest.md#commands).
 - Unsigned apps declaring write actions require the default-off inventory policy
   described above (#558). Turning it off disables affected installations without
   removing them; normal read-only declarative permission grants are unchanged.

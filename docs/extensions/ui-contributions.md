@@ -121,4 +121,20 @@ the reader saw, even if another view refreshes the resource while it is open.
 Acknowledgement says **Request accepted**, not that reconciliation completed. Every
 open list, dashboard and detail view of that resource then refreshes.
 
+## Command palette
+
+In the new design, typing `/` in the console lists enabled apps' `commands` (#544),
+each labelled with the app's name, for example **Flux: Open Helm releases**. Page
+commands sit under **Apps** and open the page on the cluster in focus; an app that is
+disabled or not allowed on that cluster contributes nothing.
+
+Action commands sit under **Action** and appear only while an app resource of the
+command's kind is open in its own tab. Running one opens that tab's review — the same
+host confirmation as the footer button, pinned to the UID and resourceVersion shown —
+and nothing is written until it is confirmed there. An action the resource's
+availability rules exclude, or a resource read without a UID and resourceVersion to
+pin, says why instead; a failed read drops the request, so a later Retry does not open
+a review. The classic palette does not list app
+commands.
+
 Arbitrary custom renderer code is not supported.

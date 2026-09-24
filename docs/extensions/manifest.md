@@ -465,6 +465,39 @@ shows on the app's list. A `countByStatus` card over a reader whose kind has no
 at install at `contributions.dashboardCards[i].type`. It never counts by
 `statusColumns`.
 
+### `commands`
+
+Entries in the new design's command palette (#544). The host shows each as
+`<app name>: <title>`, so an app's command never reads as the host's own.
+
+```json
+"commands": [
+  { "id": "open-helmreleases", "title": "Open Helm releases", "target": { "page": "helmreleases" } },
+  { "id": "reconcile", "title": "Reconcile Helm release", "target": { "action": "helmreleases-reconcile" },
+    "forKinds": ["helm.toolkit.fluxcd.io/HelmRelease"] }
+]
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | Unique among commands: 1–64 ASCII letters, digits and `-`. |
+| `title` | Label shown after the app name, held to the rules for `name`. |
+| `target` | Exactly one of `{ "page": <page id> }` or `{ "action": <declared action name> }`. |
+| `forKinds` | Action commands only, and required there: the group-qualified kind of the `k8s.listCustomResource` reader the action acts on. |
+
+At most 32 commands. A page command opens the page on the cluster in focus. An
+action command is offered only while one of the app's resources of that kind is
+open in its own tab, and running it opens that tab's host confirmation — the same
+review the action's button opens. It never writes on its own.
+
+Validation reports, at the field that has to change: an undeclared page
+(`EXTENSION_UNRESOLVED_PAGE` at `target.page`), an undeclared action
+(`EXTENSION_UNRESOLVED_CAPABILITY` at `target.action`), an action on a reader other
+than a custom-resource reader, or on one no page lists (`EXTENSION_INVALID_BINDING`
+at `target.action`), `forKinds` on a page command (`EXTENSION_INVALID_BINDING`),
+a kind the action does not act on (`EXTENSION_INVALID_BINDING` at `forKinds[i]`),
+and the usual identifier, label, count, kind and duplicate rules.
+
 ## Settings
 
 An app declares its settings, and the host draws them as a form in Settings → Apps
