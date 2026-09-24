@@ -255,6 +255,9 @@ fn change(path: &Path, store: &dyn SecretStore, input: SecretIn) -> Result<Secre
     };
     write(path, &state)?;
     sweep(store, &state);
+    // An inventory write like any other, so the app streams and the windows
+    // listening to them hear of it (#566). They hear only that it changed.
+    super::streams::announce(path, &state);
     Ok(SecretOut { set })
 }
 
