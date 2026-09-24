@@ -22,7 +22,9 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     schemaVersion: "required",
     nextRevision: "required",
     plugins: "required",
+    secretStore: "optional",
   } satisfies Presence<ExtensionInventory>,
+  SecretStoreState: { available: "required", reason: "optional" } satisfies Presence<NonNullable<ExtensionInventory["secretStore"]>>,
   Installed: {
     signatureProof: "optional",
     quarantined: "optional",

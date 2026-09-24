@@ -1134,6 +1134,25 @@
         }
       ]
     },
+    "SecretStoreState": {
+      "description": "Whether the host can store a secret now, as `extensions.list` reports it.",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Why not, in the host's words, when it cannot.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available"
+      ],
+      "type": "object"
+    },
     "Setting": {
       "additionalProperties": false,
       "description": "One setting an app declares. The host renders it as a form field and checks every value saved into it.",
@@ -1464,6 +1483,17 @@
       "format": "uint32",
       "minimum": 0.0,
       "type": "integer"
+    },
+    "secretStore": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SecretStoreState"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Whether the host can store an app's secret now (#543), as `extensions.list` reports it. Recomputed for every answer, ignored when read from disk and never written there."
     }
   },
   "required": [

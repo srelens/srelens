@@ -535,7 +535,7 @@ An app declares its settings, and the host draws them as a form in Settings → 
 | `url` | An `http` or `https` URL with a host and no user name or password. Put credentials in a `secret-reference`. |
 | `namespace-selector` | A Kubernetes namespace name. The form lists the namespaces of a cluster the person chooses. |
 | `cluster-selector` | A kubeconfig context, saved by its key (`ClusterContext.key`), the identity app cluster scope uses. |
-| `secret-reference` | Never a value. The host's secret store (#543) keeps the secret; the inventory holds only its reference, `{"secretRef": "<app id>/<setting id>"}`, written by that store. |
+| `secret-reference` | Never a value. The host's secret store keeps the secret; the inventory holds only its reference, `{"secretRef": "<app id>/<setting id>"}`, written by that store. See [Secret settings](#secret-settings). |
 
 The host holds every save to these rules, whatever the form allowed. A save
 (`extensions.configure` with `action: "settings"`) is refused, with each problem at
@@ -582,12 +582,49 @@ The access review lists the declaration of each setting an action or reader
 interpolates, so an update that lets a setting write another value shows as changed
 access.
 
+### Secret settings
+
+A `secret-reference` setting is kept by the host's secret store (#543). On the desktop
+that is the existing encrypted vault, `secrets.enc`, whose one master key is in the OS
+keychain; the app secret is one more entry in it, beside the MCP token and the provider
+API keys, keyed by `<app id>/<setting id>`. The inventory holds only the reference.
+
+- **Permission.** A manifest that declares a `secret-reference` setting lists
+  `extension.secretStore` in `permissions`, and one that declares none may not
+  (`EXTENSION_PERMISSION_MISMATCH`). It is granted at install like any other permission
+  and is never a binding target (`EXTENSION_UNSUPPORTED_TARGET`). The install and update
+  review names it, the secret settings it covers, and the host's metadata for it:
+  sensitive, `medium` impact, and its confirmation wording.
+- **Write-only.** Settings ? Apps sets, replaces and clears a secret, and shows whether
+  it is set. Nothing returns the value: not `extensions.list`, not the capability's own
+  answer (`{"set": true}`), not an error, not the audit log, not an MCP response or
+  consent prompt, not exported settings or the settings bundle.
+- **Fails closed.** A secret is stored only while the vault's key is protected by the OS
+  keychain, the biometric gate or the master password, and the vault is unlocked. With
+  no usable keychain (the headless file fallback), a locked vault, or no store at all, a
+  set is refused with the reason, which Settings ? Apps shows beside the field. Nothing is
+  ever written in plain text instead.
+- **Deleted with the app.** Removing the app, resetting its settings, or an update or
+  rollback that no longer declares the setting as a secret deletes the secret. The
+  inventory is the source of truth and the store follows it: after every inventory change
+  the host deletes each stored secret no app references. A delete the store cannot make
+  at that moment (a locked vault) leaves the secret unreferenced, where nothing can reach
+  it, and the next change deletes it.
+- **Where it is used.** The host injects a secret only into an argument a host capability
+  declares as a secret slot, and only for an app granted `extension.secretStore`
+  (`PluginHost::inject_secret`). No capability declares one yet; brokered HTTP headers
+  (#568) will be the first. A declarative app never sees the value, and a
+  `secret-reference` is never interpolated.
+- **Web.** The web host keeps no app secrets yet (#522): `extension.secretStore` is refused
+  there before dispatch.
+
 ### When the manifest changes
 
 An update or a rollback keeps only the saved values the new manifest still declares and
 still accepts. A string setting that becomes a `secret-reference` loses its plaintext
 rather than keeping it under a secret's name, and a secret that becomes a string does not
-turn its reference into a value. A required setting left without a value makes the
+turn its reference into a value; the stored secret itself is deleted, as it is when a
+secret setting is dropped. A required setting left without a value makes the
 requests that interpolate it fail, naming the setting, until one is saved.
 
 ## Rules the desktop app adds

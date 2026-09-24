@@ -120,7 +120,7 @@ impl PendingRequest {
         Self {
             id,
             tool: request.tool.clone(),
-            args: request.args.clone(),
+            args: shown_args(&request.tool, &request.args),
             prompt: request.confirm_text.clone(),
             impact: request.impact.as_str().to_string(),
             target: ConfirmTarget {
@@ -131,6 +131,19 @@ impl PendingRequest {
             },
         }
     }
+}
+
+/// The arguments the window is shown. An app's secret (#543) is blanked: the
+/// question names the app, the setting and the action, and the value itself
+/// never reaches the renderer, which could only show it.
+fn shown_args(tool: &str, args: &Value) -> Value {
+    let mut shown = args.clone();
+    if tool == srelens_registry::SECRET_STORE_PERMISSION {
+        if let Some(secret) = shown.get_mut("secret") {
+            *secret = Value::String("<redacted>".into());
+        }
+    }
+    shown
 }
 
 /// Every confirmation waiting on an answer, by id.
@@ -401,6 +414,31 @@ mod tests {
         // And the arguments still travel: the sentence says what, the payload
         // still says exactly which call.
         assert_eq!(got.args["name"], json!("node-7"));
+    }
+
+    /// #543. An agent asking to keep an app's secret sends the value in its
+    /// arguments, and the prompt ships its arguments to the window. The
+    /// window is told which app, which setting and what is asked — never the
+    /// value, which it has no use for and must not hold.
+    #[test]
+    fn the_prompt_for_an_app_secret_never_carries_the_value() {
+        let secret = "agent-sent-token-9d1c";
+        let got = PendingRequest::from_consent(
+            "id-9".into(),
+            &consent(
+                "extension.secretStore",
+                Annotations::MUTATING,
+                json!({"action":"set","id":"org.example.metrics","setting":"token","secret":secret}),
+            ),
+        );
+        let shown = serde_json::to_string(&got).unwrap();
+        assert!(!shown.contains(secret), "the window was sent the secret: {shown}");
+        assert_eq!(got.args["setting"], json!("token"));
+        assert_eq!(got.args["action"], json!("set"));
+        let p = Pending::default();
+        let (tx, _rx) = oneshot::channel();
+        p.register(got, tx);
+        assert!(!serde_json::to_string(&p.snapshot()).unwrap().contains(secret));
     }
 
     /// No template is not a hole: the window falls back to what it always

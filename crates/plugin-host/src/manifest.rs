@@ -1161,13 +1161,39 @@ impl Manifest {
                 );
             }
         }
+        // The secret store is granted, never bound (#543): the host keeps an
+        // app's secrets on its behalf, and a binding would make it a tool the
+        // app calls.
+        for (index, binding) in self.capabilities.iter().enumerate() {
+            if binding.target == crate::SECRET_STORE_PERMISSION {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("capabilities[{index}].target"),
+                    "extension.secretStore is granted to keep an app's secret settings, never bound",
+                );
+            }
+        }
+        for (index, action) in self.actions.iter().enumerate() {
+            if action.target == crate::SECRET_STORE_PERMISSION {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("actions[{index}].target"),
+                    "extension.secretStore is granted to keep an app's secret settings, never bound",
+                );
+            }
+        }
+        // What the app uses: its bound targets, plus the secret store exactly
+        // when it declares a secret setting.
+        if self.declares_secrets() {
+            targets.insert(crate::SECRET_STORE_PERMISSION);
+        }
         if targets != permissions {
             let targets: Vec<_> = targets.into_iter().collect();
             problems.push(
                 Code::PermissionMismatch,
                 "permissions",
                 format!(
-                    "permissions must name exactly the bound host capabilities: {}",
+                    "permissions must name exactly the bound host capabilities, plus extension.secretStore when a secret-reference setting is declared: {}",
                     targets.join(", ")
                 ),
             );

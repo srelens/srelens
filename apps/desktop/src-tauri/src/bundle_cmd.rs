@@ -88,7 +88,12 @@ fn secrets_for_export(vault: &Vault, include_secrets: bool) -> Result<Option<Sec
             vault.key_source()
         ));
     }
-    Ok(Some(vault.load()))
+    // An app's secrets are never exported (#543): they are kept for that app
+    // on this machine, and the inventory that references them is not carried
+    // either.
+    let mut secrets = vault.load();
+    secrets.extension_secrets.clear();
+    Ok(Some(secrets))
 }
 
 fn check_passphrase(passphrase: &str) -> Result<(), String> {
@@ -353,6 +358,7 @@ mod tests {
         let incoming = Secrets {
             mcp_token: Some("token-from-the-old-machine".into()),
             llm_keys: BTreeMap::from([("anthropic".into(), "sk-ant-from-bundle".into())]),
+            ..Default::default()
         };
 
         let written = import_secrets(&vault, &bundle_with(Some(incoming))).unwrap();
@@ -372,6 +378,7 @@ mod tests {
             Secrets {
                 mcp_token: Some("mine".into()),
                 llm_keys: BTreeMap::from([("anthropic".into(), "sk-ant-mine".into())]),
+                ..Default::default()
             },
         );
         let incoming = Secrets {
@@ -380,6 +387,7 @@ mod tests {
                 ("anthropic".into(), "sk-ant-theirs".into()),
                 ("openai".into(), "sk-openai-theirs".into()),
             ]),
+            ..Default::default()
         };
 
         let written = import_secrets(&vault, &bundle_with(Some(incoming))).unwrap();
@@ -404,6 +412,7 @@ mod tests {
             Secrets {
                 mcp_token: None,
                 llm_keys: BTreeMap::from([("anthropic".into(), "sk-ant-mine".into())]),
+                ..Default::default()
             },
         );
         // Put the vault into password mode and shut it, the same three steps
@@ -437,12 +446,36 @@ mod tests {
         let held = Secrets {
             mcp_token: Some("tok".into()),
             llm_keys: BTreeMap::from([("anthropic".into(), "sk-ant-mine".into())]),
+            ..Default::default()
         };
         let vault = vault_with(&dir, held.clone());
         assert!(vault.is_unlocked());
 
         assert_eq!(secrets_for_export(&vault, true).unwrap(), Some(held));
         assert_eq!(secrets_for_export(&vault, false).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #543: an app's secret is kept for that app on this machine, and the
+    /// bundle is how settings leave it. The export carries the API keys and
+    /// the MCP token a person chose to include, never an app's secret.
+    #[test]
+    fn an_export_never_carries_an_apps_secret() {
+        let dir = temp_dir("secrets-apps");
+        let vault = vault_with(
+            &dir,
+            Secrets {
+                mcp_token: Some("tok".into()),
+                extension_secrets: BTreeMap::from([(
+                    "org.example.metrics/token".into(),
+                    "glc_app-secret-value".into(),
+                )]),
+                ..Default::default()
+            },
+        );
+        let exported = secrets_for_export(&vault, true).unwrap().unwrap();
+        assert!(exported.extension_secrets.is_empty(), "{exported:?}");
+        assert_eq!(exported.mcp_token.as_deref(), Some("tok"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

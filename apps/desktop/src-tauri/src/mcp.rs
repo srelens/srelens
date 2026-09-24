@@ -112,7 +112,18 @@ impl McpHttpManager {
                     5 * 1024 * 1024,
                 )),
             };
-        let registry = build_registry_with(self.cache.clone());
+        // Apps' secrets (#543) in the same vault-backed store the UI's
+        // registry uses, so an agent sees the same state and a removal made
+        // here deletes the app's secrets too.
+        let registry = match app.try_state::<crate::ExtensionSecrets>() {
+            Some(secrets) => crate::registry_for(
+                self.cache.clone(),
+                crate::capabilities::default_kubeconfig_paths(),
+                crate::capabilities::default_settings_path(),
+                secrets.0.clone(),
+            ),
+            None => build_registry_with(self.cache.clone()),
+        };
         srelens_mcp::McpServer::new(Arc::new(registry))
             .with_policy(Arc::new(crate::mcp_confirm::PromptUser::new(
                 app.clone(),

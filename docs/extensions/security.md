@@ -28,6 +28,11 @@ mitigation and the risk that remains.
 - **Downloads are constrained.** Only the fixed catalog URL, GitHub release assets and
   GitHub's release-asset redirects, with bounded sizes, timeouts and redirect counts.
   The frontend never fetches catalog URLs or writes catalog caches to browser storage.
+- **App secrets are write-only and keychain-backed.** A `secret-reference` setting's
+  value is kept in the desktop vault under its keychain-held master key, needs the
+  `extension.secretStore` permission, is never returned to the app, the UI, MCP, an
+  export or a log, is refused rather than stored when no keychain protects the vault,
+  and is deleted with the app ([manifest.md](manifest.md#secret-settings)).
 - **The web host refuses app capabilities** until state is per user
   ([capabilities.md](capabilities.md#web-host)).
 - **Every write is recorded locally, wherever it came from.** A mutating or

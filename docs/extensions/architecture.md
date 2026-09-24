@@ -71,8 +71,11 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
 - Stored settings are held to the typed `settings` the manifest declares (#542). A
   setting reaches a capability only through a binding argument the capability marks
   settable, checked at install, on save and on every request. A secret-reference
-  setting's value never enters the inventory; it holds only a reference for the secret
-  store (#543). See [Settings](manifest.md#settings).
+  setting's value never enters the inventory; it holds only a reference, and the value is
+  one more entry in the desktop's existing vault (`secrets.enc`, one master key in the OS
+  keychain). The registry sees the vault only as a `SecretStore`, which follows the
+  inventory: whatever the inventory stops referencing is deleted (#543). See
+  [Secret settings](manifest.md#secret-settings).
 
 ## Quarantine
 

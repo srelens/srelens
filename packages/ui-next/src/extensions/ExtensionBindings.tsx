@@ -1,4 +1,5 @@
 import { useContext, useState } from "react";
+import { CAPABILITY_CATALOG, renderConfirmTemplate } from "@srelens/core";
 import { CodeEditor } from "@srelens/ui-kit";
 import { ExtensionControls } from "./ExtensionControls";
 import { escapeFormatCharacters, plainText } from "./displayText";
@@ -16,6 +17,7 @@ const show = (value: unknown): string =>
 
 const CUSTOM_RESOURCE = "k8s.listCustomResource";
 const EVENTS = "k8s.listEvents";
+const SECRET_STORE = "extension.secretStore";
 /** The arguments a custom-resource reader's row names in their own cells. */
 const RESOURCE_FIELDS: Array<[key: string, label: string]> = [
   ["group", "API group"],
@@ -213,6 +215,34 @@ function OtherReaders({ bindings }: { bindings: Binding[] }) {
 }
 
 /**
+ * `extension.secretStore` (#543): not bound to anything, so what it grants is
+ * which of the app's settings the host keeps as secrets, plus the host's own
+ * metadata for the permission (#548) — read from the capability catalog,
+ * never from the manifest.
+ */
+function SecretStore({ manifest }: { manifest: unknown }) {
+  const secrets = items(fields(manifest).settings)
+    .map(fields)
+    .filter((setting) => setting.type === "secret-reference")
+    .map((setting) => show(setting.title ?? setting.id));
+  const fact = CAPABILITY_CATALOG.find((capability) => capability.id === SECRET_STORE);
+  const asks = fact?.confirm ? renderConfirmTemplate(fact.confirm, {}) : null;
+  return (
+    <p className="extension-message">
+      Keeps these secret settings in the system keychain: {secrets.length ? secrets.join(", ") : "none"}. The app
+      never reads them; the host uses one only where a host capability declares a place for it.
+      {fact && (
+        <>
+          {" "}
+          {[fact.sensitive && "Sensitive", `${fact.impact} impact`].filter(Boolean).join(" · ")}
+          {asks && <> · asks “{asks}”</>}
+        </>
+      )}
+    </p>
+  );
+}
+
+/**
  * What each requested permission is bound to: for a custom-resource reader its group,
  * version, kind, plural, scope and printer columns; for an event reader the API groups its
  * dashboards filter on; for anything else, its fixed arguments. Every value is the
@@ -230,7 +260,9 @@ export function ExtensionBindings({ manifest, permissions }: { manifest: unknown
           return (
             <li key={target} aria-label={`${plainText(target)} bindings`}>
               <code>{plainText(target)}</code>
-              {bound.length === 0 ? (
+              {target === SECRET_STORE ? (
+                <SecretStore manifest={manifest} />
+              ) : bound.length === 0 ? (
                 <p className="extension-message">No binding uses this permission.</p>
               ) : target === CUSTOM_RESOURCE ? (
                 <CustomResourceReaders bindings={bound} />

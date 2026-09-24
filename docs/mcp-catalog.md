@@ -5,7 +5,7 @@
 
 Everything this server exposes over MCP, generated from the live registry so it cannot drift. Written for someone wiring an agent to srelens; the narrative reference is [MCP.md](MCP.md).
 
-## Tools (116)
+## Tools (117)
 
 Argument schemas are not reproduced here — call `tools/list` for those, which cannot go stale.
 
@@ -174,10 +174,11 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 | `ping` | low | health check; echoes the input back as { pong: <input> } |
 | `settings.get` | low | read durable desktop settings; omit key to return the complete map |
 
-### Server — needs confirmation (3)
+### Server — needs confirmation (4)
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
+| `extension.secretStore` | medium | Set or clear a secret an app keeps in the system keychain; write-only, never returns a value; requires approval |
 | `extensions.action` | high | Run a declared action on an app resource; requires explicit confirmation |
 | `extensions.configure` | medium | Install, enable, remove or configure local extensions; requires approval |
 | `settings.set` | medium | atomically write or remove durable desktop settings |

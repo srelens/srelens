@@ -9,6 +9,7 @@ mod bridge;
 pub mod bundle;
 mod bundle_cmd;
 pub mod capabilities;
+pub mod extension_secrets;
 mod cluster_oidc;
 mod cluster_oidc_cmd;
 mod llm_agent;
@@ -274,7 +275,17 @@ pub fn run() {
     // One shared client cache: request/response capabilities AND live watches
     // reuse the same authenticated kube-rs clients.
     let cache = ClientCache::new_many(capabilities::all_kubeconfig_paths());
-    let registry = capabilities::build_registry_with(cache.clone());
+    // Apps' secrets (#543) live in the vault `setup` opens below; the store
+    // is handed to the registry now and the vault attached to it there.
+    let extension_secrets =
+        std::sync::Arc::new(extension_secrets::VaultSecretStore::attached_later());
+    let registry = registry_for(
+        cache.clone(),
+        capabilities::default_kubeconfig_paths(),
+        capabilities::default_settings_path(),
+        extension_secrets.clone(),
+    );
+    let setup_secrets = extension_secrets.clone();
 
     // single-instance is registered BEFORE every other plugin, as the plugin
     // requires: it has to claim the lock and hand a second launch's argv over
@@ -412,6 +423,9 @@ pub fn run() {
                         log::warn!("could not create MCP config dir {}: {e}", dir.display());
                     }
                     let vault = std::sync::Arc::new(vault::Vault::open(&dir));
+                    // The same instance the unlock commands act on, so
+                    // unlocking the vault makes apps' secrets available.
+                    setup_secrets.attach(vault.clone());
                     let token_store: std::sync::Arc<dyn srelens_mcp::auth::TokenStore> =
                         std::sync::Arc::new(vault::VaultTokenStore(vault.clone()));
                     app.manage(token_store);
@@ -442,6 +456,7 @@ pub fn run() {
             Ok(())
         })
         .manage(AppRegistry(registry))
+        .manage(ExtensionSecrets(extension_secrets))
         // The cache itself, for commands that need the live kubeconfig paths
         // (overview_snapshot resolves context → cluster identity from them).
         .manage(cache.clone())
@@ -545,6 +560,27 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+/// The store apps' secret settings are kept in (#543), shared by every
+/// registry this process builds: the UI bridge's and the in-app MCP server's.
+pub struct ExtensionSecrets(pub std::sync::Arc<extension_secrets::VaultSecretStore>);
+
+/// A desktop registry whose apps keep their secrets in `secrets` — the vault
+/// behind the OS keychain. The GUI, the in-app MCP server and both headless
+/// MCP modes build theirs through this, so no surface quietly has no store.
+pub fn registry_for(
+    cache: std::sync::Arc<ClientCache>,
+    kubeconfig_paths: Vec<std::path::PathBuf>,
+    settings_path: Option<std::path::PathBuf>,
+    secrets: std::sync::Arc<extension_secrets::VaultSecretStore>,
+) -> srelens_capability::Registry {
+    srelens_registry::build_registry_with_paths_settings_and_secrets(
+        cache,
+        kubeconfig_paths,
+        settings_path,
+        secrets,
+    )
+}
+
 /// The sink the app writes its capability trail to.
 ///
 /// **ONE sink, and the UI bridge writes to it too (#555).** Not a second log
@@ -571,6 +607,40 @@ fn app_audit(audit_path: Option<&std::path::Path>) -> AppAudit {
             5 * 1024 * 1024,
         ))),
         None => AppAudit(std::sync::Arc::new(srelens_mcp::audit::NoopAudit)),
+    }
+}
+
+#[cfg(test)]
+mod secret_wiring_tests {
+    use super::*;
+
+    /// #543. The registry is built before `setup` opens the vault, so the app
+    /// hands it a store the vault is attached to afterwards — the SAME vault
+    /// the password and biometric unlock act on. Until then apps are told the
+    /// store is not open, never that a secret was kept somewhere else.
+    #[tokio::test]
+    async fn the_apps_registry_follows_the_vault_attached_after_it_was_built() {
+        let dir = std::env::temp_dir().join(format!("srelens-543-wiring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = std::sync::Arc::new(extension_secrets::VaultSecretStore::attached_later());
+        let registry = registry_for(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.join("settings.json")),
+            store.clone(),
+        );
+        let listed = registry.invoke("extensions.list", serde_json::json!({})).await.unwrap();
+        assert_eq!(listed["secretStore"]["available"], false);
+        assert!(listed["secretStore"]["reason"].as_str().unwrap().contains("not open"));
+
+        store.attach(std::sync::Arc::new(vault::Vault::with_backend(
+            &dir.join("mcp"),
+            Box::new(vault::test_support::MemKeychain::empty()),
+        )));
+        let listed = registry.invoke("extensions.list", serde_json::json!({})).await.unwrap();
+        assert_eq!(listed["secretStore"], serde_json::json!({"available": true}));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

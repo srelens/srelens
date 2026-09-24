@@ -3,6 +3,7 @@ import {
   getLiveKubeconfigFiles,
   listContexts,
   listNamespaces,
+  type ExtensionSecretStoreState,
   type ExtensionSetting,
   type InstalledExtension,
 } from "@srelens/core";
@@ -91,17 +92,27 @@ function splitRefusal(message: string) {
 /**
  * An installed app's settings, drawn from the settings its manifest declares
  * (#542). Everything the app wrote here — titles, help, option labels — is its
- * text and is drawn as plain text. A secret has no input: its value is kept by
- * the host's secret store, never in these settings.
+ * text and is drawn as plain text. A secret is never one of these settings:
+ * its field writes straight to the host's secret store (#543) and is
+ * write-only — set, replace, clear, and whether it is set.
  */
 export function ExtensionSettingsForm({
   plugin,
+  secretStore,
   onSave,
+  onSetSecret,
+  onClearSecret,
   onClose,
 }: {
   plugin: InstalledExtension;
+  /** Whether the host can keep a secret now, from `extensions.list`. Absent is treated as no. */
+  secretStore?: ExtensionSecretStoreState;
   /** Saves through the host, which checks every value; rejects with the host's reason. */
   onSave(settings: Record<string, unknown>): Promise<void>;
+  /** Keeps a secret in the host's store; rejects with the host's reason, which never holds the value. */
+  onSetSecret?(setting: string, secret: string): Promise<void>;
+  /** Deletes a secret from the host's store. */
+  onClearSecret?(setting: string): Promise<void>;
   onClose(): void;
 }) {
   const { Button } = useContext(ExtensionControls);
@@ -157,16 +168,27 @@ export function ExtensionSettingsForm({
               {failure}
             </p>
           )}
-          {declared.map((setting) => (
-            <SettingField
-              key={setting.id}
-              setting={setting}
-              value={draft[setting.id]}
-              saved={plugin.settings[setting.id]}
-              problem={problems[setting.id]}
-              onChange={(value) => set(setting.id, value)}
-            />
-          ))}
+          {declared.map((setting) =>
+            isSecret(setting) ? (
+              <SecretField
+                key={setting.id}
+                setting={setting}
+                saved={plugin.settings[setting.id]}
+                refusal={secretRefusal(plugin, secretStore, onSetSecret)}
+                onSet={onSetSecret && ((secret) => onSetSecret(setting.id, secret))}
+                onClear={onClearSecret && (() => onClearSecret(setting.id))}
+              />
+            ) : (
+              <SettingField
+                key={setting.id}
+                setting={setting}
+                value={draft[setting.id]}
+                saved={plugin.settings[setting.id]}
+                problem={problems[setting.id]}
+                onChange={(value) => set(setting.id, value)}
+              />
+            ),
+          )}
         </>
       )}
       <div className="extension-toolbar extension-settings-actions">
@@ -339,23 +361,153 @@ function SettingField({
           {notes}
         </fieldset>
       );
-    case "secret-reference": {
-      const isSet = typeof saved === "object" && saved !== null && "secretRef" in saved;
-      return (
-        <fieldset className="extension-setting" aria-describedby={described}>
-          <legend>{title}</legend>
-          <p className="extension-setting-note">
-            <strong>{isSet ? "Set" : "Not set"}</strong>
-            {" · "}
-            {isSet
-              ? "Kept in the system keychain, never in these settings or in exported settings."
-              : "A secret is kept in the system keychain, never in these settings or in exported settings. This version cannot store one yet, so the app cannot use this setting."}
-          </p>
-          {notes}
-        </fieldset>
-      );
+    case "secret-reference":
+      // Drawn by `SecretField`; a secret never reaches this form's draft.
+      return null;
+  }
+}
+
+/** The permission an app needs for the host to keep its secrets (#543). */
+const SECRET_STORE_PERMISSION = "extension.secretStore";
+
+/**
+ * Why no secret can be set for this app now, or `undefined` when one can. The
+ * host checks all of it again; this only keeps the form from offering what
+ * the host will refuse, and says why. Fails closed: a host that does not
+ * report its store is taken to have none.
+ */
+function secretRefusal(
+  plugin: InstalledExtension,
+  store: ExtensionSecretStoreState | undefined,
+  onSet: unknown,
+): string | undefined {
+  if (!plugin.grants.includes(SECRET_STORE_PERMISSION))
+    return `This app was not granted ${SECRET_STORE_PERMISSION}, so it cannot keep secrets. Reinstall it to review its permissions.`;
+  if (!onSet || !store) return "The host did not say whether it can keep a secret, so none can be set.";
+  if (!store.available)
+    return `${store.reason ?? "The host cannot keep a secret right now"}. Nothing is saved in plain text.`;
+  return undefined;
+}
+
+/**
+ * One `secret-reference` setting: whether it is set, and a write-only
+ * password field. The typed value goes to the host's store and is dropped
+ * from the page as soon as it is sent, whatever the answer; nothing ever
+ * shows it again.
+ */
+function SecretField({
+  setting,
+  saved,
+  refusal,
+  onSet,
+  onClear,
+}: {
+  setting: ExtensionSetting;
+  saved: unknown;
+  /** Why a secret cannot be set now; the field is disabled and says so. */
+  refusal?: string;
+  onSet?(secret: string): Promise<void>;
+  onClear?(): Promise<void>;
+}) {
+  const { Button } = useContext(ExtensionControls);
+  const id = useId();
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState("");
+  const [failure, setFailure] = useState("");
+  const title = plainText(setting.title);
+  const help = setting.description ? plainText(setting.description) : undefined;
+  const isSet = typeof saved === "object" && saved !== null && "secretRef" in saved;
+  const described = [help && `${id}-help`, `${id}-state`, refusal && `${id}-refusal`, failure && `${id}-problem`]
+    .filter(Boolean)
+    .join(" ");
+
+  async function run(action: () => Promise<void>, success: string) {
+    setBusy(true);
+    setDone("");
+    setFailure("");
+    try {
+      await action();
+      setDone(success);
+    } catch (e) {
+      setFailure(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
   }
+  function save() {
+    if (!onSet || refusal || !typed) return;
+    const secret = typed;
+    // Out of the page before the answer: kept or refused, it is not shown again.
+    setTyped("");
+    void run(() => onSet(secret), "Secret saved.");
+  }
+
+  return (
+    <fieldset className="extension-setting" aria-describedby={described}>
+      <legend>{title}</legend>
+      {help && (
+        <p id={`${id}-help`} className="extension-setting-note">
+          {help}
+        </p>
+      )}
+      <p id={`${id}-state`} className="extension-setting-note">
+        <strong>{isSet ? "Set" : "Not set"}</strong>
+        {" · "}
+        Kept in the system keychain. It is never shown again, and never saved in these settings or in exported settings.
+      </p>
+      {refusal && (
+        <p id={`${id}-refusal`} className="extension-setting-problem">
+          {refusal}
+        </p>
+      )}
+      <label htmlFor={id} className="extension-setting-label">
+        {title}
+      </label>
+      <div className="extension-setting-pair">
+        <input
+          id={id}
+          type="password"
+          autoComplete="off"
+          spellCheck={false}
+          value={typed}
+          disabled={Boolean(refusal) || busy}
+          placeholder={isSet ? "Enter a new value to replace it" : "Enter the secret"}
+          aria-invalid={failure ? true : undefined}
+          aria-describedby={described}
+          onChange={(event) => {
+            setTyped(event.target.value);
+            setDone("");
+          }}
+          onKeyDown={(event) => {
+            // Enter keeps this secret; it does not submit the other settings.
+            if (event.key === "Enter") {
+              event.preventDefault();
+              save();
+            }
+          }}
+        />
+        <Button type="button" disabled={Boolean(refusal) || busy || !typed} onClick={save}>
+          {isSet ? "Replace secret" : "Save secret"}
+        </Button>
+        {isSet && onClear && (
+          <Button type="button" variant="secondary" disabled={busy} onClick={() => void run(onClear, "Secret cleared.")}>
+            Clear secret
+          </Button>
+        )}
+      </div>
+      {failure && (
+        <p id={`${id}-problem`} role="alert" className="extension-setting-problem">
+          {failure}
+        </p>
+      )}
+      {done && (
+        <p role="status" className="extension-settings-saved">
+          {done}
+        </p>
+      )}
+    </fieldset>
+  );
 }
 
 /** A field drawn with a picker, which is labelled by its title rather than a `<label>`. */
