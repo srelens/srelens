@@ -204,6 +204,17 @@ fn health_status_badge(health: &str) -> (&'static str, Style) {
 }
 
 pub fn render_argo_detail_view(f: &mut Frame, area: Rect, state: &ArgoDetailViewState) {
+    render_argo_detail_view_with(f, area, state, false);
+}
+
+/// [`render_argo_detail_view`], also advertising `<a> ArgoCD` when an ArgoCD
+/// UI URL is configured and `a` has somewhere to open.
+pub fn render_argo_detail_view_with(
+    f: &mut Frame,
+    area: Rect,
+    state: &ArgoDetailViewState,
+    has_argo_ui: bool,
+) {
     let drift_count = state.drift_items().len();
 
     let extra_hints = match state.active_tab {
@@ -214,8 +225,11 @@ pub fn render_argo_detail_view(f: &mut Frame, area: Rect, state: &ArgoDetailView
     };
 
     let title = format!(
-        " 🐙 ArgoCD Application: {}/{} (<1-4> Tabs  <s> Sync  <p> Auto-Sync  <R> Hard Refresh  <g> Git  <r> Reload{}<Esc> Back) ",
-        state.app_namespace, state.app_name, extra_hints
+        " 🐙 ArgoCD Application: {}/{} (<1-4> Tabs  <s> Sync  <p> Auto-Sync  <R> Hard Refresh  <g> Git  {}<r> Reload{}<Esc> Back) ",
+        state.app_namespace,
+        state.app_name,
+        if has_argo_ui { "<a> ArgoCD  " } else { "" },
+        extra_hints
     );
 
     let block = Block::default()

@@ -539,6 +539,137 @@ async fn tick_schedules_helm_refreshes_and_keys_trigger_manual_refresh() {
     assert!(app.modal.is_none());
 }
 
+/// Put `app` in the Argo detail view of "payments", as Enter on it in
+/// `:argo` would.
+fn open_argo_detail(app: &mut App) {
+    let mut state = srelens_tui::views::argo_detail_view::ArgoDetailViewState::new(
+        "payments".to_string(),
+        "argocd".to_string(),
+        None,
+    );
+    state.set_application(srelens_kube::argo::ArgoApplication::from_json(&serde_json::json!({
+        "metadata": { "name": "payments", "namespace": "argocd" },
+        "status": { "health": { "status": "Healthy" }, "sync": { "status": "Synced" } }
+    })));
+    app.active_view = ActiveView::ArgoDetail(state);
+}
+
+#[tokio::test]
+async fn argo_detail_a_without_a_ui_url_points_at_config() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    open_argo_detail(&mut app);
+    app.tui_config.argo_ui_url = None;
+
+    let screen = common::render_app(&mut app, 220, 40);
+    assert!(!screen.contains("<a> ArgoCD"), "not advertised without a URL");
+
+    press(&mut app, ch('a')).await;
+
+    assert_eq!(
+        toast(&app),
+        "Set the ArgoCD UI URL in :config to open apps in the browser"
+    );
+    assert!(matches!(app.active_view, ActiveView::ArgoDetail(_)), "stays put");
+}
+
+#[tokio::test]
+async fn argo_detail_advertises_a_once_a_ui_url_is_set() {
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    open_argo_detail(&mut app);
+    app.tui_config.argo_ui_url = Some("https://argocd.example.com".to_string());
+
+    let screen = common::render_app(&mut app, 220, 40);
+    assert!(screen.contains("<a> ArgoCD"), "title hint: {screen}");
+    assert!(screen.contains("<a> ArgoCD UI"), "status-bar hint: {screen}");
+    // The link `a` opens (not pressed here: it would launch a real browser).
+    assert_eq!(
+        app.tui_config.argo_app_url("payments").as_deref(),
+        Some("https://argocd.example.com/applications/payments")
+    );
+}
+
+#[tokio::test]
+async fn config_edit_keys_reach_every_text_field() {
+    // The gate once named fields "4 or 5"; after a field was inserted at 4,
+    // the hub kubeconfig (6) could not be edited or cleared from the keys.
+    use srelens_tui::views::tui_config_view::{
+        FIELD_ARGO_HUB_KUBECONFIG, FIELD_ARGO_UI_URL, FIELD_STARTUP_UPDATES,
+    };
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    common::type_str(&mut app, ":config").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+
+    for field in [FIELD_ARGO_HUB_KUBECONFIG, FIELD_ARGO_UI_URL] {
+        if let ActiveView::TuiConfig(ref mut c) = app.active_view {
+            c.selected_field = field;
+        }
+        press(&mut app, ch('e')).await;
+        match &app.active_view {
+            ActiveView::TuiConfig(c) => assert!(c.is_editing, "field {field} opens the editor"),
+            _ => panic!("expected :config"),
+        }
+        press(&mut app, key(KeyCode::Esc)).await;
+    }
+
+    // A toggle is not a text field: `e` does not open the editor on it.
+    if let ActiveView::TuiConfig(ref mut c) = app.active_view {
+        c.selected_field = FIELD_STARTUP_UPDATES;
+    }
+    press(&mut app, ch('e')).await;
+    match &app.active_view {
+        ActiveView::TuiConfig(c) => assert!(!c.is_editing),
+        _ => panic!("expected :config"),
+    }
+
+    // A rejected URL keeps the modal open and says why; nothing is saved.
+    if let ActiveView::TuiConfig(ref mut c) = app.active_view {
+        c.selected_field = FIELD_ARGO_UI_URL;
+    }
+    press(&mut app, ch('e')).await;
+    common::type_str(&mut app, "argo.local").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert!(toast(&app).contains("must start with https://"), "{}", toast(&app));
+    match &app.active_view {
+        ActiveView::TuiConfig(c) => assert!(c.is_editing, "modal stays open"),
+        _ => panic!("expected :config"),
+    }
+    assert_eq!(app.tui_config.argo_ui_url, None);
+
+    // Fixed and saved: the toast names the field.
+    if let ActiveView::TuiConfig(ref mut c) = app.active_view {
+        c.clear_input();
+    }
+    common::type_str(&mut app, "https://argocd.example.com").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    assert_eq!(toast(&app), "Saved ArgoCD UI URL");
+    assert_eq!(app.tui_config.argo_ui_url.as_deref(), Some("https://argocd.example.com"));
+}
+
+#[tokio::test]
+async fn config_timeout_change_says_the_value_now_in_effect() {
+    use srelens_tui::views::tui_config_view::FIELD_ARGO_TIMEOUT;
+    let _settings = common::env::isolate_settings();
+    let (mut app, _rx) = common::app_with("fake-cluster", "default").await;
+    common::type_str(&mut app, ":config").await;
+    press(&mut app, key(KeyCode::Enter)).await;
+    if let ActiveView::TuiConfig(ref mut c) = app.active_view {
+        c.selected_field = FIELD_ARGO_TIMEOUT;
+    }
+
+    press(&mut app, ch('l')).await;
+    assert_eq!(toast(&app), "ArgoCD fetch timeout: 5s");
+    press(&mut app, ch('l')).await;
+    assert_eq!(toast(&app), "ArgoCD fetch timeout: 10s");
+    assert_eq!(srelens_kube::argo::argo_timeout(), std::time::Duration::from_secs(10));
+
+    press(&mut app, ch('c')).await;
+    assert!(toast(&app).starts_with("Reset ArgoCD fetch timeout to inherit ("), "{}", toast(&app));
+    assert_eq!(app.tui_config.argo_timeout_secs, None);
+}
+
 #[tokio::test]
 async fn tick_schedules_argo_detail_refreshes_silently() {
     let _settings = common::env::isolate_settings();

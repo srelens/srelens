@@ -2120,6 +2120,9 @@ fn yaml_view_empty_document_renders_a_bare_frame() {
 
 #[test]
 fn tui_config_view_state_field_navigation_and_adjustments() {
+    // Saves the config and resets the process-wide ArgoCD timeout: keep both
+    // off the reader's real files and away from the other config tests.
+    let _settings = common::env::isolate_settings();
     let mut state = TuiConfigViewState::new();
     assert_eq!(state.selected_field, 0);
 
@@ -2142,11 +2145,19 @@ fn tui_config_view_state_field_navigation_and_adjustments() {
     assert_eq!(state.selected_field, 6);
 
     state.select_next_field();
-    assert_eq!(state.selected_field, 0);
+    assert_eq!(state.selected_field, 7, "ArgoCD UI URL");
+
+    state.select_next_field();
+    assert_eq!(state.selected_field, 8, "ArgoCD fetch timeout");
+
+    state.select_next_field();
+    assert_eq!(state.selected_field, 0, "wraps after the last field");
 
     state.select_prev_field();
-    assert_eq!(state.selected_field, 6);
+    assert_eq!(state.selected_field, 8, "wraps back to the last field");
 
+    state.select_prev_field();
+    state.select_prev_field();
     state.select_prev_field();
     assert_eq!(state.selected_field, 5);
 
@@ -2320,6 +2331,8 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         check_updates: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
         update_available: None,
     };
 
@@ -2350,14 +2363,11 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
         full.contains("Startup Update Check"),
         "has startup update check setting card"
     );
-    assert!(
-        full.contains("ArgoCD Hub Context"),
-        "has hub context setting card"
-    );
-    assert!(
-        full.contains("ArgoCD Hub Kubeconfig Path"),
-        "has hub kubeconfig setting card"
-    );
+    assert!(full.contains("ArgoCD (:argo)"), "has the ArgoCD group box");
+    assert!(full.contains("Hub Context"), "has hub context row");
+    assert!(full.contains("Hub Kubeconfig"), "has hub kubeconfig row");
+    assert!(full.contains("UI URL"), "has UI URL row");
+    assert!(full.contains("Fetch Timeout"), "has fetch timeout row");
     assert!(full.contains("80 cols"), "shows configured width");
     assert!(full.contains("8 rows"), "shows configured visible rows");
     assert!(
@@ -2445,4 +2455,113 @@ fn tui_config_view_renders_cards_and_live_preview_at_wide_and_narrow() {
     assert!(narrow_full.contains("Command Popup Max Width"));
     assert!(narrow_full.contains("Command Popup Text Size"));
     assert!(narrow_full.contains("Startup Feature Banner"));
+}
+
+fn config_render(state: &TuiConfigViewState, config: &TuiConfig) -> String {
+    common::render_lines(140, 40, |f| render_tui_config_view(f, f.area(), state, config)).join("\n")
+}
+
+#[test]
+fn tui_config_argo_box_shows_each_setting_and_marks_the_selected_one() {
+    let _settings = common::env::isolate_settings();
+    use srelens_tui::views::tui_config_view::{FIELD_ARGO_TIMEOUT, FIELD_ARGO_UI_URL};
+    let config = TuiConfig {
+        argo_hub_context: Some("hub-prod".to_string()),
+        argo_ui_url: Some("https://argocd.example.com".to_string()),
+        argo_timeout_secs: Some(30),
+        ..TuiConfig::default()
+    };
+    let mut state = TuiConfigViewState::new();
+
+    let unselected = config_render(&state, &config);
+    assert!(unselected.contains("Hub Context    hub-prod"), "{unselected}");
+    assert!(unselected.contains("UI URL         https://argocd.example.com"));
+    assert!(unselected.contains("Fetch Timeout  30s"));
+    assert!(unselected.contains("j/k to select an ArgoCD setting"));
+
+    state.selected_field = FIELD_ARGO_UI_URL;
+    let url = config_render(&state, &config);
+    assert!(url.contains("▶ UI URL"), "{url}");
+    assert!(url.contains("e/Enter Edit · c Clear"));
+    // The preview names the link `a` will open and what the timeout covers.
+    assert!(url.contains("UI Link:       https://argocd.example.com/applications/<application>"), "{url}");
+    assert!(url.contains("Fetch Timeout: 30s"));
+    assert!(url.contains("Opened by a in an :argo app's details."), "{url}");
+    assert!(url.contains("Bounds list and detail reads; never cuts off a sync."), "{url}");
+
+    state.selected_field = FIELD_ARGO_TIMEOUT;
+    let timeout = config_render(&state, &config);
+    assert!(timeout.contains("▶ Fetch Timeout"));
+    assert!(timeout.contains("h/l Change · c Reset to inherit"));
+
+    // Unset values say what being unset means.
+    let empty = config_render(&state, &TuiConfig::default());
+    assert!(empty.contains("not set (a in app details is off)"), "{empty}");
+    assert!(empty.contains("inherit (8s request timeout)"));
+}
+
+#[test]
+fn tui_config_argo_ui_url_is_validated_before_it_is_saved() {
+    let _settings = common::env::isolate_settings();
+    use srelens_tui::views::tui_config_view::FIELD_ARGO_UI_URL;
+    let mut config = TuiConfig::default();
+    let mut state = TuiConfigViewState::new();
+    state.selected_field = FIELD_ARGO_UI_URL;
+    assert!(state.is_text_field());
+
+    // Not a URL: rejected, nothing changes, the modal stays open to fix it.
+    state.start_editing(&config);
+    state.insert_str("argo.local");
+    let err = state.finish_editing(&mut config).unwrap_err();
+    assert!(err.contains("https://"), "{err}");
+    assert!(state.is_editing, "still editing after a rejected value");
+    assert_eq!(config.argo_ui_url, None);
+
+    let editing = config_render(&state, &config);
+    assert!(editing.contains("Edit ArgoCD UI URL"));
+    assert!(editing.contains("Base URL of the ArgoCD web UI"));
+
+    // A URL: saved without its trailing slash.
+    state.clear_input();
+    state.insert_str("https://argocd.example.com/");
+    state.finish_editing(&mut config).unwrap();
+    assert!(!state.is_editing);
+    assert_eq!(config.argo_ui_url.as_deref(), Some("https://argocd.example.com"));
+    let saved = std::fs::read_to_string(TuiConfig::config_file_path()).unwrap();
+    assert!(saved.contains(r#""argoUiUrl": "https://argocd.example.com""#), "{saved}");
+
+    // `c` clears it.
+    assert!(state.is_clearable_field());
+    state.clear_current(&mut config).unwrap();
+    assert_eq!(config.argo_ui_url, None);
+}
+
+#[test]
+fn tui_config_argo_timeout_steps_and_applies_to_argo_reads() {
+    let _settings = common::env::isolate_settings();
+    use srelens_tui::views::tui_config_view::FIELD_ARGO_TIMEOUT;
+    let mut config = TuiConfig::default();
+    let mut state = TuiConfigViewState::new();
+    state.selected_field = FIELD_ARGO_TIMEOUT;
+    assert!(!state.is_text_field(), "stepped, not typed");
+    let request = srelens_kube::connect::request_timeout();
+
+    state.adjust_current(1, &mut config).unwrap();
+    assert_eq!(config.argo_timeout_secs, Some(5));
+    assert_eq!(srelens_kube::argo::argo_timeout(), std::time::Duration::from_secs(5));
+
+    state.adjust_current(1, &mut config).unwrap();
+    assert_eq!(config.argo_timeout_secs, Some(10));
+    assert_eq!(srelens_kube::argo::argo_timeout(), std::time::Duration::from_secs(10));
+
+    // Space/Enter walk forward too, wrapping from the maximum to inherit.
+    config.argo_timeout_secs = Some(120);
+    state.cycle_current(&mut config).unwrap();
+    assert_eq!(config.argo_timeout_secs, None);
+    assert_eq!(srelens_kube::argo::argo_timeout(), request);
+
+    state.adjust_current(1, &mut config).unwrap();
+    state.clear_current(&mut config).unwrap();
+    assert_eq!(config.argo_timeout_secs, None, "c resets to inherit");
+    assert_eq!(srelens_kube::argo::argo_timeout(), request);
 }

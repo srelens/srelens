@@ -1945,6 +1945,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         check_updates: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
         update_available: None,
     };
     cfg.save().expect("save succeeds");
@@ -1965,6 +1967,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         check_updates: true,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
         update_available: None,
     };
     clamped.clamp();
@@ -1982,6 +1986,8 @@ fn tui_config_file_paths_clamping_and_round_trip() {
         check_updates: false,
         argo_hub_context: None,
         argo_hub_kubeconfig: None,
+        argo_ui_url: None,
+        argo_timeout_secs: None,
         update_available: None,
     };
     low.clamp();

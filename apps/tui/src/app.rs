@@ -334,6 +334,9 @@ impl App {
         };
 
         let tui_config = crate::tui_config::TuiConfig::load();
+        // Every ArgoCD read consults the kube crate's timeout; give it the
+        // configured one before the first `:argo` fetch.
+        tui_config.apply_argo_timeout();
 
         let mut app = Self {
             active_context: active_context.clone(),
@@ -3980,8 +3983,10 @@ impl App {
             return;
         }
 
-        if matches!(self.active_view, ActiveView::TuiConfig(_)) {
-            if key.code == KeyCode::Char(':') {
+        if let ActiveView::TuiConfig(cfg) = &self.active_view {
+            // While a value is being typed, `:` is text (every URL has one),
+            // not the command palette. Settings guards the same way above.
+            if !cfg.is_editing && key.code == KeyCode::Char(':') {
                 self.input_mode = InputMode::Command;
                 self.command_buffer.clear();
                 return;
@@ -6275,16 +6280,25 @@ impl App {
                         KeyCode::Esc => {
                             cfg_state.cancel_editing();
                         }
-                        KeyCode::Enter => match cfg_state.finish_editing(&mut self.tui_config) {
-                            Ok(()) => self.set_toast(
-                                "Saved ArgoCD Hub setting".to_string(),
-                                Theme::status_ok(),
-                            ),
-                            Err(err) => self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            ),
-                        },
+                        KeyCode::Enter => {
+                            let label = cfg_state.field_label();
+                            match cfg_state.finish_editing(&mut self.tui_config) {
+                                Ok(()) => {
+                                    self.set_toast(format!("Saved {label}"), Theme::status_ok())
+                                }
+                                // Still editing: the value was rejected and
+                                // nothing changed. Say why; the modal stays.
+                                Err(err) if cfg_state.is_editing => {
+                                    self.set_toast(err, Theme::status_warn())
+                                }
+                                Err(err) => self.set_toast(
+                                    format!(
+                                        "Settings applied for this session but not saved: {err}"
+                                    ),
+                                    Theme::status_error(),
+                                ),
+                            }
+                        }
                         KeyCode::Left => {
                             cfg_state.move_cursor_left();
                         }
@@ -6357,54 +6371,53 @@ impl App {
                         cfg_state.select_prev_field()
                     }
                     KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('-') => {
-                        if let Err(err) = cfg_state.adjust_current(-1, &mut self.tui_config) {
-                            self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            );
-                        }
+                        let field = cfg_state.selected_field;
+                        let res = cfg_state.adjust_current(-1, &mut self.tui_config);
+                        self.report_config_change(field, res);
                     }
                     KeyCode::Char('l')
                     | KeyCode::Right
                     | KeyCode::Char('+')
                     | KeyCode::Char('=') => {
-                        if let Err(err) = cfg_state.adjust_current(1, &mut self.tui_config) {
-                            self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            );
-                        }
+                        let field = cfg_state.selected_field;
+                        let res = cfg_state.adjust_current(1, &mut self.tui_config);
+                        self.report_config_change(field, res);
                     }
                     KeyCode::Enter => {
-                        if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
+                        if cfg_state.is_text_field() {
                             cfg_state.start_editing(&self.tui_config);
-                        } else if let Err(err) = cfg_state.cycle_current(&mut self.tui_config) {
-                            self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            );
+                        } else {
+                            let field = cfg_state.selected_field;
+                            let res = cfg_state.cycle_current(&mut self.tui_config);
+                            self.report_config_change(field, res);
                         }
                     }
                     KeyCode::Char(' ') => {
-                        if let Err(err) = cfg_state.cycle_current(&mut self.tui_config) {
-                            self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            );
-                        }
+                        let field = cfg_state.selected_field;
+                        let res = cfg_state.cycle_current(&mut self.tui_config);
+                        self.report_config_change(field, res);
                     }
                     KeyCode::Char('e') | KeyCode::Char('E') => {
-                        if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
+                        if cfg_state.is_text_field() {
                             cfg_state.start_editing(&self.tui_config);
                         }
                     }
                     KeyCode::Char('c') | KeyCode::Char('C') => {
-                        if cfg_state.selected_field == 4 || cfg_state.selected_field == 5 {
+                        if cfg_state.is_clearable_field() {
+                            let label = cfg_state.field_label();
+                            let is_timeout = cfg_state.selected_field
+                                == crate::views::tui_config_view::FIELD_ARGO_TIMEOUT;
                             match cfg_state.clear_current(&mut self.tui_config) {
-                                Ok(()) => self.set_toast(
-                                    "Cleared ArgoCD Hub setting".to_string(),
+                                Ok(()) if is_timeout => self.set_toast(
+                                    format!(
+                                        "Reset {label} to {}",
+                                        self.tui_config.argo_timeout_label()
+                                    ),
                                     Theme::status_ok(),
                                 ),
+                                Ok(()) => {
+                                    self.set_toast(format!("Cleared {label}"), Theme::status_ok())
+                                }
                                 Err(err) => self.set_toast(
                                     format!(
                                         "Settings applied for this session but not saved: {err}"
@@ -6415,20 +6428,14 @@ impl App {
                         }
                     }
                     KeyCode::Char('[') | KeyCode::Char('{') => {
-                        if let Err(err) = cfg_state.adjust_current(-5, &mut self.tui_config) {
-                            self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            );
-                        }
+                        let field = cfg_state.selected_field;
+                        let res = cfg_state.adjust_current(-5, &mut self.tui_config);
+                        self.report_config_change(field, res);
                     }
                     KeyCode::Char(']') | KeyCode::Char('}') => {
-                        if let Err(err) = cfg_state.adjust_current(5, &mut self.tui_config) {
-                            self.set_toast(
-                                format!("Settings applied for this session but not saved: {err}"),
-                                Theme::status_error(),
-                            );
-                        }
+                        let field = cfg_state.selected_field;
+                        let res = cfg_state.adjust_current(5, &mut self.tui_config);
+                        self.report_config_change(field, res);
                     }
                     KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::Char('d') => {
                         match cfg_state.reset_defaults(&mut self.tui_config) {
@@ -7622,6 +7629,27 @@ impl App {
                                 Theme::status_ok(),
                             );
                             self.trigger_argo_hard_refresh(&app.name, &app.namespace);
+                        }
+                    }
+                    KeyCode::Char('a') => {
+                        if let Some(ref app) = app_opt {
+                            match self.tui_config.argo_app_url(&app.name) {
+                                Some(url) => match open_browser_url(&url) {
+                                    Ok(_) => self.set_toast(
+                                        format!("Opened ArgoCD: {url}"),
+                                        Theme::status_ok(),
+                                    ),
+                                    Err(err) => self.set_toast(
+                                        format!("Could not open browser: {err}"),
+                                        Theme::status_error(),
+                                    ),
+                                },
+                                None => self.set_toast(
+                                    "Set the ArgoCD UI URL in :config to open apps in the browser"
+                                        .to_string(),
+                                    Theme::status_warn(),
+                                ),
+                            }
                         }
                     }
                     KeyCode::Char('g') => {
@@ -10820,6 +10848,26 @@ impl App {
         });
     }
 
+    /// After a `:config` adjust or cycle: a save error says so, and a change
+    /// to the ArgoCD fetch timeout says the value now in effect, since the
+    /// setting's whole point is the number the next `:argo` fetch will use.
+    fn report_config_change(&mut self, field: usize, res: Result<(), String>) {
+        match res {
+            Err(err) => self.set_toast(
+                format!("Settings applied for this session but not saved: {err}"),
+                Theme::status_error(),
+            ),
+            Ok(()) if field == crate::views::tui_config_view::FIELD_ARGO_TIMEOUT => self.set_toast(
+                format!(
+                    "ArgoCD fetch timeout: {}",
+                    self.tui_config.argo_timeout_label()
+                ),
+                Theme::status_ok(),
+            ),
+            Ok(()) => {}
+        }
+    }
+
     pub fn handle_changed_quick_rca_result(&mut self, key: &str, result: Result<String, String>) {
         use changed_view::QuickRcaStatus;
         // Left the view, or a different report took its place: nothing to
@@ -13599,9 +13647,12 @@ impl App {
             ActiveView::Helm(helm) => render_helm_view(f, chunks[1], helm),
             ActiveView::HelmDetail(detail) => render_helm_detail_view(f, chunks[1], detail),
             ActiveView::Argo(argo) => argo_view::render_argo_view(f, chunks[1], argo),
-            ActiveView::ArgoDetail(detail) => {
-                argo_detail_view::render_argo_detail_view(f, chunks[1], detail)
-            }
+            ActiveView::ArgoDetail(detail) => argo_detail_view::render_argo_detail_view_with(
+                f,
+                chunks[1],
+                detail,
+                self.tui_config.argo_ui_url.is_some(),
+            ),
             ActiveView::Overview(ov) => render_overview_view(f, chunks[1], ov),
             ActiveView::Toolbox(tb) => render_toolbox_view(f, chunks[1], tb),
             ActiveView::Assistant => {
@@ -14166,6 +14217,22 @@ impl App {
                     ("<p>", "Auto-Sync"),
                     ("<R>", "Hard Refresh"),
                     ("<g>", "Git"),
+                    ("<r>", "Reload"),
+                    ("<Esc>", "Back"),
+                    ("<?>", "Help"),
+                ][..],
+            ),
+            // `a` is advertised only when there is a UI URL to open.
+            ActiveView::ArgoDetail(_) if self.tui_config.argo_ui_url.is_some() => Some(
+                &[
+                    ("<:>", "Cmd"),
+                    ("<1-4>", "Tabs"),
+                    ("<x>", "Actions / AI"),
+                    ("<s>", "Sync"),
+                    ("<p>", "Auto-Sync"),
+                    ("<R>", "Hard Refresh"),
+                    ("<g>", "Git"),
+                    ("<a>", "ArgoCD UI"),
                     ("<r>", "Reload"),
                     ("<Esc>", "Back"),
                     ("<?>", "Help"),
