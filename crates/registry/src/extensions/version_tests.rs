@@ -32,6 +32,8 @@ fn manifest() -> Value {
             "pages":[{"id":"helmreleases","title":"Helm releases","capability":"helmreleases"}],
             "detailTabs":[],"detailLinks":[],
             "joins":[{"id":"release","capability":"helmreleases","match":{"name":true}}],
+            "resourceLinks":[{"id":"release-owner","from":"apps/Deployment","to":"helm.toolkit.fluxcd.io/HelmRelease",
+                "relation":"managedBy","match":{"label":"helm.toolkit.fluxcd.io/name"}}],
             "tableColumns":[{"id":"revision","title":"Revision","forKinds":["apps/Deployment"],
                 "source":{"join":"release","jsonPath":MOVED},"format":"text"}],
             "badges":[{"id":"helm","forKinds":["apps/Deployment"],"join":"release",
@@ -181,6 +183,17 @@ fn route(method: &str, path: &str, served: &[&str]) -> (u16, Value) {
 
 /// A host registry whose kubeconfig names one context per cluster, with the app installed.
 async fn host(dir: &Path, clusters: &[(&str, &Cluster)]) -> (Registry, u64) {
+    let (registry, _streams, revision) = broker(dir, clusters).await;
+    (registry, revision)
+}
+
+/// The extension broker as `build_registry_*` assembles it — the real host registry
+/// with the broker-only CRD check beneath it — with the app installed, and the app
+/// streams (#565) it serves.
+async fn broker(
+    dir: &Path,
+    clusters: &[(&str, &Cluster)],
+) -> (Registry, Arc<streams::ExtensionStreams>, u64) {
     let mut config = String::from("apiVersion: v1\nkind: Config\nclusters:\n");
     for (name, cluster) in clusters {
         config += &format!(
@@ -194,10 +207,15 @@ async fn host(dir: &Path, clusters: &[(&str, &Cluster)]) -> (Registry, u64) {
     }
     let kubeconfig = dir.join("config");
     fs::write(&kubeconfig, config).unwrap();
-    let registry = crate::build_registry_with_paths_and_settings(
-        srelens_kube::client_cache::ClientCache::new_many(vec![kubeconfig.clone()]),
-        vec![kubeconfig],
-        Some(dir.join("settings.json")),
+    let cache = srelens_kube::client_cache::ClientCache::new_many(vec![kubeconfig.clone()]);
+    let mut core = crate::build_registry_with_paths(cache.clone(), vec![kubeconfig]);
+    core.register(crd::check_capability(cache.clone()));
+    let mut registry = Registry::new();
+    let streams = register(
+        &mut registry,
+        dir.join("extensions.json"),
+        Arc::new(core),
+        cache,
     );
     // The app declares a write, which an unsigned app may make only with this on.
     registry
@@ -216,7 +234,7 @@ async fn host(dir: &Path, clusters: &[(&str, &Cluster)]) -> (Registry, u64) {
         .await
         .unwrap_or_else(|error| panic!("{error}"));
     let revision = installed["plugins"][0]["revision"].as_u64().unwrap();
-    (registry, revision)
+    (registry, streams, revision)
 }
 
 async fn read(registry: &Registry, revision: u64, context: &str) -> Result<Value, CapabilityError> {
@@ -517,4 +535,71 @@ async fn a_discovery_change_is_followed_on_the_next_read_even_within_the_snapsho
     let out = cards(&registry, revision, "prod").await;
     assert_eq!(out["cards"][0]["rows"][0]["value"], REVISION, "{out}");
     assert_eq!(cluster.resource_requests(), [LIST_V2, LIST_V2BETA2]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resource_link_finds_its_target_at_the_resolved_version() {
+    // #545: a link from a Deployment to the HelmRelease that manages it looks the
+    // target up in its reader's list, which is read at the version this cluster serves.
+    let dir = tempfile::tempdir().unwrap();
+    let older = Cluster::serving(&["v2beta2"]);
+    let (registry, revision) = host(dir.path(), &[("older", &older)]).await;
+    let out = registry
+        .invoke(
+            "extensions.resolveLinks",
+            json!({"id":APP,"revision":revision,"context":"older","namespace":"team",
+                "kind":"apps/Deployment",
+                "resource":{"apiVersion":"apps/v1","kind":"Deployment",
+                    "metadata":{"name":"api","namespace":"team",
+                        "labels":{"helm.toolkit.fluxcd.io/name":"web"}}}}),
+        )
+        .await
+        .unwrap();
+    let link = &out["links"][0];
+    assert!(link.get("error").is_none(), "{out}");
+    assert_eq!(link["capability"], "helmreleases", "{out}");
+    assert_eq!(
+        link["targets"],
+        json!([{"namespace":"team","name":"web","exists":true}]),
+        "{out}"
+    );
+    assert_eq!(older.resource_requests(), [LIST_V2BETA2]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_stream_reads_the_resolved_version_on_every_tick() {
+    // #565: a `read` stream re-runs `extensions.read`'s path, so it resolves too.
+    let dir = tempfile::tempdir().unwrap();
+    let older = Cluster::serving(&["v2beta2"]);
+    let (_registry, streams, revision) = broker(dir.path(), &[("older", &older)]).await;
+    let sink = Arc::new(srelens_streams::test_util::TestSink::default());
+    let opened = streams
+        .open(
+            sink.clone(),
+            json!({"id":APP,"revision":revision,"view":"page:helmreleases#1",
+                "channel":"extstream:helmreleases","context":"older","namespace":"team",
+                "source":{"kind":"read","capability":"helmreleases"}}),
+        )
+        .await
+        .unwrap();
+    let data = async {
+        for _ in 0..500 {
+            if let Some(frame) = sink
+                .payloads_for("extstream:helmreleases")
+                .into_iter()
+                .find(|frame| frame["type"] != "open")
+            {
+                return frame;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the stream sent no frame");
+    }
+    .await;
+    streams.cancel(&opened.stream);
+    assert_eq!(data["type"], "data", "{data}");
+    let row = &data["data"]["items"][0];
+    assert_eq!(row["columns"][0], REVISION, "{data}");
+    assert_eq!(row["status"]["label"], "Released", "{data}");
+    assert_eq!(older.resource_requests(), [LIST_V2BETA2]);
 }

@@ -4,6 +4,7 @@ import { describeError } from "@srelens/core/lib/errors";
 import { validateNativeComponent, type NativeComponentPayload, type NativeValue } from "@srelens/core/lib/nativeComponents";
 import { NativeMarkdown } from "./NativeMarkdown";
 import { NativeRows } from "./NativeRows";
+import { NativeTimeseries } from "./NativeTimeseries";
 import "./native-components.css";
 
 /** Request lifecycle belongs to the host, never to the extension payload. */
@@ -42,10 +43,13 @@ function Content({ component, label, fill }: { component: NativeComponentPayload
     </li>)}</ol>}</NativeRows>;
     case "Markdown": return <NativeMarkdown text={component.data.text}/>;
     case "Code": return <CodeEditor value={component.data.text} language={component.data.language} readOnly copy flush fill={fill} ariaLabel={label} minHeight={160} maxHeight={fill ? undefined : 480}/>;
+    case "Timeseries": return <NativeTimeseries data={component.data}/>;
   }
 }
 
 function isEmpty(component: NativeComponentPayload) {
+  // A chart whose provider answered with no samples in range: absence, not failure.
+  if (component.type === "Timeseries") return component.data.series.every(entry => entry.values.every(value => value === null));
   if ("items" in component.data) return component.data.items.length === 0;
   if ("rows" in component.data) return component.data.rows.length === 0;
   if ("text" in component.data) return component.data.text.length === 0;

@@ -44,7 +44,7 @@ before publishing.
 | `capabilities` | Yes | 1–32 bindings, below. |
 | `actions` | No | Up to 32 declared mutations, below. |
 | `settings` | No | Up to 32 typed settings, drawn as a host form. See [Settings](#settings). |
-| `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns`, `detailPanels` and `dashboardCards`, below. |
+| `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns`, `detailPanels`, `statusResolvers`, `badges`, `dashboardCards`, `commands` and `resourceLinks`, below. |
 
 Unknown fields are errors at every level. A manifest is at most 256 KiB.
 
@@ -562,6 +562,75 @@ than a custom-resource reader, or on one no page lists (`EXTENSION_INVALID_BINDI
 at `target.action`), `forKinds` on a page command (`EXTENSION_INVALID_BINDING`),
 a kind the action does not act on (`EXTENSION_INVALID_BINDING` at `forKinds[i]`),
 and the usual identifier, label, count, kind and duplicate rules.
+
+### `resourceLinks`
+
+An app can say how a resource of one kind relates to resources of another: a
+Deployment is managed by an Argo CD Application, or by a Flux Kustomization.
+The Inspector shows these as a **Related** section of links, and the resolved
+links are edges (`from`, `relation`, targets) a topology view can draw too.
+
+```json
+"resourceLinks": [
+  { "id": "argocd-owner", "from": "apps/Deployment", "to": "argoproj.io/Application",
+    "relation": "managedBy",
+    "match": { "annotation": "argocd.argoproj.io/tracking-id", "parse": "argocd-tracking-id",
+               "defaultNamespace": "argocd" } },
+  { "id": "kustomization", "from": "apps/Deployment", "to": "kustomize.toolkit.fluxcd.io/Kustomization",
+    "relation": "managedBy",
+    "match": { "label": "kustomize.toolkit.fluxcd.io/name",
+               "namespaceLabel": "kustomize.toolkit.fluxcd.io/namespace" } }
+]
+```
+
+| Field | Rule |
+| --- | --- |
+| `id` | 1–64 letters, digits and `-`; unique among the app's links. |
+| `from` | The group-qualified kind the link is read from (`apps/Deployment`, `/Pod`). Built-in or custom. |
+| `to` | The group-qualified kind of the target. A declared `k8s.listCustomResource` reader must list it: that list is where the host looks the target up, so it can say whether it exists. The Inspector opens a target only when one of the app's `pages` is backed by that reader; otherwise it names the target as text. |
+| `relation` | `ownedBy`, `managedBy`, `exposedBy` or `references` — what `from` is to `to`. |
+| `match` | Exactly one of `label`, `ownerReference`, `annotation` and `name`. |
+
+`match` uses a join's selectors, read the other way round: a join indexes the
+listed resources by a key that names the row, while a link reads the key on
+the resource being inspected, and that key names the target. The target is
+then found by name through the same index a join uses.
+
+- `label`: the label's value is the target's name. `namespaceLabel` names the
+  label holding its namespace; without it the target is in the resource's own
+  namespace. A set name label with an unset namespace label is an error, not
+  "no link".
+- `ownerReference: true`: each owner reference whose API group and kind are
+  `to`'s. An owner whose uid no longer matches is shown as not found. A
+  resource with more than 64 owner references is reported as a failure on the
+  link rather than read.
+- `annotation`: the annotation's value is the target's name — or, with
+  `parse`, a reference in a host-known format. `argocd-tracking-id` is the only
+  one, and it requires `to` to be `argoproj.io/Application`: it counts only
+  when it names the resource it is on (a copied id is not
+  ownership), and its application part is the target. `<namespace>_<name>`
+  names its own namespace. A bare name is an application in Argo CD's own
+  namespace, which the id does not say, so declare it as `defaultNamespace`
+  (for example `"argocd"`, a namespace name, allowed only beside this `parse`):
+  the target is then looked up in that namespace alone, and a same-named
+  Application elsewhere is not it. Without `defaultNamespace` a bare name is
+  never searched for across namespaces: the Inspector names it as plain text,
+  *namespace unknown*, and never calls it found or missing. A Secret's
+  annotation values are redacted on every read, so a link from `/Secret` may not
+  match by annotation.
+- `name: true`: the target has the resource's own name and namespace. Not
+  allowed from a kind to itself.
+
+A cluster-scoped resource (a Namespace, a Node) has no namespace of its own, so a
+target it names without one is found by name: in a cluster-scoped kind directly,
+and in a namespaced kind across namespaces, reported as ambiguous if more than
+one has that name.
+
+At most 32 links may be declared. Each resolution rechecks the installed
+revision, grants and cluster scope. A resource that names no target shows no
+link; a target the resource names but the cluster does not have is listed as
+not found; a failed list or an ambiguous name is shown as a failure with its
+reason and a Retry — never as "No related resources".
 
 ## Settings
 

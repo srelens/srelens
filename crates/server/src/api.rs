@@ -39,6 +39,8 @@ pub const WEB_DENIED_CAPABILITIES: &[&str] = &[
     "extensions.resolveColumns",
     "extensions.resolveCards",
     "extensions.resolvePanels",
+    "extensions.resolveLinks",
+    "extensions.streams",
     "extensions.resource",
     "extensions.action",
     // The host GitOps write. On the web no installed app scopes it to a resource
@@ -461,7 +463,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_extension_inventory_and_execution_are_denied_on_web() {
-        for id in ["extensions.resource", "extensions.action", "extensions.catalog", "extensions.catalogManifest", "extensions.validate", "extensions.list", "extensions.configure", "extensions.read", "extensions.resolveColumns", "extensions.resolveCards", "extensions.resolvePanels"] {
+        for id in ["extensions.resource", "extensions.action", "extensions.catalog", "extensions.catalogManifest", "extensions.validate", "extensions.list", "extensions.configure", "extensions.read", "extensions.resolveColumns", "extensions.resolveCards", "extensions.resolvePanels", "extensions.resolveLinks", "extensions.streams"] {
             let (status, body) = post(&format!("/api/capability/{id}"), Body::empty()).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
             assert_eq!(body["error"], json!("capability not available in web mode"), "{id}");

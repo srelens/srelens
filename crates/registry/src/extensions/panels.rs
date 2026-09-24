@@ -20,53 +20,73 @@ struct ResolvedPanels {
 }
 
 fn check_input(input: &ResolvePanels) -> Result<(), CapabilityError> {
-    if input.id.is_empty()
-        || input.id.len() > 128
-        || input.context.trim().is_empty()
-        || input.context.len() > 4_096
-        || input.kind.trim().is_empty()
-        || input.kind.len() > 317
-        || input.namespace.len() > 63
-        || (!input.namespace.is_empty()
-            && (input.namespace.starts_with('-')
-                || input.namespace.ends_with('-')
-                || !input
-                    .namespace
+    check_resource_scope(
+        "Panel",
+        &input.id,
+        &input.context,
+        &input.namespace,
+        &input.kind,
+        &input.resource,
+    )
+}
+
+/// The limits an Inspector resolver holds its one resource to: the app id,
+/// context and qualified kind bounded, and the resource's own identity equal
+/// to the scope it was sent with. Shared by panels and links (#545).
+pub(super) fn check_resource_scope(
+    what: &str,
+    id: &str,
+    context: &str,
+    namespace: &str,
+    kind: &str,
+    resource: &Value,
+) -> Result<(), CapabilityError> {
+    if id.is_empty()
+        || id.len() > 128
+        || context.trim().is_empty()
+        || context.len() > 4_096
+        || kind.trim().is_empty()
+        || kind.len() > 317
+        || namespace.len() > 63
+        || (!namespace.is_empty()
+            && (namespace.starts_with('-')
+                || namespace.ends_with('-')
+                || !namespace
                     .bytes()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')))
     {
-        return Err(CapabilityError::InvalidInput(
-            "Panel scope exceeds the supported limits".into(),
-        ));
+        return Err(CapabilityError::InvalidInput(format!(
+            "{what} scope exceeds the supported limits"
+        )));
     }
-    let bytes = serde_json::to_vec(&input.resource)
+    let bytes = serde_json::to_vec(resource)
         .map_err(|error| CapabilityError::InvalidInput(error.to_string()))?;
     if bytes.len() > 1_048_576 {
-        return Err(CapabilityError::InvalidInput(
-            "Panel resource exceeds 1 MiB".into(),
-        ));
+        return Err(CapabilityError::InvalidInput(format!(
+            "{what} resource exceeds 1 MiB"
+        )));
     }
-    let metadata = &input.resource["metadata"];
+    let metadata = &resource["metadata"];
     let name = metadata["name"].as_str().unwrap_or("");
     if name.is_empty()
         || name.len() > 253
         || metadata["uid"].as_str().is_some_and(|uid| uid.len() > 128)
-        || metadata["namespace"].as_str().unwrap_or("") != input.namespace
+        || metadata["namespace"].as_str().unwrap_or("") != namespace
     {
-        return Err(CapabilityError::InvalidInput(
-            "Panel resource identity does not match its scope".into(),
-        ));
+        return Err(CapabilityError::InvalidInput(format!(
+            "{what} resource identity does not match its scope"
+        )));
     }
-    let kind = input.resource["kind"].as_str().unwrap_or("");
-    let api_version = input.resource["apiVersion"].as_str().unwrap_or("");
+    let resource_kind = resource["kind"].as_str().unwrap_or("");
+    let api_version = resource["apiVersion"].as_str().unwrap_or("");
     let group = api_version
         .split_once('/')
         .map(|(group, _)| group)
         .unwrap_or("");
-    if format!("{group}/{kind}") != input.kind {
-        return Err(CapabilityError::InvalidInput(
-            "Panel resource kind does not match its scope".into(),
-        ));
+    if format!("{group}/{resource_kind}") != kind {
+        return Err(CapabilityError::InvalidInput(format!(
+            "{what} resource kind does not match its scope"
+        )));
     }
     Ok(())
 }

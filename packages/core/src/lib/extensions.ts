@@ -99,6 +99,30 @@ export interface ExtensionBadge {
   join?: string;
   rules: ExtensionStatusRule[];
 }
+/** What the `from` resource is to the `to` resource (#545). */
+export type ExtensionLinkRelation = "ownedBy" | "managedBy" | "exposedBy" | "references";
+/** Where on the `from` resource the target's name is written: exactly one selector. */
+export interface ExtensionLinkMatch {
+  label?: string;
+  /** With `label`: the label naming the target's namespace. */
+  namespaceLabel?: string;
+  ownerReference?: boolean;
+  annotation?: string;
+  /** With `annotation`: a host-known reference format that must name the resource itself. */
+  parse?: "argocd-tracking-id";
+  /** With `parse: "argocd-tracking-id"`: the namespace of an application written as a bare name. */
+  defaultNamespace?: string;
+  name?: boolean;
+}
+export interface ExtensionResourceLink {
+  id: string;
+  /** Qualified kind the link is read from, e.g. `apps/Deployment`. */
+  from: string;
+  /** Qualified kind of the target; a declared reader lists it. */
+  to: string;
+  relation: ExtensionLinkRelation;
+  match: ExtensionLinkMatch;
+}
 /**
  * What the host resolved an object to. `label` and `reason` are an app's and
  * a cluster's text: draw them through `plainText`.
@@ -244,6 +268,7 @@ export interface ExtensionManifest {
     statusResolvers?: ExtensionStatusResolver[];
     badges?: ExtensionBadge[];
     commands?: ExtensionCommand[];
+    resourceLinks?: ExtensionResourceLink[];
   };
 }
 /** Where a version came from: `catalog` is the exact bytes of a cached catalog release. */
@@ -451,6 +476,26 @@ export type ExtensionResolvedPanel = {
 export const resolveExtensionPanels = (
   id: string, revision: number, context: string, namespace: string, kind: string, resource: object,
 ) => invokeCapability<{ panels: ExtensionResolvedPanel[] }>("extensions.resolvePanels", {
+  id, revision, context, namespace, kind, resource,
+});
+/** One endpoint of a resolved link; `namespace` is null when cluster-scoped or unknown. */
+export interface ExtensionLinkEndpoint { kind: string; namespace: string | null; name: string }
+/** One declared link resolved for one resource: an edge set a topology can also draw. */
+export interface ExtensionResolvedLink {
+  id: string;
+  relation: ExtensionLinkRelation;
+  /** Target kind, qualified. */
+  to: string;
+  /** The reader binding that lists `to`. */
+  capability: string;
+  /** `exists: false`: the resource names a target the cluster does not have — unless `unverified` says why the host did not look it up. */
+  targets: Array<{ namespace: string | null; name: string; exists: boolean; unverified?: string }>;
+  /** Why the host could not answer; distinct from an empty `targets`. */
+  error?: string;
+}
+export const resolveExtensionLinks = (
+  id: string, revision: number, context: string, namespace: string, kind: string, resource: object,
+) => invokeCapability<{ from: ExtensionLinkEndpoint; links: ExtensionResolvedLink[] }>("extensions.resolveLinks", {
   id, revision, context, namespace, kind, resource,
 });
 export function extensionRoute(

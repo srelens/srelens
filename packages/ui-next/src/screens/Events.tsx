@@ -40,7 +40,7 @@ import {
 import { useResourceList } from "../lib/resourceList";
 import { describe } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
-import { setNamespaces, useNamespaces } from "../lib/workspace";
+import { useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { ReasonRail } from "./events/ReasonRail";
 import {
   NamespaceErrorAlert,
@@ -152,6 +152,7 @@ function EventList({
   const { ask } = useConsole();
 
   const selection = useNamespaces(context.stableId);
+  const setNamespaces = useSetNamespaces();
   const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
 
   // A namespace-restricted credential has one namespace and no way to ask for
@@ -159,7 +160,7 @@ function EventList({
   // screen looking at this cluster follows the same scope.
   useEffect(() => {
     if (scope) setNamespaces(context.stableId, [scope]);
-  }, [scope, context.stableId]);
+  }, [scope, context.stableId, setNamespaces]);
 
   // One selected namespace is watched directly; none or several are watched
   // across the cluster and narrowed below, which is core's own rule. Events

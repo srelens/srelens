@@ -128,6 +128,7 @@ vi.mock("./components/ResourceBrowser", () => ({
     onOpenEdit,
     onOpenNew,
     onNamespaceChange,
+    initialNamespace,
   }: {
     context: string;
     kind: string;
@@ -137,9 +138,11 @@ vi.mock("./components/ResourceBrowser", () => ({
     onOpenEdit?: (kind: string, namespace: string | null, name: string) => void;
     onOpenNew?: (initialKind?: string) => void;
     onNamespaceChange?: (namespace: string) => void;
+    initialNamespace?: string;
   }) => (
     <div data-testid="browser">
       {context}:{kind}
+      <span data-testid="browser-namespace">{initialNamespace ?? ""}</span>
       <span data-testid="browser-query">{query ?? ""}</span>
       <button onClick={() => onViewChange?.({ query: "nginx" })}>set-query</button>
       <button
@@ -361,6 +364,26 @@ describe("App", () => {
     fireEvent.click(screen.getByText("use-team-a"));
     fireEvent.click(screen.getByText("new-config-map"));
     expect(screen.getByTestId("new-resource-namespace").textContent).toBe("team-a");
+  });
+
+  it("keeps a namespace change in its own tab — another tab on the same cluster does not follow", () => {
+    render(<App />);
+    fireEvent.click(screen.getByText("open-kind-dev"));
+    fireEvent.click(screen.getByText("nav-services"));
+    expect(screen.getByTestId("browser-namespace").textContent).toBe("");
+    // A second resource-list tab on the same cluster: following a linked pod
+    // opens the Pods list, scoped to that pod's namespace.
+    fireEvent.click(screen.getByText("linked-pod"));
+    expect(screen.getByTestId("browser").textContent).toContain("kind-dev:pods");
+    fireEvent.click(screen.getByText("use-team-a"));
+    expect(screen.getByTestId("browser-namespace").textContent).toBe("team-a");
+
+    fireEvent.click(screen.getByRole("tab", { name: /Services · kind-dev/ }));
+    expect(screen.getByTestId("browser").textContent).toContain("kind-dev:services");
+    expect(screen.getByTestId("browser-namespace").textContent).toBe("");
+
+    fireEvent.click(screen.getByRole("tab", { name: /Pods · kind-dev/ }));
+    expect(screen.getByTestId("browser-namespace").textContent).toBe("team-a");
   });
 
   it("keeps new-resource YAML in its tab while another tab is active (#403)", () => {

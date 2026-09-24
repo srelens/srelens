@@ -219,6 +219,15 @@
           }
         ]
       }
+    ],
+    "resourceLinks": [
+      {
+        "id": "argocd-owner",
+        "from": "apps/Deployment",
+        "to": "argoproj.io/Application",
+        "relation": "managedBy",
+        "match": {"annotation": "argocd.argoproj.io/tracking-id", "parse": "argocd-tracking-id", "defaultNamespace": "argocd"}
+      }
     ]
   },
   "actions": [

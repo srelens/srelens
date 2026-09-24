@@ -7,6 +7,7 @@ import {
   configureExtensions,
   readExtension,
   resolveExtensionColumns,
+  resolveExtensionLinks,
   extensionRoute,
   parseExtensionRoute,
   itemStatus,
@@ -64,6 +65,14 @@ describe("extension contract", () => {
       id: "org.test.app", revision: 2, context: "cluster/a", namespace: "team", kind: "apps/Deployment", uids: rows,
     });
     expect(vi.mocked(invokeCapability)).toHaveBeenCalledTimes(1);
+  });
+  it("sends a link resolve with the resolver's own field names (#545)", async () => {
+    const resource = { apiVersion: "apps/v1", kind: "Deployment", metadata: { name: "api", namespace: "team" } };
+    await resolveExtensionLinks("org.test.app", 3, "cluster/a", "team", "apps/Deployment", resource);
+    // `ResolveLinks` in crates/registry/src/extensions/links.rs denies unknown fields.
+    expect(invokeCapability).toHaveBeenLastCalledWith("extensions.resolveLinks", {
+      id: "org.test.app", revision: 3, context: "cluster/a", namespace: "team", kind: "apps/Deployment", resource,
+    });
   });
   it("pins cluster and namespace in route identity", () => {
     const route = extensionRoute("cluster/a", "org.test.app", "page", "ns/a");

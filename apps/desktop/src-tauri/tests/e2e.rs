@@ -2542,6 +2542,67 @@ fn item_names(list: &Value) -> Vec<&str> {
 /// against the fixture CRDs. Each payload is the one
 /// `packages/core/src/lib/extensions.ts` sends, spelled as it spells it, so a
 /// renamed field fails here instead of in the app (AGENTS.md).
+/// App streams (#565) against the live cluster: a `read` stream on the Flux
+/// app's Kustomization reader delivers the reader's rows, `extensions.streams`
+/// counts it, and closing the view ends it with `viewClosed`.
+///
+/// The host's handle comes from a second build over the same settings path:
+/// the streams are shared per inventory in a process, which is also what lets
+/// a lifecycle change made through any registry end them.
+async fn app_stream(h: &mut Harness, ctx: &str, settings: &TempSettings, flux_revision: u64) {
+    println!("=== extensions: app streams ===");
+    let (_, streams) = srelens_desktop_lib::capabilities::build_registry_and_app_streams(
+        cache(),
+        kubeconfig_paths(),
+        Some(settings.0.clone()),
+    );
+    let streams = streams.expect("a build with settings has app streams");
+    let sink = Arc::new(srelens_streams::test_util::TestSink::default());
+    let channel = "extstream:e2e-1";
+    let opened = streams
+        .open(
+            sink.clone(),
+            json!({
+                "id": "org.example.flux", "revision": flux_revision, "view": "e2e/page#1",
+                "channel": channel, "context": ctx, "namespace": NS,
+                "source": {"kind": "read", "capability": "kustomizations", "intervalSeconds": 5},
+            }),
+        )
+        .await
+        .expect("the stream opens");
+    let mut data = None;
+    for _ in 0..100 {
+        if let Some(frame) = sink.payloads_for(channel).into_iter().find(|f| f["type"] != "open") {
+            data = Some(frame);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let data = data.expect("a first frame within ten seconds");
+    assert_eq!(data["type"], "data", "the first tick must be data, not a failure: {data}");
+    assert!(
+        data["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == KUSTOMIZATION),
+        "{data}"
+    );
+    let metrics = h.ok("extensions.streams", json!({})).await;
+    let flux = metrics["apps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|app| app["app"] == "org.example.flux")
+        .unwrap_or_else(|| panic!("the harness registry sees the stream: {metrics}"))
+        .clone();
+    assert_eq!(flux["openStreams"], 1, "{metrics}");
+    assert_eq!(flux["streams"][0]["stream"], json!(opened.stream), "{metrics}");
+    assert_eq!(streams.close_view("e2e/page#1"), 1);
+    let last = sink.payloads_for(channel).pop().unwrap();
+    assert_eq!(last, json!({"type": "close", "stream": opened.stream, "reason": "viewClosed"}));
+}
+
 async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettings) {
     println!("=== extensions: validate, catalog, install ===");
     // As shipped, the examples carry reserved IDs. Unsigned, that is refused, and
@@ -2761,6 +2822,32 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         "Source reference",
         "{panels}"
     );
+    // A Deployment Flux applied carries the Kustomization's name and
+    // namespace as labels; the link finds that Kustomization in the granted
+    // list (#545). The Deployment is the caller's, as the Inspector's is.
+    let links = h
+        .ok(
+            "extensions.resolveLinks",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespace": NS, "kind": "apps/Deployment",
+                "resource": {"apiVersion": "apps/v1", "kind": "Deployment",
+                    "metadata": {"name": "e2e-flux-managed", "namespace": NS, "labels": {
+                        "kustomize.toolkit.fluxcd.io/name": KUSTOMIZATION,
+                        "kustomize.toolkit.fluxcd.io/namespace": NS}}},
+            }),
+        )
+        .await;
+    let kustomization = links["links"]
+        .as_array()
+        .and_then(|links| links.iter().find(|link| link["id"] == "kustomization"))
+        .unwrap_or_else(|| panic!("no kustomization link: {links}"));
+    assert_eq!(
+        kustomization["targets"],
+        json!([{"namespace": NS, "name": KUSTOMIZATION, "exists": true}]),
+        "{links}"
+    );
+    app_stream(h, ctx, settings, revision(&flux_app)).await;
     assert_eq!(
         detail["actions"],
         json!(["kustomizations-suspend", "kustomizations-resume", "kustomizations-reconcile"]),

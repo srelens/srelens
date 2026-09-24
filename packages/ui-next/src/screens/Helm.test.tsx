@@ -53,7 +53,7 @@ import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters"
 import { __resetHelmOpsForTests, startHelmOperation } from "../lib/helmOps";
 import { defaultState } from "../lib/tabs";
 import * as store from "../lib/tabsStore";
-import { getView, resetView, setNamespaces } from "../lib/workspace";
+import { resetView, setNamespaces } from "../lib/workspace";
 
 const ROUTE = "/helm";
 
@@ -252,6 +252,12 @@ beforeEach(() => {
   store.setState(defaultState([CTX]));
   resetView();
 });
+
+/** The active tab's namespace selection for a cluster — where a screen outside any `TabScope` reads and writes it. */
+const selectionOf = (clusterId: string) => {
+  const w = store.currentWorkspace();
+  return w.tabs.find((t) => t.id === w.activeId)?.namespaces?.[clusterId];
+};
 
 function open() {
   store.openTab(ROUTE);
@@ -1077,16 +1083,17 @@ describe("Helm — the namespace selector", () => {
    * would pass every assertion above and lose the reader's namespace the
    * moment they walked to Workloads and back.
    */
-  it("writes the pick to the cluster's shared selection", async () => {
+  it("writes the pick to its own tab's selection", async () => {
     open();
     await ready();
 
     await pickOnly("payments");
 
-    await waitFor(() => expect(getView().namespaces.prod).toEqual(["payments"]));
+    await waitFor(() => expect(selectionOf("prod")).toEqual(["payments"]));
   });
 
-  it("opens on the namespace another screen on this cluster already chose", async () => {
+  it("opens on the namespace its tab already chose", async () => {
+    store.openTab(ROUTE);
     setNamespaces(CTX.stableId, ["payments"]);
 
     open();
@@ -1125,6 +1132,8 @@ describe("Helm — the namespace selector", () => {
           pending.set(namespace ?? "", resolve);
         }),
     );
+
+    store.openTab(ROUTE);
 
     setNamespaces(CTX.stableId, ["checkout"]);
     open();
@@ -1167,6 +1176,7 @@ describe("Helm — the namespace selector", () => {
   });
 
   it("says a namespace has no releases without blaming a failure", async () => {
+    store.openTab(ROUTE);
     setNamespaces(CTX.stableId, ["platform"]);
     core.listHelmReleases.mockResolvedValue({ releases: [] });
 
@@ -1211,8 +1221,8 @@ describe("Helm — the namespace selector", () => {
 
     open();
 
-    // Written to the shared store, so every screen on this cluster follows.
-    await waitFor(() => expect(getView().namespaces.prod).toEqual(["payments"]));
+    // Written to this tab's selection, so the picker shows the scope.
+    await waitFor(() => expect(selectionOf("prod")).toEqual(["payments"]));
     await waitFor(() => expect(drawn()).toEqual(["payments/payments"]));
     expect(listedNamespaces()).toContain("payments");
   });
@@ -1246,6 +1256,7 @@ describe("Helm — the namespace selector", () => {
   });
 
   it("explains a remembered namespace that is gone, and offers the way back", async () => {
+    store.openTab(ROUTE);
     setNamespaces(CTX.stableId, ["deleted-ns"]);
 
     open();
@@ -1254,7 +1265,7 @@ describe("Helm — the namespace selector", () => {
     expect(screen.getByText("deleted-ns no longer exist on this cluster.")).toBeTruthy();
 
     await userEvent.click(screen.getByRole("button", { name: "Show all namespaces" }));
-    await waitFor(() => expect(getView().namespaces.prod).toEqual([]));
+    await waitFor(() => expect(selectionOf("prod")).toEqual([]));
     await waitFor(() => expect(drawn()).toHaveLength(5));
   });
 });
