@@ -180,7 +180,7 @@ Argument schemas are not reproduced here — call `tools/list` for those, which 
 
 | Tool | Impact | Summary |
 | --- | --- | --- |
-| `extension.secretStore` | medium | Set or clear a secret an app keeps in the system keychain; write-only, never returns a value; requires approval |
+| `extension.secretStore` | medium | Set or clear a secret an app keeps in srelens's encrypted secrets vault; write-only, never returns a value; requires approval |
 | `extensions.action` | high | Run a declared action on an app resource; requires explicit confirmation |
 | `extensions.configure` | medium | Install, enable, remove or configure local extensions; requires approval |
 | `settings.set` | medium | atomically write or remove durable desktop settings |

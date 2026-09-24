@@ -229,7 +229,7 @@ function SecretStore({ manifest }: { manifest: unknown }) {
   const asks = fact?.confirm ? renderConfirmTemplate(fact.confirm, {}) : null;
   return (
     <p className="extension-message">
-      Keeps these secret settings in the system keychain: {secrets.length ? secrets.join(", ") : "none"}. The app
+      Keeps these secret settings in srelens's encrypted secrets vault: {secrets.length ? secrets.join(", ") : "none"}. The app
       never reads them; the host uses one only where a host capability declares a place for it.
       {fact && (
         <>

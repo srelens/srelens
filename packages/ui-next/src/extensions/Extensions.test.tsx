@@ -529,10 +529,10 @@ it("resets settings to their defaults, keeps a required one, which has none, and
   expect(details.textContent).toContain("A secret is never saved in settings, so an export never holds one.");
   fireEvent.click(within(details).getByRole("button", { name: "Reset settings" }));
   // Says what reset does: keeps required values, and deletes the secrets
-  // (#543) — a reset that left a token in the keychain would not be one.
+  // (#543): a reset that left a token in the keychain would not be one.
   const confirm = within(details).getByRole("alertdialog", { name: "Reset settings" });
   expect(confirm.textContent).toContain("except the required ones, which have no default");
-  expect(confirm.textContent).toContain("its secrets are deleted from the system keychain");
+  expect(confirm.textContent).toContain("its secrets are deleted from srelens's secrets vault");
   expect(confirm.textContent).not.toContain("Secrets stay set");
   fireEvent.click(within(details).getByRole("button", { name: "Reset to defaults" }));
   await waitFor(() => expect(clearExtensionSecret).toHaveBeenCalledWith("org.test.gitops"));
@@ -818,7 +818,7 @@ it("says removing an app deletes its secrets too", async () => {
   render(<ExtensionManager />);
   fireEvent.click(await screen.findByRole("button", { name: "Remove" }));
   const dialog = screen.getByRole("alertdialog", { name: "Remove app" });
-  expect(dialog.textContent).toContain("deletes its secrets from the system keychain");
+  expect(dialog.textContent).toContain("deletes its secrets from srelens's secrets vault");
 });
 it("keeps reads idle until a cluster is chosen and shows successful empty results", async () => {
   vi.mocked(readExtension).mockResolvedValue({ items: [] });

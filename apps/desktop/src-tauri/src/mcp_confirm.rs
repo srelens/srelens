@@ -109,19 +109,46 @@ pub struct ConfirmTarget {
 
 impl PendingRequest {
     /// What the window is asked, built from the host's metadata for one gated
-    /// call. Pure, so the three cases that matter — a sentence, no template,
-    /// and a template that cannot render — are testable without a window.
+    /// call. For `extension.secretStore` it reads the installed apps to know
+    /// which names are real; everything else is pure, so the three cases that
+    /// matter — a sentence, no template, and a template that cannot render —
+    /// are testable without a window (see [`from_consent_checked`](Self::from_consent_checked)).
     pub fn from_consent(id: String, request: &srelens_mcp::policy::ConsentRequest) -> Self {
+        let inventory = crate::capabilities::default_settings_path()
+            .map(|path| path.with_extension("extensions.json"));
+        Self::from_consent_checked(id, request, &|app, setting| {
+            inventory
+                .as_deref()
+                .is_some_and(|path| srelens_registry::declares_secret_setting(path, app, setting))
+        })
+    }
+
+    /// [`from_consent`](Self::from_consent), told by `known` which app and
+    /// secret-setting names are real (#543): only those are shown for
+    /// `extension.secretStore`.
+    pub fn from_consent_checked(
+        id: String,
+        request: &srelens_mcp::policy::ConsentRequest,
+        known: &dyn Fn(&str, Option<&str>) -> bool,
+    ) -> Self {
         // The same read the sentence is rendered from: one closed vocabulary,
         // escaped and bounded once, so the facts under the question cannot
         // disagree with the question.
-        let fields = srelens_capability::confirm_fields(&request.args);
+        let args = shown_args(&request.tool, &request.args, known);
+        let fields = srelens_capability::confirm_fields(&args);
         let field = |key: &str| fields.get(key).cloned();
+        // The sentence was rendered from the caller's whole arguments; for an
+        // app's secret it is rendered again from the names alone (#543).
+        let prompt = if request.tool == srelens_registry::SECRET_STORE_PERMISSION {
+            srelens_registry::SECRET_STORE_ANNOTATIONS.confirm_text(&args)
+        } else {
+            request.confirm_text.clone()
+        };
         Self {
             id,
             tool: request.tool.clone(),
-            args: shown_args(&request.tool, &request.args),
-            prompt: request.confirm_text.clone(),
+            args,
+            prompt,
             impact: request.impact.as_str().to_string(),
             target: ConfirmTarget {
                 cluster: field("cluster"),
@@ -133,17 +160,35 @@ impl PendingRequest {
     }
 }
 
-/// The arguments the window is shown. An app's secret (#543) is blanked: the
-/// question names the app, the setting and the action, and the value itself
-/// never reaches the renderer, which could only show it.
-fn shown_args(tool: &str, args: &Value) -> Value {
-    let mut shown = args.clone();
-    if tool == srelens_registry::SECRET_STORE_PERMISSION {
-        if let Some(secret) = shown.get_mut("secret") {
-            *secret = Value::String("<redacted>".into());
+/// The arguments the window is shown.
+///
+/// For an app's secret (#543) the window gets only the names a person decides
+/// on — the action, the app and the setting — and each only when the host
+/// knows it for one: `set` or `clear`, an installed app that keeps secrets,
+/// and one of that app's declared secret settings (`known`). `secret` is
+/// shown as present and blanked. Consent is asked before the call is parsed,
+/// so an agent can put the value anywhere, including in a name's place, and
+/// no shape tells a hex API key from a setting ID; the renderer, which could
+/// only display it, must never hold it.
+fn shown_args(tool: &str, args: &Value, known: &dyn Fn(&str, Option<&str>) -> bool) -> Value {
+    if tool != srelens_registry::SECRET_STORE_PERMISSION {
+        return args.clone();
+    }
+    let text = |key: &str| args.get(key).and_then(Value::as_str);
+    let mut shown = serde_json::Map::new();
+    if let Some(action @ ("set" | "clear")) = text("action") {
+        shown.insert("action".into(), Value::String(action.into()));
+    }
+    if let Some(app) = text("id").filter(|app| known(app, None)) {
+        shown.insert("id".into(), Value::String(app.into()));
+        if let Some(setting) = text("setting").filter(|setting| known(app, Some(setting))) {
+            shown.insert("setting".into(), Value::String(setting.into()));
         }
     }
-    shown
+    if args.get("secret").is_some() {
+        shown.insert("secret".into(), Value::String("<redacted>".into()));
+    }
+    Value::Object(shown)
 }
 
 /// Every confirmation waiting on an answer, by id.
@@ -423,13 +468,14 @@ mod tests {
     #[test]
     fn the_prompt_for_an_app_secret_never_carries_the_value() {
         let secret = "agent-sent-token-9d1c";
-        let got = PendingRequest::from_consent(
+        let got = PendingRequest::from_consent_checked(
             "id-9".into(),
             &consent(
                 "extension.secretStore",
                 Annotations::MUTATING,
                 json!({"action":"set","id":"org.example.metrics","setting":"token","secret":secret}),
             ),
+            &|app, setting| app == "org.example.metrics" && setting.is_none_or(|s| s == "token"),
         );
         let shown = serde_json::to_string(&got).unwrap();
         assert!(!shown.contains(secret), "the window was sent the secret: {shown}");
@@ -439,6 +485,47 @@ mod tests {
         let (tx, _rx) = oneshot::channel();
         p.register(got, tx);
         assert!(!serde_json::to_string(&p.snapshot()).unwrap().contains(secret));
+    }
+
+    /// Review of #543: consent is asked before the call is parsed, so an agent
+    /// can put the value anywhere — under another key, nested, or in `action`
+    /// or `setting`. The window is shown the three names it needs, and only
+    /// while they look like names; the sentence is rendered from those too.
+    #[test]
+    fn the_prompt_for_an_app_secret_shows_names_only_wherever_the_value_is_put() {
+        let secret = "agent-sent-token-9d1c";
+        // The one app installed, and its one secret setting.
+        let known = |app: &str, setting: Option<&str>| {
+            app == "org.example.metrics" && setting.is_none_or(|s| s == "token")
+        };
+        for args in [
+            json!({"action":"set","id":"org.example.metrics","setting":"token","value":secret}),
+            json!({"action":"set","id":"org.example.metrics","setting":"token","nested":{"deep":[secret]}}),
+            json!({"action":secret,"id":"org.example.metrics","setting":"token"}),
+            json!({"action":"set","id":"org.example.metrics","setting":secret,"secret":"x"}),
+            json!({"action":"set","id":secret,"setting":"token","secret":"x"}),
+            json!({"action":"set","id":"org.example.metrics","setting":"token","name":secret,"context":secret}),
+        ] {
+            let got = PendingRequest::from_consent_checked(
+                "id-10".into(),
+                &consent("extension.secretStore", srelens_registry::SECRET_STORE_ANNOTATIONS, args.clone()),
+                &known,
+            );
+            let shown = serde_json::to_string(&got).unwrap();
+            assert!(!shown.contains(secret), "{args} → the window was sent: {shown}");
+        }
+        // The names a person needs to decide are still there.
+        let got = PendingRequest::from_consent_checked(
+            "id-11".into(),
+            &consent(
+                "extension.secretStore",
+                srelens_registry::SECRET_STORE_ANNOTATIONS,
+                json!({"action":"set","id":"org.example.metrics","setting":"token","secret":secret}),
+            ),
+            &known,
+        );
+        assert_eq!(got.args, json!({"action":"set","id":"org.example.metrics","setting":"token","secret":"<redacted>"}));
+        assert!(got.prompt.as_deref().is_some_and(|p| p.ends_with(" (set)?")), "{:?}", got.prompt);
     }
 
     /// No template is not a hole: the window falls back to what it always

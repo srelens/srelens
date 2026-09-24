@@ -333,6 +333,26 @@ async fn setting_a_secret_needs_the_secret_store_grant() {
     assert!(!on_disk(&path).contains("secretRef"));
 }
 
+/// An app this host no longer trusts keeps nothing new, whatever it was
+/// granted (review of #543).
+#[tokio::test]
+async fn a_quarantined_app_cannot_keep_a_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("apps.json");
+    let store = Arc::new(MemoryStore::default());
+    let reg = registry(&path, store.clone());
+    install(&reg, with_secret(declared())).await;
+    // Unreadable to this host's API range: quarantined when the inventory loads.
+    let mut raw: Value = serde_json::from_str(&on_disk(&path)).unwrap();
+    raw["plugins"][0]["manifest"]["srelensApiVersion"] = json!("^9.0");
+    fs::write(&path, raw.to_string()).unwrap();
+    assert!(listed(&reg).await["plugins"][0]["quarantined"].is_string());
+
+    let refused = set(&reg, "token").await.unwrap_err().to_string();
+    assert!(refused.contains("can't keep secrets"), "{refused}");
+    assert!(store.keys().is_empty());
+}
+
 #[tokio::test]
 async fn only_a_declared_secret_of_an_installed_app_can_be_set() {
     let dir = tempfile::tempdir().unwrap();
@@ -411,6 +431,11 @@ async fn a_malformed_call_is_refused_without_quoting_it() {
         json!({"action":"set","id":ID,"setting":"token","secret":SECRET,"extra":SECRET}),
         json!({"action":"set","id":ID,"setting":{"x":SECRET},"secret":SECRET}),
         json!({"action":"clear","id":ID,"setting":"token","secret":SECRET}),
+        // Well-formed, but with the secret where a name goes: refused by the
+        // handler, whose reasons name the app and the setting (review of #543).
+        json!({"action":"set","id":ID,"setting":SECRET,"secret":"x"}),
+        json!({"action":"clear","id":ID,"setting":SECRET}),
+        json!({"action":"set","id":SECRET,"setting":"token","secret":"x"}),
     ] {
         let refused = reg
             .invoke("extension.secretStore", input.clone())
@@ -420,6 +445,29 @@ async fn a_malformed_call_is_refused_without_quoting_it() {
         assert!(!refused.contains(SECRET), "{input} → {refused}");
     }
     assert!(store.keys().is_empty());
+}
+
+/// What a consent prompt may name: an installed app that keeps secrets, and
+/// one of its declared secret settings. Anything else is the caller's text.
+#[tokio::test]
+async fn only_an_installed_apps_declared_secret_is_a_name_a_prompt_may_show() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("apps.json");
+    let reg = registry(&path, Arc::new(MemoryStore::default()));
+    install(&reg, with_secret(declared())).await;
+    assert!(declares_secret_setting(&path, ID, None));
+    assert!(declares_secret_setting(&path, ID, Some("token")));
+    assert!(
+        !declares_secret_setting(&path, ID, Some("team")),
+        "not a secret"
+    );
+    assert!(!declares_secret_setting(&path, ID, Some(SECRET)));
+    assert!(!declares_secret_setting(&path, SECRET, None));
+    assert!(!declares_secret_setting(
+        &dir.path().join("missing.json"),
+        ID,
+        None
+    ));
 }
 
 #[tokio::test]

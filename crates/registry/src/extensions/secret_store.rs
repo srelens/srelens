@@ -38,7 +38,7 @@ pub const SECRET_STORE_ANNOTATIONS: Annotations = Annotations {
     requires_confirm: true,
     sensitive: true,
     impact: Impact::Medium,
-    confirm: Some("Change a secret an app keeps in the system keychain[ ({action})]?"),
+    confirm: Some("Change a secret an app keeps in srelens's secrets vault[ ({action})]?"),
 };
 
 #[derive(Deserialize, JsonSchema)]
@@ -95,7 +95,7 @@ pub struct SecretStoreState {
 
 impl SecretStoreState {
     pub(super) fn of(store: &dyn SecretStore) -> Self {
-        match store.status() {
+        match store.peek_status() {
             Ok(()) => Self {
                 available: true,
                 reason: None,
@@ -158,6 +158,30 @@ pub(super) fn report(store: &dyn SecretStore, state: &mut Inventory) {
     state.secret_store = Some(status);
 }
 
+/// Whether the app `id` installed in the inventory at `inventory` keeps
+/// secrets, and with `setting`, whether that is one of its declared secret
+/// settings. What a consent prompt may name: anything else in a call is the
+/// caller's text, and a caller can put a secret there. An inventory that
+/// cannot be read answers `false`, which shows less, never more.
+pub fn declares_secret_setting(inventory: &Path, id: &str, setting: Option<&str>) -> bool {
+    let Ok(state) = read(inventory) else {
+        return false;
+    };
+    state
+        .plugins
+        .iter()
+        .find(|app| app.manifest.id == id)
+        .is_some_and(|app| match setting {
+            Some(setting) => is_secret(app, setting),
+            None => app.manifest.declares_secrets(),
+        })
+}
+
+/// A setting that is not one of the app's declared secrets. Names neither the
+/// app nor the setting: both are the caller's text, and a caller that swaps
+/// fields puts the secret there.
+const NO_SUCH_SECRET: &str = "This app declares no secret setting by that name";
+
 fn app<'a>(state: &'a mut Inventory, id: &str) -> Result<&'a mut Installed, String> {
     state
         .plugins
@@ -186,7 +210,7 @@ fn change(path: &Path, store: &dyn SecretStore, input: SecretIn) -> Result<Secre
                 return Err(format!("This app can't keep secrets: {reason}"));
             }
             if !is_secret(app, &setting) {
-                return Err(format!("{id} declares no secret setting \"{setting}\""));
+                return Err(NO_SUCH_SECRET.into());
             }
             if !app
                 .grants
@@ -194,7 +218,7 @@ fn change(path: &Path, store: &dyn SecretStore, input: SecretIn) -> Result<Secre
                 .any(|grant| grant == SECRET_STORE_PERMISSION)
             {
                 return Err(format!(
-                    "{id} was not granted {SECRET_STORE_PERMISSION}, so it cannot keep secrets"
+                    "This app was not granted {SECRET_STORE_PERMISSION}, so it cannot keep secrets"
                 ));
             }
             store.status().map_err(|why| {
@@ -214,9 +238,7 @@ fn change(path: &Path, store: &dyn SecretStore, input: SecretIn) -> Result<Secre
             let app = app(&mut state, &id)?;
             let settings: Vec<String> = match setting {
                 Some(setting) if is_secret(app, &setting) => vec![setting],
-                Some(setting) => {
-                    return Err(format!("{id} declares no secret setting \"{setting}\""))
-                }
+                Some(_) => return Err(NO_SUCH_SECRET.into()),
                 None => app
                     .manifest
                     .settings
@@ -239,7 +261,7 @@ fn change(path: &Path, store: &dyn SecretStore, input: SecretIn) -> Result<Secre
 pub(super) fn register(reg: &mut Registry, path: PathBuf, store: Arc<dyn SecretStore>) {
     let mut capability = Capability::typed::<SecretIn, SecretOut, _, _>(
         SECRET_STORE_PERMISSION,
-        "Set or clear a secret an app keeps in the system keychain; write-only, never returns a value; requires approval",
+        "Set or clear a secret an app keeps in srelens's encrypted secrets vault; write-only, never returns a value; requires approval",
         SECRET_STORE_ANNOTATIONS,
         move |input| {
             let path = path.clone();
@@ -253,22 +275,25 @@ pub(super) fn register(reg: &mut Registry, path: PathBuf, store: Arc<dyn SecretS
         },
     );
     // Serde quotes what it cannot read (`invalid type: string "…"`, `unknown
-    // variant "…"`), and a caller can put the secret anywhere in a malformed
-    // call. Every value the call carried is scrubbed from an input refusal,
-    // the way the audit log scrubs errors, before the message reaches the
-    // caller, the desktop log or an MCP client.
+    // variant "…"`), and a caller can put the secret anywhere, including where
+    // a name goes. Every value the call carried is scrubbed from every
+    // refusal, the way the audit log scrubs errors, before the message
+    // reaches the caller, the desktop log (`bridge.rs`) or an MCP client. The
+    // one value kept is a recognised `action`, so "set" and "clear" survive
+    // in the words of a message.
     let typed = capability.handler.clone();
     capability.handler = Arc::new(move |input: Value| {
         let typed = typed.clone();
         Box::pin(async move {
+            let kept = match input.get("action").and_then(Value::as_str) {
+                Some(action @ ("set" | "clear")) => serde_json::json!([action]),
+                _ => Value::Null,
+            };
+            let scrub = |why: String| srelens_capability::audit::redact_error(&why, &input, &kept);
             typed(input.clone()).await.map_err(|error| match error {
-                // Nothing the caller sent is kept: `Null` holds no value, so
-                // every string and number in `input` is scrubbed, whatever
-                // shape it came in (a bare string, an array, any field).
-                CapabilityError::InvalidInput(why) => CapabilityError::InvalidInput(
-                    srelens_capability::audit::redact_error(&why, &input, &Value::Null),
-                ),
-                other => other,
+                CapabilityError::InvalidInput(why) => CapabilityError::InvalidInput(scrub(why)),
+                CapabilityError::Handler(why) => CapabilityError::Handler(scrub(why)),
+                CapabilityError::NotFound(why) => CapabilityError::NotFound(scrub(why)),
             })
         })
     });

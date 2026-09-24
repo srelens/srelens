@@ -289,14 +289,14 @@ it("reviews the secret store as a permission: what it keeps, and the host's own 
   const review = await reviewPasted(JSON.stringify(keeping));
   const store = within(review).getByRole("listitem", { name: "extension.secretStore bindings" });
   expect(store.textContent).not.toContain("No binding uses this permission");
-  expect(store.textContent).toContain("Keeps these secret settings in the system keychain: API token, Webhook");
+  expect(store.textContent).toContain("Keeps these secret settings in srelens's encrypted secrets vault: API token, Webhook");
   expect(store.textContent).not.toContain(RLO);
   expect(store.textContent).not.toContain("Team");
   expect(store.textContent).toContain("The app never reads them");
   // #548's host metadata, from the catalog, never from the manifest.
   expect(store.textContent).toContain("Sensitive");
   expect(store.textContent).toContain("medium impact");
-  expect(store.textContent).toContain("Change a secret an app keeps in the system keychain");
+  expect(store.textContent).toContain("Change a secret an app keeps in srelens's secrets vault");
 });
 it("draws inline manifest text with invisible and control characters escaped", () => {
   const zeroWidth = String.fromCodePoint(0x200b);

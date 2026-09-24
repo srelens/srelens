@@ -307,7 +307,11 @@ it("keeps a secret write-only: the typed value goes to the store, then leaves th
   const { region, field, onSave, onSetSecret } = secretForm();
   const input = within(field).getByLabelText("API token") as HTMLInputElement;
   expect(input.type).toBe("password");
-  expect(input.autocomplete).toBe("off");
+  expect(input.autocomplete).toBe("new-password");
+  // Where it is kept, true in every vault mode: the key is the keychain's, or
+  // derived from the master password (review of #543).
+  expect(field.textContent).toContain("Kept in srelens's encrypted secrets vault.");
+  expect(field.textContent).not.toContain("system keychain");
   fireEvent.change(input, { target: { value: "s3cret-typed" } });
   fireEvent.click(within(field).getByRole("button", { name: "Save secret" }));
   await waitFor(() => expect(onSetSecret).toHaveBeenCalledWith("token", "s3cret-typed"));

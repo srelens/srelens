@@ -479,6 +479,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The other direction (review of #543): a bundle is a file anyone can
+    /// hand you, and an app secret it carried would sit unreferenced on this
+    /// machine. Import writes the API keys and the MCP token, nothing else.
+    #[test]
+    fn an_import_never_writes_an_apps_secret() {
+        let dir = temp_dir("secrets-import-apps");
+        let vault = vault_with(&dir, Secrets::default());
+        let incoming = Secrets {
+            llm_keys: BTreeMap::from([("anthropic".into(), "sk-ant-from-bundle".into())]),
+            extension_secrets: BTreeMap::from([(
+                "org.example.metrics/token".into(),
+                "planted-by-a-bundle".into(),
+            )]),
+            ..Default::default()
+        };
+        import_secrets(&vault, &bundle_with(Some(incoming))).unwrap();
+        let stored = vault.load();
+        assert!(stored.extension_secrets.is_empty(), "{stored:?}");
+        assert_eq!(stored.llm_keys.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_bundle_without_secrets_writes_nothing_to_the_vault() {
         let dir = temp_dir("secrets-none");

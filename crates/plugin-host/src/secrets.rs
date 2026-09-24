@@ -60,6 +60,13 @@ pub trait SecretStore: Send + Sync {
     /// locked, no store on this host). Storing fails closed on it: a secret is
     /// never kept anywhere else instead.
     fn status(&self) -> Result<(), String>;
+    /// What `status` would say, for a report, without doing anything to find
+    /// out that only storing a secret should do (opening a vault nothing has
+    /// opened yet, and so possibly prompting for the keychain). Defaults to
+    /// `status`.
+    fn peek_status(&self) -> Result<(), String> {
+        self.status()
+    }
     /// Keep `value` under `key`, replacing what was there.
     fn put(&self, key: &str, value: &SecretValue) -> Result<(), String>;
     /// Whether a value is kept under `key`.
@@ -125,6 +132,11 @@ impl PluginHost {
     /// `secret-reference`, the app was granted [`SECRET_STORE_PERMISSION`],
     /// the saved setting is the host's own reference for it, and the store has
     /// a value. No reason names the value.
+    ///
+    /// It does not know whether the app is enabled, quarantined, or scoped to
+    /// the cluster of the call: a caller (#568) reaches it only after the
+    /// checks every app request makes (`resolver_app` in the registry), and
+    /// must keep it that way.
     pub fn inject_secret(
         target: &Capability,
         argument: &str,

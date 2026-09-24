@@ -13,6 +13,7 @@ mod panels;
 mod policy_tests;
 mod resource;
 mod secret_store;
+pub use secret_store::{declares_secret_setting, SECRET_STORE_ANNOTATIONS};
 #[cfg(test)]
 mod secrets_tests;
 #[cfg(test)]

@@ -170,7 +170,7 @@ export function ExtensionDetails({
           <p>
             Reset {extensionLabel(plugin)} to its default settings? Its saved settings are removed, except the
             required ones, which have no default
-            {keepsSecrets ? ", and its secrets are deleted from the system keychain." : "."}
+            {keepsSecrets ? ", and its secrets are deleted from srelens's secrets vault." : "."}
           </p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={() => setResetting(false)}>
             Cancel

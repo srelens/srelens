@@ -25,6 +25,9 @@ pub use settings::default_settings_path;
 /// The secret store a host supplies for apps' secret settings (#543), so a
 /// host implements it against this crate alone.
 pub use srelens_plugin_host::{NoSecretStore, SecretStore, SecretValue, SECRET_STORE_PERMISSION};
+/// The host's metadata for `extension.secretStore`, for a host that renders
+/// its confirmation from names it has vetted (#543).
+pub use extensions::{declares_secret_setting, SECRET_STORE_ANNOTATIONS};
 
 // Test-only: every consumer of this module — `render_catalog` (regenerated via
 // `UPDATE_CATALOG=1 cargo test`), the doc-scan tests below, and mcp_docs.rs's
@@ -276,7 +279,8 @@ pub fn build_registry_app_streams_and_secrets(
     kubeconfig_paths: Vec<PathBuf>,
     settings_path: Option<PathBuf>,
     secrets: Arc<dyn SecretStore>,
-) -> (Registry, Option<Arc<ExtensionStreams>>) {    let mut reg = Registry::new();
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
+    let mut reg = Registry::new();
 
     reg.register(Capability::read_only(
         "ping",
@@ -760,11 +764,24 @@ mod tests {
     async fn the_secret_store_a_host_supplies_is_the_one_the_apps_use() {
         struct Open;
         impl srelens_plugin_host::SecretStore for Open {
-            fn status(&self) -> Result<(), String> { Ok(()) }
-            fn put(&self, _: &str, _: &srelens_plugin_host::SecretValue) -> Result<(), String> { Ok(()) }
-            fn contains(&self, _: &str) -> Result<bool, String> { Ok(false) }
-            fn retain(&self, _: &std::collections::BTreeSet<String>) -> Result<(), String> { Ok(()) }
-            fn reveal(&self, _: &str) -> Result<Option<srelens_plugin_host::SecretValue>, String> { Ok(None) }
+            fn status(&self) -> Result<(), String> {
+                Ok(())
+            }
+            fn put(&self, _: &str, _: &srelens_plugin_host::SecretValue) -> Result<(), String> {
+                Ok(())
+            }
+            fn contains(&self, _: &str) -> Result<bool, String> {
+                Ok(false)
+            }
+            fn retain(&self, _: &std::collections::BTreeSet<String>) -> Result<(), String> {
+                Ok(())
+            }
+            fn reveal(
+                &self,
+                _: &str,
+            ) -> Result<Option<srelens_plugin_host::SecretValue>, String> {
+                Ok(None)
+            }
         }
         let dir = tempfile::tempdir().unwrap();
         let settings = dir.path().join("settings.json");

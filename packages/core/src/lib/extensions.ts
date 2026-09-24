@@ -351,7 +351,7 @@ export async function configureExtensions(change: ExtensionChange) {
 }
 /** Why an app's secret cannot be set or cleared outside the desktop app (#543, #522). */
 const SECRETS_ON_DESKTOP_ONLY =
-  "App secrets are kept in the desktop app's system keychain; this host cannot store one";
+  "App secrets are kept in the desktop app's encrypted secrets vault; this host cannot store one";
 
 /** What setting or clearing a secret answers: whether it is set now, never the value. */
 export interface ExtensionSecretState {

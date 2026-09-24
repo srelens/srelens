@@ -654,9 +654,10 @@ access.
 ### Secret settings
 
 A `secret-reference` setting is kept by the host's secret store (#543). On the desktop
-that is the existing encrypted vault, `secrets.enc`, whose one master key is in the OS
-keychain; the app secret is one more entry in it, beside the MCP token and the provider
-API keys, keyed by `<app id>/<setting id>`. The inventory holds only the reference.
+that is the existing encrypted vault, `secrets.enc`, whose one master key is held by the OS
+keychain (or, once a master password is set, derived from it); the app secret is one more
+entry in it, beside the MCP token and the provider API keys, keyed by
+`<app id>/<setting id>`. The inventory holds only the reference.
 
 - **Permission.** A manifest that declares a `secret-reference` setting lists
   `extension.secretStore` in `permissions`, and one that declares none may not
@@ -664,21 +665,25 @@ API keys, keyed by `<app id>/<setting id>`. The inventory holds only the referen
   and is never a binding target (`EXTENSION_UNSUPPORTED_TARGET`). The install and update
   review names it, the secret settings it covers, and the host's metadata for it:
   sensitive, `medium` impact, and its confirmation wording.
-- **Write-only.** Settings ? Apps sets, replaces and clears a secret, and shows whether
+- **Write-only.** Settings → Apps sets, replaces and clears a secret, and shows whether
   it is set. Nothing returns the value: not `extensions.list`, not the capability's own
   answer (`{"set": true}`), not an error, not the audit log, not an MCP response or
-  consent prompt, not exported settings or the settings bundle.
+  consent prompt, not exported settings or the settings bundle. The consent prompt shows
+  only the action, and the app and setting when they name an installed app's declared
+  secret; anything else the call carried is left out.
 - **Fails closed.** A secret is stored only while the vault's key is protected by the OS
   keychain, the biometric gate or the master password, and the vault is unlocked. With
   no usable keychain (the headless file fallback), a locked vault, or no store at all, a
-  set is refused with the reason, which Settings ? Apps shows beside the field. Nothing is
+  set is refused with the reason, which Settings → Apps shows beside the field. Nothing is
   ever written in plain text instead.
-- **Deleted with the app.** Removing the app, resetting its settings, or an update or
-  rollback that no longer declares the setting as a secret deletes the secret. The
-  inventory is the source of truth and the store follows it: after every inventory change
-  the host deletes each stored secret no app references. A delete the store cannot make
-  at that moment (a locked vault) leaves the secret unreferenced, where nothing can reach
-  it, and the next change deletes it.
+- **Deleted with the app.** Removing the app, or an update or rollback that no longer
+  declares the setting as a secret, deletes the secret. The inventory is the source of
+  truth and the store follows it: after every inventory change the host deletes each
+  stored secret no app references. A delete the store cannot make at that moment (a
+  locked vault) leaves the secret unreferenced, where nothing can reach it, and the next
+  change deletes it. **Reset** in Settings → Apps clears the app's secrets explicitly
+  (`extension.secretStore` with `clear` and no setting) before it resets the other
+  settings; a settings save through `extensions.configure` on its own keeps them.
 - **Where it is used.** The host injects a secret only into an argument a host capability
   declares as a secret slot, and only for an app granted `extension.secretStore`
   (`PluginHost::inject_secret`). No capability declares one yet; brokered HTTP headers

@@ -6,7 +6,7 @@
     "requiresConfirm": true,
     "sensitive": true,
     "impact": "medium",
-    "confirm": "Change a secret an app keeps in the system keychain[ ({action})]?"
+    "confirm": "Change a secret an app keeps in srelens's secrets vault[ ({action})]?"
   },
   {
     "id": "extensions.action",

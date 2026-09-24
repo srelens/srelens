@@ -392,7 +392,7 @@ export function ExtensionManager() {
           <p>
             This removes the app and its saved settings
             {(removing.manifest.settings ?? []).some((setting) => setting.type === "secret-reference")
-              ? ", and deletes its secrets from the system keychain."
+              ? ", and deletes its secrets from srelens's secrets vault."
               : "."}
           </p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={()=>setRemoving(null)}>Cancel</Button>

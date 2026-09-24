@@ -70,7 +70,8 @@ one of the four host action primitives, each a separate permission the user gran
 ## Secrets
 
 `extension.secretStore` lets the host keep an app's `secret-reference` settings in the
-system keychain-backed vault ([#543](https://github.com/srelens/srelens/issues/543)).
+desktop's encrypted secrets vault, whose key the OS keychain holds or the master password
+derives ([#543](https://github.com/srelens/srelens/issues/543)).
 
 - A manifest lists it exactly when it declares a `secret-reference` setting, and never
   binds it. It is granted at install like any other permission.
@@ -80,7 +81,8 @@ system keychain-backed vault ([#543](https://github.com/srelens/srelens/issues/5
 - Without the grant, a secret cannot be set. A secret is write-only: nothing returns
   it to the app, the UI, MCP or an export, and the host injects one only into an
   argument a host capability declares for it. None does yet (#568 will).
-- Removing or resetting the app, or an update that drops the setting, deletes it.
+- Removing the app, or an update or rollback that drops the setting, deletes it. Reset
+  in Settings → Apps clears the app's secrets before it resets the other settings.
 
 See [Secret settings](manifest.md#secret-settings).
 

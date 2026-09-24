@@ -454,7 +454,7 @@ function SecretField({
       <p id={`${id}-state`} className="extension-setting-note">
         <strong>{isSet ? "Set" : "Not set"}</strong>
         {" · "}
-        Kept in the system keychain. It is never shown again, and never saved in these settings or in exported settings.
+        Kept in srelens's encrypted secrets vault. It is never shown again, and never saved in these settings or in exported settings.
       </p>
       {refusal && (
         <p id={`${id}-refusal`} className="extension-setting-problem">
@@ -466,7 +466,7 @@ function SecretField({
           id={id}
           aria-labelledby={`${id}-title`}
           type="password"
-          autoComplete="off"
+          autoComplete="new-password"
           spellCheck={false}
           value={typed}
           disabled={Boolean(refusal) || busy}

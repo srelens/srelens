@@ -571,6 +571,15 @@ pub struct ExtensionSecrets(pub std::sync::Arc<extension_secrets::VaultSecretSto
 /// A desktop registry whose apps keep their secrets in `secrets` — the vault
 /// behind the OS keychain. The GUI, the in-app MCP server and both headless
 /// MCP modes build theirs through this, so no surface quietly has no store.
+///
+/// **One inventory per vault.** After every inventory change the registry
+/// deletes each app secret the inventory at `settings_path` does not
+/// reference (#543). Every caller today pairs the default settings path with
+/// the vault under the same config dir (`dirs::config_dir()` in `main.rs`,
+/// `app_config_dir()` here), so they agree. A registry that paired this vault
+/// with another inventory — a profile, a settings override, a test pointed at
+/// the real vault — would delete every other app's secrets on its first
+/// change. Give such a build its own vault.
 pub fn registry_for(
     cache: std::sync::Arc<ClientCache>,
     kubeconfig_paths: Vec<std::path::PathBuf>,

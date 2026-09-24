@@ -16,15 +16,16 @@
 use crate::vault::Vault;
 use srelens_registry::{SecretStore, SecretValue};
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 /// The desktop's [`SecretStore`]: the vault, once it is open.
 pub struct VaultSecretStore {
     vault: OnceLock<Arc<Vault>>,
-    /// Where to open the vault on first use, for a headless process that has
-    /// not opened one itself. `None`: the GUI attaches the vault it manages.
-    open_at: Option<PathBuf>,
+    /// Where to open the vault on first use, and how, for a headless process
+    /// that has not opened one itself. `None`: the GUI attaches the vault it
+    /// manages.
+    open_at: Option<(PathBuf, fn(&Path) -> Vault)>,
 }
 
 impl VaultSecretStore {
@@ -45,12 +46,19 @@ impl VaultSecretStore {
         }
     }
 
-    /// Opens the vault under `dir` the first time a secret is asked for, so a
-    /// headless run that never touches one never touches the keychain.
+    /// Opens the vault under `dir` the first time a secret is kept, or
+    /// deleted from a vault that exists, so a headless run that never does
+    /// either never touches the keychain.
     pub fn opening(dir: PathBuf) -> Self {
+        Self::opening_with(dir, Vault::open)
+    }
+
+    /// [`opening`](Self::opening), with how to open it: a test's in-memory
+    /// keychain in place of the OS one.
+    pub(crate) fn opening_with(dir: PathBuf, open: fn(&Path) -> Vault) -> Self {
         Self {
             vault: OnceLock::new(),
-            open_at: Some(dir),
+            open_at: Some((dir, open)),
         }
     }
 
@@ -65,7 +73,7 @@ impl VaultSecretStore {
             return Ok(vault);
         }
         match &self.open_at {
-            Some(dir) => Ok(self.vault.get_or_init(|| Arc::new(Vault::open(dir)))),
+            Some((dir, open)) => Ok(self.vault.get_or_init(|| Arc::new(open(dir)))),
             None => Err("The secrets vault is not open yet".into()),
         }
     }
@@ -95,6 +103,18 @@ fn unavailable(source: &str) -> &'static str {
 }
 
 impl SecretStore for VaultSecretStore {
+    fn peek_status(&self) -> Result<(), String> {
+        if self.vault.get().is_none() && self.open_at.is_some() {
+            // Opening it just to report would prompt for the keychain, or mint
+            // a key file on a keychain-less host, for a read.
+            return Err(
+                "The secrets vault is not open in this process yet; storing a secret opens it"
+                    .into(),
+            );
+        }
+        self.status()
+    }
+
     fn status(&self) -> Result<(), String> {
         let vault = self.unlocked()?;
         match vault.key_source() {
@@ -118,6 +138,15 @@ impl SecretStore for VaultSecretStore {
     }
 
     fn retain(&self, keep: &BTreeSet<String>) -> Result<(), String> {
+        // A vault this process has not opened, and that does not exist, holds
+        // nothing to delete: opening it would only create one.
+        if self.vault.get().is_none() {
+            if let Some((dir, _)) = &self.open_at {
+                if !dir.join("secrets.enc").exists() {
+                    return Ok(());
+                }
+            }
+        }
         let vault = self.unlocked()?;
         // Rewrite the vault only when something goes: most changes delete
         // nothing, and each write is a keychain-keyed re-encryption.
@@ -271,6 +300,38 @@ mod tests {
         let dir = temp_dir("later");
         store.attach(keychain_vault(&dir));
         assert_eq!(store.status(), Ok(()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review of #543: headless `--mcp-stdio` never touched the vault before.
+    /// Listing apps must not open it (a keychain prompt, or a key file minted
+    /// on a keychain-less host), and neither may a change that has nothing to
+    /// delete because there is no vault yet. Storing a secret does open it.
+    #[test]
+    fn a_lazy_store_opens_the_vault_only_to_keep_or_delete_a_secret() {
+        let dir = temp_dir("lazy");
+        let store = VaultSecretStore::opening_with(dir.clone(), |dir| {
+            Vault::with_backend(dir, Box::new(MemKeychain::empty()))
+        });
+        assert!(store.peek_status().unwrap_err().contains("not open"));
+        store.retain(&BTreeSet::new()).unwrap();
+        assert!(
+            store.vault.get().is_none(),
+            "reporting or sweeping opened the vault"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "nothing may be written"
+        );
+
+        store.put(KEY, &SecretValue::new(SECRET.into())).unwrap();
+        assert!(store.vault.get().is_some());
+        assert_eq!(
+            store.peek_status(),
+            Ok(()),
+            "once open, it reports what it is"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

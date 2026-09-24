@@ -357,10 +357,10 @@ fn run_mcp_stdio(allow_destructive: bool, allow_sensitive_reads: bool) {
         let cache = srelens_kube::client_cache::ClientCache::new_many(
             srelens_registry::all_kubeconfig_paths(),
         );
-        // Apps' secrets (#543) in the same vault as the GUI, opened the first
-        // time an `extensions.*` call needs the store (listing apps reports
-        // whether it is available), so a run that never touches apps never
-        // touches the keychain.
+        // Apps' secrets (#543) in the same vault as the GUI, opened only to
+        // keep a secret or to delete one from a vault that exists: listing
+        // apps reports the vault as not open yet rather than opening it, so a
+        // run that stores no secret never touches the keychain.
         let registry = srelens_desktop_lib::registry_for(
             cache.clone(),
             srelens_registry::default_kubeconfig_paths(),
