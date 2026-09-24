@@ -279,6 +279,19 @@ describe("watchNamespaces", () => {
     expect(onStatus).toHaveBeenLastCalledWith("live");
   });
 
+  it("goes live again when the only reconnecting namespace fails for good", async () => {
+    // A failed watch sends no further status, so leaving it in the
+    // reconnecting set would hold "Stream lost" over a live list forever.
+    const { emit } = capture();
+    const onStatus = vi.fn();
+
+    await watchNamespaces("c", ["team-a", "team-b"], "pods", vi.fn(), onStatus, vi.fn());
+    emit("team-b", { status: "reconnecting" });
+    emit("team-b", { error: "pods is forbidden" });
+
+    expect(onStatus).toHaveBeenLastCalledWith("live");
+  });
+
   it("stops every namespace's watch through the one handle", async () => {
     const { started, disposes } = capture();
 

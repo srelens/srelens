@@ -35,7 +35,7 @@ proto.hasPointerCapture ??= () => false;
 proto.setPointerCapture ??= () => {};
 proto.releasePointerCapture ??= () => {};
 
-import { resourceStatusLine, type ClusterContext, type K8sObject } from "@srelens/core";
+import { describeError, resourceStatusLine, type ClusterContext, type K8sObject } from "@srelens/core";
 import { Workloads } from "./Workloads";
 import { ConsoleProvider } from "../console";
 import * as store from "../lib/tabsStore";
@@ -384,6 +384,41 @@ describe("Workloads", () => {
 
     await waitFor(() => expect(rowNames()).toHaveLength(5));
     expect(screen.getByText("Could not list pods and cronjobs in kube-system")).toBeTruthy();
+  });
+
+  it("keeps every kind's reason in a grouped banner, not only the first kind's", async () => {
+    store.openTab("/resources");
+    setNamespaces(CTX.stableId, ["default", "kube-system"]);
+    watchResource.mockImplementation(
+      async (
+        _context: string,
+        namespace: string,
+        kind: string,
+        onRows: (rows: unknown[]) => void,
+        _onStatus: (status: "live" | "reconnecting") => void,
+        onError: (message: string) => void,
+      ) => {
+        if (namespace === "kube-system" && kind === "pods") {
+          onError('pods is forbidden: User "dev" cannot watch resource "pods" in the namespace "kube-system"');
+          return { stop };
+        }
+        if (namespace === "kube-system" && kind === "cronjobs") {
+          onError("dial tcp 10.1.2.3:6443: connect: connection refused");
+          return { stop };
+        }
+        onRows((FIXTURES[kind] ?? []).filter((r) => (r as { namespace: string }).namespace === namespace));
+        return { stop };
+      },
+    );
+
+    open();
+
+    const title = await screen.findByText("Could not list pods and cronjobs in kube-system");
+    const banner = title.parentElement!.parentElement!;
+    expect(banner.textContent).toMatch(/permission to watch pods in kube-system/i);
+    expect(banner.textContent).toContain(
+      describeError("dial tcp 10.1.2.3:6443: connect: connection refused").detail,
+    );
   });
 
   // Whole-branch review, Correction (a): zero options while `namespaces` is

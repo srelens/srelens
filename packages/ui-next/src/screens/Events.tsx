@@ -358,12 +358,12 @@ function EventList({
           onReset={() => setNamespaces(context.stableId, [])}
         />
 
-        {showRows && (
+        {showRows && !list.stale && (
           // Several namespaces, some refused (#688): the rows are live, the
           // named namespaces are simply missing — not the stale case below.
           <NamespaceFailuresAlert what={lower} failures={list.namespaceFailures} className="mx-3 mt-3 mb-3" />
         )}
-        {showRows && list.error && list.namespaceFailures.length === 0 && (
+        {showRows && list.stale && (
           // Rows and an error together: the last good list is still on screen
           // and is no longer being refreshed. Emptying the table would throw
           // away the only information the reader has. Pinned ABOVE the scrolling

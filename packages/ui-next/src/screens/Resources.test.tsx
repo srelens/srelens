@@ -14,6 +14,7 @@ const {
   listCustomResource,
   listNamespaces,
   listNodes,
+  listResource,
   nodeMetrics,
   podMetrics,
   useNamespaceOptions,
@@ -27,6 +28,7 @@ const {
   listCustomResource: vi.fn(),
   listNamespaces: vi.fn(),
   listNodes: vi.fn(),
+  listResource: vi.fn(),
   nodeMetrics: vi.fn(),
   podMetrics: vi.fn(),
   useNamespaceOptions: vi.fn(),
@@ -54,6 +56,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   listCustomResource: (...a: unknown[]) => listCustomResource(...a),
   listNamespaces: (...a: unknown[]) => listNamespaces(...a),
   listNodes: (...a: unknown[]) => listNodes(...a),
+  listResource: (...a: unknown[]) => listResource(...a),
   nodeMetrics: (...a: unknown[]) => nodeMetrics(...a),
   podMetrics: (...a: unknown[]) => podMetrics(...a),
   deleteResource,
@@ -534,6 +537,34 @@ describe("Resources", () => {
 
     expect(await screen.findByText("Could not list pods in team-b")).toBeTruthy();
     expect(screen.queryByText(/has no pods/)).toBeNull();
+  });
+
+  // Review of #688: a polled list whose every selected namespace fails keeps
+  // the last good rows — which must read as stale, not as live rows under a
+  // "could not list … in team-a and team-b" banner.
+  it("calls the rows stale once every selected namespace's poll has failed", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let fail = false;
+      listResource.mockImplementation(async (_c: string, _k: string, ns: string) =>
+        fail ? { error: "dial tcp 10.1.2.3:6443: connect: connection refused" } : { items: [{ name: `lock-${ns}`, namespace: ns }] },
+      );
+      store.openTab("/k/leases");
+      setNamespaces(CTX.stableId, ["team-a", "team-b"]);
+      open("/k/leases");
+      expect(await screen.findByText("lock-team-a")).toBeTruthy();
+
+      fail = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5100);
+      });
+
+      expect(await screen.findByText(/are stale/)).toBeTruthy();
+      expect(screen.getByText("lock-team-a")).toBeTruthy();
+      expect(screen.queryByText(/Could not list .* in team-a and team-b/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("marks an unhealthy pod's row with a dot that also says so in words", async () => {

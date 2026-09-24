@@ -444,11 +444,9 @@ function WorkloadList({
   // With several namespaces selected, a failure is per namespace (#688): the
   // namespaces that answered are live rows, not stale ones, so those kinds
   // get a banner naming what is missing instead of either card below.
-  const partial = kinds.filter((k) => k.list.namespaceFailures.length > 0);
+  const partial = kinds.filter((k) => k.list.namespaceFailures.length > 0 && !k.list.stale);
   const failed = kinds.filter((k) => k.list.status === "error" && k.list.namespaceFailures.length === 0);
-  const stale = kinds.filter(
-    (k) => k.list.status !== "error" && k.list.error && k.list.namespaceFailures.length === 0,
-  );
+  const stale = kinds.filter((k) => k.list.status !== "error" && k.list.stale);
   const anyReconnecting = kinds.some((k) => k.list.watch !== "live");
 
   // One banner per distinct set of refused namespaces, naming the kinds it
@@ -459,8 +457,11 @@ function WorkloadList({
     const groups = new Map<string, { what: string[]; failures: KindEntry["list"]["namespaceFailures"] }>();
     for (const k of partial) {
       const id = k.list.namespaceFailures.map((f) => f.namespace).join(",");
-      const group = groups.get(id) ?? { what: [], failures: k.list.namespaceFailures };
+      // Every kind's failures, not the first kind's: two kinds refused in one
+      // namespace can be refused for different reasons.
+      const group = groups.get(id) ?? { what: [], failures: [] };
       group.what.push(`${k.label.toLocaleLowerCase()}s`);
+      group.failures.push(...k.list.namespaceFailures);
       groups.set(id, group);
     }
     return [...groups].map(([id, g]) => ({

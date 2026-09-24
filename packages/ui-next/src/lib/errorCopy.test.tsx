@@ -216,6 +216,22 @@ describe("NamespaceFailuresAlert", () => {
     expect(screen.getByText("Could not list pods in 5 namespaces: a, b, c and 2 more")).toBeTruthy();
   });
 
+  it("names a namespace once, and keeps every reason, when several kinds failed in it", () => {
+    render(
+      <NamespaceFailuresAlert
+        what="pods and cronjobs"
+        failures={[
+          { namespace: "team-b", error: FORBIDDEN },
+          { namespace: "team-b", error: "dial tcp 10.1.2.3:6443: connect: connection refused" },
+        ]}
+      />,
+    );
+    expect(screen.getByText("Could not list pods and cronjobs in team-b")).toBeTruthy();
+    const alert = screen.getByText("Could not list pods and cronjobs in team-b").closest('[role="alert"], [data-slot="alert"], div')!.parentElement!;
+    expect(alert.textContent).toContain(describeError(FORBIDDEN).detail);
+    expect(alert.textContent).toContain(describeError("dial tcp 10.1.2.3:6443: connect: connection refused").detail);
+  });
+
   it("renders nothing when every namespace answered", () => {
     const { container } = render(<NamespaceFailuresAlert what="pods" failures={[]} />);
     expect(container.textContent).toBe("");

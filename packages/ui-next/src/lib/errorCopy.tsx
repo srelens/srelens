@@ -169,7 +169,9 @@ export function NamespaceFailuresAlert({
   return (
     <Alert
       tone="warn"
-      title={`Could not list ${what} in ${namespacePhrase(failures.map((f) => f.namespace))}`}
+      // Deduped: a grouped banner carries one failure per kind, and two kinds
+      // refused in one namespace are still one namespace.
+      title={`Could not list ${what} in ${namespacePhrase([...new Set(failures.map((f) => f.namespace))])}`}
       className={className}
     >
       {copy.detail}

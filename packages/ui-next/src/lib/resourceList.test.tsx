@@ -315,6 +315,54 @@ describe("useResourceList — several namespaces", () => {
     expect(result.current.namespaceFailures).toEqual([{ namespace: "team-b", error: "leases is forbidden" }]);
   });
 
+  it("calls the kept rows stale once every namespace's poll has failed", async () => {
+    let fail = false;
+    const load = vi.fn(async (_c: string, ns: string) =>
+      fail ? { error: "connection refused" } : { rows: [{ name: "lock", namespace: ns }] },
+    );
+    const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+    const { result } = renderHook(() => useResourceList("prod", "leases", polled, ["team-a", "team-b"], []));
+    await waitFor(() => expect(result.current.rows).toHaveLength(2));
+    expect(result.current.stale).toBe(false);
+
+    fail = true;
+    act(() => result.current.reload());
+    await waitFor(() => expect(result.current.error).toBe("connection refused"));
+    // The last good rows stay, and they are no longer being refreshed.
+    expect(result.current.rows).toHaveLength(2);
+    expect(result.current.stale).toBe(true);
+  });
+
+  it("calls cached rows stale when the watch could not even start", async () => {
+    const first = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(mockState.emitRows).not.toBeNull());
+    act(() => mockState.emitRows!([{ name: "a", namespace: "team-a" }]));
+    first.unmount();
+    watchNamespaces.mockRejectedValueOnce(new Error("backend unavailable"));
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(result.current.error).toBe("backend unavailable"));
+    expect(result.current.rows).toHaveLength(1);
+    expect(result.current.stale).toBe(true);
+  });
+
+  it("does not call a partial failure stale: the rows that answered are live", async () => {
+    const load = vi.fn(async (_c: string, ns: string) =>
+      ns === "team-b" ? { error: "leases is forbidden" } : { rows: [{ name: "lock", namespace: ns }] },
+    );
+    const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+    const { result } = renderHook(() => useResourceList("prod", "leases", polled, ["team-a", "team-b"], []));
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(result.current.stale).toBe(false);
+  });
+
+  it("calls a one-namespace list stale when it failed with rows on screen", async () => {
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a"], []));
+    await waitFor(() => expect(mockState.emitRows).not.toBeNull());
+    act(() => mockState.emitRows!([{ name: "a", namespace: "team-a" }]));
+    act(() => mockState.emitError!("watch closed", "team-a"));
+    expect(result.current.stale).toBe(true);
+  });
+
   it("marks the merged poll truncated when any one namespace's list was", async () => {
     const load = vi.fn(async (_c: string, ns: string) => ({ rows: [{ name: "x", namespace: ns }], truncated: ns === "team-b" }));
     const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };

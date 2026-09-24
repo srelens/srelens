@@ -179,6 +179,9 @@ export async function watchNamespaces(
         (error) => {
           failed.add(ns);
           snapshots.delete(ns);
+          // A failed watch sends no further status: if it was the one
+          // reconnecting, what is left is live.
+          if (reconnecting.delete(ns) && reconnecting.size === 0) onStatus?.("live");
           onError?.(error, ns);
           emitIfSettled();
         },

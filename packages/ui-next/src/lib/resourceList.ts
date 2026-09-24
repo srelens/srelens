@@ -24,6 +24,13 @@ export interface ResourceList<Row> {
    * read this still warns rather than going quiet.
    */
   namespaceFailures: NamespaceFailure[];
+  /**
+   * The rows on screen are the last good list and are no longer being
+   * refreshed: every scope failed after they arrived. Never true for a
+   * partial failure — the namespaces that answered are live. The one rule
+   * every screen's "these rows are stale" warning follows.
+   */
+  stale: boolean;
   watch: WatchStatus;
   reload(): void;
 }
@@ -331,7 +338,7 @@ export function useResourceList<Row extends ListRow>(
   // guard above; the required field is what stops a future full write from
   // dropping it.
   if (state.forKey !== key) {
-    return { rows: [], status: "loading", error: undefined, truncated: undefined, namespaceFailures: [], watch: "live", reload };
+    return { rows: [], status: "loading", error: undefined, truncated: undefined, namespaceFailures: [], stale: false, watch: "live", reload };
   }
 
   return {
@@ -340,6 +347,12 @@ export function useResourceList<Row extends ListRow>(
     error: state.error,
     truncated: state.truncated,
     namespaceFailures: failuresOf(state.errors, scopes),
+    // Every scope failed, or the failure belongs to no one scope (the watch
+    // could not start, a poll threw): either way nothing is refreshing.
+    stale:
+      state.rows.length > 0 &&
+      state.error !== undefined &&
+      (state.errors.size === 0 || state.errors.size === scopes.length),
     watch: state.watch,
     reload,
   };
