@@ -1,5 +1,7 @@
 //! Durable, native declarative extensions for desktop hosts.
 mod app_settings;
+#[cfg(test)]
+mod budget_tests;
 mod cards;
 mod catalog;
 mod columns;
