@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { describeError, namespacePhrase, type ErrorDomain } from "@srelens/core";
+import { describeError, describeForbidden, forbiddenSentence, namespacePhrase, parseForbidden, type ErrorDomain } from "@srelens/core";
 import { Alert, ErrorState, RawError, type Tone } from "@srelens/ui-kit";
 
 /**
@@ -73,8 +73,31 @@ export function friendly(error: unknown, domain: ErrorDomain = "cluster"): Frien
 export function summarise(errors: string[]): { detail: string; raw: string | undefined } {
   // Do not hand `friendly` straight to map: its second parameter is a domain,
   // while Array.map's second callback argument is the numeric index.
-  const copies = errors.filter((e) => e !== "").map((error) => friendly(error));
-  const details = [...new Set(copies.map((c) => c.detail))];
+  const reasons = errors.filter((e) => e !== "");
+  const copies = reasons.map((error) => friendly(error));
+  // A 403 names the resource it refused, so one RoleBinding denying five kinds
+  // classifies as five different sentences, which dedupe on the text cannot
+  // collapse. Grouped on the parse instead: one sentence per verb and place,
+  // naming every resource, in the position its first refusal held (#701).
+  const refused = new Map<string, { verb: string; where: string; resources: string[] }>();
+  const slots = copies.map((copy, i) => {
+    // Only where the classification itself said the parsed sentence — never
+    // re-reading a message it classified as something else.
+    const parts = parseForbidden(reasons[i]);
+    if (!parts || copy.detail !== describeForbidden(reasons[i])) return copy.detail;
+    const key = `${parts.verb}\u0000${parts.where}`;
+    const group = refused.get(key) ?? { verb: parts.verb, where: parts.where, resources: [] };
+    if (!group.resources.includes(parts.resource)) group.resources.push(parts.resource);
+    refused.set(key, group);
+    return group;
+  });
+  const details = [
+    ...new Set(
+      slots.map((slot) =>
+        typeof slot === "string" ? slot : forbiddenSentence(slot.verb, slot.resources, slot.where),
+      ),
+    ),
+  ];
   // The originals are kept apart by a blank line rather than the separator the
   // sentences use: each one is a struct that already contains punctuation, and
   // running two together makes a third thing that is neither.
@@ -91,6 +114,12 @@ export interface FailureStateProps {
    * should do, and what classic's call sites all do.
    */
   title?: ReactNode;
+  /**
+   * The failure — or several, as a list of messages, when one content area is
+   * fed by several calls that all refused. A list is said through
+   * {@link summarise}, so one refusal behind five calls reads once — and,
+   * like `summarise`, classified as cluster failures whatever `domain` says.
+   */
   error: unknown;
   /** What the failing operation contacted; cluster preserves the default copy. */
   domain?: ErrorDomain;
@@ -102,6 +131,15 @@ export interface FailureStateProps {
 
 /** A content area whose load failed, said in words the reader can act on. */
 export function FailureState({ title, error, domain, ...rest }: FailureStateProps) {
+  if (Array.isArray(error)) {
+    const errors = error.map(String);
+    const { detail, raw } = summarise(errors);
+    // The classification's headline only when every reason shares it: two
+    // different failures under one of their titles would claim too little.
+    const titles = [...new Set(errors.filter((e) => e !== "").map((e) => friendly(e).title))];
+    const fallback = titles.length === 1 ? titles[0] : friendly("").title;
+    return <ErrorState title={title ?? fallback} detail={detail} raw={raw} {...rest} />;
+  }
   const copy = friendly(error, domain);
   return <ErrorState title={title ?? copy.title} detail={copy.detail} raw={copy.raw} {...rest} />;
 }

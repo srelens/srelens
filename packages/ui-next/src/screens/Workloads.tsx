@@ -33,7 +33,7 @@ import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute } from "../lib/detailRoute";
-import { FailureAlert, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
+import { FailureAlert, FailureState, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
 import {
   cronJobVerdict,
   daemonSetVerdict,
@@ -447,6 +447,19 @@ function WorkloadList({
   const partial = kinds.filter((k) => k.list.namespaceFailures.length > 0 && !k.list.stale);
   const failed = kinds.filter((k) => k.list.status === "error" && k.list.namespaceFailures.length === 0);
   const stale = kinds.filter((k) => k.list.status !== "error" && k.list.stale);
+  // Unless none of them did (#701). Then nothing answered, so an empty table
+  // under five banners would claim these namespaces have no workloads — which
+  // the app does not know — and five banners for what is usually one refusal
+  // is a wall. One failure state instead, its reasons said once.
+  //
+  // Read off `status`, not the `failed` bucket: with several namespaces
+  // selected, a kind refused in every one is an error that also carries
+  // per-namespace failures, and sits in `partial`. Its reasons are those
+  // failures, every one of them, since `error` is only the first.
+  const allFailed = kinds.every((k) => k.list.status === "error");
+  const allFailedReasons = kinds.flatMap((k) =>
+    k.list.namespaceFailures.length > 0 ? k.list.namespaceFailures.map((f) => f.error) : [k.list.error ?? ""],
+  );
   const anyReconnecting = kinds.some((k) => k.list.watch !== "live");
 
   // One banner per distinct set of refused namespaces, naming the kinds it
@@ -530,6 +543,14 @@ function WorkloadList({
       {allLoading ? (
         <div className="scroll min-h-0 flex-1">
           <LoadingState label={`Loading ${lower}`} />
+        </div>
+      ) : allFailed ? (
+        <div className="scroll min-h-0 flex-1">
+          <FailureState
+            title={`Could not list ${lower} on ${name}`}
+            error={allFailedReasons}
+            onRetry={() => kinds.forEach((k) => k.list.reload())}
+          />
         </div>
       ) : (
         <>
