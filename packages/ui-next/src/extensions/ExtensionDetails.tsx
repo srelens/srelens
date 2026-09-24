@@ -150,7 +150,7 @@ export function ExtensionDetails({
         >
           <p>
             Reset {extensionLabel(plugin)} to its default settings? Its saved settings are removed, except the
-            required ones, which have no default.
+            required ones, which have no default. Secrets stay set; they are kept outside these settings.
           </p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={() => setResetting(false)}>
             Cancel

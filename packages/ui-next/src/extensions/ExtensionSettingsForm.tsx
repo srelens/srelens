@@ -229,6 +229,13 @@ function SettingField({
   );
   const invalid = problem ? true : undefined;
   const text = typeof value === "string" ? value : "";
+  // What a picker announces, the same as the text inputs': a picker is
+  // labelled by its title, so the visible "(required)" is not what says so.
+  const pickerState: PickerState = {
+    ariaInvalid: invalid,
+    ariaRequired: setting.required || undefined,
+    ariaDescribedBy: described,
+  };
 
   switch (setting.type) {
     case "string":
@@ -311,13 +318,14 @@ function SettingField({
             none={setting.default === undefined ? "Not set" : "Use the default"}
             options={(setting.options ?? []).map((option) => ({ value: option.value, label: plainText(option.label) }))}
             onChange={onChange}
+            state={pickerState}
           />
         </PickedField>
       );
     case "cluster-selector":
       return (
         <PickedField setting={setting} title={title} notes={notes}>
-          <ClusterChoice label={title} value={text} onChange={onChange} />
+          <ClusterChoice label={title} value={text} onChange={onChange} state={pickerState} />
         </PickedField>
       );
     case "namespace-selector":
@@ -327,7 +335,7 @@ function SettingField({
             {title}
             {setting.required && <span className="extension-setting-required"> (required)</span>}
           </legend>
-          <NamespaceChoice label={title} value={text} onChange={onChange} />
+          <NamespaceChoice label={title} value={text} onChange={onChange} state={pickerState} />
           {notes}
         </fieldset>
       );
@@ -364,6 +372,13 @@ function PickedField({ setting, title, notes, children }: { setting: ExtensionSe
   );
 }
 
+/** A picker's form-field state, announced as a text input's is. */
+interface PickerState {
+  ariaInvalid?: boolean;
+  ariaRequired?: boolean;
+  ariaDescribedBy?: string;
+}
+
 /** One of a fixed list, with a first entry that clears the choice. */
 function Choice({
   label,
@@ -371,12 +386,14 @@ function Choice({
   none,
   options,
   onChange,
+  state,
 }: {
   label: string;
   value: string;
   none: string;
   options: { value: string; label: string }[];
   onChange(value: string): void;
+  state?: PickerState;
 }) {
   const { Combobox } = useContext(ExtensionControls);
   // A saved value the list no longer has is still what is saved: shown, so it can be changed.
@@ -388,17 +405,38 @@ function Choice({
       onValueChange={onChange}
       options={[{ value: "", label: none }, ...listed]}
       placeholder={none}
+      {...state}
     />
   );
 }
 
-/** The kubeconfig contexts, listed when a field needs them. */
+/**
+ * The kubeconfig contexts, listed when a field needs them. `listContexts`
+ * answers with the contexts it could read AND why the rest are missing when
+ * some kubeconfig files fail; both are kept, so a partial list is never drawn
+ * as the whole one.
+ */
 function useContexts() {
   return useResource(async () => {
     const outcome = await listContexts(getLiveKubeconfigFiles());
     if (outcome.error && !outcome.contexts) throw new Error(outcome.error);
-    return outcome.contexts ?? [];
+    return { contexts: outcome.contexts ?? [], partial: outcome.error || undefined };
   }, [], () => false);
+}
+
+/** Why the clusters could not be listed, whole or in part. */
+function ContextsProblem({ contexts }: { contexts: ReturnType<typeof useContexts> }) {
+  if (contexts.status === "error")
+    return <ErrorNotice title="Could not list clusters" message={contexts.error} retry={contexts.reload} />;
+  if (contexts.data?.partial)
+    return (
+      <ErrorNotice
+        title="Some clusters could not be listed"
+        message={contexts.data.partial}
+        retry={contexts.reload}
+      />
+    );
+  return null;
 }
 
 /**
@@ -406,13 +444,21 @@ function useContexts() {
  * app cluster scope uses; its display name changes when another kubeconfig
  * declares the same one (#265).
  */
-function ClusterChoice({ label, value, onChange }: { label: string; value: string; onChange(value: string): void }) {
+function ClusterChoice({
+  label,
+  value,
+  onChange,
+  state,
+}: {
+  label: string;
+  value: string;
+  onChange(value: string): void;
+  state?: PickerState;
+}) {
   const contexts = useContexts();
   return (
     <>
-      {contexts.status === "error" && (
-        <ErrorNotice title="Could not list clusters" message={contexts.error} retry={contexts.reload} />
-      )}
+      <ContextsProblem contexts={contexts} />
       {contexts.status === "loading" && (
         <p role="status" className="extension-setting-note">
           Loading clusters…
@@ -422,8 +468,9 @@ function ClusterChoice({ label, value, onChange }: { label: string; value: strin
         label={label}
         value={value}
         none="Not set"
-        options={(contexts.data ?? []).map((context) => ({ value: context.key, label: context.name }))}
+        options={(contexts.data?.contexts ?? []).map((context) => ({ value: context.key, label: context.name }))}
         onChange={onChange}
+        state={state}
       />
     </>
   );
@@ -434,8 +481,23 @@ function ClusterChoice({ label, value, onChange }: { label: string; value: strin
  * chooses: an app setting is app-wide, so which cluster to list is theirs to
  * say. A listing that fails says why and offers a retry; it is never drawn as
  * a cluster with no namespaces.
+ *
+ * The cluster is sent to `listNamespaces` by its name, as every other caller
+ * of core's `list*` does: the backend resolves a name, a stable ID or a pinned
+ * ID (`find_context`), never a key, and a stable ID two contexts share
+ * resolves to neither.
  */
-function NamespaceChoice({ label, value, onChange }: { label: string; value: string; onChange(value: string): void }) {
+function NamespaceChoice({
+  label,
+  value,
+  onChange,
+  state,
+}: {
+  label: string;
+  value: string;
+  onChange(value: string): void;
+  state?: PickerState;
+}) {
   const { Combobox } = useContext(ExtensionControls);
   const contexts = useContexts();
   const [from, setFrom] = useState("");
@@ -447,15 +509,13 @@ function NamespaceChoice({ label, value, onChange }: { label: string; value: str
   }, [from], () => false);
   return (
     <>
-      {contexts.status === "error" && (
-        <ErrorNotice title="Could not list clusters" message={contexts.error} retry={contexts.reload} />
-      )}
+      <ContextsProblem contexts={contexts} />
       <div className="extension-setting-pair">
         <Combobox
           ariaLabel="Cluster to list namespaces from"
           value={from}
           onValueChange={setFrom}
-          options={(contexts.data ?? []).map((context) => ({ value: context.stableId, label: context.name }))}
+          options={(contexts.data?.contexts ?? []).map((context) => ({ value: context.name, label: context.name }))}
           placeholder={contexts.status === "loading" ? "Loading clusters…" : "List namespaces from…"}
           searchPlaceholder="Find a cluster…"
         />
@@ -465,6 +525,7 @@ function NamespaceChoice({ label, value, onChange }: { label: string; value: str
           none="Not set"
           options={(namespaces.data ?? []).map((namespace) => ({ value: namespace, label: namespace }))}
           onChange={onChange}
+          state={state}
         />
       </div>
       {from && namespaces.status === "loading" && (

@@ -45,9 +45,13 @@ function app(settings: ExtensionSetting[] = every, saved: Record<string, unknown
   };
 }
 
+// Three different identities per context, so a test can tell which one a field
+// uses: the name is what `list*` dispatch resolves (`find_context` takes a name,
+// stable ID or pinned ID, never a key), the key is what a saved cluster setting
+// holds (the identity app cluster scope uses since #624).
 const contexts = [
-  { name: "prod", stableId: "/kube/config#prod", key: "/kube/config#prod" },
-  { name: "staging", stableId: "/kube/config#staging", key: "/kube/config#staging" },
+  { name: "prod", stableId: "sid:prod", key: "key:prod" },
+  { name: "staging", stableId: "sid:staging", key: "key:staging" },
 ];
 
 beforeEach(() => {
@@ -120,7 +124,7 @@ it("saves typed values, and leaves out what was not set", async () => {
     kinds: ["b"],
     prometheusUrl: "https://prom:9090",
     // The context's key, never its display name (#265).
-    cluster: "/kube/config#staging",
+    cluster: "key:staging",
   });
 });
 
@@ -129,7 +133,9 @@ it("picks a namespace from a chosen cluster's namespaces", async () => {
   const field = within(region).getByRole("group", { name: "Default namespace" });
   fireEvent.click(within(field).getByRole("combobox", { name: "Cluster to list namespaces from" }));
   fireEvent.click(await screen.findByRole("option", { name: "prod" }));
-  await waitFor(() => expect(listNamespaces).toHaveBeenCalledWith("/kube/config#prod"));
+  // Listed under the name core dispatches by, never the stable ID or the key.
+  await waitFor(() => expect(listNamespaces).toHaveBeenCalledWith("prod"));
+  expect(listNamespaces).toHaveBeenCalledTimes(1);
   fireEvent.click(within(field).getByRole("combobox", { name: "Default namespace" }));
   fireEvent.click(await screen.findByRole("option", { name: "team-a" }));
   fireEvent.click(within(region).getByRole("button", { name: "Save settings" }));
@@ -194,6 +200,72 @@ it("puts each host refusal beside its field, and the rest above the form", async
   const alert = within(region).getByRole("alert");
   expect(alert.textContent).toContain("is not a value this host substitutes");
   expect(alert.textContent).not.toContain("Must be an http");
+});
+
+it("says which kubeconfig files could not be read, beside the clusters that could", async () => {
+  // `listContexts` answers with what it read AND why the rest is missing.
+  vi.mocked(listContexts).mockResolvedValue({
+    contexts: [contexts[0]],
+    error: "could not read /kube/broken.yaml: permission denied",
+  } as any);
+  const { form: region } = form(app([
+    { id: "cluster", type: "cluster-selector", title: "Home cluster" },
+    { id: "namespace", type: "namespace-selector", title: "Default namespace" },
+  ]));
+  for (const name of ["Home cluster", "Default namespace"]) {
+    const field = name === "Home cluster"
+      ? within(region).getByRole("combobox", { name }).closest(".extension-setting")!
+      : within(region).getByRole("group", { name });
+    const alert = await within(field as HTMLElement).findByRole("alert");
+    expect(alert.textContent).toContain("Some clusters could not be listed");
+    expect(alert.textContent).toContain("/kube/broken.yaml");
+  }
+  // The clusters that did load are still offered.
+  fireEvent.click(within(region).getByRole("combobox", { name: "Home cluster" }));
+  expect(await screen.findByRole("option", { name: "prod" })).toBeTruthy();
+});
+
+it("announces every picker's required, invalid and help state like a text input's", async () => {
+  const { form: region, onSave } = form(app([
+    { id: "mode", type: "select", title: "Refresh", required: true, description: "How hard to refresh.",
+      options: [{ value: "normal", label: "Normal" }] },
+    { id: "cluster", type: "cluster-selector", title: "Home cluster", required: true },
+    { id: "namespace", type: "namespace-selector", title: "Default namespace", required: true },
+  ]));
+  fireEvent.click(within(region).getByRole("button", { name: "Save settings" }));
+  expect(onSave).not.toHaveBeenCalled();
+  const described = (element: HTMLElement) =>
+    (element.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent).join(" | ");
+  for (const name of ["Refresh", "Home cluster", "Default namespace"]) {
+    const picker = within(region).getByRole("combobox", { name });
+    expect(picker.getAttribute("aria-required"), name).toBe("true");
+    expect(picker.getAttribute("aria-invalid"), name).toBe("true");
+    expect(described(picker), name).toContain("Required");
+  }
+  expect(described(within(region).getByRole("combobox", { name: "Refresh" }))).toContain("How hard to refresh.");
+  // A field with nothing wrong claims nothing.
+  const optional = app([{ id: "mode", type: "select", title: "Other", options: [{ value: "a", label: "A" }] }]);
+  optional.manifest.name = "Other";
+  render(<ExtensionSettingsForm plugin={optional} onSave={vi.fn()} onClose={() => {}} />);
+  const clean = screen.getByRole("form", { name: "Other settings" });
+  const other = within(clean).getByRole("combobox", { name: "Other" });
+  expect(other.hasAttribute("aria-invalid")).toBe(false);
+  expect(other.hasAttribute("aria-required")).toBe(false);
+});
+
+it("draws its inputs with the form-control boundary, not the panel divider", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const css = readFileSync(join(__dirname, "extensions.css"), "utf8");
+  const selector = '.extension-setting input:not([type="checkbox"])';
+  const at = css.indexOf(`${selector} {`);
+  expect(at, `${selector} has a rule`).toBeGreaterThanOrEqual(0);
+  const rule = css.slice(at, css.indexOf("}", at));
+  // The kit's `--control-line` is the 3:1 boundary every theme defines for
+  // inputs and pickers (the pickers beside these already use it); `--rule` is
+  // the hairline between regions.
+  expect(rule).toMatch(/border: 1px solid var\(--control-line,/);
+  expect(rule).not.toContain("--rule");
 });
 
 it("says so when an app declares no settings", () => {

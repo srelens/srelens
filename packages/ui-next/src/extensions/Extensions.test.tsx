@@ -522,6 +522,11 @@ it("resets settings to their defaults but keeps a required one, which has none",
   const details = await openDetails(app as ReturnType<typeof updated>);
   expect(details.textContent).toContain("A secret is never saved in settings, so an export never holds one.");
   fireEvent.click(within(details).getByRole("button", { name: "Reset settings" }));
+  // Says what reset actually keeps: required values, and secrets, whose
+  // references the host carries across every settings save.
+  const confirm = within(details).getByRole("alertdialog", { name: "Reset settings" });
+  expect(confirm.textContent).toContain("except the required ones, which have no default");
+  expect(confirm.textContent).toContain("Secrets stay set");
   fireEvent.click(within(details).getByRole("button", { name: "Reset to defaults" }));
   await waitFor(() =>
     expect(configureExtensions).toHaveBeenCalledWith({ action: "settings", id: "org.test.gitops", settings: { url: "https://prom" } }),

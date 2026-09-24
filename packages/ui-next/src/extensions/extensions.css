@@ -711,7 +711,8 @@
   width: 100%;
   min-width: 0;
   padding: 6px 8px;
-  border: 1px solid var(--rule, var(--fl-color-border));
+  /* The kit's control boundary (3:1 in every theme), as the pickers beside it use. */
+  border: 1px solid var(--control-line, var(--fl-color-border));
   border-radius: 4px;
   background: var(--surface, var(--fl-color-surface));
   color: inherit;
