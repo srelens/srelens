@@ -65,7 +65,7 @@ async fn resolve(
             .unwrap_or_default()
             .to_owned()
     };
-    let resource = ResourceIn {
+    let mut resource = ResourceIn {
         // The pinned ID of the context scope was checked as (see `request_context`).
         context: resolved
             .ok()
@@ -74,7 +74,12 @@ async fn resolve(
         namespace: selection.namespace,
         name: selection.name,
         group: field("group"),
-        version: field("version"),
+        // Chosen below, once the selection itself is known to be well formed.
+        version: binding
+            .accepted_versions()
+            .first()
+            .cloned()
+            .unwrap_or_default(),
         plural: field("plural"),
         kind: field("kind"),
         namespaced: binding.arguments["namespaced"] == true,
@@ -82,8 +87,19 @@ async fn resolve(
     resource.validate().map_err(CapabilityError::InvalidInput)?;
     // Before `k8s.getCustomResource` or a declared action sees it: a whole built-in object,
     // such as a Deployment with its environment, must not come back through an app (#601).
-    crd::require(&core, &resource.context, binding).await?;
-    Ok((resource, plugin.clone()))
+    // The object, the action's fresh read and its patch, and the preconditions and
+    // `availableWhen` paths all follow the version this cluster serves (#547).
+    let (manifest, version) = crd::resolved(
+        &core,
+        &resource.context,
+        &plugin.manifest,
+        &selection.capability,
+    )
+    .await?;
+    resource.version = version;
+    let mut plugin = plugin.clone();
+    plugin.manifest = manifest;
+    Ok((resource, plugin))
 }
 pub(super) fn register(
     reg: &mut Registry,
@@ -485,9 +501,14 @@ mod declaration_tests {
                     serde_json::to_value(&action.preconditions).unwrap(),
                     serde_json::to_value(&action.available_when).unwrap()
                 );
-                let binding = flux.action_binding(action).unwrap();
-                for field in ["group", "version", "plural", "kind", "namespaced"] {
-                    assert_eq!(binding.arguments[field], reader.arguments[field]);
+                // An action binds the version its reader resolved to, whichever it is.
+                for version in reader.accepted_versions() {
+                    let at = flux.at_version(&reader.name, &version).unwrap();
+                    let binding = at.action_binding(action).unwrap();
+                    assert_eq!(binding.arguments["version"], version.as_str());
+                    for field in ["group", "plural", "kind", "namespaced"] {
+                        assert_eq!(binding.arguments[field], reader.arguments[field]);
+                    }
                 }
                 match verb {
                     "suspend" | "resume" => assert_eq!(

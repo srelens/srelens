@@ -57,12 +57,79 @@ Each entry in `capabilities` binds a local operation to a trusted host capabilit
 | `name` | Local operation name, unique within the manifest. Addressed as `plugin/<id>/<name>`. |
 | `title` | Display title, held to the same rules as `name`. |
 | `target` | The host capability ID. It cannot start with `plugin/`; apps cannot call other apps. |
+| `versions` | Optional, `k8s.listCustomResource` only: the API versions the reader accepts, most preferred first, instead of one `arguments.version`. See [Several served versions](#several-served-versions). |
+| `jsonPathOverrides` | Optional, with `versions`: per listed version, the paths read differently at that version. See [Several served versions](#several-served-versions). |
 | `arguments` | Fixed arguments, merged into every call. Callers cannot override them. A `k8s.listCustomResource` binding may declare at most 32 `printerColumns`. |
 | `inputs` | The argument names a caller may supply. They cannot overlap with `arguments`. |
 
 Every required argument of the target must come from `arguments` or `inputs`, and the
 target's own handler validates the values. `permissions` must name exactly the set of
 targets used.
+
+### Several served versions
+
+A custom-resource reader fixes one API version in `arguments.version`, or lists several
+in `versions`, most preferred first. It never does both: a binding with `versions` and
+`arguments.version` is refused at `capabilities[i].versions` ([#547](https://github.com/srelens/srelens/issues/547)).
+
+```json
+{
+  "name": "helmreleases",
+  "title": "List Helm releases",
+  "target": "k8s.listCustomResource",
+  "versions": ["v2", "v2beta2"],
+  "jsonPathOverrides": {
+    "v2beta2": { ".status.history[0].chartVersion": ".status.lastAttemptedRevision" }
+  },
+  "arguments": { "group": "helm.toolkit.fluxcd.io", "plural": "helmreleases",
+                 "kind": "HelmRelease", "namespaced": true },
+  "inputs": ["context", "namespace"]
+}
+```
+
+The override is illustrative. It is accepted only if the manifest reads
+`.status.history[0].chartVersion` from HelmReleases somewhere, for example in a printer
+column or a status rule.
+
+- **Resolution.** On each cluster, every read, inspection and action looks up the
+  CustomResourceDefinition `{plural}.{group}` and uses the first listed version it serves.
+  The CRD's own version order does not matter. Resolution is per cluster: two clusters
+  can read the same app at different versions. It is not cached. The lookup is the one
+  the host already makes on every call, so a cluster that starts or stops serving a
+  version is followed on the next call. The five-second snapshot that joins and
+  dashboard cards share is keyed by the resolved version as well.
+- **Fail closed.** A cluster that serves none of the listed versions is refused, and the
+  requirements page shows *Required version unavailable*. For the example above the
+  refusal reads
+  `No CustomResourceDefinition helmreleases.helm.toolkit.fluxcd.io serving any of v2, v2beta2 on this cluster; an app reads only custom resources`.
+  A binding that fixes one version is told `serving v2` instead of `serving any of …`.
+  The host never reads a version the binding does not list.
+- **Everything that reads the objects uses the resolved version.** That covers the
+  list and its printer columns and status resolver, the Inspector's object read, a
+  declared action's fresh read, patch and `preconditions`, `availableWhen`, joined
+  table columns and badges, detail panels, and dashboard cards and their target pages.
+  The UID and `resourceVersion` an action pins are the same at every version of an
+  object.
+- **`jsonPathOverrides`** maps, for one listed version, a path the manifest reads
+  the binding's objects through to the path to read at that version. It applies
+  everywhere that path is read for this binding: printer columns, the kind's status
+  resolver, declared action predicates, joined columns, badges and panel fields, a panel
+  on the kind itself, and cards over the reader. At install, `jsonPathOverrides` names
+  at most 8 versions, as `versions` lists at most 8, and each must be a listed version,
+  with at most 32 paths per version and only paths the binding is actually read through.
+  A binding past either limit, or a manifest past 32 capabilities, is refused without its
+  overrides being checked one by one. The replacement must also be a valid path wherever
+  it replaces one: for example, a status rule condition's path has no wildcard. An
+  override cannot rewrite a declaration that also reads another kind, such as a status
+  resolver whose `forKinds` lists several kinds; give the kind its own resolver or panel.
+- A detail panel with no join reads the resource it is shown for at that resource's own
+  `apiVersion`. For a kind whose reader lists versions, its fields read that version's
+  paths. A resource read at a version the reader does not list shows an error on those
+  fields instead of values.
+- An action on the reader is bound only once a cluster has resolved the version, so the
+  host never writes through a version it did not check.
+- Adding a version, or changing an override, changes what the app reads. The permission
+  review lists both, and an update shows them as a permission change.
 
 The author cannot supply a handler, JavaScript, a schema or safety annotations.
 Annotations come from the host: mutations, destructive operations and sensitive reads
@@ -709,7 +776,8 @@ The desktop app accepts a narrower surface than the developer broker:
   read-only with no confirmation, sensitive or destructive annotation.
 - Inputs are only `context` and `namespace`.
 - A `k8s.listCustomResource` binding fixes a non-empty `group`, `version`, `plural`
-  and `kind` (letters, digits, `.` and `-`) and a boolean `namespaced`. It must accept
+  and `kind` (letters, digits, `.` and `-`) and a boolean `namespaced`, or lists
+  `versions` held to the same characters instead of fixing `version`. It must accept
   `context`, may not fix `context` or `namespace`, and a namespaced binding must accept
   `namespace`.
 - That `group` must be shaped like a CustomResourceDefinition group: dot-separated labels
@@ -717,9 +785,9 @@ The desktop app accepts a narrower surface than the developer broker:
   and `batch` are refused. The problem is reported at `capabilities[i].arguments.group`,
   and an installed app that breaks the rule is quarantined when the inventory loads.
   Every read, inspection and action also checks that a CustomResourceDefinition named
-  `{plural}.{group}` serves the bound `version` on the cluster, and is refused when none
-  does. That refuses dotted built-in groups such as `networking.k8s.io` and aggregated
-  APIs.
+  `{plural}.{group}` serves the bound `version`, or one of the listed `versions`, on the
+  cluster, and is refused when none does. That refuses dotted built-in groups such as
+  `networking.k8s.io` and aggregated APIs.
 - A `k8s.listEvents` binding has no fixed arguments and accepts both `context` and
   `namespace`.
 - Every page, detail tab and detail link references a `k8s.listCustomResource` binding.
@@ -733,7 +801,8 @@ Settings → Apps checks these rules together with the manifest's own before it 
 to install, and lists every problem with its path. See
 [Validation errors](specification.md#validation-errors).
 
-The examples bind `argoproj.io/v1alpha1` Applications and Flux's
-`kustomize.toolkit.fluxcd.io/v1` Kustomizations and `helm.toolkit.fluxcd.io/v2`
-HelmReleases. The cluster must serve those versions; see
+The examples bind `argoproj.io/v1alpha1` Applications, Flux's
+`kustomize.toolkit.fluxcd.io/v1` Kustomizations, `helm.toolkit.fluxcd.io` HelmReleases at
+`v2` or `v2beta2`, and `source.toolkit.fluxcd.io` OCIRepositories at `v1` or `v1beta2`.
+The cluster must serve one of each binding's versions; see
 [requirement checks](ui-contributions.md#requirement-checks).

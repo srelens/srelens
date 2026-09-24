@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { watchResource, type WatchHandle, type WatchStatus } from "@srelens/core";
+import { watchNamespaces, type WatchHandle, type WatchStatus } from "@srelens/core";
 import { rowKey, type KindDescriptor, type ListRow, type RowKey } from "./kinds/types";
 
 export type ResourceListStatus = "loading" | "ready" | "empty" | "error";
+
+/** One selected namespace whose listing failed, in a view of several (#688). */
+export interface NamespaceFailure {
+  namespace: string;
+  error: string;
+}
 
 export interface ResourceList<Row> {
   rows: Row[];
@@ -10,6 +16,21 @@ export interface ResourceList<Row> {
   error?: string;
   /** True when the polled list stopped at a backend row cap (#609). */
   truncated?: boolean;
+  /**
+   * In a view of several namespaces, each one whose listing failed — the
+   * others' rows are still in `rows`. Empty for an all-namespaces or
+   * one-namespace view, where `error` already says everything. `error` is
+   * set as well, to the first failure's message, so a screen that does not
+   * read this still warns rather than going quiet.
+   */
+  namespaceFailures: NamespaceFailure[];
+  /**
+   * The rows on screen are the last good list and are no longer being
+   * refreshed: every scope failed after they arrived. Never true for a
+   * partial failure — the namespaces that answered are live. The one rule
+   * every screen's "these rows are stale" warning follows.
+   */
+  stale: boolean;
   watch: WatchStatus;
   reload(): void;
 }
@@ -42,8 +63,29 @@ export function resetListCache() {
   rowCache = new Map();
 }
 
-function viewKey(context: string, namespace: string, kind: string) {
-  return `${context}|${namespace}|${kind}`;
+/**
+ * The namespace scopes a selection is listed over: `""` (cluster scope) for
+ * none, otherwise each selected namespace on its own — never the cluster scope
+ * narrowed afterwards, which a namespace-scoped credential is refused (#688).
+ */
+function scopesFor(namespaces: string[]): string[] {
+  return namespaces.length === 0 ? [""] : [...new Set(namespaces)];
+}
+
+/**
+ * The WHOLE selection is in the key: keyed on `""` as it was, a view of two
+ * namespaces and "all namespaces" shared one cache entry.
+ */
+function viewKey(context: string, namespaces: string[], kind: string) {
+  return `${context}|${scopesFor(namespaces).join(",")}|${kind}`;
+}
+
+function failuresOf(errors: Map<string, string>, scopes: string[]): NamespaceFailure[] {
+  if (scopes.length < 2) return [];
+  return scopes.flatMap((namespace) => {
+    const error = errors.get(namespace);
+    return error === undefined ? [] : [{ namespace, error }];
+  });
 }
 
 function deriveStatus(rows: unknown[], error: string | undefined, loading: boolean): ResourceListStatus {
@@ -80,9 +122,23 @@ interface ListState {
   error?: string;
   /** Set only for poll sources that report a backend row cap (#609). */
   truncated?: boolean;
+  /** Per-namespace failures, by namespace; see {@link ResourceList.namespaceFailures}. */
+  errors: Map<string, string>;
+  /**
+   * A failure that belongs to no one scope — the watch could not start — so
+   * nothing is refreshing whatever `errors` holds. Kept apart from `errors`
+   * because naming it after a namespace would blame one that did not fail.
+   */
+  unscoped: boolean;
   loading: boolean;
   watch: WatchStatus;
   forKey: string;
+}
+
+const NO_ERRORS = new Map<string, string>();
+
+function firstError(errors: Map<string, string>): string | undefined {
+  return errors.values().next().value;
 }
 
 /**
@@ -121,17 +177,19 @@ export function useResourceList<Row extends ListRow>(
   context: string,
   kind: string,
   descriptor: KindDescriptor<Row> | undefined,
-  namespace: string,
+  namespaces: string[],
   files: string[],
 ): ResourceList<Row> {
-  const key = viewKey(context, namespace, kind);
+  const scopes = scopesFor(namespaces);
+  const scopesKey = scopes.join(",");
+  const key = viewKey(context, namespaces, kind);
   const gen = useRef(0);
   const [tick, setTick] = useState(0);
   const reload = useCallback(() => setTick((t) => t + 1), []);
 
   const [state, setState] = useState<ListState>(() => {
     const cached = cacheGet(key);
-    return { rows: cached ?? [], error: undefined, loading: cached === undefined, watch: "live", forKey: key };
+    return { rows: cached ?? [], error: undefined, errors: NO_ERRORS, unscoped: false, loading: cached === undefined, watch: "live", forKey: key };
   });
 
   // Held apart from `state`: enrichment (pod/node metrics) runs on its own
@@ -142,7 +200,7 @@ export function useResourceList<Row extends ListRow>(
   useEffect(() => {
     const mine = ++gen.current;
     const cached = cacheGet(key);
-    setState({ rows: cached ?? [], error: undefined, loading: cached === undefined, watch: "live", forKey: key });
+    setState({ rows: cached ?? [], error: undefined, errors: NO_ERRORS, unscoped: false, loading: cached === undefined, watch: "live", forKey: key });
     setMetrics(undefined);
 
     if (!descriptor) {
@@ -153,17 +211,19 @@ export function useResourceList<Row extends ListRow>(
     if (descriptor.enrich) {
       const enrich = descriptor.enrich;
       const runEnrich = () => {
-        enrich(context, namespace).then(
-          (result) => {
-            if (gen.current !== mine) return;
-            setMetrics(result);
-          },
-          (e: unknown) => {
-            // Best-effort: a cluster with no metrics-server must still list
-            // its rows. Swallowed here, not surfaced as `error`.
-            console.error(e);
-          },
-        );
+        // One reading per scope, merged. Each is best-effort on its own: a
+        // cluster with no metrics-server, or a namespace whose metrics are
+        // refused, must still list its rows — swallowed here, not surfaced
+        // as `error`, and costing only that scope its readings.
+        Promise.allSettled(scopes.map((ns) => enrich(context, ns))).then((results) => {
+          if (gen.current !== mine) return;
+          const merged = new Map<RowKey, Partial<Row>>();
+          for (const r of results) {
+            if (r.status === "fulfilled") for (const [k, v] of r.value) merged.set(k, v);
+            else console.error(r.reason);
+          }
+          setMetrics(merged);
+        });
       };
       runEnrich();
       enrichInterval = setInterval(runEnrich, descriptor.enrichMs ?? ENRICH_MS);
@@ -173,9 +233,9 @@ export function useResourceList<Row extends ListRow>(
       let handle: WatchHandle | undefined;
       let stopped = false;
 
-      watchResource(
+      watchNamespaces(
         context,
-        namespace,
+        scopes[0] === "" ? [] : scopes,
         kind,
         (rows) => {
           if (gen.current !== mine) return;
@@ -186,9 +246,15 @@ export function useResourceList<Row extends ListRow>(
           if (gen.current !== mine) return;
           setState((s) => ({ ...s, watch: status }));
         },
-        (error) => {
+        (error, ns) => {
           if (gen.current !== mine) return;
-          setState((s) => ({ ...s, error, loading: false }));
+          setState((s) => {
+            const errors = new Map(s.errors).set(ns, error);
+            // Still loading while another namespace may yet answer: a fast
+            // refusal must not flash the whole list as failed first.
+            const loading = s.loading && errors.size < scopes.length;
+            return { ...s, errors, error: firstError(errors), loading };
+          });
         },
         files,
       ).then(
@@ -206,7 +272,7 @@ export function useResourceList<Row extends ListRow>(
           // must surface as `error`, not leave the hook on `loading`
           // forever — errors are returned, never thrown.
           if (gen.current !== mine) return;
-          setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e), loading: false }));
+          setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e), unscoped: true, loading: false }));
         },
       );
 
@@ -218,42 +284,53 @@ export function useResourceList<Row extends ListRow>(
       };
     }
 
-    // source: "poll"
+    // source: "poll" — one load per scope, merged. A scope that failed keeps
+    // the whole view's previous rows only when EVERY scope failed; otherwise
+    // the ones that answered are the list and the rest are named failures.
     const load = descriptor.load;
+    // The interval starts the next poll whether or not this one has
+    // answered, and a poll over several namespaces waits on its slowest — so
+    // an older poll can finish after a newer one, and must not then put its
+    // older rows back. The rule is "never older than what is shown", not
+    // "only the newest": a namespace slower than the interval would otherwise
+    // have every poll overtaken by the next one's start, and never commit.
+    // `gen` only tells views apart.
+    let pollSeq = 0;
+    let shownSeq = 0;
     const runPoll = () => {
       if (!load) return;
-      load(context, namespace).then(
-        (result) => {
-          if (gen.current !== mine) return;
-          if (result.error) {
-            setState((s) => ({
-              ...s,
-              error: result.error,
-              truncated: undefined,
-              loading: false,
-            }));
-            return;
+      const seq = ++pollSeq;
+      Promise.allSettled(scopes.map((ns) => load(context, ns))).then((results) => {
+        if (gen.current !== mine || seq < shownSeq) return;
+        shownSeq = seq;
+        const errors = new Map<string, string>();
+        const rows: unknown[] = [];
+        let truncated = false;
+        results.forEach((r, i) => {
+          const ns = scopes[i];
+          if (r.status === "rejected") {
+            errors.set(ns, r.reason instanceof Error ? r.reason.message : String(r.reason));
+          } else if (r.value.error) {
+            errors.set(ns, r.value.error);
+          } else {
+            rows.push(...(r.value.rows ?? []));
+            truncated ||= r.value.truncated === true;
           }
-          const rows = result.rows ?? [];
-          cacheSet(key, rows);
-          setState((s) => ({
-            ...s,
-            rows,
-            error: undefined,
-            truncated: result.truncated || undefined,
-            loading: false,
-          }));
-        },
-        (e: unknown) => {
-          if (gen.current !== mine) return;
-          setState((s) => ({
-            ...s,
-            error: e instanceof Error ? e.message : String(e),
-            truncated: undefined,
-            loading: false,
-          }));
-        },
-      );
+        });
+        if (errors.size === scopes.length) {
+          setState((s) => ({ ...s, errors, error: firstError(errors), truncated: undefined, loading: false }));
+          return;
+        }
+        cacheSet(key, rows);
+        setState((s) => ({
+          ...s,
+          rows,
+          errors,
+          error: firstError(errors),
+          truncated: truncated || undefined,
+          loading: false,
+        }));
+      });
     };
     runPoll();
     const interval = setInterval(runPoll, POLL_MS);
@@ -264,7 +341,7 @@ export function useResourceList<Row extends ListRow>(
       if (enrichInterval) clearInterval(enrichInterval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context, namespace, kind, descriptor, tick, files.join(",")]);
+  }, [context, scopesKey, kind, descriptor, tick, files.join(",")]);
 
   // Enrichment changes on its own cadence. Keep the merged array stable between
   // list/metrics updates so consumers can key host reads to a real snapshot,
@@ -278,7 +355,7 @@ export function useResourceList<Row extends ListRow>(
   // guard above; the required field is what stops a future full write from
   // dropping it.
   if (state.forKey !== key) {
-    return { rows: [], status: "loading", error: undefined, truncated: undefined, watch: "live", reload };
+    return { rows: [], status: "loading", error: undefined, truncated: undefined, namespaceFailures: [], stale: false, watch: "live", reload };
   }
 
   return {
@@ -286,6 +363,13 @@ export function useResourceList<Row extends ListRow>(
     status: deriveStatus(state.rows, state.error, state.loading),
     error: state.error,
     truncated: state.truncated,
+    namespaceFailures: failuresOf(state.errors, scopes),
+    // Every scope failed, or the watch could not start at all (whatever some
+    // scopes had already reported): either way nothing is refreshing.
+    stale:
+      state.rows.length > 0 &&
+      state.error !== undefined &&
+      (state.unscoped || state.errors.size === scopes.length),
     watch: state.watch,
     reload,
   };

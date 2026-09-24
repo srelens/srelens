@@ -328,9 +328,12 @@ async fn resolve_link(
             name: true,
         },
     };
-    let objects = join_objects(cache, client_cache, core, plugin, &join, context, &scope)
-        .await
-        .map_err(|error| failed(error.to_string()))?;
+    // Listed at the version the target's reader resolves to on this cluster (#547). A
+    // link reads only names from it, so no path depends on which version that is.
+    let (objects, _version) =
+        join_objects(cache, client_cache, core, plugin, &join, context, &scope)
+            .await
+            .map_err(|error| failed(error.to_string()))?;
     let targets = lookup(&references, &objects, &link.to, namespaced).map_err(failed)?;
     Ok((capability, targets))
 }

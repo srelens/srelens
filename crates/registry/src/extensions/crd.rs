@@ -9,10 +9,10 @@
 use super::*;
 use srelens_plugin_host::Binding;
 
-/// The broker's check that a CustomResourceDefinition serves a bound group, version and
-/// plural. Registered only in the registry the broker dispatches through
-/// (`build_registry_*`), so it is not in the capability catalog and no MCP client or app
-/// binding can call it.
+/// The broker's check that a CustomResourceDefinition serves a bound group and plural, and
+/// which of the binding's versions it serves first (#547). Registered only in the registry
+/// the broker dispatches through (`build_registry_*`), so it is not in the capability
+/// catalog and no MCP client or app binding can call it.
 pub(crate) const CHECK: &str = "extensions.customResourceServes";
 
 #[derive(Deserialize, JsonSchema)]
@@ -20,26 +20,35 @@ pub(crate) const CHECK: &str = "extensions.customResourceServes";
 struct CheckIn {
     context: String,
     group: String,
-    version: String,
+    /// Most preferred first; at most `MAX_BINDING_VERSIONS`.
+    versions: Vec<String>,
     plural: String,
 }
 
 pub(crate) fn check_capability(cache: Arc<srelens_kube::client_cache::ClientCache>) -> Capability {
-    Capability::typed::<CheckIn, bool, _, _>(
+    Capability::typed::<CheckIn, Option<String>, _, _>(
         CHECK,
-        "Whether a CustomResourceDefinition on the cluster serves a group, version and plural",
+        "The first of a group's and plural's versions a CustomResourceDefinition on the cluster serves",
         Annotations::READ_ONLY,
         move |input: CheckIn| {
             let cache = cache.clone();
             async move {
+                if input.versions.is_empty()
+                    || input.versions.len() > srelens_plugin_host::MAX_BINDING_VERSIONS
+                {
+                    return Err(CapabilityError::InvalidInput(format!(
+                        "Name 1–{} versions",
+                        srelens_plugin_host::MAX_BINDING_VERSIONS
+                    )));
+                }
                 let client = cache
                     .get(&input.context)
                     .await
                     .map_err(CapabilityError::Handler)?;
-                srelens_kube::crds::custom_resource_serves(
+                srelens_kube::crds::custom_resource_first_served(
                     client,
                     &input.group,
-                    &input.version,
+                    &input.versions,
                     &input.plural,
                 )
                 .await
@@ -86,14 +95,19 @@ pub(super) fn group_problems(manifest: &Manifest) -> ValidationErrors {
     problems
 }
 
-/// Refuses a call unless a CustomResourceDefinition named `{plural}.{group}` serves the
-/// binding's version on the cluster `context` names. A failed lookup is reported as one,
-/// not as an absence.
-pub(super) async fn require(
+/// The version the binding reads on the cluster `context` names: the first it accepts
+/// that a CustomResourceDefinition named `{plural}.{group}` serves (#547). Refuses the
+/// call when the CRD serves none of them — never falls back to a version the binding does
+/// not list — and reports a failed lookup as one, not as an absence.
+///
+/// Not cached: every broker call already looks the CRD up (#601), so resolving costs no
+/// extra request, follows a discovery change on the next call, and is per cluster by
+/// construction.
+pub(super) async fn resolve(
     core: &Registry,
     context: &str,
     binding: &Binding,
-) -> Result<(), CapabilityError> {
+) -> Result<String, CapabilityError> {
     let field = |key: &str| {
         binding
             .arguments
@@ -101,23 +115,48 @@ pub(super) async fn require(
             .and_then(Value::as_str)
             .unwrap_or_default()
     };
-    let (group, version, plural) = (field("group"), field("version"), field("plural"));
+    let (group, plural) = (field("group"), field("plural"));
+    let versions = binding.accepted_versions();
     let name = format!("{plural}.{group}");
+    let listed = match versions.as_slice() {
+        [one] => one.clone(),
+        several => format!("any of {}", several.join(", ")),
+    };
     match core
         .invoke(
             CHECK,
-            json!({ "context": context, "group": group, "version": version, "plural": plural }),
+            json!({ "context": context, "group": group, "versions": versions, "plural": plural }),
         )
         .await
     {
-        Ok(Value::Bool(true)) => Ok(()),
+        Ok(Value::String(version)) if versions.contains(&version) => Ok(version),
         Ok(_) => Err(CapabilityError::Handler(format!(
-            "No CustomResourceDefinition {name} serving {version} on this cluster; an app reads only custom resources"
+            "No CustomResourceDefinition {name} serving {listed} on this cluster; an app reads only custom resources"
         ))),
         Err(error) => Err(CapabilityError::Handler(format!(
-            "Could not confirm that a CustomResourceDefinition {name} serves {version}: {error}"
+            "Could not confirm that a CustomResourceDefinition {name} serves {listed}: {error}"
         ))),
     }
+}
+
+/// `manifest` as it reads the named custom-resource binding on this cluster: at the
+/// version [`resolve`] finds, with that version's path overrides applied.
+pub(super) async fn resolved(
+    core: &Registry,
+    context: &str,
+    manifest: &Manifest,
+    binding: &str,
+) -> Result<(Manifest, String), CapabilityError> {
+    let reader = manifest
+        .capabilities
+        .iter()
+        .find(|b| b.name == binding && b.target == "k8s.listCustomResource")
+        .ok_or_else(|| CapabilityError::Handler("Declared reader is unavailable".into()))?;
+    let version = resolve(core, context, reader).await?;
+    let manifest = manifest
+        .at_version(binding, &version)
+        .map_err(CapabilityError::Handler)?;
+    Ok((manifest, version))
 }
 
 #[cfg(test)]

@@ -42,6 +42,7 @@ pub fn manifest(data: &[u8]) {
                 Ok(manifest) => {
                     assert!(validated.is_ok(), "parse accepted what validate refused");
                     round_trip(&manifest);
+                    resolutions(&manifest);
                 }
                 Err(problems) => assert_eq!(validated.err(), Some(problems)),
             }
@@ -85,6 +86,39 @@ fn round_trip(manifest: &Manifest) {
         value,
         "a manifest changed on a round trip"
     );
+}
+
+/// An accepted manifest read at any version one of its readers lists (#547) is accepted
+/// too, and binds exactly that version; at a version the reader does not list it is
+/// refused, never read.
+fn resolutions(manifest: &Manifest) {
+    for binding in manifest
+        .capabilities
+        .iter()
+        .filter(|b| !b.versions.is_empty())
+    {
+        for version in &binding.versions {
+            let resolved = manifest
+                .at_version(&binding.name, version)
+                .unwrap_or_else(|why| panic!("{} at {version} is refused: {why}", binding.name));
+            resolved.validate().unwrap_or_else(|problems| {
+                panic!(
+                    "{} at {version} breaks the rules:\n{problems}",
+                    binding.name
+                )
+            });
+            let reader = resolved
+                .capabilities
+                .iter()
+                .find(|b| b.name == binding.name);
+            assert_eq!(
+                reader.and_then(|b| b.arguments.get("version")),
+                Some(&Value::String(version.clone()))
+            );
+        }
+        let unlisted = format!("{}x", binding.versions.join(""));
+        assert!(manifest.at_version(&binding.name, &unlisted).is_err());
+    }
 }
 
 /// A document a few edits away from `seed`, each edit read from `choices`. Random bytes

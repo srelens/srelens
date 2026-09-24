@@ -4,12 +4,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use srelens_capability::status::{self, StatusRule};
 use srelens_capability::{Predicate, ReferenceFormat, MAX_PREDICATES};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod cards;
 mod settings;
+mod versions;
 pub use cards::*;
 pub use settings::*;
+pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
 
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
 /// its `srelensApiVersion` range matches any of them. How versions are added and retired
@@ -183,6 +185,9 @@ fn field_present(value: &Value, path: &str) -> bool {
 
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 
+/// Most capability bindings one manifest may declare.
+pub const MAX_CAPABILITIES: usize = 32;
+
 /// Most printer columns a binding may declare (#609). Refused at
 /// `capabilities[i].arguments.printerColumns` with `EXTENSION_INVALID_VALUE`.
 pub const MAX_PRINTER_COLUMNS: usize = 32;
@@ -310,6 +315,21 @@ pub struct Binding {
     pub name: String,
     pub title: String,
     pub target: String,
+    /// A `k8s.listCustomResource` reader's API versions, most preferred first, instead of
+    /// one fixed `arguments.version` (#547). On each cluster the host reads the first one
+    /// the CustomResourceDefinition serves, and refuses the read when it serves none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<String>,
+    /// For a listed version whose objects keep a field elsewhere: each JSONPath this
+    /// manifest reads the binding's objects through, mapped to the path to read at that
+    /// version instead. Applied everywhere the objects are read: printer columns, status
+    /// resolvers, declared actions, joined columns, badges and panels, and cards.
+    #[serde(
+        default,
+        rename = "jsonPathOverrides",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub json_path_overrides: BTreeMap<String, BTreeMap<String, String>>,
     pub arguments: Map<String, Value>,
     pub inputs: Vec<String>,
 }
@@ -1035,6 +1055,15 @@ impl Manifest {
             .iter()
             .find(|binding| binding.name == action.resource)
             .ok_or_else(|| format!("\"{}\" is not a declared capability", action.resource))?;
+        // Which version the action writes is chosen per cluster (#547); until then there
+        // is no version to write, and no binding.
+        if !reader.versions.is_empty() {
+            return Err(format!(
+                "\"{}\" reads one of {}; an action on it is bound once a cluster resolves one",
+                action.resource,
+                reader.versions.join(", ")
+            ));
+        }
         let mut arguments = Map::new();
         let builtin = builtin_reader_identity(&reader.target);
         if let Some(identity) = &builtin {
@@ -1082,6 +1111,8 @@ impl Manifest {
             name: action.name.clone(),
             title: action.title.clone(),
             target: action.target.clone(),
+            versions: Vec::new(),
+            json_path_overrides: BTreeMap::new(),
             arguments,
             inputs: ACTION_INPUTS.iter().map(|i| (*i).to_owned()).collect(),
         })
@@ -1089,6 +1120,17 @@ impl Manifest {
 
     /// Checks the manifest's rules, reporting every violation with the path at fault.
     pub fn validate(&self) -> Result<(), ValidationErrors> {
+        let mut problems = self.rule_problems();
+        self.version_problems(&mut problems);
+        self.override_path_problems(&mut problems);
+        problems.into_result()
+    }
+
+    /// Every rule violation except those about a binding's `versions` and
+    /// `jsonPathOverrides` (#547). Those are checked once, by `validate`; an override is
+    /// checked by running these rules on the manifest read at its version, which must
+    /// not check every other binding's overrides again for each one.
+    fn rule_problems(&self) -> ValidationErrors {
         const LABEL: &str =
             "Must be 1–120 characters with no control characters and no bidirectional or invisible format characters";
         const IDENTIFIER: &str = "Must be 1–64 letters, digits and -";
@@ -1129,11 +1171,11 @@ impl Manifest {
                 }
             }
         }
-        if self.capabilities.is_empty() || self.capabilities.len() > 32 {
+        if self.capabilities.is_empty() || self.capabilities.len() > MAX_CAPABILITIES {
             problems.push(
                 Code::InvalidValue,
                 "capabilities",
-                "Declare 1–32 capabilities",
+                format!("Declare 1–{MAX_CAPABILITIES} capabilities"),
             );
         }
         let names = unique(
@@ -1697,7 +1739,7 @@ impl Manifest {
         settings::setting_problems(self, &mut problems);
         self.command_problems(&mut problems);
         self.link_problems(&mut problems);
-        problems.into_result()
+        problems
     }
 
     /// `commands` (#544).

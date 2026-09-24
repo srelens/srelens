@@ -19,6 +19,35 @@ use std::sync::{
     Arc,
 };
 
+/// The reader binding `name`, when it lists versions and none has been chosen yet.
+fn unresolved_reader<'a>(manifest: &'a Manifest, name: &str) -> Option<&'a Binding> {
+    manifest
+        .capabilities
+        .iter()
+        .find(|binding| binding.name == name && !binding.versions.is_empty())
+}
+
+/// `binding` with `version` bound to its first listed one, when it lists `versions` and
+/// fixes none: how the host checks such a reader against its target (#547).
+fn at_first_version(binding: &Binding) -> Binding {
+    let mut bound = binding.clone();
+    if let Some(first) = binding.versions.first() {
+        bound
+            .arguments
+            .entry("version")
+            .or_insert_with(|| Value::String(first.clone()));
+    }
+    bound
+}
+
+/// `manifest` read at the first version of `reader`, when that reader lists versions:
+/// how an action on it is checked before any cluster has chosen one (#547).
+fn first_version_of(manifest: &Manifest, reader: &str) -> Option<Manifest> {
+    unresolved_reader(manifest, reader)
+        .and_then(|binding| binding.versions.first())
+        .and_then(|first| manifest.at_version(reader, first).ok())
+}
+
 pub struct PluginHost {
     core: Arc<Registry>,
 }
@@ -51,13 +80,17 @@ impl PluginHost {
     /// Every way `binding`, the manifest's `index`th capability, does not fit its target:
     /// a target the host lacks, an argument or input the target does not take, or a
     /// required one left unbound.
+    ///
+    /// A reader that lists `versions` binds `version` per cluster (#547). Every listed
+    /// version fills the same argument, so it is checked as bound at its first one.
     pub fn binding_problems(
         &self,
         index: usize,
         manifest: &Manifest,
         binding: &Binding,
     ) -> Vec<ValidationError> {
-        self.problems_at(&format!("capabilities[{index}]"), manifest, binding, None)
+        let bound = at_first_version(binding);
+        self.problems_at(&format!("capabilities[{index}]"), manifest, &bound, None)
     }
 
     /// Every way saving `values` as `manifest`'s settings would break a
@@ -75,12 +108,15 @@ impl PluginHost {
             problems.extend(self.problems_at(
                 &format!("capabilities[{index}]"),
                 manifest,
-                binding,
+                &at_first_version(binding),
                 Some(values),
             ));
         }
         for (index, action) in manifest.actions.iter().enumerate() {
-            if let Ok(binding) = manifest.action_binding(action) {
+            // An action on a reader that lists versions is checked as install checks
+            // it, at the first; its settable arguments do not depend on the version.
+            let resolved = first_version_of(manifest, &action.resource);
+            if let Ok(binding) = resolved.as_ref().unwrap_or(manifest).action_binding(action) {
                 problems.extend(self.problems_at(
                     &format!("actions[{index}]"),
                     manifest,
@@ -217,7 +253,10 @@ impl PluginHost {
         action: &ActionBinding,
     ) -> Vec<ValidationError> {
         let at = format!("actions[{index}]");
-        match manifest.action_binding(action) {
+        // An action on a reader that lists versions acts at whichever one resolved;
+        // checked, like the reader, at the first.
+        let resolved = first_version_of(manifest, &action.resource);
+        match resolved.as_ref().unwrap_or(manifest).action_binding(action) {
             // The reader this action names cannot scope it. Reported at
             // `resource`, which is the field that would have to change.
             Err(why) => vec![ValidationError::new(
@@ -373,10 +412,15 @@ impl PluginHost {
         // Readers as written, then one binding per declared action, which the
         // manifest builds from the reader it names (#549). From here on the
         // two are the same thing: a bound host capability.
+        //
+        // A reader that lists `versions` and has not been resolved to one of them for a
+        // cluster (`Manifest::at_version`) is not registered, nor is an action on it: no
+        // version has been chosen, so nothing may be read or written through it.
         let mut bindings: Vec<(Vec<ValidationError>, Binding)> = manifest
             .capabilities
             .iter()
             .enumerate()
+            .filter(|(_, binding)| binding.versions.is_empty())
             .map(|(index, binding)| {
                 (
                     self.binding_problems(index, &manifest, binding),
@@ -385,6 +429,9 @@ impl PluginHost {
             })
             .collect();
         for (index, action) in manifest.actions.iter().enumerate() {
+            if unresolved_reader(&manifest, &action.resource).is_some() {
+                continue;
+            }
             let problems = self.action_problems(index, &manifest, action);
             // A reader that cannot scope the action leaves no binding to
             // check; `action_problems` has already said why.

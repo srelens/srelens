@@ -74,6 +74,8 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     name: "required",
     title: "required",
     target: "required",
+    versions: "optional",
+    jsonPathOverrides: "optional",
     arguments: "required",
     inputs: "required",
   } satisfies Presence<ExtensionManifest["capabilities"][number]>,
