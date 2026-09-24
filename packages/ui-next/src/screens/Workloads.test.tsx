@@ -328,10 +328,39 @@ describe("Workloads", () => {
 
     await waitFor(() => expect(rowNames()).toHaveLength(4));
     expect(screen.queryByText("node-exporter")).toBeNull();
-    expect(screen.getByText("Could not list pods in kube-system")).toBeTruthy();
+    // Five kinds refused in the one namespace is one fact, said once — not
+    // five near-identical banners stacked over the table.
+    expect(screen.getByText("Could not list workloads in kube-system")).toBeTruthy();
+    expect(screen.queryByText(/Could not list pods in/)).toBeNull();
     // Live rows from `default` are not stale, and the refusal is not the cluster's.
     expect(screen.queryByText(/are stale/i)).toBeNull();
     expect(screen.queryByText(/at the cluster scope/i)).toBeNull();
+  });
+
+  it("names only the kinds refused when the others answered in every namespace", async () => {
+    setNamespaces(CTX.stableId, ["default", "kube-system"]);
+    watchResource.mockImplementation(
+      async (
+        _context: string,
+        namespace: string,
+        kind: string,
+        onRows: (rows: unknown[]) => void,
+        _onStatus: (status: "live" | "reconnecting") => void,
+        onError: (message: string) => void,
+      ) => {
+        if (namespace === "kube-system" && (kind === "pods" || kind === "cronjobs")) {
+          onError(`${kind} is forbidden: User "dev" cannot watch resource "${kind}" in the namespace "kube-system"`);
+          return { stop };
+        }
+        onRows((FIXTURES[kind] ?? []).filter((r) => (r as { namespace: string }).namespace === namespace));
+        return { stop };
+      },
+    );
+
+    open();
+
+    await waitFor(() => expect(rowNames()).toHaveLength(5));
+    expect(screen.getByText("Could not list pods and cronjobs in kube-system")).toBeTruthy();
   });
 
   // Whole-branch review, Correction (a): zero options while `namespaces` is

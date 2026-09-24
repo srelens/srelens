@@ -262,6 +262,11 @@ export function Workloads({ route }: { route: string }) {
 
 /** One entry per fixed watch, bundled after the hooks below run — never used
  *  to decide *how many* hooks to call, only to summarize their results. */
+/** "pods", "pods and cronjobs", "pods, jobs and cronjobs". */
+function wordList(words: string[]): string {
+  return words.length < 2 ? (words[0] ?? "") : `${words.slice(0, -1).join(", ")} and ${words.at(-1)}`;
+}
+
 interface KindEntry {
   key: string;
   label: string;
@@ -445,6 +450,26 @@ function WorkloadList({
   );
   const anyReconnecting = kinds.some((k) => k.list.watch !== "live");
 
+  // One banner per distinct set of refused namespaces, naming the kinds it
+  // covers — "workloads" when it is all five. A namespace the reader cannot
+  // read refuses every kind in it, and five stacked banners saying so is a
+  // wall over the table, not five problems.
+  const partialGroups = useMemo(() => {
+    const groups = new Map<string, { what: string[]; failures: KindEntry["list"]["namespaceFailures"] }>();
+    for (const k of partial) {
+      const id = k.list.namespaceFailures.map((f) => f.namespace).join(",");
+      const group = groups.get(id) ?? { what: [], failures: k.list.namespaceFailures };
+      group.what.push(`${k.label.toLocaleLowerCase()}s`);
+      groups.set(id, group);
+    }
+    return [...groups].map(([id, g]) => ({
+      id,
+      what: g.what.length === kinds.length ? "workloads" : wordList(g.what),
+      failures: g.failures,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deploymentsList, statefulSetsList, daemonSetsList, podsList, cronJobsList]);
+
   const lower = title.toLocaleLowerCase();
   const segmentLower = segment === "All" ? lower : `${segment.toLocaleLowerCase()}s`;
 
@@ -510,13 +535,8 @@ function WorkloadList({
               review) — a reader who scrolls the table must still see a kind
               that failed or went stale; a banner that scrolls away with the
               rows no longer warns anyone. */}
-          {partial.map((k) => (
-            <NamespaceFailuresAlert
-              key={k.key}
-              what={`${k.label.toLocaleLowerCase()}s`}
-              failures={k.list.namespaceFailures}
-              className="mx-3 mt-3 mb-3"
-            />
+          {partialGroups.map((g) => (
+            <NamespaceFailuresAlert key={g.id} what={g.what} failures={g.failures} className="mx-3 mt-3 mb-3" />
           ))}
           {failed.map((k) => (
             <FailureAlert
