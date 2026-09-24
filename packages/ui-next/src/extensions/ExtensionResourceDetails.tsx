@@ -11,6 +11,7 @@ import { useResource } from "../lib/useResource";
 import { HostConfirmation } from "../confirm/HostConfirmation";
 import { useConfirmationApp } from "../confirm/confirmationApp";
 import { confirmFields } from "../confirm/confirmRequest";
+import { onExtensionActionRequested, takeExtensionAction } from "./actionRequests";
 function fieldLabel(key:string) {
   const words=key.replace(/([a-z0-9])([A-Z])/g,"$1 $2").replace(/_/g," ");
   return words.charAt(0).toUpperCase()+words.slice(1);
@@ -136,6 +137,39 @@ export function ExtensionResourceDetails({selection,onClose,fullPage=false}:{sel
     const unmet=resource&&unmetPredicate(data.data?.actionMeta?.[action]?.availableWhen??[],resource);
     return unmet?plainText(unmet.reason):undefined;
   };
+  // A palette action command (#544) asks for this view's own review, never for
+  // the write. Only a resource's own tab answers: a peek of the same resource
+  // beside a list would otherwise raise a second review for one request.
+  const [requested,setRequested]=useState<string|null>(null);
+  useEffect(()=>{
+    if(!fullPage)return;
+    const take=()=>{const action=takeExtensionAction(selection);if(action)setRequested(action);};
+    take();
+    return onExtensionActionRequested(take);
+  // The selection's fields are its identity; the object itself is rebuilt every render.
+  },[fullPage,selection.id,selection.capability,selection.context,selection.namespace,selection.name]);
+  useEffect(()=>{
+    if(!requested)return;
+    // A failed read answers the request: the error is on screen, and a Retry
+    // the reader presses later must not open a review they did not ask for then.
+    if(data.status==="error"){setRequested(null);return;}
+    if(data.status!=="ready" || !resource || busy)return;
+    setRequested(null);
+    if(!supported.includes(requested)){setError(`${plainText(requested)} is not offered for this resource.`);return;}
+    const unavailable=excuse(requested);
+    if(unavailable){setError(`${label(requested)} is unavailable: ${unavailable}`);return;}
+    // The review pins the UID and resourceVersion the reader saw; without them
+    // there is nothing to pin, and a request dropped without a word reads as
+    // the palette doing nothing.
+    if(!resource.metadata.uid || !resource.metadata.resourceVersion){
+      setError(`${label(requested)} cannot be reviewed: the host returned this resource with no UID or resourceVersion to pin the write to. Refresh details and try again.`);
+      return;
+    }
+    trigger.current=document.activeElement as HTMLElement;
+    setError("");setMessage("");
+    setPending({action:requested,uid:resource.metadata.uid,resourceVersion:resource.metadata.resourceVersion});
+  // Once per request, against the resource shown when it can be answered.
+  },[requested,data.status,resource,busy]);
   const OpenIcon=Icons.openTab;
   return <div className="extension-resource-detail" ref={heading} tabIndex={-1} onKeyDownCapture={e=>{if(e.key==="Escape" && (pending || busy)){e.preventDefault();e.stopPropagation();if(pending)cancel();}}}>
     <Inspector

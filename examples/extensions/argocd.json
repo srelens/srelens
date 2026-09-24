@@ -85,6 +85,35 @@
         ]
       }
     ],
+    "commands": [
+      {
+        "id": "open-applications",
+        "title": "Open applications",
+        "target": {
+          "page": "applications"
+        }
+      },
+      {
+        "id": "sync",
+        "title": "Sync application",
+        "target": {
+          "action": "sync"
+        },
+        "forKinds": [
+          "argoproj.io/Application"
+        ]
+      },
+      {
+        "id": "refresh",
+        "title": "Refresh application status",
+        "target": {
+          "action": "refresh"
+        },
+        "forKinds": [
+          "argoproj.io/Application"
+        ]
+      }
+    ],
     "statusResolvers": [
       {
         "forKinds": [

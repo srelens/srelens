@@ -300,6 +300,37 @@
       ],
       "type": "object"
     },
+    "CommandTarget": {
+      "description": "What a palette command does: exactly one of opening a declared page or running a declared action through the host's confirmation.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The `id` of a page in `contributions.pages`.",
+          "properties": {
+            "page": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The `name` of a declared action in `actions`.",
+          "properties": {
+            "action": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Condition": {
       "additionalProperties": false,
       "description": "One question about one value, without a sentence to say when it fails.\n\nA [`Predicate`] is a condition plus the reason an operator is told when it does not hold. A status rule (#541) asks which of its rules describes an object; nobody is refused, so there is no reason to give — but the operators, the paths and the evaluation are these, and are this code:\n\n```json {\"jsonPath\": \".spec.suspend\", \"equals\": true} ```",
@@ -352,6 +383,13 @@
           "description": "Words an app puts on built-in rows, from the row's metadata or from a joined resource (#541).",
           "items": {
             "$ref": "#/definitions/Badge"
+          },
+          "type": "array"
+        },
+        "commands": {
+          "description": "Entries in the command palette (#544): open one of this app's pages, or run one of its declared actions on the resource the reader has open.",
+          "items": {
+            "$ref": "#/definitions/PaletteCommand"
           },
           "type": "array"
         },
@@ -812,6 +850,34 @@
       "required": [
         "capability",
         "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "PaletteCommand": {
+      "additionalProperties": false,
+      "description": "One command palette entry. The host shows it under the app's name, so an app cannot pass its command off as the host's own.",
+      "properties": {
+        "forKinds": {
+          "description": "For an action command: the qualified kinds it is offered on, which must be the kind of the reader binding its action acts on. A page command has no subject and takes none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/definitions/CommandTarget"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "target",
         "title"
       ],
       "type": "object"

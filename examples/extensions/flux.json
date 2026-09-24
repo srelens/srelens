@@ -672,6 +672,66 @@
         ]
       }
     ],
+    "commands": [
+      {
+        "id": "open-overview",
+        "title": "Open overview",
+        "target": {
+          "page": "overview"
+        }
+      },
+      {
+        "id": "open-kustomizations",
+        "title": "Open Kustomizations",
+        "target": {
+          "page": "kustomizations"
+        }
+      },
+      {
+        "id": "open-helmreleases",
+        "title": "Open Helm releases",
+        "target": {
+          "page": "helmreleases"
+        }
+      },
+      {
+        "id": "open-gitrepositories",
+        "title": "Open Git repositories",
+        "target": {
+          "page": "gitrepositories"
+        }
+      },
+      {
+        "id": "reconcile-kustomization",
+        "title": "Reconcile Kustomization",
+        "target": {
+          "action": "kustomizations-reconcile"
+        },
+        "forKinds": [
+          "kustomize.toolkit.fluxcd.io/Kustomization"
+        ]
+      },
+      {
+        "id": "reconcile-helmrelease",
+        "title": "Reconcile Helm release",
+        "target": {
+          "action": "helmreleases-reconcile"
+        },
+        "forKinds": [
+          "helm.toolkit.fluxcd.io/HelmRelease"
+        ]
+      },
+      {
+        "id": "reconcile-gitrepository",
+        "title": "Reconcile Git repository",
+        "target": {
+          "action": "gitrepositories-reconcile"
+        },
+        "forKinds": [
+          "source.toolkit.fluxcd.io/GitRepository"
+        ]
+      }
+    ],
     "statusResolvers": [
       {
         "forKinds": [
