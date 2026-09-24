@@ -1,7 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import { ArrowUp, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 import {
-  listHelmReleases,
+  listHelmReleasesIn,
   getHelmRelease,
   helmVersion,
   helmRepoUpdate,
@@ -37,7 +37,7 @@ import { NamespaceMultiSelect } from "../ui/NamespaceMultiSelect";
 import {
   parseNamespaceSelection,
   serializeNamespaceSelection,
-  watchNamespaceForSelection,
+  namespacePhrase,
   rowInSelection,
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
@@ -91,6 +91,9 @@ export function HelmReleasesView({
 }) {
   const [releases, setReleases] = useState<HelmReleaseSummary[]>([]);
   const [error, setError] = useState("");
+  // Selected namespaces whose listing was refused; the others' releases are
+  // still `releases` (#688).
+  const [failures, setFailures] = useState<Array<{ namespace: string; error: string }>>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<HelmReleaseSummary | null>(null);
   const [helmMissing, setHelmMissing] = useState(false);
@@ -102,8 +105,10 @@ export function HelmReleasesView({
   const [repoBusy, setRepoBusy] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   // Namespace selection is a set (empty = all namespaces), serialized to/from
-  // the persisted comma string. One selected namespace scopes the release
-  // fetch server-side (efficient); none or many fetch all, filtered client-side.
+  // the persisted comma string. None fetches every namespace; otherwise each
+  // selected namespace is fetched on its own — an unscoped `helm list` reads
+  // release Secrets cluster-wide, which a namespace-scoped credential is
+  // refused (#688).
   const [selection, setSelection] = useState(() => parseNamespaceSelection(initialNamespace ?? ""));
   const changeNamespaces = (next: string[]) => {
     setSelection(next);
@@ -115,7 +120,7 @@ export function HelmReleasesView({
   useEffect(() => {
     if (nsScope) setSelection([nsScope]);
   }, [nsScope]);
-  const scopeNs = watchNamespaceForSelection(selection);
+  const selectionKey = serializeNamespaceSelection(selection);
   // Tab-owned when a change handler is supplied (#254), so sorting or
   // searching releases survives a tab switch like every other list.
   const [localQuery, setLocalQuery] = useState("");
@@ -130,11 +135,12 @@ export function HelmReleasesView({
   useEffect(() => {
     let active = true;
     setLoading(true);
-    void listHelmReleases(context, scopeNs || null).then((o) => {
+    void listHelmReleasesIn(context, parseNamespaceSelection(selectionKey)).then((o) => {
       if (!active) return;
       const next = o.releases ?? [];
       setReleases(next);
       setError(o.error ?? "");
+      setFailures(o.failures);
       setLoading(false);
       setSelected((sel) =>
         sel && !next.some((r) => r.namespace === sel.namespace && r.name === sel.name) ? null : sel,
@@ -143,7 +149,7 @@ export function HelmReleasesView({
     return () => {
       active = false;
     };
-  }, [context, reloadKey, scopeNs]);
+  }, [context, reloadKey, selectionKey]);
 
   useEffect(() => {
     let active = true;
@@ -192,9 +198,8 @@ export function HelmReleasesView({
 
   const { visibleColumns, columnOptions, hidden, toggle, pinnedKey } = useColumnVisibility("helmreleases", columns);
 
-  // The backend has already scoped `releases` to the selected namespace when a
-  // single namespace is selected; the client-side filter only matters for the
-  // multi-select case (several namespaces selected, all fetched, filtered here).
+  // The backend has already scoped `releases` to the selected namespaces; the
+  // filter is a guard, not the narrowing.
   const namespaceFiltered = releases.filter((r) => rowInSelection(r.namespace, selection));
   const filtered = filterTableData(namespaceFiltered, visibleColumns, query, null);
 
@@ -277,6 +282,14 @@ export function HelmReleasesView({
             </span>
           )}
         </Toolbar>
+        {!error && failures.length > 0 && (
+          // Several namespaces, some refused: the releases below are live,
+          // and these namespaces are simply not among them.
+          <p className="px-3 py-1 text-xs text-muted-foreground" role="status">
+            Could not list releases in {namespacePhrase(failures.map((f) => f.namespace))} —{" "}
+            {describeError(failures[0].error).detail}
+          </p>
+        )}
         <div className="min-h-0 flex-1 overflow-auto">
           {error ? (
             <div className="p-3 text-destructive">Error: {error}</div>

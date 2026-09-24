@@ -16,10 +16,17 @@ const core = vi.hoisted(() => ({
   getHelmRelease: vi.fn(),
   startHelmOp: vi.fn(),
 }));
-vi.mock("@srelens/core", async (orig) => ({
-  ...(await orig<typeof import("@srelens/core")>()),
-  ...core,
-}));
+vi.mock("@srelens/core", async (orig) => {
+  const real = await orig<typeof import("@srelens/core")>();
+  return {
+    ...real,
+    ...core,
+    // The real per-namespace fan-out, run over the mock above: its default
+    // lister is core's module-local one, which the spread cannot reach.
+    listHelmReleasesIn: (context: string, selection: string[]) =>
+      real.listHelmReleasesIn(context, selection, (...a) => core.listHelmReleases(...a)),
+  };
+});
 
 /**
  * The namespace options, doubled the way `Workloads.test.tsx` and
@@ -1034,7 +1041,7 @@ describe("Helm — the namespace selector", () => {
    * list --namespace` takes one namespace, so several means fetching every
    * namespace and narrowing here — classic's own rule.
    */
-  it("fetches every namespace and narrows here when several are selected", async () => {
+  it("lists each selected namespace on its own when several are selected", async () => {
     open();
     await ready();
     await pickOnly("checkout");
@@ -1050,18 +1057,35 @@ describe("Helm — the namespace selector", () => {
         "staging/checkout",
       ]),
     );
-    // One listing, unscoped — and the platform and payments releases it
-    // returned are gone from the table.
-    expect(listedNamespaces()).toEqual([null]);
+    // One listing per namespace, never an unscoped one: an unscoped `helm
+    // list` reads release Secrets cluster-wide, which a namespace-scoped
+    // credential is refused (#688).
+    expect(listedNamespaces()).toEqual(["checkout", "staging"]);
     expect(rowFor("ingress-nginx")).toBeUndefined();
   });
 
+  it("keeps the namespace that answered and names the one that was refused", async () => {
+    core.listHelmReleases.mockImplementation(async (_ctx: string, namespace?: string | null) =>
+      namespace === "staging"
+        ? { error: 'secrets is forbidden: User "dev" cannot list resource "secrets" in the namespace "staging"' }
+        : { releases: RELEASES.filter((r) => r.namespace === namespace) },
+    );
+    setNamespaces(CTX.stableId, ["checkout", "staging"]);
+
+    open();
+
+    await waitFor(() => expect(drawn()).toEqual(["checkout/checkout", "checkout/redis-session"]));
+    expect(screen.getByText("Could not list releases in staging")).toBeTruthy();
+    expect(screen.queryByText(/at the cluster scope/i)).toBeNull();
+  });
+
   /**
-   * The other half of that rule: narrowing a whole-cluster listing to several
-   * namespaces asks helm for nothing new. The releases are already here — the
-   * only thing that changed is how many of them are drawn.
+   * Narrowing a whole-cluster listing to several namespaces lists those
+   * namespaces afresh. Reusing the whole-cluster answer would be cheaper for a
+   * credential that can list everything, but the one that cannot never had
+   * that answer to reuse (#688).
    */
-  it("does not re-list when the listing it already has covers the new selection", async () => {
+  it("lists the selected namespaces when narrowing from every namespace", async () => {
     open();
     await ready();
     core.listHelmReleases.mockClear();
@@ -1069,7 +1093,7 @@ describe("Helm — the namespace selector", () => {
     act(() => setNamespaces(CTX.stableId, ["checkout", "staging"]));
 
     await waitFor(() => expect(drawn()).toHaveLength(3));
-    expect(core.listHelmReleases).not.toHaveBeenCalled();
+    expect(listedNamespaces()).toEqual(["checkout", "staging"]);
   });
 
   /**

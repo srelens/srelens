@@ -52,7 +52,7 @@ vi.mock("@srelens/core/lib/watch", async () => ({
   watchResource: watchResourceMock,
   // The real watchNamespaces lives in the module this mock replaces; stand
   // it in with one watchResourceMock call per namespace.
-  watchNamespaces: (await import("@srelens/core/lib/watchTestDouble")).watchNamespacesVia(
+  watchNamespaces: (await import("@srelens/core/lib/testDoubles")).watchNamespacesVia(
     (...a) => watchResourceMock(...a),
   ),
   WATCHABLE_KINDS: [

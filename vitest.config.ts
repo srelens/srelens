@@ -42,7 +42,7 @@ export default defineConfig({
         "packages/ui-kit/src/test-setup.ts",
         "packages/ui-next/src/test-setup.ts",
         // Test-only stand-in for watchNamespaces, imported by screen suites.
-        "packages/core/src/lib/watchTestDouble.ts",
+        "packages/core/src/lib/testDoubles.ts",
       ],
     },
   },
