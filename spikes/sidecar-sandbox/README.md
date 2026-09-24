@@ -38,7 +38,7 @@ If the host cannot do it either (no network or no DNS, for instance), the check 
 |---|---|---|
 | Windows | `none`, `appcontainer`, `job`, `appcontainer+job`, `lpac+job` | `appcontainer+job` |
 | Linux | `none`, `landlock`, `seccomp`, `cgroup`, `landlock+seccomp+cgroup`, `bwrap` | `landlock+seccomp+cgroup` |
-| macOS | `none`, `seatbelt` | `seatbelt` (candidate; **has not yet started under its profile**) |
+| macOS | `none`, `seatbelt` | `seatbelt` (checks 1 to 4 and 7 verified on macOS 27.0 arm64; no memory or CPU limit) |
 
 `none` is the unsandboxed baseline: nine checks fail there because the operation succeeds.
 That is expected.
@@ -119,10 +119,11 @@ SEATBELT_TRACE=1 sh spikes/sidecar-sandbox/run-macos.sh
   `sh spikes/sidecar-sandbox/test-run-macos.sh` tests this logic on any POSIX shell.
 - **Output:** `results/results-macos.txt`.
 
-The profile is `src/seatbelt.sb`. It was written without a Mac, and the first run never
-let the probe start (`deny(1) file-read-data /`, then `SIGABRT`). The revised profile
-allows that. If it still needs a change, make the narrowest one the trace shows, and
-send the diff back with the results.
+The profile is `src/seatbelt.sb`. Its first run never let the probe start
+(`deny(1) file-read-data /`, then `SIGABRT`). The revised profile passed checks 1 to 4
+and 7 on macOS 27.0 arm64; memory and CPU are not provided. If another Mac or macOS
+version needs a change, make the narrowest one the trace shows, and send the diff back
+with the results.
 
 ### Windows
 
@@ -167,4 +168,5 @@ test result: ok. 11 passed; 0 failed; ...
 - The results file or files from `results/`.
 - For macOS, also any change you made to `src/seatbelt.sb`.
 
-Those fill the macOS column of the ADR's matrix, which stays UNVERIFIED until then.
+The macOS column of the ADR's matrix is verified on macOS 27.0 arm64 only. A run on an
+Intel Mac, or on an older macOS, is still wanted.

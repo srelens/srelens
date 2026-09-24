@@ -54,8 +54,8 @@ pub enum Backend {
     LandlockSeccompCgroup,
     /// Linux: bubblewrap with every namespace unshared, nothing else.
     Bwrap,
-    /// macOS: `sandbox-exec` with `src/seatbelt.sb`, plus rlimits. Unverified until run on
-    /// a Mac.
+    /// macOS: `sandbox-exec` with `src/seatbelt.sb`, plus rlimits. Verified on macOS 27.0
+    /// arm64 only.
     Seatbelt,
 }
 

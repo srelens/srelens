@@ -151,23 +151,42 @@ the check failed. **Unverified** means it was not run.
 Windows was run on Windows 11 Pro 10.0.26200 (x64, 24 logical processors), from an
 unelevated process at medium integrity. Linux was run
 in Docker Desktop 29.7.2 on the WSL2 kernel `6.6.87.2-microsoft-standard-WSL2`, which
-reports Landlock ABI 3, with cgroup v2, Debian bookworm and bubblewrap 0.8.0.
+reports Landlock ABI 3, with cgroup v2, Debian bookworm and bubblewrap 0.8.0. The
+maintainer reproduced both Linux runs on the same kernel with the same results:
 
-macOS was run once by the maintainer, at `c7ff2875`, on macOS 27.0 (26A428), arm64
-(kernel 27.0.0), with rustc 1.98.1:
+- **Privileged:** `landlock+seccomp+cgroup` 11/11. bubblewrap 8/11: files and network
+  were denied through namespaces (`NotFound`, `ConnectionRefused`,
+  `NetworkUnreachable`), with no process, memory or CPU limit. The cgroup backend
+  OOM-killed the sidecar (`SIGKILL`, `oom_kill 1`) and held it to 0.26 CPUs.
+- **Unprivileged:** Landlock 5/11 and seccomp 6/11, identical to the privileged runs.
 
-- **The baseline behaved as expected:** 2 passed, 9 failed, and every must-deny
-  operation succeeded unsandboxed.
-- **`seatbelt` never got as far as a check.** All 11 tests failed at the liveness ping:
-  the probe ended with `SIGABRT` before answering. The only sandbox denial logged, once
-  per launch, was `Sandbox: probe(<pid>) deny(1) file-read-data /`.
-- **The launcher's rlimit calls:** `setrlimit` for `RLIMIT_DATA` and `RLIMIT_AS` at 128
-  MiB was refused with `EINVAL`, and `RLIMIT_CPU` at 60 s was accepted.
+macOS was run by the maintainer on macOS 27.0 (26A428), arm64, kernel 27.0.0, with
+rustc 1.98.1. The first run, at `c7ff2875`, never got the probe started: all 11 tests
+failed at the liveness ping with `SIGABRT`, and the only denial logged was
+`deny(1) file-read-data /`. The profile was revised to allow what startup needed:
 
-So the memory result below is observed, while the Seatbelt cells remain UNVERIFIED: that
-run says nothing yet about what the profile denies. The profile has since been revised
-to allow what startup needs (`file-read-data` on `/` and `file-map-executable` for the
-probe and system libraries), and `run-macos.sh` has a trace mode for the next run.
+- `file-read-data` on `/` itself (a listing of the top-level names);
+- `file-map-executable` for the probe and the system libraries;
+- the system logging preferences.
+
+The second run, at `02190671`, used `SEATBELT_TRACE=1` and exited 0:
+
+- **Baseline:** 2 passed, 9 failed, as expected.
+- **`seatbelt`, all checks:** 9 passed, 2 failed.
+  - Checks 1 to 4 and 7 were enforced. The denials were `EPERM` for file reads and
+    writes outside the scratch directory, for both TCP connects and for the child
+    process, and a resolver failure for DNS.
+  - Memory and CPU were not provided. `setrlimit` refused `RLIMIT_DATA` and `RLIMIT_AS`
+    with `EINVAL`, so 512 MiB was allocated against the 128 MiB limit. The probe used
+    1.99 CPUs against 0.25: `RLIMIT_CPU` was set, but it is a budget, not a rate.
+- **`seatbelt`, claimed checks only:** 9/9.
+- **The trace** showed the profile also denying operations that neither startup nor
+  stdio needed, and that stay denied: `file-read-data /dev/dtracehelper`,
+  `network-outbound /private/var/run/syslog`, `system-info net.link.addr`, `/etc/hosts`,
+  the networkd preferences, and the `notification_center` and `logd` lookups. It showed
+  the denials the checks rely on as well. DNS failed at
+  `network-outbound /private/var/run/mDNSResponder`, the resolver's Unix socket, and not
+  at a `mach-lookup` as the profile's first comments assumed.
 
 | Backend | 1 Read | 2 Write | 3 Network and DNS | 4 Child process | 5 Memory | 6 CPU | 7 Stdio JSON-RPC |
 |---|---|---|---|---|---|---|---|
@@ -181,7 +200,8 @@ probe and system libraries), and `run-macos.sh` has a trace mode for the next ru
 | **Linux** Landlock + seccomp + cgroup v2 | Enforced | Enforced | Enforced | Enforced | Enforced | Enforced: 0.26 CPUs | Works |
 | **Linux** bubblewrap, all namespaces unshared | Enforced (paths not mounted, `ENOENT`) | Enforced | Enforced (network namespace) | Not provided | Not provided | Not provided | Works |
 | **Linux** Landlock with TCP rules (ABI ≥ 4, kernel ≥ 6.7) | Unverified | Unverified | Unverified | — | — | — | Unverified |
-| **macOS** `seatbelt`: `sandbox-exec` with `src/seatbelt.sb`, plus `RLIMIT_DATA`, `RLIMIT_AS` and a 60 s `RLIMIT_CPU` budget | Unverified: on the first run (macOS 27.0 arm64) the profile never let the probe start (`deny file-read-data /`, then `SIGABRT`); revised, pending the next run | Unverified, as for 1 | Unverified, as for 1 | Unverified, as for 1 | **Not provided (observed, macOS 27.0 arm64):** `setrlimit` refuses `RLIMIT_DATA` and `RLIMIT_AS` at 128 MiB with `EINVAL` | Not provided as a rate: `RLIMIT_CPU` was accepted (observed), but it is a lifetime budget, not a cap on the rate (research). Throttling itself is unverified. | Unverified, as for 1 |
+| **macOS** `seatbelt`: `sandbox-exec` (deprecated) with `src/seatbelt.sb`, plus rlimits. Verified on macOS 27.0 arm64 only | Enforced (`EPERM`) | Enforced (`EPERM` outside, allowed inside) | Enforced: TCP `EPERM`, DNS resolver failure (the mDNSResponder socket is denied) | Enforced (`EPERM`) | **Not provided (observed):** `setrlimit` refuses `RLIMIT_DATA` and `RLIMIT_AS` with `EINVAL`, and 512 MiB was allocated against a 128 MiB limit | **Not provided (observed):** 1.99 CPUs against 0.25. `RLIMIT_CPU` is accepted, but it is a lifetime budget, not a rate | Works |
+| **macOS** `seatbelt` on Intel, or on macOS before 27 | Unverified | Unverified | Unverified | Unverified | Unverified | Unverified | Unverified |
 | **macOS** App Sandbox helper | Not built (follow-up) | Not built | Not built | Not built | Not provided (research) | Not provided (research) | Not built |
 
 The Landlock-only and seccomp-only rows gave the same results in an unprivileged
@@ -226,7 +246,7 @@ fails `socket` for any family but `AF_UNIX`, `io_uring_setup`, `fork`, `vfork` a
 falls back to an inspectable `clone`. Threads keep working and new processes do not.
 The code is in `spikes/sidecar-sandbox/src/linux.rs`.
 
-**macOS (built; run once, and the probe did not start).** The `seatbelt` backend starts the same launcher. The
+**macOS (verified on macOS 27.0 arm64).** The `seatbelt` backend starts the same launcher. The
 launcher sets `RLIMIT_DATA` and `RLIMIT_AS` to the memory limit and `RLIMIT_CPU` to a
 60-second budget, and prints whether macOS accepted each one. It then `exec`s
 `/usr/bin/sandbox-exec -f seatbelt.sb -D PROBE=… -D SCRATCH=…` on the probe. The profile
@@ -241,9 +261,10 @@ is its own file, `spikes/sidecar-sandbox/src/seatbelt.sb`:
 - `sysctl-read`, and signals to itself;
 - reads and writes under the scratch directory.
 
-Network and every `mach-lookup` are denied, and denying the second is expected to deny
-DNS through mDNSResponder. The paths are canonicalized first, because Seatbelt matches
-resolved paths and `/var` and `/tmp` are symlinks on macOS.
+Everything else is denied: network (including the mDNSResponder socket, which is how
+DNS was denied) and every `mach-lookup`. The paths are canonicalized first, because
+Seatbelt matches resolved paths and `/var` and `/tmp` are symlinks on macOS. The profile
+still depends on `sandbox-exec`, which Apple documents as deprecated.
 
 The CPU budget is deliberately larger than check 6 can spend. `RLIMIT_CPU` kills a
 process once a total is used up, which is not a rate limit. A small budget would pass
@@ -260,8 +281,8 @@ failures:
 `SEATBELT_TRACE=1`, which also runs automatically after an exit-2 run, runs the probe
 once under the profile with `(deny default)` replaced by allow-and-report. The log then
 lists, in one run, every operation the profile does not yet allow.
-`test-run-macos.sh` tests the exit-status logic on any POSIX shell. The first run is
-described above. The revised profile has not run yet.
+`test-run-macos.sh` tests the exit-status logic on any POSIX shell. Both Mac runs are
+described above.
 
 The research:
 
@@ -310,32 +331,45 @@ The research:
   isolation, but not process, memory or CPU limits, so seccomp and cgroups are still
   needed beside it. It also depends on unprivileged user namespaces, which some
   distributions restrict (not tested here).
-- **macOS: no verified backend yet.** Under the ADR's rule, executables are refused on
-  macOS until a passing Mac run verifies the `seatbelt` backend for checks 1 to 4 and
-  7, and a memory and CPU strategy is accepted. The first run did not get past the
-  probe's startup. The memory limit via `setrlimit` is now **observed** to be
-  unavailable, and no other macOS facility found enforces either limit.
+- **macOS: isolation yes, limits no.** The `seatbelt` backend enforced checks 1 to 4 and
+  7 on macOS 27.0 arm64. It rests on the deprecated `sandbox-exec`, or on the private
+  `sandbox_init_with_parameters`. No kernel facility found limits a process's memory or
+  CPU rate: `setrlimit` refuses the memory limits, and `RLIMIT_CPU` is only a budget.
+  Whether macOS gets executables at all is the milestone decision below.
 
 ### Recommendation on the SDK milestone (for decision)
 
-This is a recommendation, not a decision; #521 owns the decision.
+The maintainer decides this in #521 and **has not decided yet**. What follows is a
+recommendation.
 
-**Recommended:** the executable SDK milestone starts on **Windows and Linux**, with
-macOS refusing executable extensions under the ADR rule. Both Windows and Linux passed
-all seven checks with facilities that are documented, need no administrator rights once
-cgroups are delegated, and were observed working. macOS cannot currently enforce the
-memory or CPU limits the #521 exit criteria require ("Runs under CPU and memory
-limits"). The maintainer's first Mac run makes the memory half an observation rather
-than a reading of the literature: on macOS 27.0 arm64, `setrlimit` refuses
-`RLIMIT_DATA` and `RLIMIT_AS` outright, which strengthens the case for starting on
-Windows and Linux. macOS's filesystem and network backend rests on a deprecated tool or
-a private API, and it remains UNVERIFIED until a Mac run passes: on the first run, the
-profile never let the probe start.
+All three OSes can isolate a sidecar: filesystem, network, DNS and processes were
+enforced on Windows, on Linux and on macOS 27.0 arm64. Only Windows and Linux can also
+enforce the "Runs under CPU and memory limits" exit criterion in the kernel. On macOS
+the limits are **observed** to be unavailable: `setrlimit` refuses the memory limits,
+and CPU use ran to 1.99 CPUs against a 0.25 limit.
 
-**The alternative** is to hold the milestone until macOS has a verified backend. That
-keeps the platform uniform, but it puts every executable extension behind the item with
-the most unknowns, and the exit criteria may be unreachable there without relaxing the
-limits requirement.
+On macOS, limits could only be enforced by the host. The supervisor would poll the
+sidecar's memory and CPU use (`proc_pid_rusage`), and throttle it with
+`SIGSTOP`/`SIGCONT` or kill it past the limit. This is **weaker than kernel
+enforcement**: between polls a burst can exceed the limit, including one large enough to
+take memory from the rest of the system before it is seen. The spike did not build or
+measure it.
+
+The options:
+
+1. **Start on Windows and Linux, and refuse executables on macOS** under the ADR's rule
+   until macOS can meet the exit criteria.
+2. **Include macOS with host-enforced limits**, as an explicitly weaker guarantee. This
+   relaxes #521's limits exit criterion for macOS only, says so to users, and keeps the
+   Seatbelt isolation, which was verified.
+3. **Isolation only on macOS, with no limits.** Not recommended: a sidecar could exhaust
+   the machine's memory or CPU, which is part of what the SDK promises to prevent.
+
+**Recommended: option 1 for the milestone, with option 2 recorded as the follow-up path
+for macOS.** Windows and Linux met every check with documented facilities, which need no
+administrator rights once cgroups are delegated. Option 2 needs its own design,
+measurement of how far a burst can overshoot between polls, and an explicit decision to
+relax the exit criterion.
 
 ### What the spike did not establish
 
@@ -372,22 +406,16 @@ limits requirement.
 - **#572: a sandbox conformance suite.** `spikes/sidecar-sandbox/tests/checks.rs` is
   meant to seed it: the same seven checks, run against each production backend in CI on
   Windows and Linux runners.
-- **macOS: the next Mac run**, with the trace:
+- **macOS: more Macs.** Run
   `SEATBELT_TRACE=1 sh spikes/sidecar-sandbox/run-macos.sh` (see
-  [the spike's README](../../spikes/sidecar-sandbox/README.md)). The first run
-  (macOS 27.0 arm64) settled the `setrlimit` question: both memory limits are refused.
-  The next run should confirm or correct:
-  - that the probe starts under the revised `src/seatbelt.sb`. If it still does not,
-    the trace lists every operation the profile is missing, from that one run;
-  - checks 1 to 4 and 7, including that DNS is refused through the `mach-lookup` path
-    to mDNSResponder;
-  - whether the global metadata-read rule can be narrowed;
-  - the same on Intel if one is available.
-
-  After that run: decide whether `sandbox_init_with_parameters` (private) is acceptable
-  instead of the deprecated `sandbox-exec`, and measure a supervisor that polls the
-  footprint and kills, and `SIGSTOP`/`SIGCONT` duty-cycling, as the memory and CPU
-  fallbacks.
+  [the spike's README](../../spikes/sidecar-sandbox/README.md)) on an Intel Mac and on
+  macOS versions before 27, which have not been run. Try narrowing the global
+  metadata-read rule. Decide whether `sandbox_init_with_parameters` (private) is
+  acceptable in place of the deprecated `sandbox-exec`.
+- **macOS: host-enforced limits (option 2 above).** Build and measure a supervisor that
+  polls `proc_pid_rusage` and throttles with `SIGSTOP`/`SIGCONT`, or kills past the
+  limit. Measure how far a burst overshoots between polls, before anyone decides to
+  relax the exit criterion.
 - **macOS: an App Sandbox helper variant.** Not built: it needs code signing with
   entitlements. An ad-hoc signature (`codesign -s - --entitlements …`, no developer
   account) may be enough for a local test. It would still have to answer whether an

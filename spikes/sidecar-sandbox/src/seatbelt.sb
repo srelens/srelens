@@ -1,14 +1,15 @@
 (version 1)
 ;; srelens #571 spike: the Seatbelt (SBPL) profile the probe sidecar runs under on macOS.
 ;;
-;; UNVERIFIED. Written on Windows. Its first run, on macOS 27.0 arm64 at c7ff2875, never let
-;; the probe start: the only denial logged was `deny(1) file-read-data /`, and the probe
-;; then aborted (SIGABRT). This revision allows that, and what startup is known to need
-;; besides. `SEATBELT_TRACE=1 sh run-macos.sh` reports every operation this profile does
-;; not allow, in one run, so the next revision can be exact. Add the narrowest rule that
-;; allows each startup need, and never one that re-opens a denial the checks rely on:
-;; ~/.kube and anything outside SCRATCH, the network, DNS (mach-lookup to mDNSResponder),
-;; and starting any process but the probe.
+;; Verified on macOS 27.0 arm64 only (the maintainer's run at 02190671): under this profile,
+;; checks 1 to 4 and 7 passed. The first revision never let the probe start (`deny(1)
+;; file-read-data /`, then SIGABRT); the root-directory, file-map-executable and
+;; logging-preferences rules below are what startup needed. `SEATBELT_TRACE=1 sh
+;; run-macos.sh` reports every operation this profile does not allow. Change it only with
+;; the narrowest rule, and never one that re-opens a denial the checks rely on: ~/.kube and
+;; anything outside SCRATCH, the network (including the mDNSResponder socket, which is how
+;; DNS was denied), and starting any process but the probe. It runs under `sandbox-exec`,
+;; which Apple documents as deprecated.
 ;;
 ;; Parameters, passed by the harness with `sandbox-exec -D KEY=VALUE`:
 ;;   PROBE    the probe binary
@@ -61,7 +62,7 @@
 
 ;; Resolving a path stats every directory on the way, so metadata reads are allowed
 ;; everywhere. This lets the sidecar learn that ~/.kube/config EXISTS (and its size and
-;; times), but not read it. Whether this can be narrowed is an open question for the Mac run.
+;; times), but not read it. Whether this can be narrowed is still open: it was not tried.
 (allow file-read-metadata)
 (allow sysctl-read)
 (allow signal (target self))
@@ -70,9 +71,12 @@
 (allow file-read* file-write* (subpath (param "SCRATCH")))
 
 ;; Everything else is denied by (deny default): other file reads and writes (checks 1 and
-;; 2), all network operations (check 3), and every mach-lookup, which includes
-;; mDNSResponder, so DNS resolution fails too.
+;; 2), all network operations (check 3) and every mach-lookup. On the verified run, DNS
+;; failed at `network-outbound /private/var/run/mDNSResponder`, the resolver's Unix
+;; socket, and TCP at `network-outbound remote:*:<port>`. The trace also showed startup
+;; denials that turned out harmless (dtracehelper, the syslog socket, /etc/hosts, the
+;; networkd preferences, the notification_center and logd lookups); they stay denied.
 ;;
 ;; stdin and stdout are pipes the host created and passed in. Seatbelt checks access when a
-;; file is opened, not on each read or write of a descriptor already open, so the JSON-RPC
-;; exchange (check 7) is expected to keep working. Check 7 is what verifies that.
+;; file is opened, not on each read or write of a descriptor already open, and check 7 (50
+;; JSON-RPC round trips) passed on the verified run.

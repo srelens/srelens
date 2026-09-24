@@ -2,8 +2,9 @@
 //! `src/seatbelt.sb`, started by `sandbox-launch`, which first sets rlimits for memory and
 //! CPU and records whether macOS accepted them.
 //!
-//! UNVERIFIED: this compiles from Windows (`cargo check --target aarch64-apple-darwin`)
-//! but has never run. `run-macos.sh` is the first run.
+//! Verified on macOS 27.0 arm64 only, by the maintainer's run at 02190671: checks 1 to 4
+//! and 7 passed, and 5 and 6 failed as expected (below). Intel Macs and older macOS
+//! versions have not been run. `run-macos.sh` drives it.
 //!
 //! What it can and cannot claim, from the research in the ADR:
 //!
