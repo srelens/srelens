@@ -134,6 +134,12 @@ macOS:
 brew install srelens/tap/srelens-tui
 ```
 
+Windows:
+
+```bash
+winget install srelens.srelens-tui
+```
+
 See the [installation guide](docs/INSTALL.md) for platform-specific installation,
 first-launch, updating, verification, and uninstall instructions.
 

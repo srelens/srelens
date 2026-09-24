@@ -1,0 +1,8 @@
+# TEMPLATE. PackageVersion is a placeholder that no release will ever carry,
+# so an unrendered copy cannot be mistaken for a real manifest.
+# Rendered by packaging/winget/render.mjs.
+PackageIdentifier: srelens.srelens-tui
+PackageVersion: 0.0.0
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

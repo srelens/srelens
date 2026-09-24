@@ -186,7 +186,25 @@ sudo mv srelens-tui /usr/local/bin/
 srelens-tui --version
 ```
 
-**Windows.** Extract the `.zip` and move `srelens-tui.exe` somewhere on your
+**On Windows, winget** is the shortest path:
+
+```powershell
+winget install srelens.srelens-tui
+```
+
+It unpacks the same archive listed above and registers `srelens-tui` as a
+command on your `PATH`. There is no installer to run and nothing is written
+into Program Files, but winget does register the package so it can track it:
+it appears in Apps & Features, and `winget uninstall srelens.srelens-tui`
+or that entry will remove it again.
+
+`winget upgrade srelens.srelens-tui` moves it forward. Name the package: a
+bare `winget upgrade` only lists what is upgradable without touching
+anything, and `winget upgrade --all` moves everything on the machine. Since
+winget owns that copy, `srelens-tui update` will decline to replace it and
+point you back at winget.
+
+**Or by hand.** Extract the `.zip` and move `srelens-tui.exe` somewhere on your
 `PATH`, then run `srelens-tui --version` in a terminal. Windows may warn that
 the file came from the internet, for the same reason the desktop installer
 does: code signing is on the roadmap ([#32]).
