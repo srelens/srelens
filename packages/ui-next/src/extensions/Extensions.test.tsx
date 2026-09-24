@@ -689,6 +689,23 @@ it("only confirms a rollback whose grants are unchanged", async () => {
     }),
   );
 });
+it("says the settings were saved, though the save gives the app a new revision", async () => {
+  const typed = (revision: number) => ({
+    ...plugin, revision, manifest: { ...plugin.manifest, settings: [{ id: "team", type: "string", title: "Team" }] },
+  });
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [typed(1)] } as any);
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("button", { name: "Settings for GitOps" }));
+  const settings = screen.getByRole("form", { name: "GitOps settings" });
+  fireEvent.change(within(settings).getByRole("textbox", { name: "Team" }), { target: { value: "platform" } });
+  // The host answers the save with the app at its next revision.
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 3, plugins: [{ ...typed(2), settings: { team: "platform" } }] } as any);
+  fireEvent.click(within(settings).getByRole("button", { name: "Save settings" }));
+  await waitFor(() => expect(listExtensions).toHaveBeenCalledTimes(2));
+  const form = await screen.findByRole("form", { name: "GitOps settings" });
+  expect(within(form).getByRole("status").textContent).toBe("Settings saved.");
+  expect((within(form).getByRole("textbox", { name: "Team" }) as HTMLInputElement).value).toBe("platform");
+});
 it("persists settings, disable and remove through the backend", async () => {
   const typed = { ...plugin, manifest: { ...plugin.manifest, settings: [{ id: "team", type: "string", title: "Team" }] } };
   vi.mocked(listExtensions).mockResolvedValue({

@@ -724,7 +724,8 @@
 .extension-setting input[aria-invalid="true"] {
   border-color: var(--sev, var(--fl-color-danger));
 }
-.extension-setting-check {
+/* An option in a group is not a field's label; a lone checkbox's label is. */
+.extension-setting > .extension-setting-check {
   display: flex;
   align-items: center;
   gap: 6px;

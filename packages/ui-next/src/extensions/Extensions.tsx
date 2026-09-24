@@ -358,8 +358,10 @@ export function ExtensionManager() {
           )}
           {settingsFor === plugin.manifest.id && (
             <ExtensionSettingsForm
-              // A new revision may declare other settings; start again from what it saved.
-              key={plugin.revision}
+              // Keyed by what it draws, not by revision: a save rolls the revision
+              // too, and remounting then would drop "Settings saved." An update
+              // that declares other settings starts again from what it kept.
+              key={JSON.stringify(plugin.manifest.settings ?? [])}
               plugin={plugin}
               onSave={(settings) => saveSettings(plugin.manifest.id, settings)}
               onClose={() => setSettingsFor(null)}

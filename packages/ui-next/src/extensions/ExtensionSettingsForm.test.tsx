@@ -155,7 +155,11 @@ it("shows saved values and keeps a secret's reference out of the payload", async
   const { form: region, onSave } = form(app(every, saved));
   expect((within(region).getByRole("textbox", { name: "Note" }) as HTMLInputElement).value).toBe("kept");
   expect((within(region).getByRole("spinbutton", { name: "Warn before expiry (days)" }) as HTMLInputElement).value).toBe("7");
-  expect(within(region).getByRole("group", { name: "API token" }).textContent).toContain("Set");
+  const secret = within(region).getByRole("group", { name: "API token" }).textContent!;
+  expect(secret).toContain("Set");
+  expect(secret).not.toContain("Not set");
+  // A secret that is set is not also described as one this version cannot store.
+  expect(secret).not.toContain("cannot store");
   fireEvent.click(within(region).getByRole("button", { name: "Save settings" }));
   await waitFor(() =>
     expect(onSave).toHaveBeenCalledWith({ note: "kept", expiryWindowDays: 7, prometheusUrl: "https://prom" }),

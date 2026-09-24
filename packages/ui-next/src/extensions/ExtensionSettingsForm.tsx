@@ -339,8 +339,9 @@ function SettingField({
           <p className="extension-setting-note">
             <strong>{isSet ? "Set" : "Not set"}</strong>
             {" · "}
-            A secret is kept in the system keychain, never in these settings or in exported settings. This version
-            cannot store one yet, so the app cannot use this setting.
+            {isSet
+              ? "Kept in the system keychain, never in these settings or in exported settings."
+              : "A secret is kept in the system keychain, never in these settings or in exported settings. This version cannot store one yet, so the app cannot use this setting."}
           </p>
           {notes}
         </fieldset>
