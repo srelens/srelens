@@ -34,7 +34,7 @@ import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute } from "../lib/detailRoute";
-import { FailureAlert } from "../lib/errorCopy";
+import { FailureAlert, FailureState } from "../lib/errorCopy";
 import {
   cronJobVerdict,
   daemonSetVerdict,
@@ -437,6 +437,11 @@ function WorkloadList({
   // nothing cached contributes no rows and gets its own banner; the four
   // that answered stay on screen and keep being sorted and filtered with it.
   const failed = kinds.filter((k) => k.list.status === "error");
+  // Unless none of them did (#701). Then nothing answered, so an empty table
+  // under five banners would claim these namespaces have no workloads — which
+  // the app does not know — and five banners for what is usually one refusal
+  // is a wall. One failure state instead, its reasons said once.
+  const allFailed = failed.length === kinds.length;
   const stale = kinds.filter((k) => k.list.status !== "error" && k.list.error);
   const anyReconnecting = kinds.some((k) => k.list.watch !== "live");
 
@@ -498,6 +503,14 @@ function WorkloadList({
       {allLoading ? (
         <div className="scroll min-h-0 flex-1">
           <LoadingState label={`Loading ${lower}`} />
+        </div>
+      ) : allFailed ? (
+        <div className="scroll min-h-0 flex-1">
+          <FailureState
+            title={`Could not list ${lower} on ${name}`}
+            error={failed.map((k) => k.list.error ?? "")}
+            onRetry={() => kinds.forEach((k) => k.list.reload())}
+          />
         </div>
       ) : (
         <>

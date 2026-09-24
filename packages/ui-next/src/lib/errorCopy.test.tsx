@@ -61,6 +61,25 @@ describe("summarise", () => {
     expect(detail).toContain(" · ");
   });
 
+  // #701: a real 403 names its resource, so one refusal behind five kinds
+  // classifies as five different sentences. Same verb, same scope: one.
+  it("says one refusal across several resources once, naming them all", () => {
+    const refused = (r: string, where: string) =>
+      `${r} is forbidden: User "dana" cannot list resource "${r}" in API group "apps" ${where}`;
+    const { detail, raw } = summarise([
+      refused("deployments", "at the cluster scope"),
+      refused("pods", "at the cluster scope"),
+      refused("pods", "at the cluster scope"),
+      refused("secrets", 'in the namespace "team-b"'),
+    ]);
+    expect(detail).toBe(
+      "You don't have permission to list deployments and pods at the cluster scope. · " +
+        "You don't have permission to list secrets in team-b.",
+    );
+    // Nothing folded away: every distinct original is still offered.
+    expect(raw?.split("\n\n")).toHaveLength(3);
+  });
+
   it("drops the empty reasons the callers filter on", () => {
     expect(summarise([]).detail).toBe("");
     expect(summarise(["", ""]).detail).toBe("");
@@ -106,6 +125,24 @@ describe("FailureState", () => {
     expect(screen.getByText("Could not load secret/db-creds's manifest")).toBeDefined();
     expect(screen.getByText(REDACTION_REFUSED)).toBeDefined();
     expect(screen.queryByText("Something went wrong")).toBeNull();
+  });
+
+  // #701: one content area fed by several calls that all refused.
+  it("says several refusals of one cause once", () => {
+    render(<FailureState error={[API_401, API_401, API_401]} />);
+    expect(screen.getByText("Not authorized")).toBeDefined();
+    expect(screen.getAllByText(/rejected your credentials/)).toHaveLength(1);
+  });
+
+  it("keeps several different refusals apart, under no one of their headlines", () => {
+    const { container } = render(
+      <FailureState error={[API_401, "dial tcp 10.1.2.3:6443: connect: connection refused"]} />,
+    );
+    const detail = container.querySelector('[data-slot="detail"]')?.textContent ?? "";
+    expect(detail).toMatch(/rejected your credentials/);
+    expect(detail).toMatch(/connection to the API server could not be made/);
+    expect(screen.queryByText("Not authorized")).toBeNull();
+    expect(screen.getByText("Something went wrong")).toBeDefined();
   });
 
   it("passes the caller's domain to the classifier", () => {
