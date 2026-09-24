@@ -122,18 +122,36 @@ fn is_permanent_watch_error(msg: &str) -> bool {
     msg.to_ascii_lowercase().contains("forbidden")
 }
 
-/// Generic watch loop: stream `K`, summarise to `T`, key by `key_of`, call
-/// `on_update` with a full snapshot on every change, and `on_status` on
-/// connection transitions.
+/// The map key for a watched object: its name, then its namespace.
+///
+/// Taken from the object's own metadata, not from its summary, and never the
+/// name alone: on "All namespaces" the watch is `Api::all`, and a name is only
+/// unique within its namespace. A name key let `staging/db` overwrite
+/// `default/db` and a delete of either remove the other (#684).
+///
+/// Name first so a snapshot stays name-sorted, as it was; the NUL separator
+/// sorts below every character a Kubernetes name may hold, so `db` still
+/// precedes `db-2` and two `db`s sit together, ordered by namespace.
+fn object_key<K: kube::Resource>(obj: &K) -> String {
+    let meta = obj.meta();
+    format!(
+        "{}\0{}",
+        meta.name.as_deref().unwrap_or(""),
+        meta.namespace.as_deref().unwrap_or("")
+    )
+}
+
+/// Generic watch loop: stream `K`, summarise to `T`, key by
+/// [`object_key`], call `on_update` with a full snapshot on every change, and
+/// `on_status` on connection transitions.
 ///
 /// kube-rs `watcher()` is a self-healing infinite stream — on API errors it
 /// yields an `Err` item but keeps running and re-lists on the next poll. So we
 /// consume with `next()` (not `try_next()?`) and, instead of terminating on the
 /// first error, surface `Reconnecting` and carry on until it recovers.
-async fn watch_typed<K, T, S, N, F, G>(
+async fn watch_typed<K, T, S, F, G>(
     api: Api<K>,
     summarise: S,
-    key_of: N,
     mut on_update: F,
     mut on_status: G,
 ) -> Result<(), String>
@@ -142,11 +160,14 @@ where
     K::DynamicType: Default + Eq + Hash + Clone + Debug + Unpin,
     T: Clone,
     S: Fn(K) -> T,
-    N: Fn(&T) -> String,
     F: FnMut(Vec<T>),
     G: FnMut(WatchStatus),
 {
-    let mut state: BTreeMap<String, T> = BTreeMap::new();
+    // Each entry carries its own key so `reduce` can store it without asking
+    // the summary, which does not always hold a namespace.
+    let mut state: BTreeMap<String, (String, T)> = BTreeMap::new();
+    let key_of = |(key, _): &(String, T)| key.clone();
+    let keyed = |obj: K| (object_key(&obj), summarise(obj));
     let mut stream = kube::runtime::watcher(api, Config::default())
         .default_backoff()
         .boxed();
@@ -160,13 +181,13 @@ where
                 }
                 let mapped = match event {
                     Event::Init => WatchEvent::Init,
-                    Event::InitApply(obj) => WatchEvent::InitApply(summarise(obj)),
+                    Event::InitApply(obj) => WatchEvent::InitApply(keyed(obj)),
                     Event::InitDone => WatchEvent::InitDone,
-                    Event::Apply(obj) => WatchEvent::Apply(summarise(obj)),
-                    Event::Delete(obj) => WatchEvent::Delete(key_of(&summarise(obj))),
+                    Event::Apply(obj) => WatchEvent::Apply(keyed(obj)),
+                    Event::Delete(obj) => WatchEvent::Delete(object_key(&obj)),
                 };
                 if reduce(&mut state, &key_of, mapped) {
-                    on_update(snapshot(&state));
+                    on_update(state.values().map(|(_, row)| row.clone()).collect());
                 }
             }
             Err(e) => {
@@ -203,14 +224,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Pod> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_pod,
-        |p: &PodSummary| p.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_pod, on_update, on_status).await
 }
 
 /// Watch deployments in a namespace.
@@ -227,14 +241,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Deployment> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_deployment,
-        |d: &DeploymentSummary| d.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_deployment, on_update, on_status).await
 }
 
 /// Watch StatefulSets in a namespace.
@@ -251,14 +258,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<StatefulSet> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_statefulset,
-        |s: &StatefulSetSummary| s.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_statefulset, on_update, on_status).await
 }
 
 /// Watch DaemonSets in a namespace.
@@ -275,14 +275,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<DaemonSet> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_daemonset,
-        |d: &DaemonSetSummary| d.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_daemonset, on_update, on_status).await
 }
 
 /// Watch Jobs in a namespace.
@@ -299,14 +292,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Job> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_job,
-        |j: &JobSummary| j.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_job, on_update, on_status).await
 }
 
 /// Watch CronJobs in a namespace.
@@ -323,14 +309,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<CronJob> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_cronjob,
-        |c: &CronJobSummary| c.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_cronjob, on_update, on_status).await
 }
 
 /// Watch ConfigMaps in a namespace.
@@ -347,14 +326,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<ConfigMap> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_configmap,
-        |c: &ConfigMapSummary| c.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_configmap, on_update, on_status).await
 }
 
 /// Watch Secrets in a namespace (type + key count only — no values).
@@ -371,14 +343,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Secret> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_secret,
-        |s: &SecretSummary| s.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_secret, on_update, on_status).await
 }
 
 /// Watch ResourceQuotas in a namespace.
@@ -395,14 +360,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<ResourceQuota> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_resourcequota,
-        |r: &ResourceQuotaSummary| r.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_resourcequota, on_update, on_status).await
 }
 
 /// Watch LimitRanges in a namespace.
@@ -419,14 +377,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<LimitRange> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_limitrange,
-        |l: &LimitRangeSummary| l.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_limitrange, on_update, on_status).await
 }
 
 /// Watch services in a namespace.
@@ -443,14 +394,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Service> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_service,
-        |s: &ServiceSummary| s.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_service, on_update, on_status).await
 }
 
 /// Watch events in a namespace — a true stream, replacing the poll.
@@ -467,14 +411,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<CoreEvent> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_event,
-        |e: &EventSummary| e.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_event, on_update, on_status).await
 }
 
 /// Watch Ingresses in a namespace.
@@ -491,14 +428,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Ingress> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_ingress,
-        |i: &IngressSummary| i.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_ingress, on_update, on_status).await
 }
 
 /// Watch EndpointSlices in a namespace.
@@ -515,14 +445,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<EndpointSlice> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_endpointslice,
-        |e: &EndpointSliceSummary| e.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_endpointslice, on_update, on_status).await
 }
 
 /// Watch NetworkPolicies in a namespace.
@@ -539,14 +462,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<NetworkPolicy> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_networkpolicy,
-        |n: &NetworkPolicySummary| n.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_networkpolicy, on_update, on_status).await
 }
 
 /// Watch PersistentVolumeClaims in a namespace.
@@ -563,14 +479,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<PersistentVolumeClaim> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_pvc,
-        |p: &PvcSummary| p.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_pvc, on_update, on_status).await
 }
 
 /// Watch cluster PersistentVolumes (cluster-scoped; namespace ignored).
@@ -587,14 +496,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<PersistentVolume> = Api::all(client);
-    watch_typed(
-        api,
-        summarise_pv,
-        |p: &PvSummary| p.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_pv, on_update, on_status).await
 }
 
 /// Watch cluster StorageClasses (cluster-scoped; namespace ignored).
@@ -611,14 +513,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<StorageClass> = Api::all(client);
-    watch_typed(
-        api,
-        summarise_storageclass,
-        |s: &StorageClassSummary| s.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_storageclass, on_update, on_status).await
 }
 
 /// Watch ServiceAccounts in a namespace.
@@ -635,14 +530,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<ServiceAccount> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_serviceaccount,
-        |s: &ServiceAccountSummary| s.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_serviceaccount, on_update, on_status).await
 }
 
 /// Watch Roles in a namespace.
@@ -659,14 +547,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Role> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_role,
-        |r: &RoleSummary| r.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_role, on_update, on_status).await
 }
 
 /// Watch cluster ClusterRoles (cluster-scoped; namespace ignored).
@@ -683,14 +564,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<ClusterRole> = Api::all(client);
-    watch_typed(
-        api,
-        summarise_clusterrole,
-        |r: &ClusterRoleSummary| r.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_clusterrole, on_update, on_status).await
 }
 
 /// Watch RoleBindings in a namespace.
@@ -707,14 +581,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<RoleBinding> = crate::scoped_api(client, &namespace);
-    watch_typed(
-        api,
-        summarise_rolebinding,
-        |r: &RoleBindingSummary| r.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_rolebinding, on_update, on_status).await
 }
 
 /// Watch cluster ClusterRoleBindings (cluster-scoped; namespace ignored).
@@ -731,14 +598,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<ClusterRoleBinding> = Api::all(client);
-    watch_typed(
-        api,
-        summarise_clusterrolebinding,
-        |r: &ClusterRoleBindingSummary| r.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_clusterrolebinding, on_update, on_status).await
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, schemars::JsonSchema)]
@@ -783,14 +643,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Node> = Api::all(client);
-    watch_typed(
-        api,
-        summarise_node,
-        |n: &NodeSummary| n.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_node, on_update, on_status).await
 }
 
 /// Watch cluster Namespaces (cluster-scoped; namespace ignored).
@@ -807,14 +660,7 @@ where
 {
     let client = cache.get(&context).await?;
     let api: Api<Namespace> = Api::all(client);
-    watch_typed(
-        api,
-        summarise_namespace,
-        |n: &NamespaceSummary| n.name.clone(),
-        on_update,
-        on_status,
-    )
-    .await
+    watch_typed(api, summarise_namespace, on_update, on_status).await
 }
 
 /// Classify a watcher event as an object change. `Apply`/`Delete` always are.
@@ -1128,7 +974,6 @@ mod tests {
             watch_typed(
                 api,
                 |ns: Namespace| ns.metadata.name.unwrap(),
-                |name: &String| name.clone(),
                 |_| panic!("an unavailable cluster cannot supply a snapshot"),
                 move |status| received.lock().unwrap().push(status),
             )
@@ -1202,7 +1047,6 @@ mod tests {
             watch_typed(
                 api,
                 |ns: Namespace| ns.metadata.name.unwrap(),
-                |name: &String| name.clone(),
                 |rows| {
                     assert!(rows.is_empty());
                     events.lock().unwrap().push("snapshot");
@@ -1216,6 +1060,100 @@ mod tests {
         assert_eq!(
             *events.lock().unwrap(),
             vec!["reconnecting", "live", "snapshot"]
+        );
+    }
+
+    /// #684: on "All namespaces" the watch is `Api::all`, and two namespaces
+    /// may each hold a Secret called `db`. Keyed by name alone, the second
+    /// overwrote the first and the list showed one row — and deleting either
+    /// removed the row of whichever had arrived last. Every typed watch shared
+    /// the bug; Secrets are the one a reader noticed.
+    #[tokio::test]
+    async fn all_namespaces_keeps_same_named_objects_apart() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        fn secret(namespace: &str, name: &str) -> serde_json::Value {
+            serde_json::json!({
+                "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                "metadata": {"name": name, "namespace": namespace, "resourceVersion": "1"}
+            })
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let service = tower::service_fn(move |_: http::Request<kube::client::Body>| {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                let (status, body) = match attempt {
+                    0 => (
+                        200,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "SecretList",
+                            "metadata": {"resourceVersion": "1"},
+                            "items": [
+                                secret("staging", "db"),
+                                secret("default", "db"),
+                                secret("default", "api"),
+                            ]
+                        })
+                        .to_string(),
+                    ),
+                    1 => (
+                        200,
+                        serde_json::json!({"type": "DELETED", "object": secret("staging", "db")})
+                            .to_string(),
+                    ),
+                    _ => (
+                        403,
+                        serde_json::json!({
+                            "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                            "reason": "Forbidden", "message": "forbidden", "code": 403
+                        })
+                        .to_string(),
+                    ),
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(status)
+                        .body(kube::client::Body::from(body.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let cache = ClientCache::new(std::path::PathBuf::from("/nonexistent/kubeconfig"));
+        cache
+            .preload("fake", kube::Client::new(service, "default"))
+            .await;
+
+        let snapshots = Mutex::new(Vec::new());
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            watch_secrets(
+                cache,
+                "fake".into(),
+                String::new(),
+                |rows| {
+                    let rows: Vec<String> = rows
+                        .iter()
+                        .map(|s| format!("{}/{}", s.namespace, s.name))
+                        .collect();
+                    snapshots.lock().unwrap().push(rows);
+                },
+                |_| {},
+            ),
+        )
+        .await
+        .expect("the watch stops on the fake server's RBAC denial");
+        assert!(result.unwrap_err().contains("forbidden"));
+        assert_eq!(
+            *snapshots.lock().unwrap(),
+            vec![
+                // Name-sorted, namespace breaking the tie.
+                vec!["default/api", "default/db", "staging/db"],
+                // Deleting staging's `db` leaves default's.
+                vec!["default/api", "default/db"],
+            ]
         );
     }
 
@@ -1271,7 +1209,6 @@ mod tests {
             watch_typed(
                 api,
                 |ns: Namespace| ns.metadata.name.unwrap(),
-                |name: &String| name.clone(),
                 |_| panic!("an incomplete relist must not emit a snapshot"),
                 |status| statuses.lock().unwrap().push(status),
             ),
