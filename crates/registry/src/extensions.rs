@@ -438,7 +438,9 @@ fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
         .flat_map(|plugin| plugin.manifest.stored_secret_problems(&plugin.settings))
         .next()
     {
-        return Err(format!("refusing to save the extension inventory: {problem}"));
+        return Err(format!(
+            "refusing to save the extension inventory: {problem}"
+        ));
     }
     // Quarantine is recomputed on every load. Persisting it would also make the file
     // unreadable to hosts that predate the field.
@@ -1394,7 +1396,12 @@ pub fn register(
                 };
                 let mut registry = Registry::new();
                 let _registration = PluginHost::new(c)
-                    .register_with_settings(&mut registry, manifest, &plugin.grants, &plugin.settings)
+                    .register_with_settings(
+                        &mut registry,
+                        manifest,
+                        &plugin.grants,
+                        &plugin.settings,
+                    )
                     .map_err(CapabilityError::Handler)?;
                 let mut args = json!({ "context": context });
                 if plugin
