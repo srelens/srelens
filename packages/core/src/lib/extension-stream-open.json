@@ -1,0 +1,9 @@
+{
+  "id": "org.example.argocd",
+  "revision": 1,
+  "view": "org.example.argocd/page:applications#1",
+  "channel": "extstream:1-k2j3h4",
+  "context": "cluster/a",
+  "namespace": "team",
+  "source": { "kind": "read", "capability": "applications", "intervalSeconds": 30 }
+}

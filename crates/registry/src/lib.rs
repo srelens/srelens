@@ -20,6 +20,7 @@ mod settings;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use extensions::fuzzing;
+pub use extensions::streams::{ExtensionStreams, OpenStreamOut};
 pub use settings::default_settings_path;
 
 // Test-only: every consumer of this module — `render_catalog` (regenerated via
@@ -234,6 +235,16 @@ pub fn build_registry_with_paths_and_settings(
     kubeconfig_paths: Vec<PathBuf>,
     settings_path: Option<PathBuf>,
 ) -> Registry {
+    build_registry_and_app_streams(cache, kubeconfig_paths, settings_path).0
+}
+
+/// The desktop build, plus the app streams (#565) its host opens streams
+/// through. `None` when there is no settings path, so no apps either.
+pub fn build_registry_and_app_streams(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
     let mut reg = Registry::new();
 
     reg.register(Capability::read_only(
@@ -489,21 +500,22 @@ pub fn build_registry_with_paths_and_settings(
         cache.clone(),
     ));
 
+    let mut app_streams = None;
     if let Some(path) = settings_path {
         let mut core = reg.clone();
         // Broker-only: kept out of `reg`, so neither the catalog nor MCP offers it.
         core.register(extensions::crd::check_capability(cache.clone()));
         let core = Arc::new(core);
-        extensions::register(
+        app_streams = Some(extensions::register(
             &mut reg,
             path.with_extension("extensions.json"),
             core,
             cache,
-        );
+        ));
         settings::register(&mut reg, path);
     }
 
-    reg
+    (reg, app_streams)
 }
 
 /// Build the registry using a caller-provided client cache with the host's
@@ -681,6 +693,7 @@ mod tests {
             "extensions.read",
             "extensions.resolveColumns",
             "extensions.resolveCards",
+            "extensions.streams",
         ] {
             assert!(reg.get(id).is_none());
         }
