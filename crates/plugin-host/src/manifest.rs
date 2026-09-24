@@ -6,6 +6,9 @@ use srelens_capability::status::{self, StatusRule};
 use srelens_capability::{Predicate, MAX_PREDICATES};
 use std::collections::BTreeSet;
 
+mod cards;
+pub use cards::*;
+
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
 /// its `srelensApiVersion` range matches any of them. How versions are added and retired
 /// is specified in docs/extensions/specification.md.
@@ -321,6 +324,12 @@ pub struct Contributions {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub table_columns: Vec<TableColumn>,
+    #[serde(
+        default,
+        rename = "dashboardCards",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub dashboard_cards: Vec<DashboardCard>,
     #[serde(
         default,
         rename = "detailPanels",
@@ -1520,6 +1529,7 @@ impl Manifest {
             }
         }
         self.status_problems(&mut problems, &join_ids);
+        cards::card_problems(self, &mut problems);
         problems.into_result()
     }
 

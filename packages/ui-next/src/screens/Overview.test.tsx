@@ -25,6 +25,20 @@ vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
   ...core,
 }));
+// The band has its own suite (extensions/DashboardCards.test.tsx); here it is
+// only whether the overview carries it, for which cluster, and where. Shaped
+// like the real band — a `Section` — so the adjacency the bands rely on for
+// their hairlines is checked with it in place.
+vi.mock("../extensions/DashboardCards", async () => {
+  const { Section } = await import("@srelens/ui-kit");
+  return {
+    DashboardCards: ({ context }: { context: { stableId: string } }) => (
+      <Section title="App cards" smallCaps padded={false}>
+        <p data-testid="app-cards">{context.stableId}</p>
+      </Section>
+    ),
+  };
+});
 
 if (!("ResizeObserver" in globalThis)) {
   (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
@@ -1250,7 +1264,7 @@ describe("Overview — a flat surface, not a stack of cards", () => {
     // one div each to hang a class on — silently removes every rule while
     // leaving the screen looking almost right, so this is pinned rather than
     // trusted. The kit's own suite pins the CSS; this pins the adjacency.
-    expect(bandTitles(leftColumn()!)).toEqual(["Capacity", "Nodes", "Not ready"]);
+    expect(bandTitles(leftColumn()!)).toEqual(["Capacity", "App cards", "Nodes", "Not ready"]);
     expect(bandTitles(railBody()!)).toEqual([
       "Control plane",
       "Objects by kind",
@@ -1785,5 +1799,12 @@ describe("Overview — the cluster a node action was picked on", () => {
     // One click, exactly as before this fix existed.
     await userEvent.click(within(box()).getByRole("button", { name: "Drain" }));
     await waitFor(() => expect(core.drainNode).toHaveBeenCalledWith("prod-eu", "n1"));
+  });
+});
+
+describe("Overview — app cards", () => {
+  it("carries the app cards band, pinned to the cluster in focus", async () => {
+    open();
+    expect((await screen.findByTestId("app-cards")).textContent).toBe(CTX.stableId);
   });
 });

@@ -130,6 +130,10 @@ without these fields remain valid — including their `statusColumns` — and a 
 using any of them requires a host that includes the issue that added it. No alias or
 older API line is retained for this exception.
 
+The same pre-1.0 exception covers `contributions.dashboardCards` (#540): added to API
+0.3 in place, absent from every published signed manifest, and requiring a host that
+includes #540.
+
 The host enforces this for fields. `API_FIELDS` in `crates/plugin-host/src/manifest.rs`
 lists fields whose availability differs across supported API lines. It is empty while
 0.3 is the only supported line. A rename is a removal plus an addition.
@@ -287,6 +291,12 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   predicate path grammar gains one filter form, `[?(@.key=="text")]`, selecting the
   first matching element. `statusColumns` is deprecated. See the
   [manifest reference](manifest.md#status-resolvers-and-badges).
+- The cluster overview draws `dashboardCards` (`count`, `countByStatus`, `metric`,
+  `list`) over a granted custom-resource reader, with `equals`, `absent`, and date
+  `within` / `before` predicates. `extensions.resolveCards` answers one app's cards per
+  request, each with a figure or the reason it has none, and `extensions.read` takes a
+  `card` to show a card's target page narrowed to what it counted (#540). See
+  [Manifest reference](manifest.md#dashboard-cards).
 - Unsigned apps declaring write actions require the default-off inventory policy
   described above (#558). Turning it off disables affected installations without
   removing them; normal read-only declarative permission grants are unchanged.

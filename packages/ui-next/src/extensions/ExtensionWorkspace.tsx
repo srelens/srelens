@@ -297,6 +297,9 @@ function Events({
   );
 }
 
+/** The picker value standing for a card target's own namespaces; never a namespace name. */
+const CARD_SCOPE = "\u0000card";
+
 /** Native, data-only extension workspace. Every reader stays pinned to this route's context. */
 export function ExtensionWorkspace({
   plugin,
@@ -305,6 +308,9 @@ export function ExtensionWorkspace({
   namespace: initialNamespace = "",
   onPage,
   onNamespace,
+  card,
+  cardNamespaces,
+  onLeaveCard,
 }: {
   plugin: InstalledExtension;
   page: ExtensionPage;
@@ -312,6 +318,12 @@ export function ExtensionWorkspace({
   namespace?: string;
   onPage?(id: string, namespace: string): void;
   onNamespace?(namespace: string): void;
+  /** A dashboard card whose rows the page shows (#540); the whole list when absent. */
+  card?: string;
+  /** The several namespaces the card counted in, when it counted in more than one. */
+  cardNamespaces?: string[];
+  /** On a card's target: the picker chose another namespace, whose plain page this is not. */
+  onLeaveCard?(namespace: string): void;
 }) {
   const { Button, Combobox } = useContext(ExtensionControls);
   const [localPage, setLocalPage] = useState(page.id);
@@ -319,7 +331,16 @@ export function ExtensionWorkspace({
   const [search, setSearch] = useState("");
   const [refresh, setRefresh] = useState(0);
   const {namespaces, scope, error:namespaceError} = useNamespaceOptions(context, loadKubeconfigFiles(), refresh);
-  const namespace = scope || selectedNamespace;
+  // A card's target reads exactly the namespaces the card counted in — one (in
+  // the route's path), several (its list) or every one — and nothing else: its
+  // route, not a restricted credential's one namespace or the picker, says what
+  // the page shows. A credential that cannot read them gets the host's refusal
+  // for the card's scope, never quietly another namespace's rows.
+  const namespace = card ? initialNamespace : scope || selectedNamespace;
+  // What the picker shows on a card's target: the card's scope, whatever it is.
+  const cardScope = card
+    ? initialNamespace || (cardNamespaces?.length ? cardNamespaces.join(", ") : "All namespaces")
+    : "";
   const current = onPage
     ? page
     : (plugin.manifest.contributions.pages.find((p) => p.id === localPage) ??
@@ -380,11 +401,24 @@ export function ExtensionWorkspace({
       <div className="extension-toolbar extension-filters">
         {namespaces === null ? <Button variant="secondary" disabled>Loading namespaces…</Button> : <Combobox
           ariaLabel="App namespace"
-          value={namespace}
-          onValueChange={(value) => { setNamespace(value); onNamespace?.(value); }}
+          value={cardScope ? CARD_SCOPE : namespace}
+          onValueChange={(value) => {
+            if (value === CARD_SCOPE) return;
+            // A card's target shows what the card counted, where it counted it.
+            // Another namespace is another page: leave the card's route for it,
+            // and keep this one showing what its route says.
+            if (card && onLeaveCard) { onLeaveCard(value); return; }
+            setNamespace(value); onNamespace?.(value);
+          }}
           options={[
-            ...(scope ? [] : [{ value: "", label: "All namespaces" }]),
-            ...(namespaces ?? []).map(n=>({value:n,label:n})),
+            ...(cardScope ? [{ value: CARD_SCOPE, label: cardScope }] : []),
+            // The card's scope is named once: an ordinary entry with the same
+            // label (`prod`, or "All namespaces") would be a second, identical
+            // choice that left the card for the plain page.
+            ...[
+              ...(scope ? [] : [{ value: "", label: "All namespaces" }]),
+              ...(namespaces ?? []).map(n=>({value:n,label:n})),
+            ].filter((option) => option.label !== cardScope),
           ]}
           placeholder={
             namespaces === null
@@ -452,6 +486,8 @@ export function ExtensionWorkspace({
           search={search}
           refresh={refresh}
           hideToolbar
+          card={card}
+          cardNamespaces={namespace ? undefined : cardNamespaces}
         />
       )}
       </ExtensionRequirements>

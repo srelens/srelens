@@ -407,6 +407,46 @@ it("retains a namespace discovery error and offers retry", async () => {
   await waitFor(() => expect(listNamespaces).toHaveBeenCalledTimes(2));
 });
 
+it("asks the host for only a dashboard card's rows on its target page", async () => {
+  render(
+    <ExtensionWorkspace
+      plugin={plugin}
+      page={plugin.manifest.contributions.pages[1]}
+      context="staging"
+      namespace="flux-system"
+      card="suspended"
+    />,
+  );
+  expect(await screen.findByRole("cell", { name: "apps" })).toBeTruthy();
+  expect(readExtension).toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "flux-system", true, "suspended");
+});
+
+it("reads a card's rows over the several namespaces it counted in", async () => {
+  // Narrows like the host: only rows in the namespaces the read names.
+  const rows = [
+    { name: "in-prod", namespace: "prod", age: "1d", columns: [] },
+    { name: "in-team", namespace: "team", age: "1d", columns: [] },
+    { name: "in-other", namespace: "other", age: "1d", columns: [] },
+  ];
+  vi.mocked(readExtension).mockImplementation((async (...args: unknown[]) => {
+    const scope = (args[7] as string[] | undefined) ?? [];
+    return { items: rows.filter((row) => !scope.length || scope.includes(row.namespace)) };
+  }) as never);
+  render(
+    <ExtensionWorkspace
+      plugin={plugin}
+      page={plugin.manifest.contributions.pages[1]}
+      context="staging"
+      card="suspended"
+      cardNamespaces={["prod", "team"]}
+    />,
+  );
+  expect(await screen.findByRole("cell", { name: "in-prod" })).toBeTruthy();
+  expect(screen.getByRole("cell", { name: "in-team" })).toBeTruthy();
+  expect(screen.queryByRole("cell", { name: "in-other" })).toBeNull();
+  expect(readExtension).toHaveBeenCalledWith("org.test.flux", 3, "apps", "staging", "", true, "suspended", ["prod", "team"]);
+});
+
 it("filters resource rows without a second cluster read", async () => {
   render(
     <ExtensionWorkspace
@@ -459,6 +499,51 @@ it("uses the restricted namespace instead of an all-namespace resource read", as
   render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging" />);
   await waitFor(()=>expect(readExtension).toHaveBeenLastCalledWith(plugin.manifest.id,plugin.revision,"apps","staging","team",true));
   expect(vi.mocked(readExtension).mock.calls.every(call=>call[4]==="team")).toBe(true);
+});
+
+// A card route owns its scope, whatever the credential (#540 review): it reads
+// exactly the namespaces the card counted in, and the picker names them. A
+// credential restricted to another namespace gets the host's refusal for the
+// card's scope, never quietly its own namespace's rows under the card's banner.
+it.each([
+  ["one namespace", "an unrestricted credential", "prod", undefined, false, ["prod", true, "suspended"], "prod"],
+  ["one namespace", "a credential restricted to team", "prod", undefined, true, ["prod", true, "suspended"], "prod"],
+  ["several namespaces", "an unrestricted credential", "", ["prod", "team"], false, ["", true, "suspended", ["prod", "team"]], "prod, team"],
+  ["several namespaces", "a credential restricted to team", "", ["prod", "team"], true, ["", true, "suspended", ["prod", "team"]], "prod, team"],
+  ["every namespace", "an unrestricted credential", "", undefined, false, ["", true, "suspended"], "All namespaces"],
+  ["every namespace", "a credential restricted to team", "", undefined, true, ["", true, "suspended"], "All namespaces"],
+] as const)("a card target over %s, with %s, reads and shows exactly the card's scope", async (_scope, _credential, namespace, cardNamespaces, restricted, read, label) => {
+  if (restricted) {
+    vi.mocked(listNamespaces).mockResolvedValue({error:'Forbidden: User "system:serviceaccount:team:reader" cannot list namespaces'} as any);
+    vi.spyOn(await import("@srelens/core/lib/clusters"),"listContexts").mockResolvedValue({contexts:[{name:"staging",namespace:"team"}]} as any);
+  } else {
+    vi.mocked(listNamespaces).mockResolvedValue({namespaces:["prod","team","other"]} as any);
+  }
+  const onLeaveCard = vi.fn();
+  render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[1]} context="staging"
+    namespace={namespace} card="suspended" cardNamespaces={cardNamespaces ? [...cardNamespaces] : undefined}
+    onLeaveCard={onLeaveCard} />);
+  // Settled once the credential's scope, if any, is known: the picker is drawn then.
+  const picker = await screen.findByRole("combobox",{name:"App namespace"});
+  await waitFor(()=>expect(picker.textContent).toContain(label));
+  const cardReads = vi.mocked(readExtension).mock.calls.filter(call=>call[6]==="suspended");
+  expect(cardReads.length).toBeGreaterThan(0);
+  for (const call of cardReads) expect(call.slice(4)).toEqual(read);
+  // Never the credential's own namespace in place of the card's.
+  if (restricted) expect(cardReads.some(call=>call[4]==="team")).toBe(false);
+  // One option per label: the card's scope is named once, so a reader never
+  // has two identical choices that do different things.
+  fireEvent.click(picker);
+  const labels = (await screen.findAllByRole("option")).map((option)=>option.textContent?.trim());
+  expect(labels.filter((text)=>text===label)).toHaveLength(1);
+  expect(new Set(labels).size).toBe(labels.length);
+  // Choosing the card's own scope stays on the card; any other namespace leaves it.
+  fireEvent.click(screen.getByRole("option",{name:label}));
+  expect(onLeaveCard).not.toHaveBeenCalled();
+  fireEvent.click(picker);
+  const other = restricted ? "team" : "other";
+  fireEvent.click(await screen.findByRole("option",{name:other}));
+  expect(onLeaveCard).toHaveBeenCalledWith(other);
 });
 
 it("carries the selected namespace into group navigation", async () => {

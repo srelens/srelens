@@ -73,6 +73,7 @@ import { describe } from "../lib/routes";
 import { openTab } from "../lib/tabsStore";
 import { LINK_WORD, useWorkspaceView } from "../lib/workspace";
 import { NoClusterScreen } from "./resourceShell";
+import { DashboardCards } from "../extensions/DashboardCards";
 
 /**
  * What a figure says when there is no reading behind it.
@@ -215,6 +216,8 @@ function ClusterOverview({ title, context }: { title: string; context: ClusterCo
         <div className="scroll flex min-h-0 flex-1 flex-col">
           <Stale overview={overview} />
           <Capacity overview={overview} />
+          {/* Declared by installed apps (#540); nothing at all when none declares one. */}
+          <DashboardCards context={context} />
           <Nodes context={name} nodes={overview.nodes} />
           <NotReady context={name} overview={overview} />
         </div>

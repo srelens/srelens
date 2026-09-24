@@ -773,6 +773,32 @@
           }
         ]
       }
+    ],
+    "dashboardCards": [
+      {
+        "id": "suspended-kustomizations",
+        "title": "Suspended Kustomizations",
+        "size": "s",
+        "type": "count",
+        "source": "kustomizations",
+        "predicate": {
+          "jsonPath": ".spec.suspend",
+          "equals": true
+        },
+        "target": {
+          "page": "kustomizations"
+        }
+      },
+      {
+        "id": "kustomizations-by-status",
+        "title": "Kustomizations by status",
+        "size": "m",
+        "type": "countByStatus",
+        "source": "kustomizations",
+        "target": {
+          "page": "kustomizations"
+        }
+      }
     ]
   },
   "actions": [

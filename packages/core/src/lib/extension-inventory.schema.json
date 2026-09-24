@@ -116,6 +116,162 @@
       ],
       "type": "object"
     },
+    "CardAggregate": {
+      "enum": [
+        "sum",
+        "min",
+        "max"
+      ],
+      "type": "string"
+    },
+    "CardList": {
+      "additionalProperties": false,
+      "properties": {
+        "jsonPath": {
+          "description": "A value shown beside each row, and what rows are ordered by; by namespace and name when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "How many rows to show, 1–10; by the card's size when absent.",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "order": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CardOrder"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CardMetric": {
+      "additionalProperties": false,
+      "properties": {
+        "aggregate": {
+          "$ref": "#/definitions/CardAggregate"
+        },
+        "jsonPath": {
+          "description": "A number on each object, in the predicates' bounded path grammar.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "aggregate",
+        "jsonPath"
+      ],
+      "type": "object"
+    },
+    "CardOrder": {
+      "enum": [
+        "asc",
+        "desc"
+      ],
+      "type": "string"
+    },
+    "CardPredicate": {
+      "additionalProperties": false,
+      "description": "What a dashboard card counts (#540): one question about one value of each object its source lists.\n\nThe action predicates' path grammar, literal rule and `equals` / `absent`, plus two date operators. There is no `reason`: nothing is refused, so there is nothing to tell an operator. Exactly one operator per predicate:\n\n```json {\"jsonPath\": \".status.notAfter\", \"within\": \"14d\"} ```",
+      "properties": {
+        "absent": {
+          "description": "`true`: the value at `jsonPath` must be unset or null.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "before": {
+          "description": "The value at `jsonPath` is an RFC 3339 timestamp earlier than now plus this duration: `14d` includes everything already past, `0d` is only the past, `-30d` is older than thirty days.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "equals": {
+          "description": "The value at `jsonPath` must equal this string, number or boolean."
+        },
+        "jsonPath": {
+          "description": "The value this predicate asks about, in the same bounded JSONPath subset as an action predicate's.",
+          "type": "string"
+        },
+        "within": {
+          "description": "The value at `jsonPath` is an RFC 3339 timestamp within this duration of now: `14d` is from now until fourteen days ahead, `-1h` the last hour. Units s, m, h, d and w.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "jsonPath"
+      ],
+      "type": "object"
+    },
+    "CardSize": {
+      "description": "How much of the dashboard's width a card takes.",
+      "enum": [
+        "s",
+        "m",
+        "l"
+      ],
+      "type": "string"
+    },
+    "CardTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "page": {
+          "description": "The `id` of a page in `contributions.pages` that lists the card's source.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "page"
+      ],
+      "type": "object"
+    },
+    "CardType": {
+      "oneOf": [
+        {
+          "description": "How many objects the predicate holds for.",
+          "enum": [
+            "count"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Those objects counted by the status the app's status resolver gives them (#541).",
+          "enum": [
+            "countByStatus"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "One number reduced from a value of those objects.",
+          "enum": [
+            "metric"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The first few of those objects.",
+          "enum": [
+            "list"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "ColumnFormat": {
       "enum": [
         "text",
@@ -200,6 +356,12 @@
           },
           "type": "array"
         },
+        "dashboardCards": {
+          "items": {
+            "$ref": "#/definitions/DashboardCard"
+          },
+          "type": "array"
+        },
         "detailLinks": {
           "items": {
             "$ref": "#/definitions/DetailLink"
@@ -273,6 +435,81 @@
       },
       "required": [
         "pages"
+      ],
+      "type": "object"
+    },
+    "DashboardCard": {
+      "additionalProperties": false,
+      "description": "A card on the cluster dashboard: one figure about the objects one granted custom-resource reader lists, drawn by the host.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "list": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CardList"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How a `list` card orders and bounds its rows; refused on other types."
+        },
+        "metric": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CardMetric"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What a `metric` card reads; required there and refused elsewhere."
+        },
+        "predicate": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CardPredicate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which of the source's objects the card counts; every one when absent."
+        },
+        "size": {
+          "$ref": "#/definitions/CardSize"
+        },
+        "source": {
+          "description": "The name of a `k8s.listCustomResource` binding in `capabilities`.",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CardTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The app page the card opens, with the predicate applied as its filter."
+        },
+        "title": {
+          "description": "Untrusted display text, drawn as plain text.",
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/definitions/CardType"
+        }
+      },
+      "required": [
+        "id",
+        "size",
+        "source",
+        "title",
+        "type"
       ],
       "type": "object"
     },

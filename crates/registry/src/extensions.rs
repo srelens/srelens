@@ -1,4 +1,5 @@
 //! Durable, native declarative extensions for desktop hosts.
+mod cards;
 mod catalog;
 mod columns;
 pub(crate) mod crd;
@@ -282,6 +283,14 @@ struct Read {
     context: String,
     #[serde(default)]
     namespace: String,
+    /// A dashboard card's id: return only the rows that card counted (#540).
+    #[serde(default)]
+    #[schemars(length(max = 64))]
+    card: Option<String>,
+    /// With `card` and no `namespace`: the several namespaces the card counted
+    /// in, so its target page shows exactly those rows (#540).
+    #[serde(default)]
+    namespaces: Vec<String>,
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1167,7 +1176,11 @@ pub fn register(
 ) {
     catalog::register(reg, path.with_extension("catalog.json"), core.clone());
     resource::register(reg, path.clone(), core.clone(), cache.clone());
-    columns::register(reg, path.clone(), core.clone(), cache.clone());
+    // One snapshot of each granted reader, shared by table columns, dashboard
+    // cards and a card's target page, so the three agree and list it once.
+    let snapshots = columns::JoinCache::default();
+    columns::register(reg, path.clone(), core.clone(), cache.clone(), snapshots.clone());
+    cards::register(reg, path.clone(), core.clone(), cache.clone(), snapshots.clone());
     let p = path.clone();
     reg.register(Capability::typed::<Empty, Inventory, _, _>(
         "extensions.list",
@@ -1237,6 +1250,7 @@ pub fn register(
             let p = path.clone();
             let c = core.clone();
             let k = cache.clone();
+            let snapshots = snapshots.clone();
             async move {
                 let resolved = request_context(&k, &input.context).await;
                 if input.context.trim().is_empty() {
@@ -1244,6 +1258,16 @@ pub fn register(
                         "An explicit cluster context is required".into(),
                     ));
                 }
+                if input.card.as_ref().is_some_and(|card| card.len() > 64) {
+                    return Err(CapabilityError::InvalidInput(
+                        "A dashboard card id is at most 64 characters".into(),
+                    ));
+                }
+                cards::check_card_namespaces(
+                    input.card.is_some(),
+                    &input.namespace,
+                    &input.namespaces,
+                )?;
                 if !input.namespace.is_empty()
                     && (input.namespace.len() > 63
                         || !input
@@ -1323,6 +1347,26 @@ pub fn register(
                 {
                     crd::require(&c, &context, binding).await?;
                 }
+                // A card's target shows only what the card counted. Worked out before
+                // the page's own read, so a card that cannot be evaluated fails the
+                // read rather than leaving every row on a page titled by the card.
+                let counted = match &input.card {
+                    Some(card) => Some(
+                        cards::card_rows(
+                            &snapshots,
+                            &k,
+                            &c,
+                            plugin,
+                            card,
+                            &input.capability,
+                            &context,
+                            &input.namespace,
+                            &input.namespaces,
+                        )
+                        .await?,
+                    ),
+                    None => None,
+                };
                 let mut registry = Registry::new();
                 let _registration = PluginHost::new(c)
                     .register(&mut registry, manifest, &plugin.grants)
@@ -1337,9 +1381,29 @@ pub fn register(
                 {
                     args["namespace"] = json!(input.namespace);
                 }
-                registry
+                let mut out = registry
                     .invoke(&format!("plugin/{}/{}", input.id, input.capability), args)
-                    .await
+                    .await?;
+                if let Some(counted) = counted {
+                    let items = out
+                        .get_mut("items")
+                        .and_then(Value::as_array_mut)
+                        .ok_or_else(|| {
+                            CapabilityError::Handler(
+                                "The page's read returned no rows to narrow to the card's".into(),
+                            )
+                        })?;
+                    // A row the card's snapshot lacks — created since it was read — is
+                    // left out rather than shown as something the card counted.
+                    items.retain(|item| {
+                        let key = (
+                            item["namespace"].as_str().unwrap_or("").to_owned(),
+                            item["name"].as_str().unwrap_or("").to_owned(),
+                        );
+                        counted.contains(&key)
+                    });
+                }
+                Ok(out)
             }
         },
     ));
@@ -2280,6 +2344,8 @@ mod tests {
         let without_events: Vec<_> = grants.iter().filter(|grant| grant.as_str() != "k8s.listEvents").cloned().collect();
         assert!(validate_app(&parsed, &grants, core.clone()).is_ok());
         assert!(validate_app(&parsed, &without_events, core.clone()).is_err());
+        // The example's card targets this page; it would be refused first, for its own reason.
+        value["contributions"].as_object_mut().unwrap().remove("dashboardCards");
         value["contributions"]["pages"][1]["capability"] = json!("events");
         let invalid = Manifest::decode(&value.to_string()).unwrap();
         // The specific refusal: an event reader cannot back a table. Other
@@ -3110,6 +3176,7 @@ mod tests {
         for id in [
             "extensions.read",
             "extensions.resolveColumns",
+            "extensions.resolveCards",
             "extensions.resolvePanels",
             "extensions.catalog",
             "extensions.catalogManifest",
@@ -3118,7 +3185,7 @@ mod tests {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 10);
+        assert_eq!(mcp.list_tools().len(), 11);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

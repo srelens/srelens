@@ -546,3 +546,136 @@
    horizontal keyboard scrolling without widening the containing panel. */
 .extension-bulk-name[data-expanded="true"] { overflow-x: auto; text-overflow: clip; }
 .extension-bulk-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Dashboard cards (#540). Flush tiles divided by hairlines, like the capacity
+   strip's `.stat`s: no gap, no radius, no lifted surface. The band measures
+   its own width rather than the viewport's, because the overview's rail takes
+   a fixed share beside it. */
+.dashboard-cards-band { container-type: inline-size; }
+.dashboard-cards-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.dashboard-cards-message { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 12px; }
+.dashboard-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.dashboard-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 0.6rem 0.85rem;
+  /* Every tile rules its right and bottom edge; the band clips the outer ones. */
+  border-right: 1px solid var(--rule, var(--fl-color-border));
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.dashboard-card[data-size="s"] { grid-column: span 1; }
+.dashboard-card[data-size="m"] { grid-column: span 2; }
+.dashboard-card[data-size="l"] { grid-column: span 4; }
+@container (max-width: 44rem) {
+  .dashboard-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard-card[data-size="m"],
+  .dashboard-card[data-size="l"] { grid-column: span 2; }
+}
+@container (max-width: 26rem) {
+  .dashboard-cards { grid-template-columns: minmax(0, 1fr); }
+  .dashboard-card[data-size] { grid-column: span 1; }
+}
+.dashboard-card-head { display: flex; flex-direction: column; min-width: 0; }
+/* App prose, not machine text: it wraps, so the whole of it is readable
+   without a pointer, and a long unbroken word breaks inside the tile. */
+.dashboard-card-app {
+  font-size: 0.6875rem;
+  color: var(--ink-faint, var(--fl-color-text-muted));
+  overflow-wrap: anywhere;
+}
+.dashboard-card-title {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--ink-soft, inherit);
+  overflow-wrap: anywhere;
+}
+.dashboard-card-link {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  color: var(--accent, var(--fl-color-primary));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.dashboard-card-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.dashboard-card-figure {
+  margin: 0.15rem 0 0;
+  font-size: 1.375rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  font-variant-numeric: tabular-nums;
+}
+/* None is an answer, drawn quieter than a count but still a figure. */
+.dashboard-card[data-state="zero"] .dashboard-card-figure { color: var(--ink-muted, var(--fl-color-text-muted)); }
+.dashboard-card-caption {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--ink-muted, var(--fl-color-text-muted));
+}
+.dashboard-card-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0.4rem 0 0;
+  font-size: 0.75rem;
+  color: var(--ink-muted, var(--fl-color-text-muted));
+}
+/* A failed read: words first, colour second, and never a figure. */
+.dashboard-card-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+}
+.dashboard-card-error p { margin: 0; }
+.dashboard-card-error strong { color: var(--sev, var(--fl-color-danger)); }
+.dashboard-card-statuses,
+.dashboard-card-rows {
+  margin: 0.25rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.75rem;
+}
+.dashboard-card-statuses li { display: flex; justify-content: space-between; gap: 8px; }
+/* Machine text keeps its line and scrolls rather than wrapping. */
+.dashboard-card-row {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+.dashboard-card-row-value { color: var(--ink-muted, var(--fl-color-text-muted)); font-variant-numeric: tabular-nums; }
+
+/* A dashboard card's target page says what it is narrowed to. */
+.extension-card-filter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+  background: var(--accent-wash, transparent);
+  font-size: 0.8125rem;
+}

@@ -71,6 +71,13 @@ describe("gatedCapabilityIds", () => {
     expect(desktop.filter((id) => !HOST_ONLY_CAPABILITY_IDS.includes(id))).toEqual(web);
   });
 
+  // The web registry registers no app capability at all (`build_registry_with_paths`
+  // passes no settings path), so every `extensions.*` id is one only a host has.
+  it("counts every app capability as host-only", () => {
+    const apps = entries.map((c) => c.id).filter((id) => id.startsWith("extensions."));
+    expect(apps.filter((id) => !HOST_ONLY_CAPABILITY_IDS.includes(id))).toEqual([]);
+  });
+
   it("exposes the catalog it derives from, unchanged", () => {
     expect(CAPABILITY_CATALOG).toEqual(entries);
   });

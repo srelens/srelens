@@ -661,7 +661,7 @@ fn an_unsupported_api_range_is_reported_with_the_other_problems() {
         ])
     );
     // One this host cannot decode is told the version it needs, not the field it lacks.
-    value["contributions"]["dashboardCards"] = json!([]);
+    value["contributions"]["notYetAContribution"] = json!([]);
     assert_eq!(
         problems(&errors(&value)),
         expected(&[("EXTENSION_API_INCOMPATIBLE", "srelensApiVersion")])
@@ -699,4 +699,230 @@ fn every_code_is_documented_in_the_specification() {
             "{name} is not documented"
         );
     }
+}
+
+/// The manifest with one card of each type over its custom-resource reader.
+fn with_cards() -> Value {
+    let mut value = manifest();
+    value["contributions"]["dashboardCards"] = json!([
+        {"id":"expiring", "title":"Certificates expiring soon", "size":"s", "type":"count",
+         "source":"applications", "predicate":{"jsonPath":".status.notAfter","within":"14d"},
+         "target":{"page":"applications"}},
+        {"id":"by-status", "title":"By status", "size":"m", "type":"countByStatus", "source":"applications"},
+        {"id":"critical", "title":"Critical CVEs", "size":"m", "type":"metric", "source":"applications",
+         "metric":{"jsonPath":".report.summary.criticalCount","aggregate":"sum"}},
+        {"id":"soonest", "title":"Soonest to expire", "size":"l", "type":"list", "source":"applications",
+         "predicate":{"jsonPath":".status.notAfter","before":"30d"},
+         "list":{"jsonPath":".status.notAfter","order":"asc","limit":5}}
+    ]);
+    // A countByStatus card counts by the status rules for its source's kind (#541).
+    value["capabilities"][0]["arguments"] = json!({"group":"argoproj.io","kind":"Application"});
+    value["contributions"]["statusResolvers"] = json!([{
+        "forKinds":["argoproj.io/Application"],
+        "rules":[{"when":[],"status":"unknown","label":"Unknown"}]
+    }]);
+    value
+}
+
+#[test]
+fn a_status_card_over_a_kind_with_no_status_rules_is_refused_at_install() {
+    // The manifest says statically whether the source's kind has rules; a card
+    // that could never show a figure is refused where the author can fix it.
+    let mut value = with_cards();
+    value["contributions"]["statusResolvers"] = json!([]);
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[(
+            "EXTENSION_INVALID_BINDING",
+            "contributions.dashboardCards[1].type"
+        )])
+    );
+    let error = errors(&value).remove(0);
+    assert!(
+        error.message.contains("argoproj.io/Application"),
+        "{}",
+        error.message
+    );
+    // A reader that does not fix its kind cannot have rules either.
+    let mut unkinded = with_cards();
+    unkinded["capabilities"][0]["arguments"] = json!({"group":"argoproj.io"});
+    unkinded["contributions"]["statusResolvers"] = json!([]);
+    assert_eq!(
+        problems(&errors(&unkinded)),
+        expected(&[(
+            "EXTENSION_INVALID_BINDING",
+            "contributions.dashboardCards[1].type"
+        )])
+    );
+}
+
+#[test]
+fn dashboard_cards_of_every_type_and_size_parse() {
+    use srelens_plugin_host::{CardAggregate, CardSize, CardType};
+    let parsed = Manifest::parse(&with_cards().to_string()).expect("every card type is valid");
+    let cards = &parsed.contributions.dashboard_cards;
+    assert_eq!(
+        cards.iter().map(|c| c.card_type).collect::<Vec<_>>(),
+        [
+            CardType::Count,
+            CardType::CountByStatus,
+            CardType::Metric,
+            CardType::List
+        ]
+    );
+    assert_eq!(
+        cards.iter().map(|c| c.size).collect::<Vec<_>>(),
+        [CardSize::S, CardSize::M, CardSize::M, CardSize::L]
+    );
+    assert_eq!(
+        cards[2].metric.as_ref().unwrap().aggregate,
+        CardAggregate::Sum
+    );
+    assert_eq!(cards[0].target.as_ref().unwrap().page, "applications");
+    // Round-trips to the same JSON: a stored manifest is re-verified from its own bytes.
+    let again: Value = serde_json::to_value(&parsed).unwrap();
+    assert_eq!(
+        again["contributions"]["dashboardCards"],
+        with_cards()["contributions"]["dashboardCards"]
+    );
+}
+
+#[test]
+fn a_card_with_an_unknown_type_or_size_is_a_schema_error_at_its_field() {
+    for (field, value) in [("type", "gauge"), ("size", "xl")] {
+        let mut manifest = with_cards();
+        manifest["contributions"]["dashboardCards"][0][field] = json!(value);
+        let errors = errors(&manifest);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(
+            errors[0].path,
+            format!("contributions.dashboardCards[0].{field}")
+        );
+        assert!(errors[0].message.contains(value), "{}", errors[0].message);
+    }
+}
+
+#[test]
+fn card_rules_are_reported_at_the_field_that_has_to_change() {
+    let mut value = with_cards();
+    let cards = &mut value["contributions"]["dashboardCards"];
+    cards[0]["source"] = json!("missing");
+    cards[0]["predicate"] = json!({"jsonPath":".status.notAfter","within":"soon"});
+    cards[0]["target"] = json!({"page":"nowhere"});
+    cards[1]["id"] = json!("expiring");
+    cards[1]["title"] = json!("By\u{202e}status");
+    cards[1]["metric"] = json!({"jsonPath":".x","aggregate":"sum"});
+    cards[2].as_object_mut().unwrap().remove("metric");
+    cards[3]["list"]["limit"] = json!(11);
+    cards[3]["list"]["jsonPath"] = json!(".status[*].notAfter");
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[
+            (
+                "EXTENSION_UNRESOLVED_CAPABILITY",
+                "contributions.dashboardCards[0].source"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.dashboardCards[0].predicate"
+            ),
+            (
+                "EXTENSION_UNRESOLVED_PAGE",
+                "contributions.dashboardCards[0].target.page"
+            ),
+            (
+                "EXTENSION_DUPLICATE_IDENTIFIER",
+                "contributions.dashboardCards[1].id"
+            ),
+            (
+                "EXTENSION_INVALID_VALUE",
+                "contributions.dashboardCards[1].title"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.dashboardCards[1].metric"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.dashboardCards[2].metric"
+            ),
+            (
+                "EXTENSION_INVALID_VALUE",
+                "contributions.dashboardCards[3].list.limit"
+            ),
+            (
+                "EXTENSION_INVALID_VALUE",
+                "contributions.dashboardCards[3].list.jsonPath"
+            ),
+        ])
+    );
+}
+
+#[test]
+fn a_bad_card_path_fails_install_rather_than_counting_nothing() {
+    for (card, field, path) in [
+        (0, "predicate", "status.notAfter"),
+        (2, "metric", ".report..critical"),
+    ] {
+        let mut value = with_cards();
+        value["contributions"]["dashboardCards"][card][field]["jsonPath"] = json!(path);
+        let found = errors(&value);
+        let at = if field == "predicate" {
+            format!("contributions.dashboardCards[{card}].predicate")
+        } else {
+            format!("contributions.dashboardCards[{card}].metric.jsonPath")
+        };
+        assert!(found.iter().any(|e| e.path == at), "{path}: {found:?}");
+    }
+}
+
+#[test]
+fn a_card_source_is_a_custom_resource_reader_and_its_target_a_page_over_it() {
+    let mut value = with_cards();
+    value["permissions"] = json!(["k8s.listCustomResource", "k8s.listEvents"]);
+    value["capabilities"].as_array_mut().unwrap().push(json!({
+        "name":"events","title":"Events","target":"k8s.listEvents","arguments":{},"inputs":["context","namespace"]}));
+    value["capabilities"].as_array_mut().unwrap().push(json!({
+        "name":"projects","title":"Projects","target":"k8s.listCustomResource",
+        "arguments":{"group":"argoproj.io"},"inputs":["context","namespace"]}));
+    value["contributions"]["pages"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(
+        {"id":"projects","title":"Projects","capability":"projects"}));
+    let cards = &mut value["contributions"]["dashboardCards"];
+    cards[1]["source"] = json!("events");
+    // The target page lists another source, so the card's predicate would filter the wrong rows.
+    cards[0]["target"] = json!({"page":"projects"});
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[
+            (
+                "EXTENSION_UNRESOLVED_CAPABILITY",
+                "contributions.dashboardCards[1].source"
+            ),
+            (
+                "EXTENSION_INVALID_BINDING",
+                "contributions.dashboardCards[0].target.page"
+            ),
+        ])
+    );
+}
+
+#[test]
+fn a_manifest_declares_at_most_sixteen_cards() {
+    let mut value = manifest();
+    let cards: Vec<Value> = (0..17)
+        .map(|i| json!({"id":format!("card-{i}"),"title":"Card","size":"s","type":"count","source":"applications"}))
+        .collect();
+    value["contributions"]["dashboardCards"] = json!(cards);
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[("EXTENSION_INVALID_VALUE", "contributions.dashboardCards")])
+    );
+    value["contributions"]["dashboardCards"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    assert!(Manifest::parse(&value.to_string()).is_ok());
 }

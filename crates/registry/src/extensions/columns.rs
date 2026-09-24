@@ -11,8 +11,8 @@ use std::{
 
 const CACHE_TTL: Duration = Duration::from_secs(5);
 const CACHE_LIMIT: usize = 32;
-type Snapshot = (Instant, Arc<Vec<Value>>);
-type SlotState = Result<Option<Snapshot>, (Instant, CapabilityError)>;
+pub(super) type Snapshot = (Instant, Arc<Vec<Value>>);
+pub(super) type SlotState = Result<Option<Snapshot>, (Instant, CapabilityError)>;
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub(super) struct CacheKey {
     app: String,
@@ -149,15 +149,22 @@ fn copy_error(error: &CapabilityError) -> CapabilityError {
     }
 }
 
-fn key_for_join(app: &str, revision: u64, context: &str, namespace: &str, join: &Join) -> CacheKey {
+/// The snapshot one reader's list is kept under. Keyed by the reader, not by
+/// whoever asked: two join rules, or a column and a dashboard card, over one
+/// granted reader need one Kubernetes list.
+fn reader_key(app: &str, revision: u64, context: &str, namespace: &str, reader: &str) -> CacheKey {
     CacheKey {
         app: app.to_owned(),
         revision,
         context: context.to_owned(),
         namespace: namespace.to_owned(),
-        // Two match rules over one granted reader need one Kubernetes list.
-        reader: join.capability.clone(),
+        reader: reader.to_owned(),
     }
+}
+
+#[cfg(test)]
+fn key_for_join(app: &str, revision: u64, context: &str, namespace: &str, join: &Join) -> CacheKey {
+    reader_key(app, revision, context, namespace, &join.capability)
 }
 
 async fn cached_objects<F, Fut>(
@@ -220,19 +227,45 @@ pub(super) async fn join_objects(
     context: &str,
     namespace: &str,
 ) -> Result<Arc<Vec<Value>>, CapabilityError> {
+    reader_objects(
+        cache,
+        client_cache,
+        core,
+        plugin,
+        &join.capability,
+        context,
+        namespace,
+    )
+    .await
+}
+
+/// Every object a granted custom-resource reader lists in `namespace` (`""`
+/// is all), complete, through the snapshot joins and dashboard cards share: a
+/// table and a dashboard open on one reader list it once per five seconds.
+/// A list that reached the read limit is an error, because anything computed
+/// over it would be silently incomplete.
+pub(super) async fn reader_objects(
+    cache: &JoinCache,
+    client_cache: &srelens_kube::client_cache::ClientCache,
+    core: &Registry,
+    plugin: &Installed,
+    reader: &str,
+    context: &str,
+    namespace: &str,
+) -> Result<Arc<Vec<Value>>, CapabilityError> {
     let binding = plugin
         .manifest
         .capabilities
         .iter()
-        .find(|binding| binding.name == join.capability)
-        .ok_or_else(|| CapabilityError::Handler("Declared join reader is unavailable".into()))?;
+        .find(|binding| binding.name == reader && binding.target == "k8s.listCustomResource")
+        .ok_or_else(|| CapabilityError::Handler("Declared reader is unavailable".into()))?;
     crd::require(core, context, binding).await?;
-    let key = key_for_join(
+    let key = reader_key(
         &plugin.manifest.id,
         plugin.revision,
         context,
         namespace,
-        join,
+        reader,
     );
     let argument = |key: &str| {
         binding
@@ -253,7 +286,7 @@ pub(super) async fn join_objects(
         ).await?;
         if truncated {
             return Err(CapabilityError::Handler(
-                "Joined resource list reached its 2,000-object limit; joined values would be incomplete".into(),
+                "Resource list reached its 2,000-object limit; joined values and dashboard figures read from it would be incomplete".into(),
             ));
         }
         Ok(objects)
@@ -429,8 +462,9 @@ pub(super) fn register(
     path: PathBuf,
     core: Arc<Registry>,
     client_cache: Arc<srelens_kube::client_cache::ClientCache>,
+    cache: JoinCache,
 ) {
-    let cache: JoinCache = Arc::new(Mutex::new(HashMap::new()));
+    // Panels, columns and dashboard cards share one snapshot of each reader.
     super::panels::register(
         reg,
         path.clone(),
@@ -1325,6 +1359,7 @@ mod tests {
             path.clone(),
             core,
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            JoinCache::default(),
         );
         let payload = |kind: &str| {
             json!({"id":"org.example.argocd","revision":revision,"context":"cluster/a",
@@ -1376,6 +1411,7 @@ mod tests {
             path.clone(),
             core.clone(),
             srelens_kube::client_cache::ClientCache::new_many(vec![]),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         let uids: Vec<Value> = (0..1_000)
             .map(|index| {
