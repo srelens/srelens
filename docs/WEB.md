@@ -230,9 +230,21 @@ URI, pin a fixed port with `SRELENS_CLUSTER_LOGIN_PORT` and register
   against a **private helm home** (`HELM_CONFIG_HOME`/`HELM_CACHE_HOME`/
   `HELM_DATA_HOME` under their runtime dir), so even allowed operations never
   share repository config, cache, or plugins across users.
-- **Apps are desktop-only for now.** Every `extensions.*` capability is refused
-  until app inventories are kept per user
-  ([#515](https://github.com/srelens/srelens/issues/515)). The four host action primitives are refused too: the web has no installed app to scope their writes or consent prompt. `k8s.getCustomResource` stays
+- **Apps are per user.** Each signed-in user has their own app inventory —
+  installs, grants, enabled state, cluster limits and settings — stored as their
+  row of the SQLite database, not under `runtime/`, so it survives restarts and
+  environment rebuilds and is deleted with the account
+  ([#515](https://github.com/srelens/srelens/issues/515)). No user can list,
+  read or change another's. The **app catalog** is one cache on the data volume
+  (`$SRELENS_DATA/cache/extensions.catalog.json`) that users read and only the
+  server writes: it checks hourly and fetches
+  `raw.githubusercontent.com/srelens/extensions` again once its copy is a day
+  old, so the server makes that outbound request whether or not anyone opens
+  the catalog; a failed fetch keeps the cached copy. Every install still
+  downloads and verifies its release for the user installing it. Declared app
+  actions run only through the user's own installed app and its confirmation;
+  the host action primitives stay refused when called directly. App pages are
+  not live on the web: they read on Refresh. `k8s.getCustomResource` stays
   available: it is a read under your own kubeconfig and RBAC, like every other
   custom-resource read.
 

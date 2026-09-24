@@ -17,7 +17,7 @@
 //! providers (#569) are further `source` kinds on the same wire; none of them
 //! changes the frames.
 
-use super::{columns, crd, read_contribution, resolver_app, Inventory, Read};
+use super::{columns, crd, read_contribution, resolver_app, Inventory, InventoryKey, Read, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use srelens_capability::{Annotations, Capability, CapabilityError, Registry};
@@ -29,7 +29,6 @@ use srelens_streams::app::{
 use srelens_streams::EventSink;
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
@@ -200,7 +199,7 @@ pub struct OpenStreamOut {
 /// this process that serves it: the desktop UI's and an MCP server's registry
 /// see the same streams, and a lifecycle change made through either ends them.
 pub struct ExtensionStreams {
-    path: PathBuf,
+    path: Store,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
     snapshots: columns::JoinCache,
@@ -449,7 +448,7 @@ impl WatchAsk {
     /// not the cluster; [`WatchAsk::kind_served`] asks the cluster.
     async fn authorize(
         &self,
-        path: &Path,
+        path: &Store,
         core: &Arc<Registry>,
         cache: &Arc<srelens_kube::client_cache::ClientCache>,
     ) -> Result<(String, Binding), String> {
@@ -457,7 +456,7 @@ impl WatchAsk {
             return Err("An explicit cluster context is required".into());
         }
         let (state, index, context) = resolver_app(
-            path.to_path_buf(),
+            path.clone(),
             core,
             cache,
             &self.id,
@@ -518,7 +517,7 @@ struct Follow {
     namespace: String,
     target: CustomWatchTarget,
     binding: Binding,
-    path: PathBuf,
+    path: Store,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
     snapshots: columns::JoinCache,
@@ -699,15 +698,15 @@ fn check_channel(channel: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The live [`ExtensionStreams`] per inventory path.
-fn live() -> &'static Mutex<HashMap<PathBuf, Weak<ExtensionStreams>>> {
-    static LIVE: OnceLock<Mutex<HashMap<PathBuf, Weak<ExtensionStreams>>>> = OnceLock::new();
+/// The live [`ExtensionStreams`] per inventory.
+fn live() -> &'static Mutex<HashMap<InventoryKey, Weak<ExtensionStreams>>> {
+    static LIVE: OnceLock<Mutex<HashMap<InventoryKey, Weak<ExtensionStreams>>>> = OnceLock::new();
     LIVE.get_or_init(Default::default)
 }
 
-/// Tell the streams of `path` that the inventory was written as `state`.
-pub(super) fn announce(path: &Path, state: &Inventory) {
-    let streams = live().lock().unwrap().get(path).and_then(Weak::upgrade);
+/// Tell the streams of the inventory `key` names that it was written as `state`.
+pub(super) fn announce(key: &InventoryKey, state: &Inventory) {
+    let streams = live().lock().unwrap().get(key).and_then(Weak::upgrade);
     if let Some(streams) = streams {
         streams.reconcile(state);
     }
@@ -726,18 +725,20 @@ struct StreamsOut {
 #[serde(deny_unknown_fields)]
 struct Empty {}
 
-/// Join (or start) the streams of `path`, and register `extensions.streams`,
-/// the read path the Inspector (#575) reads open streams and traffic from.
+/// Join (or start) the streams of the inventory at `path`, and register
+/// `extensions.streams`, the read path the Inspector (#575) reads open streams and
+/// traffic from.
 pub(super) fn register(
     reg: &mut Registry,
-    path: PathBuf,
+    path: Store,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
     snapshots: columns::JoinCache,
 ) -> Arc<ExtensionStreams> {
     let streams = {
+        let key = path.key();
         let mut live = live().lock().unwrap();
-        match live.get(&path).and_then(Weak::upgrade) {
+        match live.get(&key).and_then(Weak::upgrade) {
             Some(streams) => streams,
             None => {
                 let streams = Arc::new(ExtensionStreams {
@@ -752,7 +753,7 @@ pub(super) fn register(
                     listeners: Mutex::new(Vec::new()),
                 });
                 live.retain(|_, weak| weak.strong_count() > 0);
-                live.insert(path, Arc::downgrade(&streams));
+                live.insert(key, Arc::downgrade(&streams));
                 streams
             }
         }
@@ -783,6 +784,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use srelens_streams::test_util::TestSink;
+    use std::path::{Path, PathBuf};
 
     /// What `@srelens/core` sends, byte for byte: `extensionStreams.test.ts`
     /// holds the wrapper to this same file.

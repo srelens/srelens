@@ -15,6 +15,7 @@ mod resource;
 #[cfg(test)]
 mod settings_tests;
 mod signing;
+mod store;
 pub mod streams;
 #[cfg(test)]
 mod version_tests;
@@ -31,6 +32,41 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+pub use catalog::SharedCatalog;
+pub use store::{InventoryKey, InventoryLock, InventoryStore};
+
+/// An inventory, as every capability that reads or changes one holds it.
+type Store = Arc<dyn InventoryStore>;
+
+/// Where one registry keeps its apps: the inventory, and the catalog cache that says
+/// which installed versions are catalog releases.
+#[derive(Clone)]
+pub struct Apps {
+    inventory: Store,
+    catalog: catalog::CatalogCache,
+}
+
+impl Apps {
+    /// One web user's apps (#515): their own inventory, and the catalog every user of the
+    /// server shares and none of them can write.
+    pub fn with_shared_catalog(inventory: Arc<dyn InventoryStore>, catalog: SharedCatalog) -> Self {
+        Self {
+            inventory,
+            catalog: catalog::CatalogCache::Shared(catalog),
+        }
+    }
+}
+
+/// The desktop's layout: the inventory file, and this host's own catalog cache beside it.
+impl From<PathBuf> for Apps {
+    fn from(path: PathBuf) -> Self {
+        Self {
+            catalog: catalog::CatalogCache::Owned(path.with_extension("catalog.json")),
+            inventory: Arc::new(path),
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -185,7 +221,7 @@ impl Default for Inventory {
 }
 /// Recheck installed app authority for each native contribution read.
 async fn resolver_app(
-    path: PathBuf,
+    inventory: Store,
     core: &Arc<Registry>,
     client_cache: &Arc<srelens_kube::client_cache::ClientCache>,
     id: &str,
@@ -193,7 +229,7 @@ async fn resolver_app(
     context: String,
 ) -> Result<(Inventory, usize, String), CapabilityError> {
     let resolved = request_context(client_cache, &context).await;
-    let state = tokio::task::spawn_blocking(move || read(&path))
+    let state = tokio::task::spawn_blocking(move || read(&inventory))
         .await
         .map_err(|error| CapabilityError::Handler(error.to_string()))?
         .map_err(CapabilityError::Handler)?;
@@ -304,18 +340,11 @@ struct Read {
 #[serde(deny_unknown_fields)]
 struct Empty {}
 
-fn read(path: &Path) -> Result<Inventory, String> {
-    // One byte past the limit is enough to refuse it, so an oversized file is never loaded whole.
-    let mut raw = Vec::new();
-    match fs::File::open(path).and_then(|file| {
-        std::io::Read::read_to_end(
-            &mut std::io::Read::take(file, MAX_INVENTORY_BYTES as u64 + 1),
-            &mut raw,
-        )
-    }) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Inventory::default()),
-        Err(e) => return Err(format!("read extension inventory: {e}")),
+fn read<S: InventoryStore + ?Sized>(store: &S) -> Result<Inventory, String> {
+    // One byte past the limit is enough to refuse it, so an oversized inventory is never
+    // loaded whole.
+    let Some(raw) = store.load(MAX_INVENTORY_BYTES)? else {
+        return Ok(Inventory::default());
     };
     if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
@@ -457,12 +486,12 @@ fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
     }
     serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())
 }
-fn write(path: &Path, state: &Inventory) -> Result<(), String> {
+fn write<S: InventoryStore + ?Sized>(store: &S, state: &Inventory) -> Result<(), String> {
     let raw = saved_form(state)?;
     if raw.len() > MAX_INVENTORY_BYTES {
         return Err("extension inventory exceeds 1 MiB".into());
     }
-    crate::durable::replace(path, &raw).map_err(|e| format!("save extension inventory: {e}"))
+    store.save(&raw)
 }
 /// The `k8s.listCustomResource` input the host fills from `statusResolvers`.
 const STATUS_RULES_ARGUMENT: &str = "statusRules";
@@ -854,9 +883,17 @@ fn take_revision(state: &mut Inventory) -> Result<u64, String> {
         .ok_or("extension revision limit reached")?;
     Ok(revision)
 }
+/// `extensions.configure` on the desktop's layout, for the tests that name an inventory by
+/// its file (see [`Apps`]'s `From<PathBuf>`).
+#[cfg(test)]
 fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventory, String> {
-    let _lock = super::settings::write_lock(path)?;
-    let mut state = read(path)?;
+    configure(&Apps::from(path.to_path_buf()), core, input)
+}
+/// `extensions.configure`: one read-modify-write of `apps`'s inventory, under its lock.
+fn configure(apps: &Apps, core: Arc<Registry>, input: Configure) -> Result<Inventory, String> {
+    let store = &*apps.inventory;
+    let _lock = store.lock()?;
+    let mut state = read(store)?;
     match input {
         Configure::UnsignedApps {
             allow_unsigned_apps,
@@ -883,11 +920,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                 "{:x}",
                 <sha2::Sha256 as sha2::Digest>::digest(source.as_bytes())
             );
-            let origin = if catalog::cached_release(
-                &path.with_extension("catalog.json"),
-                &manifest.id,
-                &checksum,
-            ) {
+            let origin = if apps.catalog.lists_release(&manifest.id, &checksum) {
                 Source::Catalog
             } else {
                 Source::Local
@@ -1075,8 +1108,8 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
         }
     }
     apply_unsigned_policy(&mut state);
-    write(path, &state)?;
-    streams::announce(path, &state);
+    write(store, &state)?;
+    streams::announce(&store.key(), &state);
     Ok(state)
 }
 #[derive(Deserialize, JsonSchema)]
@@ -1221,13 +1254,17 @@ fn permission_diff(
         unchanged: current.intersection(&old).cloned().collect(),
     }
 }
+/// Register every `extensions.*` capability over `apps`: an inventory file for the
+/// desktop's layout, or one web user's inventory and the shared catalog.
 pub fn register(
     reg: &mut Registry,
-    path: PathBuf,
+    apps: impl Into<Apps>,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
 ) -> Arc<streams::ExtensionStreams> {
-    catalog::register(reg, path.with_extension("catalog.json"), core.clone());
+    let apps: Apps = apps.into();
+    let path = apps.inventory.clone();
+    catalog::register(reg, apps.catalog.clone(), core.clone());
     resource::register(reg, path.clone(), core.clone(), cache.clone());
     // One snapshot of each granted reader, shared by table columns, dashboard
     // cards and a card's target page, so the three agree and list it once.
@@ -1249,17 +1286,16 @@ pub fn register(
             }
         },
     ));
-    let p = path.clone();
     let c = core.clone();
     reg.register(Capability::typed::<Configure, Inventory, _, _>(
         "extensions.configure",
         "Install, enable, remove or configure local extensions; requires approval",
         Annotations::MUTATING,
         move |input| {
-            let p = p.clone();
+            let apps = apps.clone();
             let c = c.clone();
             async move {
-                tokio::task::spawn_blocking(move || mutate(&p, c, input))
+                tokio::task::spawn_blocking(move || configure(&apps, c, input))
                     .await
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)
@@ -1319,7 +1355,7 @@ pub fn register(
 /// `extensions.read`: every check it makes is made again on each call, which
 /// is what lets a stream re-run it on every tick (#565).
 async fn read_contribution(
-    p: PathBuf,
+    p: Store,
     c: Arc<Registry>,
     k: Arc<srelens_kube::client_cache::ClientCache>,
     snapshots: columns::JoinCache,

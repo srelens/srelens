@@ -136,7 +136,7 @@ const SETTINGS_SECTIONS: Array<{
   { id: "security", label: "Security", description: "Master password and biometric unlock", icon: Shield },
   { id: "backup", label: "Backup", description: "Move this setup to another machine", icon: Archive },
   { id: "logs", label: "Application logs", description: "Diagnostics and log file", icon: ScrollText },
-  { id: "extensions", label: "Apps", description: "Local apps and permissions", icon: Plug },
+  { id: "extensions", label: "Apps", description: "Installed apps and permissions", icon: Plug },
   { id: "updates", label: "Updates", description: "App version and updates", icon: Download },
 ];
 
@@ -206,8 +206,8 @@ export function SettingsView({
           s.id !== "assistant" &&
           s.id !== "security" &&
           s.id !== "backup" &&
-          s.id !== "updates" &&
-          s.id !== "extensions",
+          s.id !== "updates",
+        // Apps stays: the web server keeps each user's own apps (#515).
       );
 
   const [section, setSection] = useState<SettingsSection>(initialSection);
@@ -1130,7 +1130,7 @@ export function SettingsView({
             </SectionPanel>
           )}
 
-          {section === "extensions" && isTauri() && <ExtensionManager />}
+          {section === "extensions" && <ExtensionManager />}
           {section === "updates" && isTauri() && (
             <SectionPanel title="Updates" description="Check for and install new versions of srelens.">
               <div className="fl-settings-update">

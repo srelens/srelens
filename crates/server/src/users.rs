@@ -56,6 +56,13 @@ pub struct UserEnv {
 pub struct UserEnvs {
     factory: RegistryFactory,
     data_dir: PathBuf,
+    /// The app catalog every user of this server reads (#515). Only the server
+    /// refreshes it (`serve`); users' capabilities never write it.
+    catalog: srelens_registry::SharedCatalog,
+    /// One app-inventory writer lock per user, kept across environment rebuilds:
+    /// a request still running on an old environment and one on its replacement
+    /// write the same row.
+    inventory_locks: Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
     /// Public base URL of this server, used to build the cluster-OIDC redirect
     /// URI (`<public_url>/auth/cluster/callback`) for the token refresh client.
     public_url: String,
@@ -75,6 +82,13 @@ fn user_runtime_dir(data_dir: &Path, user_id: i64) -> PathBuf {
         .join("runtime")
         .join("users")
         .join(user_id.to_string())
+}
+
+/// Where the shared app catalog cache lives: on the data volume, outside
+/// `runtime/`, since it is neither anyone's nor secret, and a restart should not
+/// have to fetch it again.
+fn shared_catalog_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("cache").join("extensions.catalog.json")
 }
 
 fn create_private_dir(dir: &Path) -> Result<(), String> {
@@ -108,11 +122,18 @@ impl UserEnvs {
     pub fn new(factory: RegistryFactory, data_dir: PathBuf, public_url: String) -> Self {
         Self {
             factory,
+            catalog: srelens_registry::SharedCatalog::new(shared_catalog_path(&data_dir)),
+            inventory_locks: Mutex::new(HashMap::new()),
             data_dir,
             public_url,
             map: Mutex::new(HashMap::new()),
             build_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The app catalog every user reads, for the server to keep fresh.
+    pub fn catalog(&self) -> &srelens_registry::SharedCatalog {
+        &self.catalog
     }
 
     /// Remove ALL materialized runtime files (startup hygiene: a crash may
@@ -201,7 +222,25 @@ impl UserEnvs {
             }))
             .await;
 
-        let registry = Arc::new((self.factory)(cache.clone(), paths.clone()));
+        // The user's own apps: their inventory row, and the catalog every user
+        // shares. Never a file under `dir`, which goes with the environment.
+        let inventory_lock = self
+            .inventory_locks
+            .lock()
+            .unwrap()
+            .entry(user_id)
+            .or_default()
+            .clone();
+        let apps = srelens_registry::Apps::with_shared_catalog(
+            Arc::new(crate::app_inventory::DbInventory::new(
+                db.clone(),
+                user_id,
+                tokio::runtime::Handle::current(),
+                inventory_lock,
+            )),
+            self.catalog.clone(),
+        );
+        let registry = Arc::new((self.factory)(cache.clone(), paths.clone(), apps));
         let streams = Arc::new(crate::streams::UserStreams::new(cache.clone()));
         let env = Arc::new(UserEnv {
             registry,
@@ -286,7 +325,7 @@ mod tests {
     use srelens_streams::test_util::TestSink;
 
     fn factory() -> RegistryFactory {
-        Arc::new(|_cache, paths: Vec<PathBuf>| {
+        Arc::new(|_cache, paths: Vec<PathBuf>, _apps| {
             let mut reg = Registry::new();
             let n = paths.len();
             reg.register(Capability::read_only(

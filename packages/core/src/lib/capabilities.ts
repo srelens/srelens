@@ -154,18 +154,19 @@ export const CAPABILITY_CATALOG: readonly CapabilityFacts[] = rows as readonly C
  * The host-owned ids the catalog carries that a WEB registry does not register.
  *
  * The committed catalog projects `build_registry()` — the desktop/MCP registry,
- * which includes durable desktop settings and local extension inventory. A web server builds its
- * registry through `build_registry_with_paths`, which passes no settings path,
- * because web settings are per-user SQLite rows rather than a file on the host;
- * `web_registry_omits_host_desktop_settings` (`crates/registry/src/lib.rs`)
- * pins those host-owned ids as the difference.
+ * which includes the durable desktop settings file. A web server builds each
+ * user's registry through `build_registry_for_user`, which registers that
+ * user's own apps (#515) but no settings capabilities, because web settings are
+ * per-user SQLite rows rather than a file on the host;
+ * `a_web_users_registry_has_apps_but_no_desktop_settings`
+ * (`crates/registry/src/lib.rs`) pins this list as the difference.
  *
  * Named here so a count shown to a reader is a count of what THEIR build
  * registers. Off by one is a small error, and shipping a small error while
  * fixing a large one is how the large one came to be.
  */
 export const HOST_ONLY_CAPABILITY_IDS: readonly string[] = [
-  "settings.get", "settings.set", "extensions.catalog", "extensions.catalogManifest", "extensions.list", "extensions.configure", "extensions.validate", "extensions.read", "extensions.resolveColumns", "extensions.resolveCards", "extensions.resolvePanels", "extensions.resolveLinks", "extensions.streams", "extensions.resource", "extensions.action",
+  "settings.get", "settings.set",
 ];
 
 /**

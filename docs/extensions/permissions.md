@@ -96,5 +96,7 @@ admitted may finish.
 
 ## Web host
 
-Apps are not available on the multi-user web host yet. See
-[capabilities.md](capabilities.md#web-host).
+Each user of the multi-user web host grants permissions to their own apps; one user's
+grants never reach another's. Declared actions run only through `extensions.action`,
+after the host confirmation, and the host action primitives stay refused when called
+directly. See [capabilities.md](capabilities.md#web-host).

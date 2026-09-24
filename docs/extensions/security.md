@@ -28,7 +28,8 @@ mitigation and the risk that remains.
 - **Downloads are constrained.** Only the fixed catalog URL, GitHub release assets and
   GitHub's release-asset redirects, with bounded sizes, timeouts and redirect counts.
   The frontend never fetches catalog URLs or writes catalog caches to browser storage.
-- **The web host refuses app capabilities** until state is per user
+- **The web host keeps apps per user.** Each user's inventory is their own database
+  row, and the one shared catalog cache is written only by the server
   ([capabilities.md](capabilities.md#web-host)).
 - **Every write is recorded locally, wherever it came from.** A mutating or
   sensitive capability call is appended to `audit.jsonl` whether an agent made

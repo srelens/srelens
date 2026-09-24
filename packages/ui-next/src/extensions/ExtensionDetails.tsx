@@ -1,13 +1,13 @@
 import { useContext, useState } from "react";
 import {
   CAPABILITY_CATALOG,
-  saveTextFile,
   type ExtensionChange,
   type ExtensionPreviousVersion,
   type ExtensionSource,
   type InstalledExtension,
 } from "@srelens/core";
 import { CodeEditor } from "@srelens/ui-kit";
+import { saveOrDownload } from "../lib/saveOrDownload";
 import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionControls } from "./ExtensionControls";
 import { escapeFormatCharacters } from "./displayText";
@@ -82,7 +82,8 @@ export function ExtensionDetails({
 
   async function exportSettings() {
     try {
-      await saveTextFile(`${manifest.id}-settings.json`, `${JSON.stringify(plugin.settings, null, 2)}\n`);
+      // A browser download on the web, which has no `save_text_file` command.
+      await saveOrDownload(`${manifest.id}-settings.json`, `${JSON.stringify(plugin.settings, null, 2)}\n`);
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
     }

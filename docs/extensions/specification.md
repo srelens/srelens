@@ -12,7 +12,8 @@ Tracking: [#163](https://github.com/srelens/srelens/issues/163). Field reference
 ## Scope
 
 - **Hosts.** Apps run in the desktop app, whose extension capabilities are also exposed
-  over MCP. The web host refuses every `extensions.*` capability.
+  over MCP, and on the web host, where each signed-in user has their own inventory
+  ([capabilities.md](capabilities.md#web-host)).
 - **The terminal UI is out of scope for extension API 1.0.** The TUI neither loads nor
   renders apps, and nothing in this specification applies to it.
 - **Clusters.** An app is installed for the whole application. It may be limited to

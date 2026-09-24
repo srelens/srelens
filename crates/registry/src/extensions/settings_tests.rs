@@ -346,7 +346,7 @@ async fn refresh(
     let mut reg = Registry::new();
     resource::register(
         &mut reg,
-        path.to_path_buf(),
+        Arc::new(path.to_path_buf()),
         core,
         srelens_kube::client_cache::ClientCache::new_many(vec![]),
     );

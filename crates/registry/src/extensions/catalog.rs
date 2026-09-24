@@ -7,6 +7,7 @@ use srelens_plugin_host::{
 use std::{
     collections::BTreeSet,
     io::Read as _,
+    sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 const CATALOG_URL: &str = "https://raw.githubusercontent.com/srelens/extensions/main/catalog.json";
@@ -295,6 +296,86 @@ fn load_with(
 fn load(path: &Path, refresh: bool) -> Result<Snapshot, String> {
     load_with(path, refresh, || download(CATALOG_URL, MAX_CATALOG))
 }
+/// The catalog cache a registry's apps read.
+#[derive(Clone)]
+pub(super) enum CatalogCache {
+    /// This host's own cache file (the desktop). `extensions.catalog` fetches the catalog
+    /// into it when it is a day old or the reader asks.
+    Owned(PathBuf),
+    /// The cache every user of one server shares. Capabilities only read it.
+    Shared(SharedCatalog),
+}
+impl CatalogCache {
+    /// The catalog as this cache has it; an owned cache is fetched first when it is a day
+    /// old or `refresh` asks. The shared cache never is: it is what the server last fetched.
+    fn snapshot(&self, refresh: bool) -> Result<Snapshot, String> {
+        match self {
+            Self::Owned(path) => load(path, refresh),
+            Self::Shared(shared) => shared.read(),
+        }
+    }
+    /// Whether the cached catalog, fresh or stale, lists this exact release. Never fetches.
+    pub(super) fn lists_release(&self, id: &str, sha256: &str) -> bool {
+        let path = match self {
+            Self::Owned(path) => path,
+            Self::Shared(shared) => &shared.path,
+        };
+        cached_release(path, id, sha256)
+    }
+}
+/// The catalog cache every user of one web server shares (#515).
+///
+/// The catalog is not anyone's: it is the fixed public catalog, the same for every user.
+/// What is per user is the inventory, and every install from this cache downloads and
+/// verifies its release again for the user installing it. So one cache serves them all,
+/// and nothing a user sends can write it: their `extensions.catalog` and
+/// `extensions.catalogManifest` read it and never fetch into it, and only the server, on
+/// its own schedule through [`SharedCatalog::refresh_if_stale`], replaces it — with what it
+/// downloaded from the fixed catalog URL and validated, exactly as a desktop refresh does.
+#[derive(Clone)]
+pub struct SharedCatalog {
+    path: PathBuf,
+    /// Why the server's last refresh failed, if it did, for readers of a stale cache.
+    last_error: Arc<Mutex<Option<String>>>,
+}
+impl SharedCatalog {
+    /// The shared cache kept at `path`. Nothing is read or fetched until it is used.
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            last_error: Arc::default(),
+        }
+    }
+    /// Fetch the catalog into the cache when it is missing or a day old, as a desktop
+    /// does when its catalog is opened. For the server's own schedule: no capability calls
+    /// it. A failed fetch keeps the cache as it was, and says why.
+    pub fn refresh_if_stale(&self) -> Result<(), String> {
+        self.refresh_if_stale_with(|| download(CATALOG_URL, MAX_CATALOG))
+    }
+    /// [`SharedCatalog::refresh_if_stale`], with the fetch supplied. What it returns is
+    /// validated as a downloaded catalog is.
+    pub fn refresh_if_stale_with(
+        &self,
+        fetch: impl FnOnce() -> Result<Vec<u8>, String>,
+    ) -> Result<(), String> {
+        let outcome =
+            load_with(&self.path, false, fetch).and_then(|snapshot| match snapshot.error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            });
+        *self.last_error.lock().unwrap() = outcome.as_ref().err().cloned();
+        outcome
+    }
+    /// What a user reads: the cache as the server last fetched it. Never fetches and never
+    /// writes it; a cache past its day is returned as stale, with why it was not refreshed.
+    fn read(&self) -> Result<Snapshot, String> {
+        let why = match self.last_error.lock().unwrap().clone() {
+            Some(error) => format!("the server could not refresh the shared catalog: {error}"),
+            None => "the server has not refreshed the shared catalog yet".to_owned(),
+        };
+        load_with(&self.path, false, || Err(why))
+    }
+}
 /// Whether the cached catalog, fresh or stale, lists this exact release. Never fetches.
 pub(super) fn cached_release(path: &Path, id: &str, sha256: &str) -> bool {
     load_with(path, false, || {
@@ -361,16 +442,16 @@ fn verify_release(entry: &Entry, raw: &[u8], signature: Option<Vec<u8>>) -> Resu
         signature,
     })
 }
-pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
-    let p = path.clone();
+pub(super) fn register(reg: &mut Registry, cache: CatalogCache, core: Arc<Registry>) {
+    let c = cache.clone();
     reg.register(Capability::typed::<ListIn, Snapshot, _, _>(
         "extensions.catalog",
         "Browse the native extension catalog with a durable cache; never connects clusters",
         Annotations::READ_ONLY,
         move |input| {
-            let path = p.clone();
+            let cache = c.clone();
             async move {
-                tokio::task::spawn_blocking(move || load(&path, input.refresh))
+                tokio::task::spawn_blocking(move || cache.snapshot(input.refresh))
                     .await
                     .map_err(|e| CapabilityError::Handler(e.to_string()))?
                     .map_err(CapabilityError::Handler)
@@ -378,9 +459,9 @@ pub(super) fn register(reg: &mut Registry, path: PathBuf, core: Arc<Registry>) {
         },
     ));
     reg.register(Capability::typed::<ManifestIn, Review, _, _>("extensions.catalogManifest", "Download and checksum-verify a catalog manifest for permission review; does not install it", Annotations::READ_ONLY, move |input| {
-        let path = path.clone(); let core = core.clone();
+        let cache = cache.clone(); let core = core.clone();
         async move { tokio::task::spawn_blocking(move || {
-            let state = load(&path, false)?;
+            let state = cache.snapshot(false)?;
             let entry = state.catalog.extensions.iter().find(|e| e.id == input.id && e.release.sha256 == input.sha256).ok_or("Catalog release changed; refresh and review it again")?;
             if !compatible(&entry.release.srelens_api_version) { return Err("Extension requires a different host API version".to_string()); }
             let signature = signature_url(entry)?.map(|url| download(&url, 64)).transpose()?;
@@ -555,7 +636,7 @@ mod tests {
 
         let mut reg = Registry::new();
         let core = Arc::new(Registry::new());
-        register(&mut reg, path, core);
+        register(&mut reg, CatalogCache::Owned(path), core);
 
         let cap_list = reg.get("extensions.catalog").unwrap();
         let list_res = (cap_list.handler)(serde_json::json!({"refresh": false}))
@@ -569,6 +650,86 @@ mod tests {
             (cap_manifest.handler)(serde_json::json!({"id": "nonexistent", "sha256": "fake"}))
                 .await;
         assert!(err_res.is_err());
+    }
+    /// The web's shared cache (#515): a user's capabilities read it, whatever they ask,
+    /// and neither fetch nor write it. Only the server's refresh fills it.
+    #[tokio::test]
+    async fn no_capability_fetches_into_or_writes_the_shared_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache").join("extensions.catalog.json");
+        let shared = SharedCatalog::new(path.clone());
+        let mut reg = Registry::new();
+        register(
+            &mut reg,
+            CatalogCache::Shared(shared.clone()),
+            Arc::new(Registry::new()),
+        );
+        let refresh = json!({"refresh": true});
+
+        // Nothing fetched yet: the read says so rather than going to the network.
+        let refused = reg
+            .invoke("extensions.catalog", refresh.clone())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("has not refreshed the shared catalog yet"),
+            "{refused}"
+        );
+        assert!(!path.exists());
+
+        shared.refresh_if_stale_with(|| Ok(fixture())).unwrap();
+        let saved = fs::read(&path).unwrap();
+        // Asked to refresh, a user gets the server's copy, unchanged on disk.
+        let read = reg
+            .invoke("extensions.catalog", refresh.clone())
+            .await
+            .unwrap();
+        assert_eq!(read["stale"], json!(false));
+        assert_eq!(read["catalog"]["extensions"].as_array().unwrap().len(), 2);
+        assert_eq!(fs::read(&path).unwrap(), saved);
+        // A fresh cache is not fetched again by the server either.
+        shared
+            .refresh_if_stale_with(|| unreachable!("a fresh cache is not fetched"))
+            .unwrap();
+        let entry = parse_catalog(&fixture()).unwrap().extensions.remove(0);
+        let cache = CatalogCache::Shared(shared.clone());
+        assert!(cache.lists_release(&entry.id, &entry.release.sha256));
+        assert!(reg
+            .invoke(
+                "extensions.catalogManifest",
+                json!({"id": "org.example.missing", "sha256": "0".repeat(64)})
+            )
+            .await
+            .is_err());
+        assert_eq!(fs::read(&path).unwrap(), saved);
+
+        // A day old, it is served as stale, with why the server has not replaced it.
+        let mut old: Snapshot = serde_json::from_slice(&saved).unwrap();
+        old.fetched_at = 0;
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let aged = fs::read(&path).unwrap();
+        let read = reg
+            .invoke("extensions.catalog", refresh.clone())
+            .await
+            .unwrap();
+        assert_eq!(read["stale"], json!(true));
+        assert!(read["error"]
+            .as_str()
+            .unwrap()
+            .contains("has not refreshed"));
+        let failed = shared.refresh_if_stale_with(|| Err("offline".into()));
+        assert_eq!(failed.unwrap_err(), "offline");
+        let read = reg.invoke("extensions.catalog", refresh).await.unwrap();
+        assert_eq!(
+            read["error"],
+            json!("the server could not refresh the shared catalog: offline")
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            aged,
+            "a failed refresh keeps the cache"
+        );
     }
     #[test]
     fn additive_catalog_fields_do_not_break_released_hosts() {

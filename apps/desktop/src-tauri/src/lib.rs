@@ -66,8 +66,8 @@ use watch::{start_resource_watch, stop_watch};
 
 pub use appimage::gio_module_dir_for_appimage;
 pub use capabilities::{
-    build_registry, build_registry_with_paths, build_registry_with_paths_and_settings,
-    default_settings_path,
+    build_registry, build_registry_for_user, build_registry_with_paths,
+    build_registry_with_paths_and_settings, default_settings_path,
 };
 
 /// Size the main window to a comfortable default, clamped to the screen it

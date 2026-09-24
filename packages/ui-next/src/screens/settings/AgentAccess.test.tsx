@@ -77,7 +77,7 @@ describe("AgentAccess", () => {
 
   /**
    * A web build does not register the host settings capabilities
-   * (`web_registry_omits_host_desktop_settings`), so naming `settings.set`
+   * (`a_web_users_registry_has_apps_but_no_desktop_settings`), so naming `settings.set`
    * there would be this pane inventing an id again, one instead of six.
    */
   it("does not name a capability the running build has no registry entry for", () => {

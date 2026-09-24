@@ -15,6 +15,7 @@ pub mod api_clusters;
 pub mod api_command;
 pub mod api_kubeconfigs;
 pub mod api_settings;
+pub mod app_inventory;
 pub mod assets;
 pub mod auth;
 pub mod cluster_auth_resolver;
@@ -31,11 +32,16 @@ pub mod streams;
 pub mod users;
 pub mod ws;
 
-/// Builds a full capability registry for a (cache, kubeconfig-paths) pair.
-/// The desktop binary supplies this from its capability assembly, keeping
-/// this crate assembly-agnostic.
-pub type RegistryFactory =
-    Arc<dyn Fn(Arc<ClientCache>, Vec<std::path::PathBuf>) -> Registry + Send + Sync>;
+/// Builds one user's full capability registry from their client cache, their
+/// kubeconfig paths and their apps (their own inventory and the shared catalog,
+/// #515). The binaries supply this from their capability assembly
+/// (`srelens_registry::build_registry_for_user`), keeping this crate
+/// assembly-agnostic.
+pub type RegistryFactory = Arc<
+    dyn Fn(Arc<ClientCache>, Vec<std::path::PathBuf>, srelens_registry::Apps) -> Registry
+        + Send
+        + Sync,
+>;
 
 /// The HTTP client every OIDC flow (app login and per-cluster sign-in) uses.
 ///
@@ -75,10 +81,14 @@ pub struct AppState {
 
 impl AppState {
     /// Test-only convenience: in-memory database, fixed master key, dev auth.
-    /// The factory ignores the (cache, paths) it's given and always returns a
-    /// clone of `registry` — tests don't materialize real kubeconfigs.
+    /// The factory ignores the (cache, paths, apps) it's given and always
+    /// returns a clone of `registry` — tests don't materialize real kubeconfigs.
     pub async fn for_tests(registry: Arc<Registry>) -> AppState {
-        let factory: RegistryFactory = Arc::new(move |_cache, _paths| (*registry).clone());
+        Self::for_tests_with(Arc::new(move |_cache, _paths, _apps| (*registry).clone())).await
+    }
+
+    /// [`AppState::for_tests`] with each user's registry built by `factory`.
+    pub async fn for_tests_with(factory: RegistryFactory) -> AppState {
         let mut bytes = [0u8; 8];
         getrandom::getrandom(&mut bytes).expect("random");
         let data_dir =
@@ -250,6 +260,25 @@ pub async fn serve(factory: RegistryFactory, config: ServerConfig) -> Result<(),
                 tick.tick().await;
                 if let Err(e) = db.purge_expired_sessions(unix_now()).await {
                     eprintln!("session purge failed: {e}");
+                }
+            }
+        });
+    }
+    {
+        // The one app catalog every user reads (#515), refreshed here and only
+        // here: users' capabilities read it and never fetch into it. Checked
+        // hourly and fetched once it is a day old, as a desktop does; a failed
+        // fetch keeps the cached copy and is retried at the next check.
+        let catalog = state.user_envs.catalog().clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                let catalog = catalog.clone();
+                match tokio::task::spawn_blocking(move || catalog.refresh_if_stale()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => eprintln!("app catalog refresh failed: {e}"),
+                    Err(e) => eprintln!("app catalog refresh failed: {e}"),
                 }
             }
         });
