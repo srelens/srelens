@@ -15,7 +15,7 @@ import { getKubeconfigFiles, useContexts } from "../lib/clusters";
 import { FailureAlert } from "../lib/errorCopy";
 import { openTab } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
-import { setNamespaces, useNamespaces } from "../lib/workspace";
+import { useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { NamespaceErrorAlert, NamespacePicker } from "../screens/resourceShell";
 import { SHARED_CONTEXT_ID_MESSAGE } from "./contextIds";
 import { plainText } from "./displayText";
@@ -65,6 +65,7 @@ export function DashboardCards({ context }: { context: ClusterContext }) {
 
 function CardsBand({ context, apps }: { context: ClusterContext; apps: InstalledExtension[] }) {
   const selection = useNamespaces(context.stableId);
+  const setNamespaces = useSetNamespaces();
   const { namespaces, scope, error: namespaceError } = useNamespaceOptions(context.name, getKubeconfigFiles());
   const [refresh, setRefresh] = useState(0);
   const contexts = useContexts();

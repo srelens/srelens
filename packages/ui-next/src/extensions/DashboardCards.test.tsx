@@ -26,6 +26,7 @@ import {
 } from "@srelens/core";
 import { DashboardCards } from "./DashboardCards";
 import * as tabs from "../lib/tabsStore";
+import { defaultState } from "../lib/tabs";
 import { resetView, setNamespaces } from "../lib/workspace";
 
 const CTX: ClusterContext = {
@@ -65,6 +66,7 @@ const cardRegion = (title: string) => screen.getByRole("region", { name: title }
 beforeEach(() => {
   vi.clearAllMocks();
   resetView();
+  tabs.setState(defaultState([]));
   namespaceOptions.useNamespaceOptions.mockReturnValue({ namespaces: ["prod", "team"], scope: "", error: "" });
 });
 afterEach(cleanup);
