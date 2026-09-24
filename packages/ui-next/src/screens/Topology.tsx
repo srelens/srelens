@@ -18,7 +18,7 @@ import {
   StaleSelectionAlert,
 } from "./resourceShell";
 import { FailureAlert } from "../lib/errorCopy";
-import { setNamespaces, useNamespaces } from "../lib/workspace";
+import { useNamespaces, useSetNamespaces } from "../lib/workspace";
 import { useResource } from "../lib/useResource";
 import {
   FLOW_ANIMATION_LIMIT,
@@ -111,13 +111,13 @@ function TopologyGraph({ context }: { context: ClusterContext }) {
   );
 
   /**
-   * The reader's namespace selection — the workspace's, not this screen's.
+   * The reader's namespace selection — this tab's, per cluster.
    *
-   * One selection per cluster, shared by every screen looking at it: narrowing
-   * to `payments` here narrows the resource lists and the events screen too,
-   * and arriving from one of those lands on what they were already looking at.
+   * Narrowing to `payments` here narrows this tab and nothing else: another
+   * tab on the same cluster keeps its own selection.
    */
   const scoped = useNamespaces(cluster?.stableId);
+  const setNamespaces = useSetNamespaces();
 
   /**
    * A metrics backend, if the cluster already runs one.

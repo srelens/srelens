@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
+import type { ReactNode } from "react";
 import * as ws from "./workspace";
+import { activateTab, getState, setState, subscribe as subscribeTabs } from "./tabsStore";
+import { makeTab } from "./tabs";
+import { TabScope } from "./tabScope";
 import { settingsStorage } from "@srelens/core";
 
 function fakeStorage() {
@@ -17,7 +21,7 @@ beforeEach(() => { settingsStorage.removeItem("srelens.defaultNamespace"); ws.re
 
 describe("workspace view", () => {
   it("starts with no links and nothing expanded", () => {
-    expect(ws.getView()).toEqual({ links: {}, expanded: {}, namespaces: {} });
+    expect(ws.getView()).toEqual({ links: {}, expanded: {} });
   });
 
   it("tells the hook when a link changes", () => {
@@ -88,144 +92,99 @@ describe("workspace view", () => {
     off();
   });
 
-  it("keeps a namespace selection per cluster, so two clusters do not share one", () => {
-    ws.setNamespaces("prod", ["default"]);
-    ws.setNamespaces("dev", ["kube-system"]);
-    expect(ws.getView().namespaces).toEqual({ prod: ["default"], dev: ["kube-system"] });
+});
+
+function twoTabs() {
+  const a = { ...makeTab("/pods"), id: "tab-a" };
+  const b = { ...makeTab("/deployments"), id: "tab-b" };
+  setState({
+    workspaces: [{ id: "w", name: "W", clusters: ["prod", "dev"], activeCluster: "prod", tabs: [a, b], activeId: "tab-a", closed: [] }],
+    currentId: "w",
+  });
+}
+
+const tab = (id: string) => getState().workspaces[0].tabs.find((t) => t.id === id)!;
+const inTab = (tabId: string) => ({ children }: { children: ReactNode }) => <TabScope.Provider value={tabId}>{children}</TabScope.Provider>;
+
+describe("namespace selection", () => {
+  beforeEach(twoTabs);
+
+  it("belongs to the tab it was made in — narrowing one tab leaves another tab on the same cluster alone", () => {
+    const a = renderHook(() => ws.useNamespaces("prod"), { wrapper: inTab("tab-a") });
+    const b = renderHook(() => ws.useNamespaces("prod"), { wrapper: inTab("tab-b") });
+    const setA = renderHook(() => ws.useSetNamespaces(), { wrapper: inTab("tab-a") }).result.current;
+    act(() => setA("prod", ["payments"]));
+    expect(a.result.current).toEqual(["payments"]);
+    expect(b.result.current).toEqual([]);
   });
 
-  it("reads an unset cluster as all namespaces", () => {
-    expect(ws.getView().namespaces["never-set"]).toBeUndefined();
+  it("is kept per cluster within a tab, so the rail switching cluster does not carry one cluster's namespaces to another", () => {
+    ws.setNamespaces("prod", ["default"], "tab-a");
+    ws.setNamespaces("dev", ["kube-system"], "tab-a");
+    expect(tab("tab-a").namespaces).toEqual({ prod: ["default"], dev: ["kube-system"] });
+    expect(tab("tab-b").namespaces).toBeUndefined();
+  });
+
+  it("is written on the tab, so it persists and restores with the tab", () => {
+    ws.setNamespaces("prod", ["default", "billing"], "tab-b");
+    expect(tab("tab-b").namespaces).toEqual({ prod: ["default", "billing"] });
+    expect(tab("tab-a").namespaces).toBeUndefined();
+  });
+
+  it("falls back to the active tab outside any tab — the dock asks about what is on screen", () => {
+    ws.setNamespaces("prod", ["billing"], "tab-a");
+    ws.setNamespaces("prod", ["shop"], "tab-b");
+    const { result } = renderHook(() => ws.useNamespaces("prod"));
+    expect(result.current).toEqual(["billing"]);
+    act(() => activateTab("tab-b"));
+    expect(result.current).toEqual(["shop"]);
   });
 
   it("does not notify when the selection is set to what it already is", () => {
-    ws.setNamespaces("prod", ["default"]);
+    ws.setNamespaces("prod", ["default"], "tab-a");
     const seen = vi.fn();
-    const off = ws.subscribe(seen);
-    ws.setNamespaces("prod", ["default"]);
+    const off = subscribeTabs(seen);
+    ws.setNamespaces("prod", ["default"], "tab-a");
     off();
     expect(seen).not.toHaveBeenCalled();
   });
 
   it("keeps an explicit all-namespaces choice when a selection is cleared", () => {
-    ws.setNamespaces("prod", ["default"]);
-    ws.setNamespaces("prod", []);
-    expect(ws.getView().namespaces.prod).toEqual([]);
+    ws.setNamespaces("prod", ["default"], "tab-a");
+    ws.setNamespaces("prod", [], "tab-a");
+    expect(tab("tab-a").namespaces).toEqual({ prod: [] });
   });
 
-  it("records all namespaces even when the cluster previously had no choice", () => {
-    const seen = vi.fn();
-    const off = ws.subscribe(seen);
-    ws.setNamespaces("never-set", []);
-    off();
-    expect(seen).toHaveBeenCalledOnce();
-  });
-});
-
-describe("persisted namespace selection", () => {
-  it("persists a set selection and reads it back after a reload", () => {
-    const s = fakeStorage();
-    ws.loadNamespaces(s);
-    ws.setNamespaces("prod", ["default", "billing"], s);
-    expect(JSON.parse(s.m.get(ws.NAMESPACES_KEY)!)).toEqual({ prod: ["default", "billing"] });
-    ws.loadNamespaces(fakeStorage()); // forget the in-memory state
-    ws.loadNamespaces(s); // and read it back off the same storage
-    expect(ws.getView().namespaces.prod).toEqual(["default", "billing"]);
-  });
-
-  it("keeps the selection when the cluster is looked up again — the key is the stableId, never a name the store never sees", () => {
-    const s = fakeStorage();
-    ws.setNamespaces("ctx-1", ["prod"], s);
-    ws.loadNamespaces(fakeStorage()); // forget
-    ws.loadNamespaces(s); // reload, as a fresh launch would
-    // A rename in the kubeconfig cannot touch this: `setNamespaces`/`useNamespaces`
-    // take a `stableId` and nothing else, so there is no name for a rename to change.
-    expect(ws.getView().namespaces["ctx-1"]).toEqual(["prod"]);
-  });
-
-  it("remembers an explicit all-namespaces selection", () => {
-    const s = fakeStorage();
-    ws.setNamespaces("prod", ["default"], s);
-    ws.setNamespaces("prod", [], s);
-    const stored = JSON.parse(s.m.get(ws.NAMESPACES_KEY) ?? "{}");
-    expect(stored.prod).toEqual([]);
-  });
-
-  it("removes only the deleted cluster's persisted selection", () => {
-    const s = fakeStorage();
-    ws.setNamespaces("prod", ["default"], s);
-    ws.setNamespaces("dev", ["kube-system"], s);
-
-    ws.removeNamespaces("prod", s);
-
-    expect(ws.getView().namespaces).toEqual({ dev: ["kube-system"] });
-    expect(JSON.parse(s.m.get(ws.NAMESPACES_KEY) ?? "{}")).toEqual({ dev: ["kube-system"] });
-  });
-
-  it("survives a storage that throws on both read and write, costing only the selection", () => {
-    const bad = {
-      getItem: () => {
-        throw new Error("no reads");
-      },
-      setItem: () => {
-        throw new Error("no writes");
-      },
-      removeItem: () => {},
-    };
-    ws.setLink("prod", "connected");
-    expect(() => ws.loadNamespaces(bad)).not.toThrow();
-    expect(() => ws.setNamespaces("prod", ["default"], bad)).not.toThrow();
-    // Only the selection is at the mercy of storage; links stay untouched.
-    expect(ws.getView().links.prod).toEqual({ state: "connected" });
-  });
-
-  it("loading namespaces leaves links and expanded exactly as they were", () => {
-    ws.setLink("prod", "connected");
-    ws.toggleExpanded("prod", "workloads");
-    const s = fakeStorage();
-    ws.loadNamespaces(s);
-    expect(ws.getView().links.prod).toEqual({ state: "connected" });
-    expect(ws.getView().expanded.prod).toEqual(["workloads"]);
-  });
-
-  it("reads a document that is not valid JSON, or not a map, as nothing stored", () => {
-    for (const raw of ["{oops", "[]", "7", "null", '"hello"']) {
-      expect(ws.parseStoredNamespaces(raw)).toEqual({});
-    }
-    expect(ws.parseStoredNamespaces(null)).toEqual({});
-  });
-
-  it("drops one cluster's malformed entry without losing the others", () => {
-    const raw = JSON.stringify({ prod: ["default", "billing"], dev: "not-an-array", stage: [1, 2] });
-    expect(ws.parseStoredNamespaces(raw)).toEqual({ prod: ["default", "billing"] });
+  it("forgets a removed cluster's selection in every tab without disturbing other clusters", () => {
+    ws.setNamespaces("prod", ["default"], "tab-a");
+    ws.setNamespaces("dev", ["kube-system"], "tab-a");
+    ws.setNamespaces("prod", ["billing"], "tab-b");
+    ws.removeNamespaces("prod");
+    expect(tab("tab-a").namespaces).toEqual({ dev: ["kube-system"] });
+    expect(tab("tab-b").namespaces).toEqual({});
   });
 
   it("keeps the same array reference across reads until the selection actually changes, so useSyncExternalStore cannot loop", () => {
-    const s = fakeStorage();
-    ws.loadNamespaces(s);
-    const { result, rerender } = renderHook(() => ws.useNamespaces("prod"));
+    const { result, rerender } = renderHook(() => ws.useNamespaces("prod"), { wrapper: inTab("tab-a") });
     const first = result.current;
     rerender();
     expect(result.current).toBe(first);
-    act(() => ws.setNamespaces("prod", ["default"], s));
+    act(() => ws.setNamespaces("prod", ["default"], "tab-a"));
     expect(result.current).not.toBe(first);
     expect(result.current).toEqual(["default"]);
   });
-});
 
-it("uses the default only for clusters without a choice, and preserves explicit all after reload", () => {
-  const s = fakeStorage();
-  const { result } = renderHook(() => ws.useNamespaces("fresh"));
-  act(() => ws.setNamespaceDefault("team"));
-  expect(result.current).toEqual(["team"]);
-  act(() => ws.setNamespaces("fresh", [], s));
-  expect(result.current).toEqual([]);
-  act(() => ws.loadNamespaces(s));
-  expect(result.current).toEqual([]);
-  act(() => ws.setNamespaceDefault("other"));
-  expect(result.current).toEqual([]);
-  const other = renderHook(() => ws.useNamespaces("unseen"));
-  expect(other.result.current).toEqual(["other"]);
+  it("uses the default only where the tab has no choice for the cluster, and keeps an explicit all", () => {
+    const { result } = renderHook(() => ws.useNamespaces("prod"), { wrapper: inTab("tab-a") });
+    act(() => ws.setNamespaceDefault("team"));
+    expect(result.current).toEqual(["team"]);
+    act(() => ws.setNamespaces("prod", [], "tab-a"));
+    expect(result.current).toEqual([]);
+    act(() => ws.setNamespaceDefault("other"));
+    expect(result.current).toEqual([]);
+    const other = renderHook(() => ws.useNamespaces("prod"), { wrapper: inTab("tab-b") });
+    expect(other.result.current).toEqual(["other"]);
+  });
 });
 
 describe("persisted sidebar groups", () => {

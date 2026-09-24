@@ -17,6 +17,7 @@ import { STATUS_WORD } from "./StatusBadge";
 import { ExtensionControls } from "./ExtensionControls";
 import { ErrorNotice, ExtensionResults } from "./ExtensionResults";
 import { useResource } from "../lib/useResource";
+import { LiveNotice, LiveReaders, LiveStatus, useLiveReaders } from "./liveReaders";
 
 // The six normalized statuses (#541), each counted and listed by its word:
 // the legend names every one, zero included, so no colour is the only signal.
@@ -124,6 +125,10 @@ function Summary({
     ],
   );
   const { reload } = data;
+  // Counts follow the reader's kind (#566), re-read in place on every change.
+  const live = useLiveReaders({
+    plugin, capabilities: [page.capability], context, namespace, label: `summary:${page.id}`, onChange: data.refresh,
+  });
   // Status counts change when an action on one of these resources is accepted.
   useEffect(
     () =>
@@ -147,10 +152,13 @@ function Summary({
     Object.fromEntries(statuses.map((status, i) => [status, counts[i]])) as Record<NormalizedStatus, number>,
   );
   return (
-    <section className="extension-summary">
+    <section className="extension-summary" data-stale={live.state === "reconnecting" || undefined}>
       <Button variant="ghost" onClick={() => onPage(page.id)}>
         {page.title}
       </Button>
+      {/* In words, where the counts are: a tint or a tooltip alone says nothing to most readers. */}
+      <LiveStatus live={live} />
+      <LiveNotice live={live} what="counts" />
       {data.status === "error" ? (
         <ErrorNotice cluster message={data.error} retry={data.reload} />
       ) : data.status === "loading" ? (
@@ -212,6 +220,9 @@ function Events({
       refresh,
     ],
   );
+  const live = useLiveReaders({
+    plugin, capabilities: [config.capability], context, namespace, label: "events", onChange: result.refresh,
+  });
   // Bound how many matching rows enter the DOM; Load more reveals the next page
   // of the already-capped backend result (#609).
   const PAGE = 100;
@@ -242,6 +253,7 @@ function Events({
       <h3 className="extension-message">
         Events <small>({events.length}{result.data?.truncated ? "+" : ""})</small>
       </h3>
+      <LiveNotice live={live} what="events" />
       {result.data?.truncated && (
         <p className="extension-message" role="status">
           Showing the first {(result.data.events ?? []).length.toLocaleString()} events; more remain on the cluster.
@@ -359,6 +371,9 @@ export function ExtensionWorkspace({
       </p>
     );
   return (
+    // One view (#566): every reader this page shows is watched once, and the
+    // watches end with the page.
+    <LiveReaders plugin={plugin} label={`page:${page.id}`}>
     <div className="extension-workspace">
       <nav
         className="extension-toolbar extension-navigation"
@@ -492,5 +507,6 @@ export function ExtensionWorkspace({
       )}
       </ExtensionRequirements>
     </div>
+    </LiveReaders>
   );
 }

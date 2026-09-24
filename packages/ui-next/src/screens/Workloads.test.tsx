@@ -11,6 +11,9 @@ const { watchResource, useNamespaceOptions, cronjobSetSuspend } = vi.hoisted(() 
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
   watchResource: (...a: unknown[]) => watchResource(...a),
+  // Core's own watchNamespaces calls its module-local watchResource, which
+  // the line above cannot reach — route each namespace to the mock instead.
+  watchNamespaces: (await import("@srelens/core/lib/testDoubles")).watchNamespacesVia((...a) => watchResource(...a)),
   cronjobSetSuspend: (...a: unknown[]) => cronjobSetSuspend(...a),
 }));
 
@@ -32,15 +35,16 @@ proto.hasPointerCapture ??= () => false;
 proto.setPointerCapture ??= () => {};
 proto.releasePointerCapture ??= () => {};
 
-import { resourceStatusLine, type ClusterContext, type K8sObject } from "@srelens/core";
+import { describeError, resourceStatusLine, type ClusterContext, type K8sObject } from "@srelens/core";
 import { Workloads } from "./Workloads";
 import { ConsoleProvider } from "../console";
 import * as store from "../lib/tabsStore";
+import { TabScope } from "../lib/tabScope";
 import { defaultState } from "../lib/tabs";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { resetListCache } from "../lib/resourceList";
-import { resetView } from "../lib/workspace";
+import { resetView, setNamespaces } from "../lib/workspace";
 
 const CTX: ClusterContext = {
   name: "prod-eu",
@@ -126,6 +130,25 @@ function open() {
 }
 
 describe("Workloads", () => {
+  it("writes a namespace pick to its own tab — another Workloads tab on the same cluster keeps its selection", async () => {
+    store.openTab("/resources");
+    const first = tabFor("/resources").id;
+    store.duplicateTab(first);
+    const second = store.currentWorkspace().activeId;
+    render(
+      <ConsoleProvider>
+        <div data-testid="first"><TabScope.Provider value={first}><Workloads route="/resources" /></TabScope.Provider></div>
+        <div data-testid="second"><TabScope.Provider value={second}><Workloads route="/resources" /></TabScope.Provider></div>
+      </ConsoleProvider>,
+    );
+    await userEvent.click(await within(screen.getByTestId("first")).findByRole("combobox", { name: "Namespaces" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Only kube-system" }));
+
+    const tab = (id: string) => store.currentWorkspace().tabs.find((t) => t.id === id)!;
+    await waitFor(() => expect(tab(first).namespaces).toEqual({ [CTX.stableId]: ["kube-system"] }));
+    expect(tab(second).namespaces).toBeUndefined();
+  });
+
   it("lists every workload kind at once, each row saying which it is", async () => {
     open();
 
@@ -325,6 +348,159 @@ describe("Workloads", () => {
     await waitFor(() => expect(watchResource).toHaveBeenCalledTimes(5));
     expect(watchResource.mock.calls.map((c) => c[2]).sort()).toEqual(
       ["cronjobs", "daemonsets", "deployments", "pods", "statefulsets"],
+    );
+  });
+
+  // #701 over #688: several namespaces selected, every one refused for every
+  // kind. Each kind is then an error WITH per-namespace failures — nothing
+  // answered anywhere, so this is the same one failure state, not a grouped
+  // banner over "has no workloads".
+  it("says the listing failed, once, when every kind is refused in every selected namespace", async () => {
+    store.openTab("/resources");
+    setNamespaces(CTX.stableId, ["default", "kube-system"]);
+    watchResource.mockImplementation(
+      async (
+        _context: string,
+        namespace: string,
+        kind: string,
+        _onRows: (rows: unknown[]) => void,
+        _onStatus: (status: "live" | "reconnecting") => void,
+        onError: (message: string) => void,
+      ) => {
+        onError(`${kind} is forbidden: User "dev" cannot watch resource "${kind}" in the namespace "${namespace}"`);
+        return { stop };
+      },
+    );
+
+    open();
+
+    expect(await screen.findByText(/could not list workloads on prod-eu/i)).toBeTruthy();
+    expect(screen.queryByText(/no workloads/i)).toBeNull();
+    expect(screen.getAllByText(/could not list/i)).toHaveLength(1);
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    // Every namespace's refusal, not only the first one `error` carries.
+    const detail = document.querySelector('[data-slot="detail"]')?.textContent ?? "";
+    expect(detail).toContain(
+      "You don't have permission to watch deployments, statefulsets, daemonsets, pods and cronjobs in default.",
+    );
+    expect(detail).toContain(
+      "You don't have permission to watch deployments, statefulsets, daemonsets, pods and cronjobs in kube-system.",
+    );
+  });
+
+  // #688: a credential scoped to a few namespaces is refused a cluster-scope
+  // list, and two selected namespaces used to mean exactly that.
+  it("watches each selected namespace on its own, never the cluster scope", async () => {
+    store.openTab("/resources");
+    setNamespaces(CTX.stableId, ["default", "kube-system"]);
+    watchResource.mockImplementation(
+      async (_context: string, namespace: string, kind: string, onRows: (rows: unknown[]) => void) => {
+        onRows((FIXTURES[kind] ?? []).filter((r) => (r as { namespace: string }).namespace === namespace));
+        return { stop };
+      },
+    );
+    open();
+
+    // Both namespaces' rows, each once.
+    await waitFor(() => expect(rowNames()).toHaveLength(5));
+    const watched = watchResource.mock.calls.map((c) => c[1]);
+    expect(watched).not.toContain("");
+    expect(new Set(watched)).toEqual(new Set(["default", "kube-system"]));
+  });
+
+  it("keeps the namespace that answered and names the one that was refused", async () => {
+    store.openTab("/resources");
+    setNamespaces(CTX.stableId, ["default", "kube-system"]);
+    watchResource.mockImplementation(
+      async (
+        _context: string,
+        namespace: string,
+        kind: string,
+        onRows: (rows: unknown[]) => void,
+        _onStatus: (status: "live" | "reconnecting") => void,
+        onError: (message: string) => void,
+      ) => {
+        if (namespace === "kube-system") {
+          onError(`${kind} is forbidden: User "dev" cannot watch resource "${kind}" in the namespace "kube-system"`);
+          return { stop };
+        }
+        onRows((FIXTURES[kind] ?? []).filter((r) => (r as { namespace: string }).namespace === namespace));
+        return { stop };
+      },
+    );
+
+    open();
+
+    await waitFor(() => expect(rowNames()).toHaveLength(4));
+    expect(screen.queryByText("node-exporter")).toBeNull();
+    // Five kinds refused in the one namespace is one fact, said once — not
+    // five near-identical banners stacked over the table.
+    expect(screen.getByText("Could not list workloads in kube-system")).toBeTruthy();
+    expect(screen.queryByText(/Could not list pods in/)).toBeNull();
+    // Live rows from `default` are not stale, and the refusal is not the cluster's.
+    expect(screen.queryByText(/are stale/i)).toBeNull();
+    expect(screen.queryByText(/at the cluster scope/i)).toBeNull();
+  });
+
+  it("names only the kinds refused when the others answered in every namespace", async () => {
+    store.openTab("/resources");
+    setNamespaces(CTX.stableId, ["default", "kube-system"]);
+    watchResource.mockImplementation(
+      async (
+        _context: string,
+        namespace: string,
+        kind: string,
+        onRows: (rows: unknown[]) => void,
+        _onStatus: (status: "live" | "reconnecting") => void,
+        onError: (message: string) => void,
+      ) => {
+        if (namespace === "kube-system" && (kind === "pods" || kind === "cronjobs")) {
+          onError(`${kind} is forbidden: User "dev" cannot watch resource "${kind}" in the namespace "kube-system"`);
+          return { stop };
+        }
+        onRows((FIXTURES[kind] ?? []).filter((r) => (r as { namespace: string }).namespace === namespace));
+        return { stop };
+      },
+    );
+
+    open();
+
+    await waitFor(() => expect(rowNames()).toHaveLength(5));
+    expect(screen.getByText("Could not list pods and cronjobs in kube-system")).toBeTruthy();
+  });
+
+  it("keeps every kind's reason in a grouped banner, not only the first kind's", async () => {
+    store.openTab("/resources");
+    setNamespaces(CTX.stableId, ["default", "kube-system"]);
+    watchResource.mockImplementation(
+      async (
+        _context: string,
+        namespace: string,
+        kind: string,
+        onRows: (rows: unknown[]) => void,
+        _onStatus: (status: "live" | "reconnecting") => void,
+        onError: (message: string) => void,
+      ) => {
+        if (namespace === "kube-system" && kind === "pods") {
+          onError('pods is forbidden: User "dev" cannot watch resource "pods" in the namespace "kube-system"');
+          return { stop };
+        }
+        if (namespace === "kube-system" && kind === "cronjobs") {
+          onError("dial tcp 10.1.2.3:6443: connect: connection refused");
+          return { stop };
+        }
+        onRows((FIXTURES[kind] ?? []).filter((r) => (r as { namespace: string }).namespace === namespace));
+        return { stop };
+      },
+    );
+
+    open();
+
+    const title = await screen.findByText("Could not list pods and cronjobs in kube-system");
+    const banner = title.parentElement!.parentElement!;
+    expect(banner.textContent).toMatch(/permission to watch pods in kube-system/i);
+    expect(banner.textContent).toContain(
+      describeError("dial tcp 10.1.2.3:6443: connect: connection refused").detail,
     );
   });
 

@@ -14,6 +14,7 @@ const samples = [
   p("Timeline", { items: [{ time: "2026-09-22T12:00:00Z", title: "Deployed", detail: "Revision 1" }] }),
   p("Markdown", { text: "# Notes\n\n**Ready**" }),
   p("Code", { text: "kind: Pod", language: "yaml" }),
+  p("Timeseries", { label: "CPU", unit: "cores", range: { start: 0, end: 120_000 }, times: [0, 60_000], series: [{ name: "web", values: [0.1, 0.2] }] }),
 ];
 describe("NativeComponent", () => {
   it.each(samples)("renders $type through the catalog", payload => {

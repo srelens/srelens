@@ -14,6 +14,7 @@ const {
   listCustomResource,
   listNamespaces,
   listNodes,
+  listResource,
   nodeMetrics,
   podMetrics,
   useNamespaceOptions,
@@ -27,6 +28,7 @@ const {
   listCustomResource: vi.fn(),
   listNamespaces: vi.fn(),
   listNodes: vi.fn(),
+  listResource: vi.fn(),
   nodeMetrics: vi.fn(),
   podMetrics: vi.fn(),
   useNamespaceOptions: vi.fn(),
@@ -47,10 +49,14 @@ vi.mock("../extensions/inventoryStore", async (original) => ({
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
   watchResource: (...a: unknown[]) => watchResource(...a),
+  // Core's own watchNamespaces calls its module-local watchResource, which
+  // the line above cannot reach — route each namespace to the mock instead.
+  watchNamespaces: (await import("@srelens/core/lib/testDoubles")).watchNamespacesVia((...a) => watchResource(...a)),
   listCrds: (...a: unknown[]) => listCrds(...a),
   listCustomResource: (...a: unknown[]) => listCustomResource(...a),
   listNamespaces: (...a: unknown[]) => listNamespaces(...a),
   listNodes: (...a: unknown[]) => listNodes(...a),
+  listResource: (...a: unknown[]) => listResource(...a),
   nodeMetrics: (...a: unknown[]) => nodeMetrics(...a),
   podMetrics: (...a: unknown[]) => podMetrics(...a),
   deleteResource,
@@ -138,10 +144,11 @@ proto.hasPointerCapture ??= () => false;
 proto.setPointerCapture ??= () => {};
 proto.releasePointerCapture ??= () => {};
 
-import type { ClusterContext, CrdRef, K8sObject } from "@srelens/core";
+import { describeError, type ClusterContext, type CrdRef, type K8sObject } from "@srelens/core";
 import { ResourceDetailScreen, Resources } from "./Resources";
 import { ConsoleProvider, useConsole } from "../console";
 import * as store from "../lib/tabsStore";
+import { TabScope } from "../lib/tabScope";
 import { defaultState } from "../lib/tabs";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { hiddenColumns, loadColumnPrefs, toggleColumn } from "../lib/columnPrefs";
@@ -154,7 +161,7 @@ import {
   loadPeekWidth,
 } from "../lib/peekWidth";
 import { resetListCache } from "../lib/resourceList";
-import { getView, resetView, setNamespaces } from "../lib/workspace";
+import { resetView, setNamespaces } from "../lib/workspace";
 
 const CTX: ClusterContext = {
   name: "prod-eu",
@@ -299,6 +306,12 @@ function AskPeek() {
  * same `ConsoleProvider` the real shell mounts at the root, since a row's ask
  * chip now reaches `useConsole()`.
  */
+/** The active tab's namespace selection for a cluster — where a screen outside any `TabScope` reads and writes it. */
+const selectionOf = (clusterId: string) => {
+  const w = store.currentWorkspace();
+  return w.tabs.find((t) => t.id === w.activeId)?.namespaces?.[clusterId];
+};
+
 function open(route: string) {
   store.openTab(route);
   return render(
@@ -500,6 +513,68 @@ describe("Resources", () => {
   // Correction 3: an unhealthy row gets a dot before its name, and the dot is
   // never colour alone — a reason rides beside it for anyone who cannot see
   // the colour, the same contract the cluster rail's `unavailable` follows.
+  // #688: the namespace that answered had none, the other was refused — an
+  // error that names the refused namespace, not "no pods" and not a
+  // failure of the whole list.
+  it("names the refused namespace when the one that answered was empty", async () => {
+    store.openTab("/k/pods");
+    setNamespaces(CTX.stableId, ["team-a", "team-b"]);
+    watchResource.mockImplementation(
+      async (
+        _c: string,
+        namespace: string,
+        _k: string,
+        onRows: (rows: unknown[]) => void,
+        _onStatus: unknown,
+        onError: (message: string) => void,
+      ) => {
+        if (namespace === "team-b") onError('pods is forbidden: User "dev" cannot watch resource "pods" in the namespace "team-b"');
+        else onRows([]);
+        return { stop: vi.fn() };
+      },
+    );
+    open("/k/pods");
+
+    expect(await screen.findByText("Could not list pods in team-b")).toBeTruthy();
+    expect(screen.queryByText(/has no pods/)).toBeNull();
+  });
+
+  // Review of #688: a polled list whose every selected namespace fails keeps
+  // the last good rows — which must read as stale, not as live rows under a
+  // "could not list … in team-a and team-b" banner.
+  it("calls the rows stale once every selected namespace's poll has failed", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let fail = false;
+      // Two namespaces going stale for two different reasons.
+      const reasons: Record<string, string> = {
+        "team-a": 'leases is forbidden: User "dev" cannot list resource "leases" in API group "coordination.k8s.io" in the namespace "team-a"',
+        "team-b": "dial tcp 10.1.2.3:6443: connect: connection refused",
+      };
+      listResource.mockImplementation(async (_c: string, _k: string, ns: string) =>
+        fail ? { error: reasons[ns] } : { items: [{ name: `lock-${ns}`, namespace: ns }] },
+      );
+      store.openTab("/k/leases");
+      setNamespaces(CTX.stableId, ["team-a", "team-b"]);
+      open("/k/leases");
+      expect(await screen.findByText("lock-team-a")).toBeTruthy();
+
+      fail = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5100);
+      });
+
+      expect(await screen.findByText(/are stale/)).toBeTruthy();
+      expect(screen.getByText("lock-team-a")).toBeTruthy();
+      expect(screen.queryByText(/Could not list .* in team-a and team-b/)).toBeNull();
+      // Each namespace with its own reason — not the first one's for both.
+      expect(screen.getByText(`team-a: ${describeError(reasons["team-a"]).detail}`)).toBeTruthy();
+      expect(screen.getByText(`team-b: ${describeError(reasons["team-b"]).detail}`)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("marks an unhealthy pod's row with a dot that also says so in words", async () => {
     watchResource.mockImplementation(
       async (_c: string, _n: string, _k: string, onRows: (rows: unknown[]) => void) => {
@@ -872,8 +947,8 @@ describe("Resources", () => {
 
     open("/k/pods");
 
-    // Written to the workspace store, so every screen on this cluster follows.
-    await waitFor(() => expect(getView().namespaces.prod).toEqual(["team-a"]));
+    // Written to this tab's selection, so the picker shows the scope.
+    await waitFor(() => expect(selectionOf("prod")).toEqual(["team-a"]));
     await waitFor(() =>
       expect(watchResource.mock.calls.some((call) => call[1] === "team-a")).toBe(true),
     );
@@ -881,6 +956,7 @@ describe("Resources", () => {
 
   it("explains a remembered selection that no longer exists, rather than showing an empty table with no reason", async () => {
     useNamespaceOptions.mockReturnValue({ namespaces: ["default", "billing"], scope: "", error: "" });
+    store.openTab("/k/pods");
     act(() => setNamespaces(CTX.stableId, ["deleted-ns"]));
 
     open("/k/pods");
@@ -891,7 +967,36 @@ describe("Resources", () => {
     // The alert's dismiss action is the recovery: back to "all namespaces",
     // written through the same store a manual clear would use.
     await userEvent.click(screen.getByRole("button", { name: "Show all namespaces" }));
-    await waitFor(() => expect(getView().namespaces.prod).toEqual([]));
+    await waitFor(() => expect(selectionOf("prod")).toEqual([]));
+  });
+
+  it("keeps a namespace pick in its own tab — another tab on the same cluster does not follow", async () => {
+    useNamespaceOptions.mockReturnValue({ namespaces: ["default", "billing"], scope: "", error: "" });
+    store.openTab("/k/pods");
+    store.openTab("/k/deployments");
+    const tabIdOf = (route: string) => store.currentWorkspace().tabs.find((t) => t.route === route)!.id;
+    const pods = tabIdOf("/k/pods");
+    const deployments = tabIdOf("/k/deployments");
+    // Both mounted at once, each in its own scope — the way `Window` mounts every tab.
+    render(
+      <ConsoleProvider>
+        <div data-testid="pods">
+          <TabScope.Provider value={pods}><Resources route="/k/pods" /></TabScope.Provider>
+        </div>
+        <div data-testid="deployments">
+          <TabScope.Provider value={deployments}><Resources route="/k/deployments" /></TabScope.Provider>
+        </div>
+      </ConsoleProvider>,
+    );
+    const podsPane = within(screen.getByTestId("pods"));
+    await userEvent.click(await podsPane.findByRole("combobox", { name: "Namespaces" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Only billing" }));
+
+    const tab = (id: string) => store.currentWorkspace().tabs.find((t) => t.id === id)!;
+    await waitFor(() => expect(tab(pods).namespaces).toEqual({ [CTX.stableId]: ["billing"] }));
+    expect(tab(deployments).namespaces).toBeUndefined();
+    // And the other tab's watch was never narrowed to it.
+    expect(watchResource.mock.calls.some((call) => call[2] === "deployments" && call[1] === "billing")).toBe(false);
   });
 
   it("does not warn about a selection that is merely empty of this kind right now", async () => {
@@ -1040,7 +1145,7 @@ describe("Resources", () => {
     // The fixture's own premise, asserted rather than assumed: neither cluster
     // has a namespace selection, so both are on "all namespaces" and the
     // selection this screen watches cannot change identity below.
-    expect(getView().namespaces).toEqual({});
+    expect(store.currentWorkspace().tabs.every((t) => t.namespaces === undefined)).toBe(true);
 
     await userEvent.click(screen.getByRole("checkbox", { name: "Select default/web-1" }));
     await screen.findByText("1 selected");

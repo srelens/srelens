@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const core = vi.hoisted(() => ({
   listExtensions: vi.fn(),
   resolveDashboardCards: vi.fn(),
+  onExtensionInventoryChanged: vi.fn(async () => () => {}),
+  openExtensionView: vi.fn(),
 }));
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
@@ -24,8 +26,20 @@ import {
   type InstalledExtension,
   type ResolvedDashboardCard,
 } from "@srelens/core";
+// jsdom has no ResizeObserver or scrollIntoView; the namespace picker's popover wants both.
+HTMLElement.prototype.scrollIntoView ??= () => {};
+if (!("ResizeObserver" in globalThis)) {
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+
 import { DashboardCards } from "./DashboardCards";
 import * as tabs from "../lib/tabsStore";
+import { TabScope } from "../lib/tabScope";
+import { defaultState } from "../lib/tabs";
 import { resetView, setNamespaces } from "../lib/workspace";
 
 const CTX: ClusterContext = {
@@ -65,7 +79,10 @@ const cardRegion = (title: string) => screen.getByRole("region", { name: title }
 beforeEach(() => {
   vi.clearAllMocks();
   resetView();
+  tabs.setState(defaultState([]));
   namespaceOptions.useNamespaceOptions.mockReturnValue({ namespaces: ["prod", "team"], scope: "", error: "" });
+  // A host that never answers an open: the cards stay as read, and say they are connecting.
+  core.openExtensionView.mockImplementation((id: string) => ({ view: id, close: async () => {}, open: () => new Promise(() => {}) }));
 });
 afterEach(cleanup);
 
@@ -86,6 +103,21 @@ it("shows a card's whole title and app name rather than cutting them off", async
   for (const selector of [".dashboard-card-title", ".dashboard-card-app"]) {
     expect(rule(selector), selector).not.toMatch(/text-overflow|white-space\s*:\s*nowrap/);
     expect(rule(selector), selector).toMatch(/overflow-wrap\s*:\s*anywhere/);
+  }
+});
+
+// What a reconnecting view shows is marked without fading it (#566): an
+// opacity drops muted text below the contrast floor in every theme, and a bare
+// `[data-stale]` rule would reach any element in the app that uses the name.
+it("marks stale regions without fading their text, and only its own regions", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const css = readFileSync(join(__dirname, "extensions.css"), "utf8");
+  const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]*\[data-stale\][^{}]*)\{([^}]*)\}/g)];
+  expect(rules.length).toBeGreaterThan(0);
+  for (const [, selector, body] of rules) {
+    expect(body, selector).not.toMatch(/opacity|filter/);
+    for (const part of selector.split(",")) expect(part.trim(), selector).toMatch(/^\.(extension|dashboard)-[\w-]+\[data-stale\]/);
   }
 });
 
@@ -218,6 +250,27 @@ describe("DashboardCards", () => {
     );
   });
 
+  it("writes a pick to its own tab — the same cluster's cards in another tab keep their selection", async () => {
+    tabs.openTab("/overview");
+    tabs.openTab("/overview-copy");
+    const idOf = (route: string) => tabs.currentWorkspace().tabs.find((t) => t.route === route)!.id;
+    const [first, second] = [idOf("/overview"), idOf("/overview-copy")];
+    installed(app([card({ id: "c", title: "Expiring" })]));
+    answer([{ id: "c", state: "count", count: 1 }]);
+    render(
+      <>
+        <div data-testid="first"><TabScope.Provider value={first}><DashboardCards context={CTX} /></TabScope.Provider></div>
+        <div data-testid="second"><TabScope.Provider value={second}><DashboardCards context={CTX} /></TabScope.Provider></div>
+      </>,
+    );
+    await userEvent.click(await within(screen.getByTestId("first")).findByRole("combobox", { name: "Namespaces" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Only team" }));
+
+    const tab = (id: string) => tabs.currentWorkspace().tabs.find((t) => t.id === id)!;
+    await waitFor(() => expect(tab(first).namespaces).toEqual({ [CTX.stableId]: ["team"] }));
+    expect(tab(second).namespaces).toBeUndefined();
+  });
+
   it("reads a namespace-restricted credential's one namespace whatever is selected", async () => {
     namespaceOptions.useNamespaceOptions.mockReturnValue({ namespaces: ["team"], scope: "team", error: "" });
     installed(app([card({ id: "c", title: "Expiring" })]));
@@ -239,11 +292,43 @@ describe("DashboardCards", () => {
     expect(region.getAttribute("data-state")).toBe("loading");
     await act(async () => {});
     expect(core.resolveDashboardCards).not.toHaveBeenCalled();
+    // Nothing is followed yet either, and the band says why — not the web's reason.
+    const status = screen.getByText("Not live").closest("[title]");
+    expect(status?.getAttribute("title")).toMatch(/namespaces/);
+    expect(core.openExtensionView).not.toHaveBeenCalled();
     namespaceOptions.useNamespaceOptions.mockReturnValue({ namespaces: ["team"], scope: "team", error: "" });
     view.rerender(<DashboardCards context={CTX} />);
     await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
     expect(core.resolveDashboardCards).toHaveBeenCalledTimes(1);
     expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.stableId, ["team"]);
+  });
+
+  it("follows each card's reader and redraws its figure in place when it changes (#566)", async () => {
+    const watched: Array<{ capability: string; namespace?: string; context: string; onData: (d: unknown, s: number) => void }> = [];
+    core.openExtensionView.mockImplementation((id: string) => ({
+      view: id, close: vi.fn(async () => {}),
+      open: async (request: { context: string; namespace?: string; source: { capability: string } }, handlers: { onData: (d: unknown, s: number) => void }) => {
+        watched.push({ capability: request.source.capability, namespace: request.namespace, context: request.context, onData: handlers.onData });
+        return { stream: "s", cancel: vi.fn(async () => {}) };
+      },
+    }));
+    setNamespaces(CTX.stableId, ["team"]);
+    installed(app([card({ id: "c", title: "Expiring" }), card({ id: "d", title: "Issued" })]));
+    core.resolveDashboardCards
+      .mockResolvedValueOnce({ cards: [{ id: "c", state: "count", count: 1 }, { id: "d", state: "count", count: 0 }] })
+      .mockResolvedValue({ cards: [{ id: "c", state: "count", count: 4 }, { id: "d", state: "count", count: 0 }] });
+    render(<DashboardCards context={CTX} />);
+    const figure = () => cardRegion("Expiring").querySelector(".dashboard-card-figure")?.textContent;
+    await waitFor(() => expect(figure()).toBe("1"));
+    // Two cards over one reader: one watch, in the selected namespace, on the pinned cluster.
+    await waitFor(() => expect(watched.map((w) => [w.capability, w.namespace, w.context])).toEqual([["certificates", "team", CTX.stableId]]));
+    act(() => watched[0].onData({ event: "synced" }, 1));
+    expect(screen.getByText("Live")).toBeTruthy();
+    act(() => watched[0].onData({ event: "changed" }, 2));
+    await waitFor(() => expect(figure()).toBe("4"));
+    act(() => watched[0].onData({ event: "reconnecting", message: "reset" }, 3));
+    expect(screen.getByText(/The figures below may be out of date/)).toBeTruthy();
+    expect(cardRegion("Expiring").closest("[data-stale]")).not.toBeNull();
   });
 
   it("refreshes on request", async () => {

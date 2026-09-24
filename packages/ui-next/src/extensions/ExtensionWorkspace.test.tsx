@@ -5,11 +5,15 @@ vi.mock("@srelens/core", async (original) => ({
   listCrds: vi.fn(),
   readExtension: vi.fn(),
   listNamespaces: vi.fn(),
+  openExtensionView: vi.fn(),
+  isTauri: vi.fn(),
 }));
 import {
   listCrds,
   readExtension,
   listNamespaces,
+  openExtensionView,
+  isTauri,
   type InstalledExtension,
 } from "@srelens/core";
 import { ExtensionWorkspace, DONUT_COLORS, donutBackground, EMPTY_DONUT } from "./ExtensionWorkspace";
@@ -165,6 +169,43 @@ beforeEach(async () => {
       },
     ],
   });
+});
+it("watches each reader of a dashboard page once, for the page, and re-reads its counts on a change (#566)", async () => {
+  const { act } = await import("@testing-library/react");
+  vi.mocked(isTauri).mockReturnValue(true);
+  const opened: Array<{ capability: string; onData: (data: unknown, seq: number) => void; onEnd: (end: unknown) => void }> = [];
+  const close = vi.fn(async () => {});
+  vi.mocked(openExtensionView).mockImplementation((app, label) => ({
+    view: `${app}/${label}`,
+    close,
+    open: async (request, handlers) => {
+      opened.push({ capability: request.source.capability, onData: handlers.onData as never, onEnd: handlers.onEnd as never });
+      return { stream: `s-${opened.length}`, cancel: vi.fn(async () => {}) };
+    },
+  }));
+  const { unmount } = render(<ExtensionWorkspace plugin={plugin} page={plugin.manifest.contributions.pages[0]} context="staging" />);
+  expect(await screen.findByText("Healthy: 1")).toBeTruthy();
+  await waitFor(() => expect(opened.map((o) => o.capability)).toEqual(["apps"]));
+  expect(openExtensionView).toHaveBeenCalledTimes(1);
+  const reads = vi.mocked(readExtension).mock.calls.length;
+  vi.mocked(readExtension).mockResolvedValue({ items: [
+    { name: "apps", namespace: "flux-system", age: "1d", columns: ["True", "false", "False"] },
+    { name: "infra", namespace: "flux-system", age: "1d", columns: ["True", "false", "False"] },
+  ] });
+  act(() => opened[0].onData({ event: "changed" }, 1));
+  expect(await screen.findByText("Healthy: 2")).toBeTruthy();
+  expect(vi.mocked(readExtension).mock.calls.length).toBe(reads + 1);
+  // A dashboard page says its state in words, visibly, not by a tint or a tooltip.
+  act(() => opened[0].onData({ event: "synced" }, 2));
+  expect(screen.getByText("Live")).toBeTruthy();
+  act(() => opened[0].onData({ event: "reconnecting", message: "connection reset" }, 3));
+  expect(screen.getByText("Reconnecting…")).toBeTruthy();
+  expect(screen.getByText(/Reconnecting to the cluster \(connection reset\)\. The counts below may be out of date/)).toBeTruthy();
+  act(() => opened[0].onEnd({ type: "error", code: "source", message: "forbidden" }));
+  expect(screen.getByText("Not live")).toBeTruthy();
+  expect(screen.getByText(/Live updates stopped: The stream failed: forbidden/)).toBeTruthy();
+  unmount();
+  await waitFor(() => expect(close).toHaveBeenCalled());
 });
 it("counts a resolver-backed page by the host's resolved statuses, in words", async () => {
   // Flux after #541: no statusColumns; the host resolves each row's status.

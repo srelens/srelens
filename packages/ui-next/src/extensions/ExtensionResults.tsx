@@ -19,6 +19,7 @@ import { useResolvedColumns } from "./useResolvedColumns";
 import { contributionKind } from "@srelens/core";
 import { useContextId } from "./contextIds";
 import { StatusBadge } from "./StatusBadge";
+import { LiveNotice, LiveStatus, useLiveReaders } from "./liveReaders";
 
 export function ErrorNotice({
   message,
@@ -171,7 +172,12 @@ export function ExtensionResults({
       cardNamespaces?.join(","),
     ],
   );
-  const { reload } = data;
+  const { reload, refresh: reread } = data;
+  // Follow the reader's kind (#566): every change the watch reports reads the
+  // list again in place, through the same read Refresh makes.
+  const live = useLiveReaders({
+    plugin, capabilities: [capability], context, namespace, label: `page:${capability}`, onChange: reread,
+  });
   // Refresh when an action on one of this list's resources is accepted, from any view.
   useEffect(
     () =>
@@ -231,15 +237,21 @@ export function ExtensionResults({
       /\bApiError:\s*404\b|\bcode:\s*404\b|\b404 page not found\b/i.test(
         data.error ?? "",
       );
+    // A reader fixes one version or accepts several, the first served (#547).
+    const versions = binding?.versions?.length
+      ? binding.versions
+      : typeof args?.version === "string"
+        ? [args.version]
+        : [];
     const guidance =
       notFound &&
       typeof args?.group === "string" &&
-      typeof args.version === "string" &&
+      versions.length > 0 &&
       typeof args.plural === "string" &&
       typeof args.kind === "string"
         ? {
             title: `${args.kind} API unavailable`,
-            detail: `This extension reads ${args.plural} from ${args.group}/${args.version}. Check that the selected cluster serves this API version. Installing an extension does not install its Kubernetes APIs.`,
+            detail: `This extension reads ${args.plural} from ${args.group}/${versions.join(" or ")}. Check that the selected cluster serves ${versions.length > 1 ? "one of these API versions" : "this API version"}. Installing an extension does not install its Kubernetes APIs.`,
           }
         : undefined;
     return (
@@ -326,11 +338,16 @@ export function ExtensionResults({
                 ? `Namespace: ${namespace}`
                 : "All namespaces"}
           </span>
+          <LiveStatus live={live} />
           <Button variant="secondary" onClick={data.reload}>
             Refresh
           </Button>
         </div>
       )}
+      {hideToolbar && <div className="extension-live-row"><LiveStatus live={live} /></div>}
+      <LiveNotice live={live} what="list" />
+      {/* One notice when both are down for one reason; the columns' own only when they differ. */}
+      {appColumns.live.state !== live.state && <LiveNotice live={appColumns.live} what="app column values" />}
       {selectable && (
         <ExtensionBulkActions
           key={scope}
@@ -341,7 +358,7 @@ export function ExtensionResults({
         />
       )}
       {data.status === "loading" ? <p className="extension-message" role="status">Refreshing resources…</p> : data.status === "error" ? <ErrorNotice cluster message={data.error} retry={data.reload}/> : shown.length ? (
-        <div className="extension-table-scroll">
+        <div className="extension-table-scroll" data-stale={live.state === "reconnecting" || undefined}>
           <table>
             <thead>
               <tr>

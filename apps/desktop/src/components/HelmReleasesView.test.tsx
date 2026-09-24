@@ -8,8 +8,13 @@ const { listHelmReleasesMock, getHelmReleaseMock, useNamespaceOptionsMock } = vi
   getHelmReleaseMock: vi.fn(),
   useNamespaceOptionsMock: vi.fn(),
 }));
-vi.mock("@srelens/core/lib/helm", () => ({
+vi.mock("@srelens/core/lib/helm", async (importOriginal) => ({
   listHelmReleases: listHelmReleasesMock,
+  // The real per-namespace fan-out, run over the mock above.
+  listHelmReleasesIn: (context: string, selection: string[]) =>
+    importOriginal<typeof import("@srelens/core/lib/helm")>().then((real) =>
+      real.listHelmReleasesIn(context, selection, (...a) => listHelmReleasesMock(...a)),
+    ),
   getHelmRelease: getHelmReleaseMock,
   helmVersion: vi.fn().mockResolvedValue({ version: "v3.14.0" }),
   helmRepoUpdate: vi.fn().mockResolvedValue({ output: "" }),
@@ -166,6 +171,44 @@ describe("HelmReleasesView", () => {
     expect(listHelmReleasesMock.mock.calls[0][0]).toBe("kind-dev");
     expect(listHelmReleasesMock.mock.calls[0][1]).toBe("cache");
     expect(listHelmReleasesMock.mock.calls[0][1]).not.toBeNull();
+  });
+
+  // #688: an unscoped `helm list` reads release Secrets cluster-wide, which a
+  // credential scoped to a few namespaces is refused.
+  it("lists each selected namespace on its own when several are selected", async () => {
+    listHelmReleasesMock.mockImplementation(async (_c: string, ns: string | null) => ({
+      releases: [release, otherRelease].filter((r) => r.namespace === ns),
+    }));
+    render(<HelmReleasesView context="kind-dev" initialNamespace={`${release.namespace},${otherRelease.namespace}`} />);
+    await waitFor(() => expect(listHelmReleasesMock).toHaveBeenCalledTimes(2));
+    expect(listHelmReleasesMock.mock.calls.map((c) => c[1])).toEqual([release.namespace, otherRelease.namespace]);
+    expect(await screen.findByText(release.name)).toBeDefined();
+    expect(screen.getByText(otherRelease.name)).toBeDefined();
+  });
+
+  it("keeps the namespace that answered and names the one that was refused", async () => {
+    listHelmReleasesMock.mockImplementation(async (_c: string, ns: string | null) =>
+      ns === otherRelease.namespace
+        ? { error: `secrets is forbidden: cannot list resource "secrets" in the namespace "${ns}"` }
+        : { releases: [release] },
+    );
+    render(<HelmReleasesView context="kind-dev" initialNamespace={`${release.namespace},${otherRelease.namespace}`} />);
+    expect(await screen.findByText(release.name)).toBeDefined();
+    expect(screen.getByText(new RegExp(`Could not list releases in ${otherRelease.namespace}`))).toBeDefined();
+    expect(screen.queryByText(/^Error:/)).toBeNull();
+  });
+
+  it("gives each refused namespace its own reason", async () => {
+    listHelmReleasesMock.mockImplementation(async (_c: string, ns: string | null) => {
+      if (ns === "team-b") return { error: 'secrets is forbidden: User "dev" cannot list resource "secrets" in API group "" in the namespace "team-b"' };
+      if (ns === "team-c") return { error: "dial tcp 10.1.2.3:6443: connect: connection refused" };
+      return { releases: [release] };
+    });
+    render(<HelmReleasesView context="kind-dev" initialNamespace={`${release.namespace},team-b,team-c`} />);
+    expect(await screen.findByText(release.name)).toBeDefined();
+    const notice = screen.getByText(/Could not list releases in team-b and team-c/);
+    expect(notice.textContent).toMatch(/team-b: You don.t have permission to list secrets in team-b/);
+    expect(notice.textContent).toMatch(/team-c: .*reach|team-c: .*connect/i);
   });
 
   it("fetches all releases when no namespace is selected", async () => {
