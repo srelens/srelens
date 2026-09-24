@@ -237,7 +237,10 @@ export function useResourceList<Row extends ListRow>(
           if (gen.current !== mine) return;
           setState((s) => {
             const errors = new Map(s.errors).set(ns, error);
-            return { ...s, errors, error: firstError(errors), loading: false };
+            // Still loading while another namespace may yet answer: a fast
+            // refusal must not flash the whole list as failed first.
+            const loading = s.loading && errors.size < scopes.length;
+            return { ...s, errors, error: firstError(errors), loading };
           });
         },
         files,

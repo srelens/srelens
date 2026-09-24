@@ -398,6 +398,31 @@ describe("Events", () => {
     ).toBeTruthy();
   });
 
+  // #688: the namespace that answered had none, the other was refused — an
+  // error that names the refused namespace, not "no events" and not a
+  // failure of the whole list.
+  it("names the refused namespace when the one that answered was empty", async () => {
+    setNamespaces("prod", ["team-a", "team-b"]);
+    watchResource.mockImplementation(
+      async (
+        _c: string,
+        namespace: string,
+        _k: string,
+        onRows: (rows: unknown[]) => void,
+        _onStatus: unknown,
+        onError: (message: string) => void,
+      ) => {
+        if (namespace === "team-b") onError('events is forbidden: User "dev" cannot watch resource "events" in the namespace "team-b"');
+        else onRows([]);
+        return { stop: vi.fn() };
+      },
+    );
+    open();
+
+    expect(await screen.findByText("Could not list events in team-b")).toBeTruthy();
+    expect(screen.queryByText(/has no events/)).toBeNull();
+  });
+
   it("names what failed, and offers a way back, when nothing arrived", async () => {
     const user = userEvent.setup();
     initialRows = null;

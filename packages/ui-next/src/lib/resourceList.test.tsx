@@ -258,6 +258,33 @@ describe("useResourceList — several namespaces", () => {
     expect(result.current.error).toBe('pods is forbidden in the namespace "team-b"');
   });
 
+  it("stays loading while one namespace has refused and another has not answered", async () => {
+    // A fast refusal must not flash the whole list as failed before the
+    // namespaces that can answer have had the chance to.
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(mockState.emitError).not.toBeNull());
+    act(() => mockState.emitError!("pods is forbidden", "team-b"));
+    expect(result.current.status).toBe("loading");
+  });
+
+  it("is an error naming the refused namespace when the one that answered is empty", async () => {
+    // Not "empty": team-b was never listed, so nobody knows it has no pods.
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(mockState.emitError).not.toBeNull());
+    act(() => mockState.emitError!("pods is forbidden", "team-b"));
+    act(() => mockState.emitRows!([]));
+    expect(result.current.status).toBe("error");
+    expect(result.current.namespaceFailures).toEqual([{ namespace: "team-b", error: "pods is forbidden" }]);
+  });
+
+  it("is an error once every namespace has refused", async () => {
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(mockState.emitError).not.toBeNull());
+    act(() => mockState.emitError!("pods is forbidden", "team-b"));
+    act(() => mockState.emitError!("pods is forbidden", "team-a"));
+    expect(result.current.status).toBe("error");
+  });
+
   it("reports no namespace failures for a one-namespace view", async () => {
     const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a"], []));
     await waitFor(() => expect(mockState.emitError).not.toBeNull());

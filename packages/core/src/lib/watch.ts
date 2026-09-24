@@ -117,7 +117,10 @@ function mergeKey(row: { name: string; namespace?: string }): string {
  * A failure is reported with the namespace it came from (`""` for the cluster
  * scope), and the message is passed through untouched so `describeError` can
  * still classify it. The namespaces that answered keep their rows — one
- * refused namespace is a fact about that namespace, not about the list.
+ * refused namespace is a fact about that namespace, not about the list. A
+ * namespace whose watch fails after answering loses its rows: they can no
+ * longer refresh, and a list under "could not list team-b" must not still
+ * show team-b.
  *
  * Status is `reconnecting` while any one watch is.
  */
@@ -139,9 +142,12 @@ export async function watchNamespaces(
   const snapshots = new Map<string, Array<{ name: string; namespace?: string }>>();
   const failed = new Set<string>();
   const reconnecting = new Set<string>();
+  let emitted = false;
 
   const emitIfSettled = () => {
-    if (snapshots.size === 0) return;
+    // Nothing answered yet and nothing ever emitted: an empty list here would
+    // read as "none", when every namespace simply failed.
+    if (snapshots.size === 0 && !emitted) return;
     if (scopes.some((ns) => !snapshots.has(ns) && !failed.has(ns))) return;
     const merged = [...snapshots.values()].flat();
     merged.sort((a, b) => {
@@ -149,6 +155,7 @@ export async function watchNamespaces(
       const kb = mergeKey(b);
       return ka < kb ? -1 : ka > kb ? 1 : 0;
     });
+    emitted = true;
     onRows(merged);
   };
 
@@ -171,6 +178,7 @@ export async function watchNamespaces(
         },
         (error) => {
           failed.add(ns);
+          snapshots.delete(ns);
           onError?.(error, ns);
           emitIfSettled();
         },

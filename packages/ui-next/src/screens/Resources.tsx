@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   describeError,
   listCrds,
+  namespacePhrase,
   rowInSelection,
   watchNamespaceForSelection,
   type ClusterContext,
@@ -416,7 +417,13 @@ function KindList({
           <LoadingState label={`Loading ${lower}`} />
         ) : list.status === "error" ? (
           <FailureState
-            title={`Could not list ${lower} on ${name}`}
+            // Several namespaces, some refused and the rest empty: say which were
+          // refused (#688) — neither "none" nor a failure of the whole cluster.
+          title={
+            list.namespaceFailures.length > 0
+              ? `Could not list ${lower} in ${namespacePhrase(list.namespaceFailures.map((f) => f.namespace))}`
+              : `Could not list ${lower} on ${name}`
+          }
             error={list.error}
             onRetry={list.reload}
           />

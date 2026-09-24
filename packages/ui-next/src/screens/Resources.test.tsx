@@ -503,6 +503,31 @@ describe("Resources", () => {
   // Correction 3: an unhealthy row gets a dot before its name, and the dot is
   // never colour alone — a reason rides beside it for anyone who cannot see
   // the colour, the same contract the cluster rail's `unavailable` follows.
+  // #688: the namespace that answered had none, the other was refused — an
+  // error that names the refused namespace, not "no pods" and not a
+  // failure of the whole list.
+  it("names the refused namespace when the one that answered was empty", async () => {
+    setNamespaces(CTX.stableId, ["team-a", "team-b"]);
+    watchResource.mockImplementation(
+      async (
+        _c: string,
+        namespace: string,
+        _k: string,
+        onRows: (rows: unknown[]) => void,
+        _onStatus: unknown,
+        onError: (message: string) => void,
+      ) => {
+        if (namespace === "team-b") onError('pods is forbidden: User "dev" cannot watch resource "pods" in the namespace "team-b"');
+        else onRows([]);
+        return { stop: vi.fn() };
+      },
+    );
+    open("/k/pods");
+
+    expect(await screen.findByText("Could not list pods in team-b")).toBeTruthy();
+    expect(screen.queryByText(/has no pods/)).toBeNull();
+  });
+
   it("marks an unhealthy pod's row with a dot that also says so in words", async () => {
     watchResource.mockImplementation(
       async (_c: string, _n: string, _k: string, onRows: (rows: unknown[]) => void) => {

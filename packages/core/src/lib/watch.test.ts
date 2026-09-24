@@ -228,6 +228,42 @@ describe("watchNamespaces", () => {
     expect(onRows).toHaveBeenLastCalledWith([{ name: "web", namespace: "team-a" }]);
   });
 
+  it("drops a namespace's rows once its watch fails, rather than keeping them frozen", async () => {
+    const { emit } = capture();
+    const onRows = vi.fn();
+
+    await watchNamespaces("c", ["team-a", "team-b"], "pods", onRows, undefined, vi.fn());
+    emit("team-a", [{ name: "web", namespace: "team-a" }]);
+    emit("team-b", [{ name: "db", namespace: "team-b" }]);
+    emit("team-b", { error: "pods is forbidden" });
+
+    expect(onRows).toHaveBeenLastCalledWith([{ name: "web", namespace: "team-a" }]);
+  });
+
+  it("empties the merged list when every namespace fails after answering", async () => {
+    const { emit } = capture();
+    const onRows = vi.fn();
+
+    await watchNamespaces("c", ["team-a", "team-b"], "pods", onRows, undefined, vi.fn());
+    emit("team-a", [{ name: "web", namespace: "team-a" }]);
+    emit("team-b", [{ name: "db", namespace: "team-b" }]);
+    emit("team-a", { error: "pods is forbidden" });
+    emit("team-b", { error: "pods is forbidden" });
+
+    expect(onRows).toHaveBeenLastCalledWith([]);
+  });
+
+  it("emits nothing when every namespace fails before any answered", async () => {
+    const { emit } = capture();
+    const onRows = vi.fn();
+
+    await watchNamespaces("c", ["team-a", "team-b"], "pods", onRows, undefined, vi.fn());
+    emit("team-a", { error: "pods is forbidden" });
+    emit("team-b", { error: "pods is forbidden" });
+
+    expect(onRows).not.toHaveBeenCalled();
+  });
+
   it("is reconnecting while any one namespace's watch is, and live once all are", async () => {
     const { emit } = capture();
     const onStatus = vi.fn();
