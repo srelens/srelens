@@ -1131,9 +1131,13 @@ mod tests {
     #[derive(Clone)]
     enum Step {
         Signal(KindSignal),
+        /// Changes sent back to back, with no pause between them, so the burst
+        /// is inside one window by construction. A pause per signal is not:
+        /// on Windows each 5 ms sleep takes a ~15.6 ms timer tick (#711).
+        Burst(usize),
         Fail(&'static str),
     }
-    use Step::{Fail, Signal};
+    use Step::{Burst, Fail, Signal};
     const LISTED: Step = Signal(KindSignal::Listed);
     const CHANGED: Step = Signal(KindSignal::Changed);
 
@@ -1158,6 +1162,11 @@ mod tests {
                         Signal(signal) => {
                             let _ = scope.signals.send(signal);
                             tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                        Burst(n) => {
+                            for _ in 0..n {
+                                let _ = scope.signals.send(KindSignal::Changed);
+                            }
                         }
                         Fail(message) => return Err(message.to_owned()),
                     }
@@ -1336,9 +1345,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (path, _reg, streams) = setup(dir.path());
         let revision = install(&path, fake_core());
-        let mut script = vec![LISTED];
-        script.extend(std::iter::repeat_n(CHANGED, 20));
-        let (session, _) = scripted(vec![script]);
+        let (session, _) = scripted(vec![vec![LISTED, Burst(20)]]);
         streams.script_watches(session, FAST);
         let sink = Arc::new(TestSink::default());
         streams

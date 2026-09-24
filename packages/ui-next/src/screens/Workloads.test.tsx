@@ -305,6 +305,89 @@ describe("Workloads", () => {
     expect(screen.getByText(/forbidden: cannot list deployments/i)).toBeTruthy();
   });
 
+  // #701: with every kind refused, nothing answered — so "has no workloads"
+  // is a claim the app cannot make, and five banners for one refusal are a
+  // wall. One failure state, the reason said once, one retry for all five.
+  it("says the listing failed, once, when every kind is refused — never that there are no workloads", async () => {
+    watchResource.mockImplementation(
+      async (
+        _context: string,
+        _namespace: string,
+        kind: string,
+        _onRows: (rows: unknown[]) => void,
+        _onStatus: (status: "live" | "reconnecting") => void,
+        onError: (message: string) => void,
+      ) => {
+        // What the apiserver actually sends: each refusal names its own
+        // resource, so the five are five different strings.
+        onError(
+          `${kind} is forbidden: User "dana" cannot list resource "${kind}" in API group "apps" at the cluster scope`,
+        );
+        return { stop };
+      },
+    );
+
+    open();
+
+    expect(await screen.findByText(/could not list workloads/i)).toBeTruthy();
+    expect(screen.queryByText(/has no workloads/i)).toBeNull();
+    expect(screen.queryByText(/no workloads/i)).toBeNull();
+    // One failure, not five.
+    expect(screen.getAllByText(/could not list/i)).toHaveLength(1);
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    // The shared reason, said once rather than once per kind.
+    expect(
+      screen.getByText(
+        "You don't have permission to list deployments, statefulsets, daemonsets, pods and cronjobs at the cluster scope.",
+      ),
+    ).toBeTruthy();
+
+    // Retry re-lists all five kinds, not only the first.
+    watchResource.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(watchResource).toHaveBeenCalledTimes(5));
+    expect(watchResource.mock.calls.map((c) => c[2]).sort()).toEqual(
+      ["cronjobs", "daemonsets", "deployments", "pods", "statefulsets"],
+    );
+  });
+
+  // #701 over #688: several namespaces selected, every one refused for every
+  // kind. Each kind is then an error WITH per-namespace failures — nothing
+  // answered anywhere, so this is the same one failure state, not a grouped
+  // banner over "has no workloads".
+  it("says the listing failed, once, when every kind is refused in every selected namespace", async () => {
+    store.openTab("/resources");
+    setNamespaces(CTX.stableId, ["default", "kube-system"]);
+    watchResource.mockImplementation(
+      async (
+        _context: string,
+        namespace: string,
+        kind: string,
+        _onRows: (rows: unknown[]) => void,
+        _onStatus: (status: "live" | "reconnecting") => void,
+        onError: (message: string) => void,
+      ) => {
+        onError(`${kind} is forbidden: User "dev" cannot watch resource "${kind}" in the namespace "${namespace}"`);
+        return { stop };
+      },
+    );
+
+    open();
+
+    expect(await screen.findByText(/could not list workloads on prod-eu/i)).toBeTruthy();
+    expect(screen.queryByText(/no workloads/i)).toBeNull();
+    expect(screen.getAllByText(/could not list/i)).toHaveLength(1);
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    // Every namespace's refusal, not only the first one `error` carries.
+    const detail = document.querySelector('[data-slot="detail"]')?.textContent ?? "";
+    expect(detail).toContain(
+      "You don't have permission to watch deployments, statefulsets, daemonsets, pods and cronjobs in default.",
+    );
+    expect(detail).toContain(
+      "You don't have permission to watch deployments, statefulsets, daemonsets, pods and cronjobs in kube-system.",
+    );
+  });
+
   // #688: a credential scoped to a few namespaces is refused a cluster-scope
   // list, and two selected namespaces used to mean exactly that.
   it("watches each selected namespace on its own, never the cluster scope", async () => {
