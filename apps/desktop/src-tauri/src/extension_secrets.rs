@@ -295,6 +295,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Review of #543: master-password mode, the other protected key source.
+    /// A vault re-keyed onto a password, locked, and unlocked with that
+    /// password again keeps an app's secret like a keychain-backed one.
+    #[test]
+    fn a_master_password_vault_keeps_a_secret_once_unlocked() {
+        let dir = temp_dir("password");
+        let vault = keychain_vault(&dir);
+        // Setup as `vault_password` does it: re-key onto a password-derived
+        // key, write the meta whose existence is password mode.
+        let password = format!("master-{}-passphrase", 7);
+        let (meta, key) = crate::vault::build_meta(&password).unwrap();
+        vault.rekey_from_current(key, "password").unwrap();
+        crate::vault::write_meta(&dir, &meta).unwrap();
+        let store = VaultSecretStore::with(vault.clone());
+        assert_eq!(
+            store.status(),
+            Ok(()),
+            "an unlocked password vault keeps secrets"
+        );
+
+        vault.discard_key().unwrap();
+        let why = store.status().unwrap_err();
+        assert!(why.contains("master password"), "{why}");
+        assert!(store.put(KEY, &SecretValue::new(SECRET.into())).is_err());
+
+        crate::vault::unlock_with_master_password(&vault, &dir, &password).unwrap();
+        assert_eq!(vault.key_source(), "password");
+        store.put(KEY, &SecretValue::new(SECRET.into())).unwrap();
+        assert_eq!(store.contains(KEY), Ok(true), "the secret reads as set");
+        let revealed = store
+            .reveal(KEY)
+            .unwrap()
+            .is_some_and(|v| v.expose() == SECRET);
+        assert!(revealed, "the store returns the value it kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_store_whose_vault_is_not_open_yet_is_unavailable() {
         let store = VaultSecretStore::attached_later();
