@@ -382,6 +382,71 @@ describe("useResourceList — several namespaces", () => {
     expect(result.current.stale).toBe(true);
   });
 
+  it("never lets a slow poll overwrite the newer one that finished first", async () => {
+    // A poll waits on its slowest namespace; the next one starts on the
+    // interval regardless. If the newer poll answers first, the older must
+    // not land afterwards and put its older rows back.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let poll = 0;
+      let releaseSlow!: () => void;
+      const load = vi.fn((_c: string, ns: string) => {
+        if (ns === "team-a") poll++;
+        const n = poll;
+        const answer = { rows: [{ name: `v${n}`, namespace: ns }] };
+        if (n === 1 && ns === "team-b") {
+          return new Promise<typeof answer>((resolve) => {
+            releaseSlow = () => resolve(answer);
+          });
+        }
+        return Promise.resolve(answer);
+      });
+      const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+      const { result } = renderHook(() => useResourceList("prod", "leases", polled, ["team-a", "team-b"], []));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      await waitFor(() => expect(result.current.rows.map((r) => r.name)).toEqual(["v2", "v2"]));
+
+      await act(async () => {
+        releaseSlow();
+      });
+      expect(result.current.rows.map((r) => r.name)).toEqual(["v2", "v2"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still commits a slow poll when no newer one has answered yet", async () => {
+    // A namespace slower than the interval must not starve the list: every
+    // poll would be overtaken by the next one's START, never by an answer.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const releases: Array<() => void> = [];
+      let poll = 0;
+      const load = vi.fn((_c: string, ns: string) => {
+        if (ns === "team-a") poll++;
+        const answer = { rows: [{ name: `v${poll}`, namespace: ns }] };
+        if (ns === "team-a") return Promise.resolve(answer);
+        return new Promise<typeof answer>((resolve) => releases.push(() => resolve(answer)));
+      });
+      const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+      const { result } = renderHook(() => useResourceList("prod", "leases", polled, ["team-a", "team-b"], []));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      // Poll 2 has started and not answered; poll 1 answers now.
+      await act(async () => {
+        releases[0]();
+      });
+      expect(result.current.rows.map((r) => r.name)).toEqual(["v1", "v1"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("marks the merged poll truncated when any one namespace's list was", async () => {
     const load = vi.fn(async (_c: string, ns: string) => ({ rows: [{ name: "x", namespace: ns }], truncated: ns === "team-b" }));
     const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };

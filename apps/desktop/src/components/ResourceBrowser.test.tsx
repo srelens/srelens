@@ -181,6 +181,23 @@ describe("ResourceBrowser — several namespaces", () => {
     expect(screen.queryByText(/at the cluster scope/i)).toBeNull();
   });
 
+  it("gives each refused namespace its own reason", async () => {
+    listNamespacesMock.mockResolvedValue({ namespaces: ["team-a", "team-b", "team-c"] });
+    watchResourceMock.mockImplementation(
+      (_c: string, ns: string, _k: string, onRows: (r: unknown) => void, _s: unknown, onError: (e: string) => void) => {
+        if (ns === "team-b") onError(FORBIDDEN);
+        else if (ns === "team-c") onError("dial tcp 10.1.2.3:6443: connect: connection refused");
+        else onRows([{ ...pod, namespace: "team-a" }]);
+        return Promise.resolve({ stop: vi.fn() });
+      },
+    );
+    render(<ResourceBrowser context="kind-dev" kind="pods" initialNamespace="team-a,team-b,team-c" />);
+    expect(await screen.findByText("web-1")).toBeTruthy();
+    const notice = screen.getByText(/Could not list pods in team-b and team-c/);
+    expect(notice.textContent).toMatch(/team-b: You don.t have permission to watch pods in team-b/);
+    expect(notice.textContent).toMatch(/team-c: .*reach|team-c: .*connect/i);
+  });
+
   it("polls a non-watchable namespaced kind in each selected namespace", async () => {
     listNamespacesMock.mockResolvedValue({ namespaces: ["team-a", "team-b"] });
     listResourceMock.mockImplementation(async (_c: string, _k: string, ns: string) => ({

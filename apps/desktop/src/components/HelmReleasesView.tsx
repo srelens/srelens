@@ -287,7 +287,9 @@ export function HelmReleasesView({
           // and these namespaces are simply not among them.
           <p className="px-3 py-1 text-xs text-muted-foreground" role="status">
             Could not list releases in {namespacePhrase(failures.map((f) => f.namespace))} —{" "}
-            {describeError(failures[0].error).detail}
+            {/* Each namespace with its own reason: two can be refused for two
+                different reasons, and the first alone would misstate the other. */}
+            {failures.map((f) => `${f.namespace}: ${describeError(f.error).detail}`).join(" · ")}
           </p>
         )}
         <div className="min-h-0 flex-1 overflow-auto">

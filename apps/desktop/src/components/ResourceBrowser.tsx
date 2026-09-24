@@ -966,7 +966,8 @@ export function ResourceBrowser({
               <p className="px-3 py-1 text-xs text-muted-foreground" role="status">
                 Could not list {RESOURCE_LABELS[kind].toLocaleLowerCase()} in{" "}
                 {namespacePhrase(res.failures.map((f) => f.namespace))} —{" "}
-                {describeError(res.failures[0].error).detail}
+                {/* Each namespace with its own reason, not the first one's for all. */}
+                {res.failures.map((f) => `${f.namespace}: ${describeError(f.error).detail}`).join(" · ")}
               </p>
             )}
             <Toolbar className="fl-resource-toolbar shrink-0 flex-wrap">

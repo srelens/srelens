@@ -198,6 +198,19 @@ describe("HelmReleasesView", () => {
     expect(screen.queryByText(/^Error:/)).toBeNull();
   });
 
+  it("gives each refused namespace its own reason", async () => {
+    listHelmReleasesMock.mockImplementation(async (_c: string, ns: string | null) => {
+      if (ns === "team-b") return { error: 'secrets is forbidden: User "dev" cannot list resource "secrets" in API group "" in the namespace "team-b"' };
+      if (ns === "team-c") return { error: "dial tcp 10.1.2.3:6443: connect: connection refused" };
+      return { releases: [release] };
+    });
+    render(<HelmReleasesView context="kind-dev" initialNamespace={`${release.namespace},team-b,team-c`} />);
+    expect(await screen.findByText(release.name)).toBeDefined();
+    const notice = screen.getByText(/Could not list releases in team-b and team-c/);
+    expect(notice.textContent).toMatch(/team-b: You don.t have permission to list secrets in team-b/);
+    expect(notice.textContent).toMatch(/team-c: .*reach|team-c: .*connect/i);
+  });
+
   it("fetches all releases when no namespace is selected", async () => {
     render(<HelmReleasesView context="kind-dev" />);
     await waitFor(() => expect(listHelmReleasesMock).toHaveBeenCalled());

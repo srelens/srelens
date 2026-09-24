@@ -288,10 +288,21 @@ export function useResourceList<Row extends ListRow>(
     // the whole view's previous rows only when EVERY scope failed; otherwise
     // the ones that answered are the list and the rest are named failures.
     const load = descriptor.load;
+    // The interval starts the next poll whether or not this one has
+    // answered, and a poll over several namespaces waits on its slowest — so
+    // an older poll can finish after a newer one, and must not then put its
+    // older rows back. The rule is "never older than what is shown", not
+    // "only the newest": a namespace slower than the interval would otherwise
+    // have every poll overtaken by the next one's start, and never commit.
+    // `gen` only tells views apart.
+    let pollSeq = 0;
+    let shownSeq = 0;
     const runPoll = () => {
       if (!load) return;
+      const seq = ++pollSeq;
       Promise.allSettled(scopes.map((ns) => load(context, ns))).then((results) => {
-        if (gen.current !== mine) return;
+        if (gen.current !== mine || seq < shownSeq) return;
+        shownSeq = seq;
         const errors = new Map<string, string>();
         const rows: unknown[] = [];
         let truncated = false;
