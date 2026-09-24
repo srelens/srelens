@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { describeError } from "@srelens/core";
-import { FailureAlert, FailureState, FailureWord, friendly, summarise } from "./errorCopy";
+import { FailureAlert, FailureState, FailureWord, NamespaceFailuresAlert, friendly, summarise } from "./errorCopy";
 
 /** The 401 the overview's Fleet rail was printing at the reader, verbatim. */
 const API_401 =
@@ -183,5 +183,41 @@ describe("FailureWord", () => {
   it("takes a lead so a row can say what it is about", () => {
     render(<FailureWord error={API_401} lead="Could not count Pod: " />);
     expect(screen.getByText(/Could not count Pod: Not authorized/)).toBeDefined();
+  });
+});
+
+describe("NamespaceFailuresAlert", () => {
+  const FORBIDDEN =
+    'pods is forbidden: User "dev" cannot watch resource "pods" in API group "" in the namespace "team-b"';
+
+  it("names the namespace that could not be listed, and says why", () => {
+    render(<NamespaceFailuresAlert what="pods" failures={[{ namespace: "team-b", error: FORBIDDEN }]} />);
+    expect(screen.getByText("Could not list pods in team-b")).toBeTruthy();
+    // The reason is describeError's, not the raw struct.
+    expect(screen.getByText(describeError(FORBIDDEN).detail)).toBeTruthy();
+  });
+
+  it("lists every failed namespace in one banner", () => {
+    render(
+      <NamespaceFailuresAlert
+        what="pods"
+        failures={[
+          { namespace: "team-b", error: FORBIDDEN },
+          { namespace: "team-c", error: FORBIDDEN },
+        ]}
+      />,
+    );
+    expect(screen.getByText("Could not list pods in team-b and team-c")).toBeTruthy();
+  });
+
+  it("counts, rather than lists, a long run of failed namespaces", () => {
+    const failures = ["a", "b", "c", "d", "e"].map((namespace) => ({ namespace, error: FORBIDDEN }));
+    render(<NamespaceFailuresAlert what="pods" failures={failures} />);
+    expect(screen.getByText("Could not list pods in 5 namespaces: a, b, c and 2 more")).toBeTruthy();
+  });
+
+  it("renders nothing when every namespace answered", () => {
+    const { container } = render(<NamespaceFailuresAlert what="pods" failures={[]} />);
+    expect(container.textContent).toBe("");
   });
 });

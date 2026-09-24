@@ -52,9 +52,10 @@ import {
 
 type NodeRow = NodeSummary & { cpu?: number; memory?: number };
 type PodRow = PodSummary & { cpu?: number; memory?: number };
-import { watchResource, WATCHABLE_KINDS, type WatchHandle, type WatchStatus } from "@srelens/core";
+import { watchNamespaces, WATCHABLE_KINDS, type WatchHandle, type WatchStatus } from "@srelens/core";
 import type { TabViewState } from "@srelens/core";
 import {
+  namespacePhrase,
   parseNamespaceSelection,
   serializeNamespaceSelection,
   watchNamespaceForSelection,
@@ -439,6 +440,12 @@ interface ResourceState {
   rows: Array<{ name: string }>;
   error: string;
   loading: boolean;
+  /**
+   * With several namespaces selected, each one whose listing failed; the
+   * others' rows are still in `rows` and `error` stays empty, because a
+   * refused namespace is a fact about that namespace, not the list (#688).
+   */
+  failures?: Array<{ namespace: string; error: string }>;
 }
 
 // Last-seen rows per view (`context|namespace|kind`), kept module-level so
@@ -543,10 +550,18 @@ export function ResourceBrowser({
   }, [nsScope]);
   const watchNamespace = watchNamespaceForSelection(selection);
   const selectionKey = serializeNamespaceSelection(selection);
+  // What the list is fetched over: each selected namespace on its own, never
+  // the cluster scope narrowed afterwards — a credential scoped to a few
+  // namespaces is refused that (#688). A cluster-scoped kind has no namespace
+  // to narrow by, and fanning it out would fetch the same list N times.
+  const namespaced = isNamespaced(kind);
+  const listSelection = namespaced ? selection : [];
+  const listScopes = listSelection.length === 0 ? [""] : listSelection;
+  const listKey = listScopes.join(",");
   const [res, setRes] = useState<ResourceState>(() => {
     // Hydrate from the cross-mount cache on first render so a re-opened tab
     // paints its previous rows immediately (no empty flash before the effect).
-    const cached = listRowCache.get(`${context}|${watchNamespace}|${kind}`);
+    const cached = listRowCache.get(`${context}|${listKey}|${kind}`);
     return { rows: cached ?? [], error: "", loading: false };
   });
   const [watchStatus, setWatchStatus] = useState<WatchStatus>("live");
@@ -573,8 +588,6 @@ export function ResourceBrowser({
   const [podCpuMem, setPodCpuMem] = useState<Map<string, { cpu: number; mem: number }>>(new Map());
   const viewKeyRef = useRef("");
 
-  const namespaced = isNamespaced(kind);
-
   // Reset the search column only when the kind genuinely CHANGES in place —
   // not on mount. This component is keyed by tab id, so it remounts on every
   // tab switch, and a mount-time reset would patch `filterColumn: null` into
@@ -590,7 +603,7 @@ export function ResourceBrowser({
     if (namespaced && namespaces === null) return; // wait for the namespace list
     let cancelled = false;
     // Only reset the table for a genuinely new view; a poll keeps current rows.
-    const viewKey = `${context}|${watchNamespace}|${kind}`;
+    const viewKey = `${context}|${listKey}|${kind}`;
     const fresh = viewKeyRef.current !== viewKey;
     viewKeyRef.current = viewKey;
     if (fresh) {
@@ -607,21 +620,34 @@ export function ResourceBrowser({
     if (isWatchable(kind)) {
       if (fresh) setWatchStatus("live");
       let handle: WatchHandle | null = null;
-      void watchResource(
+      const several = listScopes.length > 1;
+      const failures: Array<{ namespace: string; error: string }> = [];
+      void watchNamespaces(
         context,
-        watchNamespace,
+        listSelection,
         kind,
         (rows) => {
           if (!cancelled) {
-            setRes({ rows, error: "", loading: false });
+            setRes({ rows, error: "", loading: false, failures: [...failures] });
             cacheRows(viewKey, rows);
           }
         },
         (status) => {
           if (!cancelled) setWatchStatus(status);
         },
-        (err) => {
-          if (!cancelled) setRes({ rows: [], error: err, loading: false });
+        (err, ns) => {
+          if (cancelled) return;
+          if (!several) {
+            setRes({ rows: [], error: err, loading: false });
+            return;
+          }
+          failures.push({ namespace: ns, error: err });
+          // Every namespace refused: nothing to list, so it is the list's error.
+          if (failures.length === listScopes.length) {
+            setRes({ rows: [], error: err, loading: false, failures: [...failures] });
+          } else {
+            setRes((r) => ({ ...r, failures: [...failures] }));
+          }
         },
         kubeconfigFiles,
       )
@@ -637,7 +663,7 @@ export function ResourceBrowser({
 
     // Non-watchable kinds (nodes, generic) load on demand + poll. (Events now
     // stream via watch.)
-    const loader: Promise<{ rows?: Array<{ name: string }>; error?: string }> =
+    const loader: Promise<{ rows?: Array<{ name: string }>; error?: string; failures?: ResourceState["failures"] }> =
       kind === "nodes"
         ? Promise.all([listNodes(context), nodeMetrics(context)]).then(([n, m]) => {
             const mm = new Map((m.metrics ?? []).map((x) => [x.name, x]));
@@ -648,21 +674,29 @@ export function ResourceBrowser({
             }));
             return { rows, error: n.error }; // metrics are best-effort
           })
-        : listResource(context, K8S_KIND[kind], watchNamespace).then((o) => ({
-            rows: o.items,
-            error: o.error,
-          }));
-    void loader.then(({ rows, error }) => {
+        : Promise.all(
+            listScopes.map((ns) =>
+              listResource(context, K8S_KIND[kind], ns).then((o) => ({ namespace: ns, rows: o.items, error: o.error })),
+            ),
+          ).then((results) => {
+            const failures = results.flatMap((r) => (r.error ? [{ namespace: r.namespace, error: r.error }] : []));
+            const rows = results.flatMap((r) => (r.error ? [] : (r.rows ?? [])));
+            // One scope: its error is the list's, as it always was. Several:
+            // the list's error only when every namespace refused.
+            const error = failures.length === results.length ? failures[0]?.error : undefined;
+            return { rows, error, failures: listScopes.length > 1 ? failures : [] };
+          });
+    void loader.then(({ rows, error, failures }) => {
       if (!cancelled) {
         const loaded = rows ?? [];
-        setRes({ rows: loaded, error: error ?? "", loading: false });
+        setRes({ rows: loaded, error: error ?? "", loading: false, failures });
         if (!error) cacheRows(viewKey, loaded);
       }
     });
     return () => {
       cancelled = true;
     };
-  }, [context, watchNamespace, kind, namespaced, namespaces, reloadKey]);
+  }, [context, listKey, kind, namespaced, namespaces, reloadKey]);
 
   // Poll non-watchable kinds for a live-updating feel (true watch streams
   // cover pods/deployments/services).
@@ -671,7 +705,7 @@ export function ResourceBrowser({
     if (namespaced && namespaces === null) return;
     const t = setInterval(() => setReloadKey((k) => k + 1), POLL_MS);
     return () => clearInterval(t);
-  }, [kind, watchNamespace, namespaced, namespaces, context]);
+  }, [kind, listKey, namespaced, namespaces, context]);
 
   // Pods stream over watch (no metrics) — poll pod CPU/memory separately and
   // merge by name. Best-effort: a missing metrics-server just leaves "—".
@@ -681,12 +715,12 @@ export function ResourceBrowser({
       return;
     }
     let active = true;
+    // One reading per scope, each best-effort on its own.
     const fetchMetrics = () =>
-      void podMetrics(context, watchNamespace).then((o) => {
+      void Promise.allSettled(listScopes.map((ns) => podMetrics(context, ns))).then((results) => {
         if (!active) return;
-        setPodCpuMem(
-          new Map((o.metrics ?? []).map((m) => [m.name, { cpu: m.cpuMillicores, mem: m.memoryMiB }])),
-        );
+        const metrics = results.flatMap((r) => (r.status === "fulfilled" ? (r.value.metrics ?? []) : []));
+        setPodCpuMem(new Map(metrics.map((m) => [m.name, { cpu: m.cpuMillicores, mem: m.memoryMiB }])));
       });
     fetchMetrics();
     const t = setInterval(fetchMetrics, 10000);
@@ -694,7 +728,7 @@ export function ResourceBrowser({
       active = false;
       clearInterval(t);
     };
-  }, [kind, context, watchNamespace]);
+  }, [kind, context, listKey]);
 
   const columns = useMemo(() => {
     if (kind === "events") return eventColumns as unknown as Column<{ name: string }>[];
@@ -924,6 +958,15 @@ export function ResourceBrowser({
             {nsError && (
               <p className="px-3 py-1 text-xs text-muted-foreground" role="status">
                 {describeError(nsError).title} — can’t list namespaces; showing all.
+              </p>
+            )}
+            {!res.error && res.failures && res.failures.length > 0 && (
+              // Several namespaces, some refused (#688): the rows below are
+              // live, and these namespaces are simply not among them.
+              <p className="px-3 py-1 text-xs text-muted-foreground" role="status">
+                Could not list {RESOURCE_LABELS[kind].toLocaleLowerCase()} in{" "}
+                {namespacePhrase(res.failures.map((f) => f.namespace))} —{" "}
+                {describeError(res.failures[0].error).detail}
               </p>
             )}
             <Toolbar className="fl-resource-toolbar shrink-0 flex-wrap">

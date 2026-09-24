@@ -48,8 +48,13 @@ vi.mock("@srelens/core/lib/clusters", async (importOriginal) => {
     listContexts: listContextsMock,
   };
 });
-vi.mock("@srelens/core/lib/watch", () => ({
+vi.mock("@srelens/core/lib/watch", async () => ({
   watchResource: watchResourceMock,
+  // The real watchNamespaces lives in the module this mock replaces; stand
+  // it in with one watchResourceMock call per namespace.
+  watchNamespaces: (await import("@srelens/core/lib/watchTestDouble")).watchNamespacesVia(
+    (...a) => watchResourceMock(...a),
+  ),
   WATCHABLE_KINDS: [
     "pods",
     "deployments",
@@ -145,6 +150,47 @@ beforeEach(() => {
   listResourceMock.mockReset();
   listContextsMock.mockReset();
   listContextsMock.mockResolvedValue({ contexts: [] });
+});
+
+// #688: a credential scoped to a few namespaces is refused a cluster-scope
+// list, and two selected namespaces used to mean exactly that.
+describe("ResourceBrowser — several namespaces", () => {
+  const FORBIDDEN = 'pods is forbidden: User "dev" cannot watch resource "pods" in API group "" in the namespace "team-b"';
+
+  it("watches each selected namespace on its own, never the cluster scope", async () => {
+    listNamespacesMock.mockResolvedValue({ namespaces: ["team-a", "team-b"] });
+    watchResourceMock.mockImplementation(watchWith([]));
+    render(<ResourceBrowser context="kind-dev" kind="pods" initialNamespace="team-a,team-b" />);
+    await waitFor(() => expect(watchResourceMock).toHaveBeenCalledTimes(2));
+    const watched = watchResourceMock.mock.calls.map((c) => c[1]);
+    expect(watched.sort()).toEqual(["team-a", "team-b"]);
+  });
+
+  it("keeps the namespace that answered and names the one that was refused", async () => {
+    listNamespacesMock.mockResolvedValue({ namespaces: ["team-a", "team-b"] });
+    watchResourceMock.mockImplementation(
+      (_c: string, ns: string, _k: string, onRows: (r: unknown) => void, _s: unknown, onError: (e: string) => void) => {
+        if (ns === "team-b") onError(FORBIDDEN);
+        else onRows([{ ...pod, namespace: "team-a" }]);
+        return Promise.resolve({ stop: vi.fn() });
+      },
+    );
+    render(<ResourceBrowser context="kind-dev" kind="pods" initialNamespace="team-a,team-b" />);
+    expect(await screen.findByText("web-1")).toBeTruthy();
+    expect(screen.getByText(/Could not list pods in team-b/)).toBeTruthy();
+    expect(screen.queryByText(/at the cluster scope/i)).toBeNull();
+  });
+
+  it("polls a non-watchable namespaced kind in each selected namespace", async () => {
+    listNamespacesMock.mockResolvedValue({ namespaces: ["team-a", "team-b"] });
+    listResourceMock.mockImplementation(async (_c: string, _k: string, ns: string) => ({
+      items: [{ name: `lease-${ns}`, namespace: ns }],
+    }));
+    render(<ResourceBrowser context="kind-dev" kind="leases" initialNamespace="team-a,team-b" />);
+    expect(await screen.findByText("lease-team-a")).toBeTruthy();
+    expect(screen.getByText("lease-team-b")).toBeTruthy();
+    expect(listResourceMock.mock.calls.map((c) => c[2])).not.toContain("");
+  });
 });
 
 describe("ResourceBrowser", () => {
@@ -560,15 +606,17 @@ describe("ResourceBrowser", () => {
     );
 
     // Selecting a second namespace is additive (multi-select): the serialized
-    // filter now holds both, and the watch widens to all namespaces (filtered
-    // client-side) since more than one is selected.
+    // filter now holds both, and the second namespace gets a watch of its own
+    // — never the cluster scope, which a namespace-scoped credential is
+    // refused (#688).
     await userEvent.click(screen.getByRole("combobox", { name: "Namespace" }));
     await userEvent.click(await screen.findByRole("option", { name: "default" }));
     expect(onNamespaceChange).toHaveBeenCalledWith("kube-system,default");
+    expect(watchResourceMock.mock.calls.map((c) => c[1])).not.toContain("");
     await waitFor(() =>
       expect(watchResourceMock).toHaveBeenCalledWith(
         "kind-dev",
-        "",
+        "default",
         "pods",
         expect.any(Function),
         expect.any(Function),
@@ -587,17 +635,19 @@ describe("ResourceBrowser", () => {
     expect(await screen.findByText("Loading pods")).toBeDefined();
   });
 
-  it("filters rows client-side to the selected namespaces when several are chosen", async () => {
+  it("lists only the selected namespaces when several are chosen", async () => {
     listNamespacesMock.mockResolvedValue({ namespaces: ["default", "kube-system", "ops"] });
-    // Two namespaces selected → watch runs across all namespaces and the rows
-    // are narrowed client-side to the selection.
-    watchResourceMock.mockImplementation(
-      watchWith([
-        { ...pod, name: "web-1", namespace: "default" },
-        { ...pod, name: "dns-1", namespace: "kube-system" },
-        { ...pod, name: "backup-1", namespace: "ops" },
-      ]),
-    );
+    // Two namespaces selected → one watch each, answering for its own
+    // namespace; `ops` is never asked for.
+    const everywhere = [
+      { ...pod, name: "web-1", namespace: "default" },
+      { ...pod, name: "dns-1", namespace: "kube-system" },
+      { ...pod, name: "backup-1", namespace: "ops" },
+    ];
+    watchResourceMock.mockImplementation((_c: string, ns: string, _k: string, onRows: (r: unknown) => void) => {
+      onRows(everywhere.filter((r) => ns === "" || r.namespace === ns));
+      return Promise.resolve({ stop: vi.fn() });
+    });
     render(<ResourceBrowser context="kind-dev" kind="pods" initialNamespace="default,kube-system" />);
     await waitFor(() => expect(screen.getByText("web-1")).toBeDefined());
     expect(screen.getByText("dns-1")).toBeDefined();

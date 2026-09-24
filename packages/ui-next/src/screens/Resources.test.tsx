@@ -47,6 +47,9 @@ vi.mock("../extensions/inventoryStore", async (original) => ({
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
   watchResource: (...a: unknown[]) => watchResource(...a),
+  // Core's own watchNamespaces calls its module-local watchResource, which
+  // the line above cannot reach — route each namespace to the mock instead.
+  watchNamespaces: (await import("@srelens/core/lib/watchTestDouble")).watchNamespacesVia((...a) => watchResource(...a)),
   listCrds: (...a: unknown[]) => listCrds(...a),
   listCustomResource: (...a: unknown[]) => listCustomResource(...a),
   listNamespaces: (...a: unknown[]) => listNamespaces(...a),

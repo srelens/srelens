@@ -11,6 +11,9 @@ const { watchResource, useNamespaceOptions, cronjobSetSuspend } = vi.hoisted(() 
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
   watchResource: (...a: unknown[]) => watchResource(...a),
+  // Core's own watchNamespaces calls its module-local watchResource, which
+  // the line above cannot reach — route each namespace to the mock instead.
+  watchNamespaces: (await import("@srelens/core/lib/watchTestDouble")).watchNamespacesVia((...a) => watchResource(...a)),
   cronjobSetSuspend: (...a: unknown[]) => cronjobSetSuspend(...a),
 }));
 
@@ -40,7 +43,7 @@ import { defaultState } from "../lib/tabs";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
 import { resetListCache } from "../lib/resourceList";
-import { resetView } from "../lib/workspace";
+import { resetView, setNamespaces } from "../lib/workspace";
 
 const CTX: ClusterContext = {
   name: "prod-eu",
@@ -280,6 +283,55 @@ describe("Workloads", () => {
 
     expect(screen.getByText(/could not list deployments/i)).toBeTruthy();
     expect(screen.getByText(/forbidden: cannot list deployments/i)).toBeTruthy();
+  });
+
+  // #688: a credential scoped to a few namespaces is refused a cluster-scope
+  // list, and two selected namespaces used to mean exactly that.
+  it("watches each selected namespace on its own, never the cluster scope", async () => {
+    setNamespaces(CTX.stableId, ["default", "kube-system"]);
+    watchResource.mockImplementation(
+      async (_context: string, namespace: string, kind: string, onRows: (rows: unknown[]) => void) => {
+        onRows((FIXTURES[kind] ?? []).filter((r) => (r as { namespace: string }).namespace === namespace));
+        return { stop };
+      },
+    );
+    open();
+
+    // Both namespaces' rows, each once.
+    await waitFor(() => expect(rowNames()).toHaveLength(5));
+    const watched = watchResource.mock.calls.map((c) => c[1]);
+    expect(watched).not.toContain("");
+    expect(new Set(watched)).toEqual(new Set(["default", "kube-system"]));
+  });
+
+  it("keeps the namespace that answered and names the one that was refused", async () => {
+    setNamespaces(CTX.stableId, ["default", "kube-system"]);
+    watchResource.mockImplementation(
+      async (
+        _context: string,
+        namespace: string,
+        kind: string,
+        onRows: (rows: unknown[]) => void,
+        _onStatus: (status: "live" | "reconnecting") => void,
+        onError: (message: string) => void,
+      ) => {
+        if (namespace === "kube-system") {
+          onError(`${kind} is forbidden: User "dev" cannot watch resource "${kind}" in the namespace "kube-system"`);
+          return { stop };
+        }
+        onRows((FIXTURES[kind] ?? []).filter((r) => (r as { namespace: string }).namespace === namespace));
+        return { stop };
+      },
+    );
+
+    open();
+
+    await waitFor(() => expect(rowNames()).toHaveLength(4));
+    expect(screen.queryByText("node-exporter")).toBeNull();
+    expect(screen.getByText("Could not list pods in kube-system")).toBeTruthy();
+    // Live rows from `default` are not stale, and the refusal is not the cluster's.
+    expect(screen.queryByText(/are stale/i)).toBeNull();
+    expect(screen.queryByText(/at the cluster scope/i)).toBeNull();
   });
 
   // Whole-branch review, Correction (a): zero options while `namespaces` is

@@ -39,7 +39,7 @@ import { describe, isBuiltInKind } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
 import { setNamespaces, useNamespaces } from "../lib/workspace";
-import { FailureAlert, FailureState } from "../lib/errorCopy";
+import { FailureAlert, FailureState, NamespaceFailuresAlert } from "../lib/errorCopy";
 import { useExtensions } from "../extensions/inventoryStore";
 import { qualifiedTableKind, useResolvedColumns } from "../extensions/useResolvedColumns";
 import { AboutKind } from "./crd/AboutKind";
@@ -175,10 +175,12 @@ function KindList({
   }, [scope, context.stableId]);
 
   const clusterScoped = descriptor?.scope === "cluster";
-  // One selected namespace is watched directly; none or several are watched
-  // across the cluster and narrowed below, which is core's own rule.
+  // Each selected namespace is listed on its own (#688); none is "all
+  // namespaces". A cluster-scoped kind has no namespace to narrow by.
+  const list = useResourceList<ListRow>(name, slug, descriptor, clusterScoped ? [] : selection, files);
+  // The one namespace an app column is told the table is scoped to, or ""
+  // for several — its contract is a single namespace, not the list's scopes.
   const namespace = clusterScoped ? "" : watchNamespaceForSelection(selection);
-  const list = useResourceList<ListRow>(name, slug, descriptor, namespace, files);
 
   const rows = useMemo(
     () => clusterScoped ? list.rows : list.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)),
@@ -564,7 +566,12 @@ function KindList({
         />
       )}
 
-      {showRows && list.error && (
+      {showRows && (
+        // Several namespaces, some refused (#688): the rows are live, the
+        // named namespaces are simply missing — not the stale case below.
+        <NamespaceFailuresAlert what={lower} failures={list.namespaceFailures} className="mx-3 mt-3 mb-3" />
+      )}
+      {showRows && list.error && list.namespaceFailures.length === 0 && (
         // Rows and an error together: the last good list is still on screen
         // and is no longer being refreshed. Emptying the table would throw
         // away the only information the reader has. Pinned above the

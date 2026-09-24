@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { describeError, type ErrorDomain } from "@srelens/core";
+import { describeError, namespacePhrase, type ErrorDomain } from "@srelens/core";
 import { Alert, ErrorState, RawError, type Tone } from "@srelens/ui-kit";
 
 /**
@@ -141,6 +141,37 @@ export function FailureAlert({
   const copy = friendly(error, domain);
   return (
     <Alert tone={tone} title={title} className={className}>
+      {copy.detail}
+      <RawError text={copy.raw ?? ""} className="mt-1" />
+    </Alert>
+  );
+}
+
+/**
+ * Some of a multi-namespace view's namespaces could not be listed (#688).
+ *
+ * Not a stale banner: the rows under it are live, and the ones it names were
+ * never there. It says WHICH namespaces are missing, because "Access denied"
+ * over a list of team-a's pods reads as though team-a had been refused.
+ */
+export function NamespaceFailuresAlert({
+  what,
+  failures,
+  className,
+}: {
+  /** The plural noun of what was listed — "pods", "events". */
+  what: string;
+  failures: Array<{ namespace: string; error: string }>;
+  className?: string;
+}) {
+  if (failures.length === 0) return null;
+  const copy = summarise(failures.map((f) => f.error));
+  return (
+    <Alert
+      tone="warn"
+      title={`Could not list ${what} in ${namespacePhrase(failures.map((f) => f.namespace))}`}
+      className={className}
+    >
       {copy.detail}
       <RawError text={copy.raw ?? ""} className="mt-1" />
     </Alert>

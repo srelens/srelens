@@ -4,7 +4,6 @@ import {
   ageSortValue,
   podStatus,
   rowInSelection,
-  watchNamespaceForSelection,
   type ClusterContext,
   type CronJobSummary,
   type DaemonSetSummary,
@@ -34,7 +33,7 @@ import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute } from "../lib/detailRoute";
-import { FailureAlert } from "../lib/errorCopy";
+import { FailureAlert, NamespaceFailuresAlert } from "../lib/errorCopy";
 import {
   cronJobVerdict,
   daemonSetVerdict,
@@ -285,11 +284,10 @@ function WorkloadList({
 
   const selection = useNamespaces(context.stableId);
   const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
-  // A namespace-restricted credential watches its one namespace directly;
-  // every workload kind here is namespaced, so there is no cluster-scoped
-  // branch to take (unlike `KindList`, which serves cluster-scoped kinds
-  // too).
-  const namespaceFilter = watchNamespaceForSelection(selection);
+  // Every workload kind here is namespaced, so the selection is handed to
+  // the watches as it stands: each selected namespace is watched on its own
+  // (#688), none is "all namespaces". No cluster-scoped branch to take
+  // (unlike `KindList`, which serves cluster-scoped kinds too).
 
   // Five watches at five fixed call sites — never a loop over a filtered
   // array, never conditional on the segment control. A hook count that
@@ -300,11 +298,11 @@ function WorkloadList({
   const daemonSetsDescriptor = descriptorFor("daemonsets");
   const podsDescriptor = descriptorFor("pods");
   const cronJobsDescriptor = descriptorFor("cronjobs");
-  const deploymentsList = useResourceList<ListRow>(name, "deployments", deploymentsDescriptor, namespaceFilter, files);
-  const statefulSetsList = useResourceList<ListRow>(name, "statefulsets", statefulSetsDescriptor, namespaceFilter, files);
-  const daemonSetsList = useResourceList<ListRow>(name, "daemonsets", daemonSetsDescriptor, namespaceFilter, files);
-  const podsList = useResourceList<ListRow>(name, "pods", podsDescriptor, namespaceFilter, files);
-  const cronJobsList = useResourceList<ListRow>(name, "cronjobs", cronJobsDescriptor, namespaceFilter, files);
+  const deploymentsList = useResourceList<ListRow>(name, "deployments", deploymentsDescriptor, selection, files);
+  const statefulSetsList = useResourceList<ListRow>(name, "statefulsets", statefulSetsDescriptor, selection, files);
+  const daemonSetsList = useResourceList<ListRow>(name, "daemonsets", daemonSetsDescriptor, selection, files);
+  const podsList = useResourceList<ListRow>(name, "pods", podsDescriptor, selection, files);
+  const cronJobsList = useResourceList<ListRow>(name, "cronjobs", cronJobsDescriptor, selection, files);
 
   // `useRowMenu` is itself a hook — five fixed calls for the same reason the
   // five watches above are five fixed calls, one per kind's own descriptor
@@ -436,8 +434,15 @@ function WorkloadList({
   // Five watches means five ways to fail — a kind whose watch errored with
   // nothing cached contributes no rows and gets its own banner; the four
   // that answered stay on screen and keep being sorted and filtered with it.
-  const failed = kinds.filter((k) => k.list.status === "error");
-  const stale = kinds.filter((k) => k.list.status !== "error" && k.list.error);
+  //
+  // With several namespaces selected, a failure is per namespace (#688): the
+  // namespaces that answered are live rows, not stale ones, so those kinds
+  // get a banner naming what is missing instead of either card below.
+  const partial = kinds.filter((k) => k.list.namespaceFailures.length > 0);
+  const failed = kinds.filter((k) => k.list.status === "error" && k.list.namespaceFailures.length === 0);
+  const stale = kinds.filter(
+    (k) => k.list.status !== "error" && k.list.error && k.list.namespaceFailures.length === 0,
+  );
   const anyReconnecting = kinds.some((k) => k.list.watch !== "live");
 
   const lower = title.toLocaleLowerCase();
@@ -505,6 +510,14 @@ function WorkloadList({
               review) — a reader who scrolls the table must still see a kind
               that failed or went stale; a banner that scrolls away with the
               rows no longer warns anyone. */}
+          {partial.map((k) => (
+            <NamespaceFailuresAlert
+              key={k.key}
+              what={`${k.label.toLocaleLowerCase()}s`}
+              failures={k.list.namespaceFailures}
+              className="mx-3 mt-3 mb-3"
+            />
+          ))}
           {failed.map((k) => (
             <FailureAlert
               key={k.key}

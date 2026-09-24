@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseNamespaceSelection, serializeNamespaceSelection, watchNamespaceForSelection, rowInSelection } from "./namespaces";
+import { namespacePhrase, parseNamespaceSelection, serializeNamespaceSelection, watchNamespaceForSelection, rowInSelection } from "./namespaces";
 
 describe("parseNamespaceSelection", () => {
   it("splits a comma string, trims, drops blanks, and dedupes", () => {
@@ -35,5 +35,16 @@ describe("rowInSelection", () => {
   it("keeps only rows whose namespace is in the set", () => {
     expect(rowInSelection("a", ["a", "b"])).toBe(true);
     expect(rowInSelection("c", ["a", "b"])).toBe(false);
+  });
+});
+
+describe("namespacePhrase", () => {
+  it("names one, two or three namespaces in words", () => {
+    expect(namespacePhrase(["a"])).toBe("a");
+    expect(namespacePhrase(["a", "b"])).toBe("a and b");
+    expect(namespacePhrase(["a", "b", "c"])).toBe("a, b and c");
+  });
+  it("counts a longer run rather than listing it", () => {
+    expect(namespacePhrase(["a", "b", "c", "d", "e"])).toBe("5 namespaces: a, b, c and 2 more");
   });
 });
