@@ -27,7 +27,7 @@ import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute } from "../lib/detailRoute";
-import { FailureAlert, FailureState, NamespaceFailuresAlert } from "../lib/errorCopy";
+import { FailureState, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import {
   EVENT_DESCRIPTOR,
@@ -370,7 +370,7 @@ function EventList({
           // table rather than inside it — a "these rows are stale" warning the
           // reader scrolls past no longer warns anyone. The table runs flush to
           // the panel, so the alert carries its own inset.
-          <FailureAlert title={`These ${lower} are stale`} error={list.error} className="mx-3 mt-3 mb-3" />
+          <StaleListAlert what={lower} error={list.error} failures={list.namespaceFailures} className="mx-3 mt-3 mb-3" />
         )}
 
         <div className="scroll min-h-0 flex-1">

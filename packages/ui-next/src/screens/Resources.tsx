@@ -40,7 +40,7 @@ import { describe, isBuiltInKind } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
 import { useNamespaces, useSetNamespaces } from "../lib/workspace";
-import { FailureAlert, FailureState, NamespaceFailuresAlert } from "../lib/errorCopy";
+import { FailureState, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
 import { useExtensions } from "../extensions/inventoryStore";
 import { qualifiedTableKind, useResolvedColumns } from "../extensions/useResolvedColumns";
 import { AboutKind } from "./crd/AboutKind";
@@ -586,7 +586,7 @@ function KindList({
         // rows are stale" warning the reader scrolls past no longer warns
         // anyone. The table runs flush to the panel, so the alert carries
         // its own inset rather than borrowing the container's.
-        <FailureAlert title={`These ${lower} are stale`} error={list.error} className="mx-3 mt-3 mb-3" />
+        <StaleListAlert what={lower} error={list.error} failures={list.namespaceFailures} className="mx-3 mt-3 mb-3" />
       )}
       {showRows && list.truncated && (
         <Alert

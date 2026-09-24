@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { describeError } from "@srelens/core";
-import { FailureAlert, FailureState, FailureWord, NamespaceFailuresAlert, friendly, summarise } from "./errorCopy";
+import { FailureAlert, FailureState, FailureWord, NamespaceFailuresAlert, StaleListAlert, friendly, summarise } from "./errorCopy";
 
 /** The 401 the overview's Fleet rail was printing at the reader, verbatim. */
 const API_401 =
@@ -235,5 +235,41 @@ describe("NamespaceFailuresAlert", () => {
   it("renders nothing when every namespace answered", () => {
     const { container } = render(<NamespaceFailuresAlert what="pods" failures={[]} />);
     expect(container.textContent).toBe("");
+  });
+});
+
+describe("StaleListAlert", () => {
+  const FORBIDDEN =
+    'pods is forbidden: User "dev" cannot watch resource "pods" in API group "" in the namespace "team-a"';
+  const REFUSED = "dial tcp 10.1.2.3:6443: connect: connection refused";
+
+  it("says the rows are stale, and why, for a one-scope list", () => {
+    render(<StaleListAlert what="pods" error={REFUSED} failures={[]} />);
+    expect(screen.getByText("These pods are stale")).toBeTruthy();
+    expect(screen.getByText(describeError(REFUSED).detail)).toBeTruthy();
+  });
+
+  it("names every failed namespace with its own reason", () => {
+    render(
+      <StaleListAlert
+        what="pods"
+        error={FORBIDDEN}
+        failures={[
+          { namespace: "team-a", error: FORBIDDEN },
+          { namespace: "team-b", error: REFUSED },
+        ]}
+      />,
+    );
+    expect(screen.getByText("These pods are stale")).toBeTruthy();
+    expect(screen.getByText(`team-a: ${describeError(FORBIDDEN).detail}`)).toBeTruthy();
+    expect(screen.getByText(`team-b: ${describeError(REFUSED).detail}`)).toBeTruthy();
+  });
+
+  it("keeps the list's own reason when it belongs to no one namespace", () => {
+    // The watch could not start after team-a had already refused: both are
+    // why the rows are stale, and the start failure is nobody's namespace.
+    render(<StaleListAlert what="pods" error={REFUSED} failures={[{ namespace: "team-a", error: FORBIDDEN }]} />);
+    expect(screen.getByText(describeError(REFUSED).detail)).toBeTruthy();
+    expect(screen.getByText(`team-a: ${describeError(FORBIDDEN).detail}`)).toBeTruthy();
   });
 });

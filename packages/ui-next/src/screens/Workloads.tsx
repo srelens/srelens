@@ -33,7 +33,7 @@ import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute, newRoute } from "../lib/detailRoute";
-import { FailureAlert, NamespaceFailuresAlert } from "../lib/errorCopy";
+import { FailureAlert, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
 import {
   cronJobVerdict,
   daemonSetVerdict,
@@ -549,10 +549,11 @@ function WorkloadList({
             />
           ))}
           {stale.map((k) => (
-            <FailureAlert
+            <StaleListAlert
               key={k.key}
-              title={`These ${k.label.toLocaleLowerCase()}s are stale`}
+              what={`${k.label.toLocaleLowerCase()}s`}
               error={k.list.error}
+              failures={k.list.namespaceFailures}
               className="mx-3 mt-3 mb-3"
             />
           ))}

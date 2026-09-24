@@ -345,6 +345,25 @@ describe("useResourceList — several namespaces", () => {
     expect(result.current.stale).toBe(true);
   });
 
+  it("calls cached rows stale when one namespace failed and the watch then could not start", async () => {
+    const first = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(mockState.emitRows).not.toBeNull());
+    act(() => mockState.emitRows!([{ name: "a", namespace: "team-a" }]));
+    first.unmount();
+    // team-b's watch refuses at once; team-a's then fails to start, so
+    // `watchNamespaces` stops everything and rejects. Nothing is refreshing.
+    watchNamespaces.mockImplementationOnce(
+      async (_c: string, _s: string[], _k: string, _r: unknown, _st: unknown, onError: (e: string, ns: string) => void) => {
+        onError("pods is forbidden", "team-b");
+        throw new Error("backend unavailable");
+      },
+    );
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(result.current.error).toBe("backend unavailable"));
+    expect(result.current.rows).toHaveLength(1);
+    expect(result.current.stale).toBe(true);
+  });
+
   it("does not call a partial failure stale: the rows that answered are live", async () => {
     const load = vi.fn(async (_c: string, ns: string) =>
       ns === "team-b" ? { error: "leases is forbidden" } : { rows: [{ name: "lock", namespace: ns }] },

@@ -124,6 +124,12 @@ interface ListState {
   truncated?: boolean;
   /** Per-namespace failures, by namespace; see {@link ResourceList.namespaceFailures}. */
   errors: Map<string, string>;
+  /**
+   * A failure that belongs to no one scope — the watch could not start — so
+   * nothing is refreshing whatever `errors` holds. Kept apart from `errors`
+   * because naming it after a namespace would blame one that did not fail.
+   */
+  unscoped: boolean;
   loading: boolean;
   watch: WatchStatus;
   forKey: string;
@@ -183,7 +189,7 @@ export function useResourceList<Row extends ListRow>(
 
   const [state, setState] = useState<ListState>(() => {
     const cached = cacheGet(key);
-    return { rows: cached ?? [], error: undefined, errors: NO_ERRORS, loading: cached === undefined, watch: "live", forKey: key };
+    return { rows: cached ?? [], error: undefined, errors: NO_ERRORS, unscoped: false, loading: cached === undefined, watch: "live", forKey: key };
   });
 
   // Held apart from `state`: enrichment (pod/node metrics) runs on its own
@@ -194,7 +200,7 @@ export function useResourceList<Row extends ListRow>(
   useEffect(() => {
     const mine = ++gen.current;
     const cached = cacheGet(key);
-    setState({ rows: cached ?? [], error: undefined, errors: NO_ERRORS, loading: cached === undefined, watch: "live", forKey: key });
+    setState({ rows: cached ?? [], error: undefined, errors: NO_ERRORS, unscoped: false, loading: cached === undefined, watch: "live", forKey: key });
     setMetrics(undefined);
 
     if (!descriptor) {
@@ -266,7 +272,7 @@ export function useResourceList<Row extends ListRow>(
           // must surface as `error`, not leave the hook on `loading`
           // forever — errors are returned, never thrown.
           if (gen.current !== mine) return;
-          setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e), loading: false }));
+          setState((s) => ({ ...s, error: e instanceof Error ? e.message : String(e), unscoped: true, loading: false }));
         },
       );
 
@@ -347,12 +353,12 @@ export function useResourceList<Row extends ListRow>(
     error: state.error,
     truncated: state.truncated,
     namespaceFailures: failuresOf(state.errors, scopes),
-    // Every scope failed, or the failure belongs to no one scope (the watch
-    // could not start, a poll threw): either way nothing is refreshing.
+    // Every scope failed, or the watch could not start at all (whatever some
+    // scopes had already reported): either way nothing is refreshing.
     stale:
       state.rows.length > 0 &&
       state.error !== undefined &&
-      (state.errors.size === 0 || state.errors.size === scopes.length),
+      (state.unscoped || state.errors.size === scopes.length),
     watch: state.watch,
     reload,
   };

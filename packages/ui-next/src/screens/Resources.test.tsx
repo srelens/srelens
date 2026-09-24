@@ -144,7 +144,7 @@ proto.hasPointerCapture ??= () => false;
 proto.setPointerCapture ??= () => {};
 proto.releasePointerCapture ??= () => {};
 
-import type { ClusterContext, CrdRef, K8sObject } from "@srelens/core";
+import { describeError, type ClusterContext, type CrdRef, type K8sObject } from "@srelens/core";
 import { ResourceDetailScreen, Resources } from "./Resources";
 import { ConsoleProvider, useConsole } from "../console";
 import * as store from "../lib/tabsStore";
@@ -546,8 +546,13 @@ describe("Resources", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       let fail = false;
+      // Two namespaces going stale for two different reasons.
+      const reasons: Record<string, string> = {
+        "team-a": 'leases is forbidden: User "dev" cannot list resource "leases" in API group "coordination.k8s.io" in the namespace "team-a"',
+        "team-b": "dial tcp 10.1.2.3:6443: connect: connection refused",
+      };
       listResource.mockImplementation(async (_c: string, _k: string, ns: string) =>
-        fail ? { error: "dial tcp 10.1.2.3:6443: connect: connection refused" } : { items: [{ name: `lock-${ns}`, namespace: ns }] },
+        fail ? { error: reasons[ns] } : { items: [{ name: `lock-${ns}`, namespace: ns }] },
       );
       store.openTab("/k/leases");
       setNamespaces(CTX.stableId, ["team-a", "team-b"]);
@@ -562,6 +567,9 @@ describe("Resources", () => {
       expect(await screen.findByText(/are stale/)).toBeTruthy();
       expect(screen.getByText("lock-team-a")).toBeTruthy();
       expect(screen.queryByText(/Could not list .* in team-a and team-b/)).toBeNull();
+      // Each namespace with its own reason — not the first one's for both.
+      expect(screen.getByText(`team-a: ${describeError(reasons["team-a"]).detail}`)).toBeTruthy();
+      expect(screen.getByText(`team-b: ${describeError(reasons["team-b"]).detail}`)).toBeTruthy();
     } finally {
       vi.useRealTimers();
     }
