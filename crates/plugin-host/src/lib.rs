@@ -90,6 +90,31 @@ impl PluginHost {
         problems
     }
 
+    /// `why` with every setting value interpolated into `checked` scrubbed out.
+    ///
+    /// A target's rule tends to quote the value it refuses (`k8s.annotate`
+    /// does), and the value there is what a person saved. The scrub is the
+    /// audit log's (#555, #660): the values that differ from the binding as
+    /// written are the hidden ones, and `redact_error` removes them in every
+    /// spelling serde would echo.
+    fn scrub_settings(
+        why: &str,
+        written: &Map<String, Value>,
+        checked: &Map<String, Value>,
+    ) -> String {
+        let used: Map<String, Value> = checked
+            .iter()
+            .filter(|(key, value)| written.get(*key) != Some(*value))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if used.is_empty() {
+            return why.to_owned();
+        }
+        let used = Value::Object(used);
+        let redacted = srelens_capability::audit::redact(&used, true);
+        srelens_capability::audit::redact_error(why, &used, &redacted)
+    }
+
     /// The arguments `binding` sends to `target`, with each
     /// `${settings.<id>}` replaced; or every reason it cannot be, as
     /// `(argument, why)`.
@@ -282,6 +307,12 @@ impl PluginHost {
         // here in its place: as the stand-in at install, as its value on save.
         if let Some(check) = &target.bound_arguments {
             if let Err(why) = check(&arguments) {
+                // On save the value in place is the person's, and the rule
+                // may quote it back.
+                let why = match values {
+                    Some(_) => Self::scrub_settings(&why, &binding.arguments, &arguments),
+                    None => why,
+                };
                 problems.push(
                     ValidationCode::InvalidBinding,
                     format!("{at}.arguments"),
@@ -443,7 +474,9 @@ impl PluginHost {
                             ))?;
                         if args != binding.arguments {
                             if let Some(check) = &target.bound_arguments {
-                                check(&args).map_err(CapabilityError::Handler)?;
+                                check(&args).map_err(|why| CapabilityError::Handler(
+                                    Self::scrub_settings(&why, &binding.arguments, &args),
+                                ))?;
                             }
                         }
                         args.extend(input.clone());

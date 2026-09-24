@@ -156,7 +156,12 @@ fn declarations_are_checked_with_a_path_per_problem() {
         .iter()
         .find(|e| e.path == "settings[10].default")
         .unwrap();
-    assert!(!secret.message.contains("hunter2"), "{}", secret.message);
+    // The failure output names the path only: printing the message would
+    // print the secret in exactly the case this guards against.
+    assert!(
+        !secret.message.contains("hunter2"),
+        "the refusal at settings[10].default repeats the default"
+    );
 }
 
 #[test]
@@ -384,6 +389,10 @@ fn core(calls: Arc<Mutex<Vec<Value>>>) -> Registry {
         .with_settable("count", &[SettingType::Number], json!(1))
         .checking_bound_arguments(|arguments| match arguments.get("value") {
             Some(v) if v == "forbidden" => Err("`value` may not be forbidden".into()),
+            // Echoes what it refuses, as `k8s.annotate`'s `resolve_value` does.
+            Some(Value::String(v)) if v.starts_with('$') => {
+                Err(format!("`{v}` is not a value this host substitutes"))
+            }
             _ => Ok(()),
         });
     let recording = read.handler.clone();
@@ -523,6 +532,53 @@ async fn a_request_interpolates_the_current_values_through_the_same_checks() {
         calls.lock().unwrap().is_empty(),
         "nothing refused reached the handler"
     );
+}
+
+/// PR #691 review: the target's own rule quotes the value it refuses, and with
+/// a setting in place that value is the person's. Neither the save nor the
+/// request may hand it back.
+#[tokio::test]
+async fn a_target_refusal_never_repeats_the_setting_value_it_refused() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let host = PluginHost::new(Arc::new(core(calls.clone())));
+    let mut value = settable_manifest();
+    value["capabilities"][0]["arguments"]["value"] = json!("${settings.text}");
+    let parsed = parse(&value);
+    let saved = values(json!({"text":"$abc123"}));
+
+    let found = host.settings_problems(&parsed, &saved);
+    assert_eq!(
+        problems(&found),
+        expected(&[("EXTENSION_INVALID_BINDING", "capabilities[0].arguments")])
+    );
+    let text = format!("{found:?}");
+    assert!(
+        !text.contains("abc123"),
+        "the save refusal repeated it: {text}"
+    );
+    assert!(text.contains("not a value this host substitutes"), "{text}");
+
+    let mut registry = Registry::new();
+    let _registration = host
+        .register_with_settings(&mut registry, parsed, &["test.read".into()], &saved)
+        .unwrap();
+    let error = registry
+        .invoke(
+            "plugin/org.example.certs/certificates",
+            json!({"context":"prod"}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        !error.contains("abc123"),
+        "the request refusal repeated it: {error}"
+    );
+    assert!(
+        error.contains("not a value this host substitutes"),
+        "{error}"
+    );
+    assert!(calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

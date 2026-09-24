@@ -439,6 +439,9 @@ fn a_saved_value_the_primitive_would_refuse_is_refused_when_saved() {
     .err()
     .unwrap();
     assert!(refused.contains("actions[0].arguments"), "{refused}");
+    // `k8s.annotate` quotes the value it refuses; the saved value is not repeated.
+    assert!(!refused.contains("bogus"), "{refused}");
+    assert!(refused.contains("is not a value this host substitutes"), "{refused}");
     assert!(read(&path).unwrap().plugins[0].settings.is_empty());
 }
 
