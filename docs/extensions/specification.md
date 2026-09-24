@@ -80,7 +80,7 @@ permission grants, action confirmation, cluster scoping, or manifest validation.
    version is not removed. It is quarantined: disabled, with the reason shown in
    Settings → Apps, until it is updated or removed.
 3. **Choosing a range.** Target the API line you tested against with a caret range:
-   `^0.3` before 1.0, `^1.2` after. Under SemVer caret rules a `0.x` range pins its
+   `^0.4` before 1.0, `^1.2` after. Under SemVer caret rules a `0.x` range pins its
    minor version, so `^0.1` does not match `0.2.0`. That is deliberate: each `0.MINOR`
    is its own compatibility line.
 4. **New API versions.** Before 1.0, any manifest-visible change (a new field, a new
@@ -88,11 +88,12 @@ permission grants, action confirmation, cluster scoping, or manifest validation.
    `0.MINOR` version. A `0.MINOR.PATCH` bump is for clarifications that do not change
    which manifests validate. From 1.0: MAJOR for breaking changes, MINOR for
    additive ones, PATCH for fixes.
-5. **Current supported line.** This host implements **API 0.3 only**. API 0.1 and
-   API 0.2 are not supported. Existing installations targeting a retired line are
-   quarantined until replaced by a compatible manifest. Official manifests must
-   receive a new version and publisher signature; editing an installed signed
-   manifest invalidates its proof.
+5. **Current supported lines.** This host implements **API 0.3 and API 0.4**. A
+   `^0.3` manifest is served under 0.3 and may use only what 0.3 has; a `^0.4` one may
+   also use what [0.4 added](#040). API 0.1 and API 0.2 are not supported. Existing
+   installations targeting a retired line are quarantined until replaced by a
+   compatible manifest. Official manifests must receive a new version and publisher
+   signature; editing an installed signed manifest invalidates its proof.
 6. **API 1.0.** The API is frozen as 1.0 when the cert-manager declarative milestone
    ([#582](https://github.com/srelens/srelens/issues/582)) passes. After that, the 1.x
    line only grows additively.
@@ -120,46 +121,51 @@ Why a new field needs a new minor even though it is optional: manifests are stri
 (see below), so a host that predates the field would reject it. Requiring the minor
 turns that into a clear "requires API 0.x" message.
 
-Pre-1.0 exception for #538, #539, #541, #544 and #545: `contributions.joins`,
-`contributions.tableColumns`, `contributions.detailPanels`,
-`contributions.statusResolvers`, `contributions.badges`, `contributions.commands` and
-`contributions.resourceLinks` were added to API 0.3 in place while the extension
-platform is still being built, and so was the one predicate
-path filter form, `[?(@.key=="text")]` (#541), which widens what a path accepts without
-changing what an accepted path means. Earlier signed Flux and Argo CD 0.3 releases
-without these fields remain valid — including their `statusColumns` — and a manifest
-using any of them requires a host that includes the issue that added it. No alias or
-older API line is retained for this exception.
+There is no pre-1.0 exception to this. There was one: the fields listed under
+[0.4.0](#040) were first added to API 0.3 in place while the extension platform was
+being built ([#517](https://github.com/srelens/srelens/issues/517)), and srelens builds
+implementing 0.3 with none or only some of them had already been published. A signed
+release using them under `^0.3` would have been offered by those hosts and then failed
+to parse on an unknown field. They moved to API 0.4 before any signed release used them
+([#709](https://github.com/srelens/srelens/issues/709)), and the exception is retired.
 
-The same pre-1.0 exception covers `contributions.dashboardCards` (#540): added to API
-0.3 in place, absent from every published signed manifest, and requiring a host that
-includes #540. It also covers the top-level `settings` (#542), under the same terms.
-An installed app's settings are now held to its manifest's declarations, so values
-saved as free-form JSON by an earlier host that the manifest does not declare are
-refused on the next save. Nothing had been released that relied on them.
-
-It also covers a binding's `versions` and `jsonPathOverrides` (#547): added to API 0.3
-in place, absent from every published signed manifest, and requiring a host that
-includes #547. A binding that fixes `arguments.version` means what it did before.
-
-The host enforces this for fields. `API_FIELDS` in `crates/plugin-host/src/manifest.rs`
-lists fields whose availability differs across supported API lines. It is empty while
-0.3 is the only supported line. A rename is a removal plus an addition.
+The host enforces this. `API_FIELDS` in `crates/plugin-host/src/manifest.rs` lists every
+field whose availability differs across supported API lines, and every *form* of value
+that a later line admits in a field all of them have — API 0.4's predicate path filter
+in `actions[].preconditions` and `actions[].availableWhen`, which API 0.3 already had
+without it. A rename is a removal plus an addition. The schema file of each older
+supported line is kept as it was when the next line was cut
+(`schemas/extension-manifest.v0.3.json`), and CI fails when the host's contract has a
+field that file lacks and `API_FIELDS` does not list.
 
 A manifest may use a field only if the field is available in every supported API
-version its range admits, not just the one it negotiates to. Otherwise it is rejected,
-even by a host that knows the field. That covers a field a later line added, one a later
-line removed or renamed, and a range that spans several lines: `>=0.1, <0.3` claims 0.1
-hosts, so it may not use a 0.2-only field. Otherwise the manifest would install on some
-hosts and fail on others that still match its range.
+version its range admits, not just the one it negotiates to. Otherwise it is rejected
+with `EXTENSION_API_INCOMPATIBLE`, even by a host that knows the field, for example
+"`contributions.commands` requires API 0.4.0, but this manifest's srelensApiVersion
+admits API 0.3.0". That covers a field a later line added, one a later line removed or
+renamed, and a range that spans several lines: `>=0.3, <0.5` claims 0.3 hosts, so it
+may not use a 0.4 field. Otherwise the manifest would install on some hosts and fail on
+others that still match its range.
 
 The check runs at installation and again every time the inventory is loaded. An
 installed app that uses a field a newer host's supported versions no longer admit is
-quarantined rather than left enabled. A field that is null or an empty list or object
-does not count as used.
+quarantined rather than left enabled. So is an app installed by a build that accepted a
+0.4 field under `^0.3`: it is quarantined with that message until it is updated to a
+release that requires `^0.4`. A field that is null or an empty list or object does not
+count as used.
 
 A change that narrows the values a field accepts, rather than adding or removing the
-field, must add a check keyed on the negotiated API version in the same change.
+field, must add a check keyed on the negotiated API version in the same change. A change
+that widens them is a new API minor with an `API_FIELDS` form entry, as the path filter
+was.
+
+**Published 0.3 releases stay installable.** The signed releases published on the 0.3
+line, Argo CD 0.3.0 and Flux 0.4.0, use none of the 0.4 fields, so this host installs
+and reverifies them unchanged; the registry's tests pin their exact bytes and
+signatures. The condition filter Flux 0.4.0 writes in `arguments.printerColumns` is not
+the 0.4 predicate filter: printer columns evaluated that form before API 0.4. Their
+successors require `^0.4`, so a host that implements only 0.3 lists them as incompatible
+instead of offering them.
 
 ## Deprecation
 
@@ -182,9 +188,10 @@ Deprecated or planned:
   name declared mutations ([#549](https://github.com/srelens/srelens/issues/549)). Until
   then a manifest that uses it is rejected as an unknown field.
 - `pages[].statusColumns` is deprecated in favour of `contributions.statusResolvers`
-  ([#541](https://github.com/srelens/srelens/issues/541)). It keeps working unchanged
-  on the 0.3 line — its indices are validated and dashboards still count by it — and
-  the earliest version that may remove it is the next API line, 0.4.
+  ([#541](https://github.com/srelens/srelens/issues/541)), which API 0.4 adds. It keeps
+  working unchanged on the 0.3 and 0.4 lines — its indices are validated and dashboards
+  still count by it — and the earliest version that may remove it is the next API line,
+  0.5.
 
 ## Unknown fields
 
@@ -283,7 +290,13 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 
 ## API changelog
 
-### 0.3.0
+### 0.4.0
+
+Everything below was first added to API 0.3 in place, and moved to this line before
+any signed release used it (#709). A manifest that uses any of it requires `^0.4`.
+Under a range that admits 0.3 it is refused with `EXTENSION_API_INCOMPATIBLE` at
+`srelensApiVersion`, naming the field and the version it needs, rather than as an
+unknown field. A 0.4 manifest may use everything 0.3 has, with the same meaning.
 
 - Table columns on native resource lists may declare `joins` over a granted
   custom-resource reader and `tableColumns` with a row or joined `jsonPath`.
@@ -291,13 +304,14 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   failed reads explicitly (#538). See [Manifest reference](manifest.md#table-columns-and-joins).
 - Apps may declare `detailPanels` with fields and conditions for matching
   resources. `extensions.resolvePanels` rechecks the installed app's revision,
-  grants and cluster scope (#539). These manifests require a host with #539;
-  see the [manifest reference](manifest.md#detailpanels).
+  grants and cluster scope (#539). See the
+  [manifest reference](manifest.md#detailpanels).
 - Apps may declare `statusResolvers` for their custom-resource kinds and `badges` on
   built-in kinds, as first-hit rules resolving to six normalized statuses with a
   required word (#541). A badge reads its row's metadata or a declared join. The
   predicate path grammar gains one filter form, `[?(@.key=="text")]`, selecting the
-  first matching element. `statusColumns` is deprecated. See the
+  first matching element, which an action's `preconditions` and `availableWhen` may
+  also use. `statusColumns` is deprecated. See the
   [manifest reference](manifest.md#status-resolvers-and-badges).
 - The cluster overview draws `dashboardCards` (`count`, `countByStatus`, `metric`,
   `list`) over a granted custom-resource reader, with `equals`, `absent`, and date
@@ -311,15 +325,18 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   setting fills a binding argument as `"${settings.<id>}"` only where the host
   capability marks the argument settable (`k8s.annotate`'s `value`,
   `k8s.setStatusCondition`'s `message`), and is checked at install, on save and on
-  every request. A `secret-reference` value never enters the inventory (#542). See
-  [Manifest reference](manifest.md#settings).
+  every request. A `secret-reference` value never enters the inventory (#542). An
+  installed app's settings are held to its manifest's declarations, so values saved as
+  free-form JSON by an earlier host that the manifest does not declare are refused on
+  the next save. See [Manifest reference](manifest.md#settings).
 - Apps may declare `commands` for the new design's command palette: open a declared
   page, or open the host confirmation for a declared action on a resource of the
   action's kind (#544). See the [manifest reference](manifest.md#commands).
 - A custom-resource reader may list `versions` in preference order instead of one
   `arguments.version`, with optional per-version `jsonPathOverrides`. Each cluster reads
   the first listed version its CRD serves, through that version's paths, for every read,
-  action and contribution, and a cluster serving none is refused (#547). See
+  action and contribution, and a cluster serving none is refused (#547). A binding that
+  fixes `arguments.version` means what it did before. See
   [Several served versions](manifest.md#several-served-versions).
 - Apps may declare `resourceLinks` from one qualified kind to another their
   readers list, with a relation (`ownedBy`, `managedBy`, `exposedBy`,
@@ -327,19 +344,28 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   `extensions.resolveLinks` rechecks the installed app's revision, grants and
   cluster scope; the Inspector shows the result as a Related section. See the
   [manifest reference](manifest.md#resourcelinks).
+- The host supports API 0.3 and 0.4, and `extensions.catalog` reports both in
+  `hostApiVersions` (#709). The signed 0.3 releases keep installing; see
+  [Compatibility rules](#compatibility-rules).
+- The manifest JSON Schema for this line is `schemas/extension-manifest.v0.4.json`.
+  `schemas/extension-manifest.v0.3.json` is the 0.3 contract, without these fields.
+- Current examples are Flux 0.5.0 and Argo CD 0.4.0, requiring `^0.4` and naming
+  `schemas/extension-manifest.v0.4.json`. Publishing them requires fresh signed
+  external releases and a catalog update; existing signed release bytes stay unchanged.
+  The Flux example reads HelmReleases at `v2` or `v2beta2` and OCIRepositories at `v1`
+  or `v1beta2` (#547).
+
+### 0.3.0
+
 - Unsigned apps declaring write actions require the default-off inventory policy
   described above (#558). Turning it off disables affected installations without
   removing them; normal read-only declarative permission grants are unchanged.
-- The host supports only API 0.3; API 0.1 and 0.2 manifests are incompatible.
+- API 0.1 and 0.2 are retired: their manifests are incompatible.
 - Flux and Argo CD actions are declared by manifests, with their target reader,
   primitive write binding, confirmation metadata and availability predicates.
   The host no longer supplies a controller-specific action menu.
-- Current examples are Flux 0.5.0 and Argo CD 0.4.0, requiring `^0.3` and naming
-  `schemas/extension-manifest.v0.3.json`. Publishing them requires fresh signed
-  external releases and a catalog update; existing signed release bytes stay unchanged.
-  The Flux example reads HelmReleases at `v2` or `v2beta2` and OCIRepositories at `v1`
-  or `v1beta2` (#547), which also needs a new signed release.
-
+- The signed releases on this line are Argo CD 0.3.0 and Flux 0.4.0, requiring `^0.3`
+  and naming `schemas/extension-manifest.v0.3.json`.
 
 ### 0.1.0
 

@@ -111,7 +111,7 @@ once. A host-owned confirmation UI built on this is
 
 ## Declared GitOps actions
 
-Flux and Argo CD declare their actions in the API 0.3 manifests under
+Flux and Argo CD declare their actions in their manifests under
 `examples/extensions`. Reading a kind grants no write access. Installation or
 update must explicitly grant every action primitive in `permissions`.
 
@@ -140,8 +140,8 @@ same request timestamp. API failures remain errors; accepted requests do not cla
 that controller work has completed.
 
 `k8s.gitOpsAction` has been removed. There is no compatibility endpoint or inherited
-write permission. API 0.1 releases must be replaced by signed API 0.3 releases and
-reviewed with their new grants before they can be enabled.
+write permission. API 0.1 releases must be replaced by signed API 0.3 or later
+releases and reviewed with their new grants before they can be enabled.
 
 ## Host action primitives
 

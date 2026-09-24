@@ -238,6 +238,21 @@ pub fn check_path(path: &str) -> Result<(), String> {
     segments(path).map(|_| ())
 }
 
+/// Whether `path` selects an element with the `[?(@.key=="text")]` filter.
+///
+/// API 0.3's predicate paths have no filter; the form arrived with API 0.4
+/// (#541, #709), so a manifest whose range still admits 0.3 may not write one.
+/// Asked of the parsed path rather than its spelling, because a quoted key may
+/// hold the same characters. A path that is not one is refused by
+/// [`check_path`], and is no filter here.
+pub fn path_uses_filter(path: &str) -> bool {
+    segments(path).is_ok_and(|parsed| {
+        parsed
+            .iter()
+            .any(|segment| matches!(segment, Segment::First { .. }))
+    })
+}
+
 /// A declared test's operator and parsed path, or why it is not one.
 fn test_of<'a>(
     path: &str,

@@ -38,7 +38,7 @@ const every: ExtensionSetting[] = [
 function app(settings: ExtensionSetting[] = every, saved: Record<string, unknown> = {}): InstalledExtension {
   return {
     manifest: {
-      id: "org.example.certs", name: "Certificates", version: "1.0.0", srelensApiVersion: "^0.3", kind: "declarative",
+      id: "org.example.certs", name: "Certificates", version: "1.0.0", srelensApiVersion: "^0.4", kind: "declarative",
       permissions: [], capabilities: [], settings, contributions: { pages: [], detailTabs: [], detailLinks: [] },
     },
     enabled: true, revision: 3, grants: [], settings: saved, source: "local", installedAt: 0, history: [],

@@ -1833,7 +1833,7 @@ mod tests {
     pub(super) fn manifest() -> String {
         let source = include_str!("../tests/fixtures/argocd-manifest.json")
             .replace("\"org.srelens.argocd\"", "\"org.example.argocd\"")
-            .replace("\"^0.1\"", "\"^0.3\"");
+            .replace("\"^0.1\"", "\"^0.4\"");
         let mut value: Value = serde_json::from_str(&source).unwrap();
         value["settings"] = json!([{"id": "team", "type": "string", "title": "Team"}]);
         value.to_string()
