@@ -4,7 +4,7 @@ This is a feasibility check. It asks whether each desktop OS's own sandbox can e
 restrictions an executable extension must run under, on ordinary operations. It is a
 throwaway prototype, not the supervisor (that is #572), and it attempts no escapes. The
 findings and the support matrix are in the ADR:
-[Sandbox backends for executable extensions](../../docs/design/plugin-architecture.md#sandbox-backends-for-executable-extensions-proposed).
+[Sandbox backends for executable extensions](../../docs/design/plugin-architecture.md#sandbox-backends-for-executable-extensions).
 
 It is its own Cargo workspace, like `fuzz/`, so the root workspace and CI never build it.
 

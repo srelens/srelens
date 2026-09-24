@@ -55,10 +55,15 @@ per-user inventory and lifecycle isolation are implemented.
 2. Add resource workflows through explicit broker operations with inherited
    mutation annotations and confirmation; do not bypass host consent.
 3. Design a native SDK for supervised, sandboxed JSON-RPC sidecars. Require
-   quotas, cancellation and teardown; refuse executable extensions on unsupported
-   sandbox backends. No renderer bridge is planned: contributions use host
-   components. What each OS's sandbox can enforce is recorded under
-   [Sandbox backends for executable extensions](#sandbox-backends-for-executable-extensions-proposed).
+   quotas, cancellation and teardown. Refuse executable extensions wherever no
+   sandbox backend exists for isolation, which is the filesystem, network and process
+   restrictions. Windows, Linux and macOS each have one. Memory and CPU quotas are
+   kernel-enforced on Windows and Linux, and host-enforced by the supervisor on macOS,
+   a weaker guarantee accepted for macOS only (see
+   [the macOS decision](#decision-macos-limits-are-host-enforced)). No renderer bridge
+   is planned: contributions use host components. What each OS's sandbox can enforce
+   is recorded under
+   [Sandbox backends for executable extensions](#sandbox-backends-for-executable-extensions).
 4. Extend signed distribution from official releases to third-party publishers,
    with key rotation, update verification, permission-diff consent and
    revocation. Unsigned local manifests stay outside reserved namespaces.
@@ -68,13 +73,20 @@ Extensions must target the srelens contract. Retired archive inventory entries a
 excluded on read and removed on the next successful inventory save, preserving
 native installations and settings.
 
-## Sandbox backends for executable extensions (Proposed)
+## Sandbox backends for executable extensions
 
-Status: **Proposed**. These are the findings of the feasibility spike
-[#571](https://github.com/srelens/srelens/issues/571), recorded 2026-09-24, for the
-decisions still open in [#521](https://github.com/srelens/srelens/issues/521). Nothing
-here ships. The supervisor that would use these backends is
-[#572](https://github.com/srelens/srelens/issues/572).
+Status:
+
+- **Accepted, 2026-09-24:**
+  [the macOS decision](#decision-macos-limits-are-host-enforced). The executable SDK
+  milestone includes macOS, with host-enforced limits there.
+- **Proposed:** everything else here, from the feasibility spike
+  [#571](https://github.com/srelens/srelens/issues/571) (recorded 2026-09-24). That
+  covers the backend per OS and the open questions.
+
+Nothing here ships yet. The supervisor that will use these backends is
+[#572](https://github.com/srelens/srelens/issues/572), under
+[#521](https://github.com/srelens/srelens/issues/521).
 
 The spike asked one question: can each desktop OS's own sandbox facility enforce the
 restrictions an executable extension must run under, on ordinary operations? It is a
@@ -200,7 +212,8 @@ The second run, at `02190671`, used `SEATBELT_TRACE=1` and exited 0:
 | **Linux** Landlock + seccomp + cgroup v2 | Enforced | Enforced | Enforced | Enforced | Enforced | Enforced: 0.26 CPUs | Works |
 | **Linux** bubblewrap, all namespaces unshared | Enforced (paths not mounted, `ENOENT`) | Enforced | Enforced (network namespace) | Not provided | Not provided | Not provided | Works |
 | **Linux** Landlock with TCP rules (ABI ≥ 4, kernel ≥ 6.7) | Unverified | Unverified | Unverified | — | — | — | Unverified |
-| **macOS** `seatbelt`: `sandbox-exec` (deprecated) with `src/seatbelt.sb`, plus rlimits. Verified on macOS 27.0 arm64 only | Enforced (`EPERM`) | Enforced (`EPERM` outside, allowed inside) | Enforced: TCP `EPERM`, DNS resolver failure (the mDNSResponder socket is denied) | Enforced (`EPERM`) | **Not provided (observed):** `setrlimit` refuses `RLIMIT_DATA` and `RLIMIT_AS` with `EINVAL`, and 512 MiB was allocated against a 128 MiB limit | **Not provided (observed):** 1.99 CPUs against 0.25. `RLIMIT_CPU` is accepted, but it is a lifetime budget, not a rate | Works |
+| **macOS** `seatbelt`: `sandbox-exec` (deprecated) with `src/seatbelt.sb`, plus rlimits. Verified on macOS 27.0 arm64 only | Enforced (`EPERM`) | Enforced (`EPERM` outside, allowed inside) | Enforced: TCP `EPERM`, DNS resolver failure (the mDNSResponder socket is denied) | Enforced (`EPERM`) | **Not provided by the kernel (observed):** `setrlimit` refuses `RLIMIT_DATA` and `RLIMIT_AS` with `EINVAL`, and 512 MiB was allocated against a 128 MiB limit. Host-enforced by the planned watchdog (next row) | **Not provided by the kernel (observed):** 1.99 CPUs against 0.25. `RLIMIT_CPU` is accepted, but it is a lifetime budget, not a rate. Host-enforced by the planned watchdog (next row) | Works |
+| **macOS** supervisor watchdog ([#713](https://github.com/srelens/srelens/issues/713), decided, not built) | — | — | — | — | Host-enforced, weaker than the kernel: bounds sustained use, while a burst can exceed the limit between samples. Not built or measured | Host-enforced, weaker than the kernel: throttles with `SIGSTOP`/`SIGCONT` or kills after a sample shows the overrun. Not built or measured | — |
 | **macOS** `seatbelt` on Intel, or on macOS before 27 | Unverified | Unverified | Unverified | Unverified | Unverified | Unverified | Unverified |
 | **macOS** App Sandbox helper | Not built (follow-up) | Not built | Not built | Not built | Not provided (research) | Not provided (research) | Not built |
 
@@ -331,45 +344,54 @@ The research:
   isolation, but not process, memory or CPU limits, so seccomp and cgroups are still
   needed beside it. It also depends on unprivileged user namespaces, which some
   distributions restrict (not tested here).
-- **macOS: isolation yes, limits no.** The `seatbelt` backend enforced checks 1 to 4 and
-  7 on macOS 27.0 arm64. It rests on the deprecated `sandbox-exec`, or on the private
-  `sandbox_init_with_parameters`. No kernel facility found limits a process's memory or
-  CPU rate: `setrlimit` refuses the memory limits, and `RLIMIT_CPU` is only a budget.
-  Whether macOS gets executables at all is the milestone decision below.
+- **macOS: Seatbelt for isolation, plus a host-side watchdog for limits.** The
+  `seatbelt` backend enforced checks 1 to 4 and 7 on macOS 27.0 arm64. It rests on the
+  deprecated `sandbox-exec`, or on the private `sandbox_init_with_parameters`. No kernel
+  facility found limits a process's memory or CPU rate: `setrlimit` refuses the memory
+  limits, and `RLIMIT_CPU` is only a budget. Memory and CPU are therefore host-enforced,
+  as the decision below records.
 
-### Recommendation on the SDK milestone (for decision)
+### Decision: macOS limits are host-enforced
 
-The maintainer decides this in #521 and **has not decided yet**. What follows is a
-recommendation.
+Status: **Accepted**, 2026-09-24, by the maintainer
+([#521](https://github.com/srelens/srelens/issues/521#issuecomment-5823655882)).
 
-All three OSes can isolate a sidecar: filesystem, network, DNS and processes were
-enforced on Windows, on Linux and on macOS 27.0 arm64. Only Windows and Linux can also
-enforce the "Runs under CPU and memory limits" exit criterion in the kernel. On macOS
-the limits are **observed** to be unavailable: `setrlimit` refuses the memory limits,
-and CPU use ran to 1.99 CPUs against a 0.25 limit.
+**The executable SDK milestone includes macOS.** On macOS only, the supervisor enforces
+the memory and CPU limits with a host-side watchdog, documented as a weaker guarantee
+than the kernel enforcement on Windows and Linux. The watchdog is
+[#713](https://github.com/srelens/srelens/issues/713), a sub-issue of #521 that depends
+on #572. It is not built yet.
 
-On macOS, limits could only be enforced by the host. The supervisor would poll the
-sidecar's memory and CPU use (`proc_pid_rusage`), and throttle it with
-`SIGSTOP`/`SIGCONT` or kill it past the limit. This is **weaker than kernel
-enforcement**: between polls a burst can exceed the limit, including one large enough to
-take memory from the rest of the system before it is seen. The spike did not build or
-measure it.
+**Why:**
 
-The options:
+- **Isolation holds on all three OSes.** Filesystem, network, DNS and process
+  restrictions were verified on Windows (AppContainer), on Linux (Landlock and seccomp)
+  and on macOS 27.0 arm64 (Seatbelt).
+- **macOS lacks kernel resource limits.** It has nothing like a Job Object or a cgroup.
+  `setrlimit` refuses the memory limits (observed), and `RLIMIT_CPU` is a lifetime
+  budget, not a rate.
 
-1. **Start on Windows and Linux, and refuse executables on macOS** under the ADR's rule
-   until macOS can meet the exit criteria.
-2. **Include macOS with host-enforced limits**, as an explicitly weaker guarantee. This
-   relaxes #521's limits exit criterion for macOS only, says so to users, and keeps the
-   Seatbelt isolation, which was verified.
-3. **Isolation only on macOS, with no limits.** Not recommended: a sidecar could exhaust
-   the machine's memory or CPU, which is part of what the SDK promises to prevent.
+**The macOS guarantee, stated plainly:**
 
-**Recommended: option 1 for the milestone, with option 2 recorded as the follow-up path
-for macOS.** Windows and Linux met every check with documented facilities, which need no
-administrator rights once cgroups are delegated. Option 2 needs its own design,
-measurement of how far a burst can overshoot between polls, and an explicit decision to
-relax the exit criterion.
+- **How it works.** The watchdog samples the sidecar's memory and CPU use (for example
+  with `proc_pid_rusage`). Past a limit, it throttles the sidecar (`SIGSTOP`/`SIGCONT`)
+  or kills it.
+- **What it bounds.** *Sustained* use, not every instant.
+- **What it does not bound.** A burst between two samples can exceed the limit,
+  including an allocation large enough to take memory from the rest of the system
+  before it is seen.
+- **How it differs.** On Windows and Linux the kernel refuses or kills at the limit
+  itself.
+- **Exit criterion.** #521's "Runs under CPU and memory limits" is met on macOS in this
+  weaker sense, and the product documentation must say so.
+
+Considered and not chosen:
+
+1. **Start on Windows and Linux and refuse executables on macOS.** The spike recommended
+   this; it would have kept every platform at kernel enforcement, at the cost of no
+   executables on macOS.
+2. **Isolation only on macOS, with no limits.** Rejected: a sidecar could exhaust the
+   machine's memory or CPU, which the SDK promises to prevent.
 
 ### What the spike did not establish
 
@@ -412,10 +434,10 @@ relax the exit criterion.
   macOS versions before 27, which have not been run. Try narrowing the global
   metadata-read rule. Decide whether `sandbox_init_with_parameters` (private) is
   acceptable in place of the deprecated `sandbox-exec`.
-- **macOS: host-enforced limits (option 2 above).** Build and measure a supervisor that
-  polls `proc_pid_rusage` and throttles with `SIGSTOP`/`SIGCONT`, or kills past the
-  limit. Measure how far a burst overshoots between polls, before anyone decides to
-  relax the exit criterion.
+- **macOS: the host-side watchdog** ([#713](https://github.com/srelens/srelens/issues/713),
+  as decided above). Build the supervisor's sampler, and its throttle
+  (`SIGSTOP`/`SIGCONT`) or kill past the limit. Measure how far a burst overshoots
+  between samples, and document that bound for users.
 - **macOS: an App Sandbox helper variant.** Not built: it needs code signing with
   entitlements. An ad-hoc signature (`codesign -s - --entitlements …`, no developer
   account) may be enough for a local test. It would still have to answer whether an
@@ -430,8 +452,9 @@ relax the exit criterion.
 
 ### Open questions
 
-- Should a missing limit refuse the extension, or allow it with a warning? The ADR
-  refuses only when no sandbox backend exists at all.
+- On Windows or Linux, should a missing limit layer refuse the extension or allow it with
+  a warning? An example is a Linux desktop with no delegated cgroup. The macOS case is
+  decided above; this one is not.
 - One AppContainer profile per extension, or one per install? Where is the profile
   deleted if srelens is uninstalled with extensions still installed?
 - Can the host-side broker callbacks (#573) stay on stdio, so that no backend has to
