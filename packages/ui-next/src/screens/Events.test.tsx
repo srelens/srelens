@@ -16,6 +16,9 @@ const { watchResource, useNamespaceOptions } = vi.hoisted(() => ({
 vi.mock("@srelens/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@srelens/core")>()),
   watchResource: (...a: unknown[]) => watchResource(...a),
+  // Core's own watchNamespaces calls its module-local watchResource, which
+  // the line above cannot reach — route each namespace to the mock instead.
+  watchNamespaces: (await import("@srelens/core/lib/testDoubles")).watchNamespacesVia((...a) => watchResource(...a)),
 }));
 
 vi.mock("@srelens/core/react", async (importOriginal) => ({
@@ -394,6 +397,32 @@ describe("Events", () => {
     expect(
       screen.getByText("prod-eu has no events in the namespaces you are looking at."),
     ).toBeTruthy();
+  });
+
+  // #688: the namespace that answered had none, the other was refused — an
+  // error that names the refused namespace, not "no events" and not a
+  // failure of the whole list.
+  it("names the refused namespace when the one that answered was empty", async () => {
+    store.openTab("/events");
+    setNamespaces("prod", ["team-a", "team-b"]);
+    watchResource.mockImplementation(
+      async (
+        _c: string,
+        namespace: string,
+        _k: string,
+        onRows: (rows: unknown[]) => void,
+        _onStatus: unknown,
+        onError: (message: string) => void,
+      ) => {
+        if (namespace === "team-b") onError('events is forbidden: User "dev" cannot watch resource "events" in the namespace "team-b"');
+        else onRows([]);
+        return { stop: vi.fn() };
+      },
+    );
+    open();
+
+    expect(await screen.findByText("Could not list events in team-b")).toBeTruthy();
+    expect(screen.queryByText(/has no events/)).toBeNull();
   });
 
   it("names what failed, and offers a way back, when nothing arrived", async () => {

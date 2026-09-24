@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   describeError,
   listCrds,
+  namespacePhrase,
   rowInSelection,
   watchNamespaceForSelection,
   type ClusterContext,
@@ -39,7 +40,7 @@ import { describe, isBuiltInKind } from "../lib/routes";
 import { openTab, useTabs } from "../lib/tabsStore";
 import { useResource } from "../lib/useResource";
 import { useNamespaces, useSetNamespaces } from "../lib/workspace";
-import { FailureAlert, FailureState } from "../lib/errorCopy";
+import { FailureState, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
 import { useExtensions } from "../extensions/inventoryStore";
 import { qualifiedTableKind, useResolvedColumns } from "../extensions/useResolvedColumns";
 import { AboutKind } from "./crd/AboutKind";
@@ -175,10 +176,12 @@ function KindList({
   }, [scope, context.stableId, setNamespaces]);
 
   const clusterScoped = descriptor?.scope === "cluster";
-  // One selected namespace is watched directly; none or several are watched
-  // across the cluster and narrowed below, which is core's own rule.
+  // Each selected namespace is listed on its own (#688); none is "all
+  // namespaces". A cluster-scoped kind has no namespace to narrow by.
+  const list = useResourceList<ListRow>(name, slug, descriptor, clusterScoped ? [] : selection, files);
+  // The one namespace an app column is told the table is scoped to, or ""
+  // for several — its contract is a single namespace, not the list's scopes.
   const namespace = clusterScoped ? "" : watchNamespaceForSelection(selection);
-  const list = useResourceList<ListRow>(name, slug, descriptor, namespace, files);
 
   const rows = useMemo(
     () => clusterScoped ? list.rows : list.rows.filter((row) => rowInSelection(row.namespace ?? "", selection)),
@@ -414,7 +417,13 @@ function KindList({
           <LoadingState label={`Loading ${lower}`} />
         ) : list.status === "error" ? (
           <FailureState
-            title={`Could not list ${lower} on ${name}`}
+            // Several namespaces, some refused and the rest empty: say which were
+          // refused (#688) — neither "none" nor a failure of the whole cluster.
+          title={
+            list.namespaceFailures.length > 0
+              ? `Could not list ${lower} in ${namespacePhrase(list.namespaceFailures.map((f) => f.namespace))}`
+              : `Could not list ${lower} on ${name}`
+          }
             error={list.error}
             onRetry={list.reload}
           />
@@ -564,7 +573,12 @@ function KindList({
         />
       )}
 
-      {showRows && list.error && (
+      {showRows && !list.stale && (
+        // Several namespaces, some refused (#688): the rows are live, the
+        // named namespaces are simply missing — not the stale case below.
+        <NamespaceFailuresAlert what={lower} failures={list.namespaceFailures} className="mx-3 mt-3 mb-3" />
+      )}
+      {showRows && list.stale && (
         // Rows and an error together: the last good list is still on screen
         // and is no longer being refreshed. Emptying the table would throw
         // away the only information the reader has. Pinned above the
@@ -572,7 +586,7 @@ function KindList({
         // rows are stale" warning the reader scrolls past no longer warns
         // anyone. The table runs flush to the panel, so the alert carries
         // its own inset rather than borrowing the container's.
-        <FailureAlert title={`These ${lower} are stale`} error={list.error} className="mx-3 mt-3 mb-3" />
+        <StaleListAlert what={lower} error={list.error} failures={list.namespaceFailures} className="mx-3 mt-3 mb-3" />
       )}
       {showRows && list.truncated && (
         <Alert

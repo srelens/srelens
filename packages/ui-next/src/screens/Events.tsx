@@ -3,8 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import {
   eventVerdict,
   plural,
+  namespacePhrase,
   rowInSelection,
-  watchNamespaceForSelection,
   type ClusterContext,
 } from "@srelens/core";
 import { useNamespaceOptions } from "@srelens/core/react";
@@ -27,7 +27,7 @@ import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
 import { useHiddenColumns } from "../lib/columnPrefs";
 import { detailRoute } from "../lib/detailRoute";
-import { FailureAlert, FailureState } from "../lib/errorCopy";
+import { FailureState, NamespaceFailuresAlert, StaleListAlert } from "../lib/errorCopy";
 import { Icons } from "../lib/icons";
 import {
   EVENT_DESCRIPTOR,
@@ -162,11 +162,9 @@ function EventList({
     if (scope) setNamespaces(context.stableId, [scope]);
   }, [scope, context.stableId, setNamespaces]);
 
-  // One selected namespace is watched directly; none or several are watched
-  // across the cluster and narrowed below, which is core's own rule. Events
-  // are namespaced, so there is no cluster-scoped branch to take.
-  const namespace = watchNamespaceForSelection(selection);
-  const list = useResourceList<EventRow>(name, KIND, EVENT_DESCRIPTOR, namespace, files);
+  // Each selected namespace is watched on its own (#688); none is "all
+  // namespaces". Events are namespaced, so there is no cluster-scoped branch.
+  const list = useResourceList<EventRow>(name, KIND, EVENT_DESCRIPTOR, selection, files);
 
   const hidden = useHiddenColumns(KIND);
   const columns = useMemo(
@@ -360,14 +358,19 @@ function EventList({
           onReset={() => setNamespaces(context.stableId, [])}
         />
 
-        {showRows && list.error && (
+        {showRows && !list.stale && (
+          // Several namespaces, some refused (#688): the rows are live, the
+          // named namespaces are simply missing — not the stale case below.
+          <NamespaceFailuresAlert what={lower} failures={list.namespaceFailures} className="mx-3 mt-3 mb-3" />
+        )}
+        {showRows && list.stale && (
           // Rows and an error together: the last good list is still on screen
           // and is no longer being refreshed. Emptying the table would throw
           // away the only information the reader has. Pinned ABOVE the scrolling
           // table rather than inside it — a "these rows are stale" warning the
           // reader scrolls past no longer warns anyone. The table runs flush to
           // the panel, so the alert carries its own inset.
-          <FailureAlert title={`These ${lower} are stale`} error={list.error} className="mx-3 mt-3 mb-3" />
+          <StaleListAlert what={lower} error={list.error} failures={list.namespaceFailures} className="mx-3 mt-3 mb-3" />
         )}
 
         <div className="scroll min-h-0 flex-1">
@@ -375,7 +378,13 @@ function EventList({
             <LoadingState label={`Loading ${lower}`} />
           ) : list.status === "error" ? (
             <FailureState
-              title={`Could not list ${lower} on ${name}`}
+              // Several namespaces, some refused and the rest empty: say which were
+            // refused (#688) — neither "none" nor a failure of the whole cluster.
+            title={
+              list.namespaceFailures.length > 0
+                ? `Could not list ${lower} in ${namespacePhrase(list.namespaceFailures.map((f) => f.namespace))}`
+                : `Could not list ${lower} on ${name}`
+            }
               error={list.error}
               onRetry={list.reload}
             />

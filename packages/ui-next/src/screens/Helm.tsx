@@ -11,10 +11,11 @@ import {
   ageFromTimestamp,
   getHelmRelease,
   helmStatus,
-  listHelmReleases,
+  listHelmReleasesIn,
+  parseNamespaceSelection,
   plural,
   rowInSelection,
-  watchNamespaceForSelection,
+  serializeNamespaceSelection,
   type ClusterContext,
   type HelmReleaseSummary,
   type HelmRevision,
@@ -35,7 +36,7 @@ import {
 } from "@srelens/ui-kit";
 import { useConsole } from "../console";
 import { getKubeconfigFiles, useActiveContext } from "../lib/clusters";
-import { FailureState, friendly } from "../lib/errorCopy";
+import { FailureState, NamespaceFailuresAlert, friendly } from "../lib/errorCopy";
 import {
   dismissHelmOp,
   getHelmOps,
@@ -234,7 +235,13 @@ function FailedOps({
 /** Where the release listing stands. */
 type ListLoad =
   | { status: "loading" }
-  | { status: "ready"; releases: HelmReleaseSummary[]; at: number }
+  | {
+      status: "ready";
+      releases: HelmReleaseSummary[];
+      at: number;
+      /** Selected namespaces whose listing was refused; the others are `releases` (#688). */
+      failures: Array<{ namespace: string; error: string }>;
+    }
   | { status: "error"; error: string };
 
 /**
@@ -315,15 +322,15 @@ function HelmReleases({
   const { namespaces, scope, error: namespaceError } = useNamespaceOptions(name, files);
 
   /**
-   * The namespace the BACKEND is asked for: one selected namespace scopes the
-   * call, none or many fetch everything and are narrowed below.
+   * What the BACKEND is asked for: every namespace for an empty selection,
+   * otherwise one `helm list --namespace` per selected namespace, merged.
    *
-   * `helm list --namespace` takes exactly one, so this is not a choice about
-   * tidiness — it is the only scoping helm itself offers, and it is classic's
-   * own rule (`HelmReleasesView.tsx:195-198`). Fetching 383 releases to draw
-   * six is the common case on the cluster this defect was reported from.
+   * `helm list --namespace` takes exactly one, and an unscoped listing reads
+   * release Secrets across the cluster — which a credential scoped to a few
+   * namespaces is refused (#688). Held as the serialized string so `reload`
+   * below changes identity when, and only when, the selection does.
    */
-  const listNamespace = watchNamespaceForSelection(selection);
+  const listKey = serializeNamespaceSelection(selection);
 
   // A namespace-restricted credential has one namespace and no way to ask for
   // another — the same rule every other screen follows, written to the shared
@@ -348,20 +355,20 @@ function HelmReleases({
    *
    * Stable except for what it asks for — this screen re-renders on every line
    * a running `helm upgrade` prints, and a handler rebuilt each time would
-   * re-fire the effects that depend on it. `listNamespace` is in the deps
+   * re-fire the effects that depend on it. `listKey` is in the deps
    * BECAUSE changing it must re-list: that is what makes the picker fetch
    * again rather than merely re-render the rows it already has.
    */
   const reload = useCallback(async () => {
     const seq = ++listSeq.current;
-    const out = await listHelmReleases(name, listNamespace || null);
+    const out = await listHelmReleasesIn(name, parseNamespaceSelection(listKey));
     if (seq !== listSeq.current) return;
     if (out.error !== undefined || !out.releases) {
       setList({ status: "error", error: out.error ?? "helm returned no releases" });
       return;
     }
-    setList({ status: "ready", releases: out.releases, at: Date.now() });
-  }, [name, listNamespace]);
+    setList({ status: "ready", releases: out.releases, at: Date.now(), failures: out.failures });
+  }, [name, listKey]);
 
   /**
    * The mount's listing — and every re-listing a change of scope asks for,
@@ -934,6 +941,11 @@ function HelmReleases({
                 : "Releases"}
             </span>
           </div>
+          {list.status === "ready" && (
+            // Pinned above the scrolling table, not inside it: the releases
+            // below are live, and these namespaces are simply not among them.
+            <NamespaceFailuresAlert what="releases" failures={list.failures} className="mx-3 mt-3 mb-3" />
+          )}
           <div className="scroll min-h-0 min-w-0 flex-1">
             {list.status === "loading" ? (
               <LoadingState label="Listing Helm releases" />
