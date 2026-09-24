@@ -114,3 +114,5 @@ futures = "0.3"
 # issue #30) — drives the real built app through tauri-driver. Dev-only; the
 # shipping binary never links it.
 thirtyfour = "0.32"
+# Throwaway inventories for the app-stream command tests (extension_streams.rs).
+tempfile = "3"

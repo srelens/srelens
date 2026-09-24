@@ -472,6 +472,13 @@ pub(super) fn register(
         client_cache.clone(),
         cache.clone(),
     );
+    super::links::register(
+        reg,
+        path.clone(),
+        core.clone(),
+        client_cache.clone(),
+        cache.clone(),
+    );
     reg.register(Capability::typed::<ResolveColumns, ResolvedColumns, _, _>(
         "extensions.resolveColumns",
         "Resolve native extension table columns and badges in one batch",

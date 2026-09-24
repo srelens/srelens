@@ -1,7 +1,9 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { getDefaultNamespace, setDefaultNamespace, settingsStorage } from "@srelens/core";
 import type { Tone } from "@srelens/ui-kit";
 import type { Storage } from "./tabsPersist";
+import { currentWorkspace, forgetClusterNamespaces, setTabNamespaces, subscribe as subscribeTabs, tabNamespaces } from "./tabsStore";
+import { useTabScope } from "./tabScope";
 
 export type LinkState = "connected" | "connecting" | "disconnected" | "error";
 
@@ -40,23 +42,10 @@ export interface WorkspaceView {
   links: Record<string, { state: LinkState; error?: string }>;
   /** Open sidebar groups per stable cluster ID, persisted through settingsStorage. */
   expanded: Record<string, string[]>;
-  /**
-   * Namespace selection per cluster, keyed by `ClusterContext.stableId`, never
-   * a display name — a context renamed in the kubeconfig keeps its selection.
-   * One selection per cluster, shared by every screen looking at that
-   * cluster, rather than one per tab. An empty array means "all namespaces",
-   * and so does a cluster with no entry at all — a cluster is only ever added
-   * here when something narrows it, never seeded up front. This is persisted
-   * (`loadNamespaces`/`setNamespaces`,
-   * through `settingsStorage`, the same as `marks.ts` and `columnPrefs.ts`):
-   * a namespace selection is a standing choice about what a reader wants to
-   * see, not a fact about this sitting.
-   */
-  namespaces: Record<string, string[]>;
 }
 
 /** Live connection status and the reader's persisted per-cluster choices. */
-const initial = (): WorkspaceView => ({ links: {}, expanded: {}, namespaces: {} });
+const initial = (): WorkspaceView => ({ links: {}, expanded: {} });
 let view: WorkspaceView = initial();
 const listeners = new Set<() => void>();
 
@@ -71,7 +60,7 @@ function sameArray(a: readonly string[], b: readonly string[]): boolean {
 }
 
 function isInitial(v: WorkspaceView): boolean {
-  return Object.keys(v.links).length === 0 && Object.keys(v.expanded).length === 0 && Object.keys(v.namespaces).length === 0;
+  return Object.keys(v.links).length === 0 && Object.keys(v.expanded).length === 0;
 }
 
 export function getView(): WorkspaceView {
@@ -135,20 +124,8 @@ export function setExpanded(clusterId: string, ids: string[], storage: Storage =
   }
 }
 
-export const NAMESPACES_KEY = "srelens.next.namespaces";
-
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
-
-/**
- * Anything but a map of `stableId -> namespace names` reads as no stored
- * selection at all. One cluster's entry that is not a string array is
- * dropped on its own rather than taking the rest of the document with it —
- * losing one cluster's remembered namespaces is a nuisance, losing every
- * cluster's is not. An empty array is an explicit all-namespaces choice;
- * a missing entry follows the global default.
- */
-export const parseStoredNamespaces = parseStoredClusterLists;
 
 function parseStoredClusterLists(raw: string | null): Record<string, string[]> {
   if (!raw) return {};
@@ -162,56 +139,34 @@ function parseStoredClusterLists(raw: string | null): Record<string, string[]> {
   return Object.fromEntries(Object.entries(doc).filter((entry): entry is [string, string[]] => isStringArray(entry[1])));
 }
 
-function saveNamespaces(storage: Storage) {
-  try {
-    storage.setItem(NAMESPACES_KEY, JSON.stringify(view.namespaces));
-  } catch (error) {
-    // Best-effort, as `settingsStorage` itself is: a selection that does not
-    // survive the session is better than a selection that cannot be set.
-    console.error("could not persist the namespace selection", error);
-  }
-}
-
-/**
- * Read the saved namespace selections once at boot — and in tests, as often
- * as they like.
+/*
+ * Namespace selection is per TAB, and per cluster within the tab — it lives
+ * on `Tab.namespaces` in the tab store and persists with the tab. It used to
+ * be one selection per cluster, shared by every screen on that cluster, and
+ * that is exactly the bug it no longer is: narrowing the pods list in one tab
+ * narrowed every other tab on the same cluster behind the reader's back.
  *
- * Guarded like every accessor in `marks.ts`/`columnPrefs.ts`: the settings adapter
- * can refuse reads if backend initialization failed. Boot
- * must survive it, so a refusing storage costs the remembered selections and
- * nothing else. Merged onto the current view rather than replacing it, so a
- * `links`/`expanded` set before boot finishes reading storage is not undone —
- * neither is written here, but both could already be set.
+ * Which tab: the one the screen is mounted in, from `TabScope`. Outside any
+ * tab — the dock — the active tab, which is the one the reader is looking at.
  */
-export function loadNamespaces(storage: Storage = settingsStorage): void {
-  defaultSelection = readDefaultSelection();
-  let next: Record<string, string[]> = {};
-  try {
-    next = parseStoredNamespaces(storage.getItem(NAMESPACES_KEY));
-  } catch (error) {
-    console.error("could not read the saved namespace selections", error);
-  }
-  emit({ ...view, namespaces: next });
-}
 
 /**
- * Sets a cluster's namespace selection. Per cluster, not per tab: two tabs on
- * the same cluster agree, because both read this same record.
+ * Sets a tab's namespace selection for a cluster. `tabId` defaults to the
+ * active tab; a screen passes its own through {@link useSetNamespaces}.
  */
-export function setNamespaces(clusterId: string, namespaces: string[], storage: Storage = settingsStorage): void {
-  const current = view.namespaces[clusterId];
-  if (current && sameArray(current, namespaces)) return;
-  emit({ ...view, namespaces: { ...view.namespaces, [clusterId]: [...namespaces] } });
-  saveNamespaces(storage);
+export function setNamespaces(clusterId: string, namespaces: string[], tabId: string = currentWorkspace().activeId): void {
+  setTabNamespaces(tabId, clusterId, namespaces);
 }
 
-/** Forget a removed cluster's namespace without disturbing other clusters. */
-export function removeNamespaces(clusterId: string, storage: Storage = settingsStorage): void {
-  if (!(clusterId in view.namespaces)) return;
-  const namespaces = { ...view.namespaces };
-  delete namespaces[clusterId];
-  emit({ ...view, namespaces });
-  saveNamespaces(storage);
+/** The setter for the tab this component is mounted in. */
+export function useSetNamespaces(): (clusterId: string, namespaces: string[]) => void {
+  const tabId = useTabScope();
+  return useCallback((clusterId: string, namespaces: string[]) => setNamespaces(clusterId, namespaces, tabId ?? undefined), [tabId]);
+}
+
+/** Forget a removed cluster's selection in every tab without disturbing other clusters. */
+export function removeNamespaces(clusterId: string): void {
+  forgetClusterNamespaces(clusterId);
 }
 
 /** A stable empty selection, so an unset cluster's snapshot never changes identity. */
@@ -229,11 +184,25 @@ export function setNamespaceDefault(namespace: string): void {
   emit({ ...view });
 }
 
-/** The cluster's namespace selection, re-rendering whoever reads it when it changes. */
+function subscribeSelection(listener: () => void): () => void {
+  const offTabs = subscribeTabs(listener);
+  const offView = subscribe(listener);
+  return () => {
+    offTabs();
+    offView();
+  };
+}
+
+/**
+ * This tab's namespace selection for the cluster, re-rendering whoever reads
+ * it when it changes — and only this tab's: another tab narrowing the same
+ * cluster changes nothing here.
+ */
 export function useNamespaces(clusterId: string | undefined): string[] {
-  return useSyncExternalStore(
-    subscribe,
-    () => (clusterId === undefined ? NO_NAMESPACES : (view.namespaces[clusterId] ?? defaultSelection)),
-    () => NO_NAMESPACES,
-  );
+  const scoped = useTabScope();
+  const read = () => {
+    if (clusterId === undefined) return NO_NAMESPACES;
+    return tabNamespaces(scoped ?? currentWorkspace().activeId, clusterId) ?? defaultSelection;
+  };
+  return useSyncExternalStore(subscribeSelection, read, () => NO_NAMESPACES);
 }

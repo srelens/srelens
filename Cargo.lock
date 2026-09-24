@@ -6464,6 +6464,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
+ "tempfile",
  "thirtyfour",
  "tokio",
  "uuid",
@@ -6569,6 +6570,7 @@ dependencies = [
  "srelens-kube",
  "srelens-mcp",
  "srelens-plugin-host",
+ "srelens-streams",
  "tempfile",
  "tokio",
  "windows-sys 0.61.2",
@@ -6611,6 +6613,7 @@ name = "srelens-streams"
 version = "0.15.0"
 dependencies = [
  "portable-pty",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "srelens-kube",

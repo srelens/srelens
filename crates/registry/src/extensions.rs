@@ -7,6 +7,7 @@ pub(crate) mod crd;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 mod limits;
+mod links;
 mod panels;
 #[cfg(test)]
 mod policy_tests;
@@ -14,6 +15,7 @@ mod resource;
 #[cfg(test)]
 mod settings_tests;
 mod signing;
+pub mod streams;
 use app_settings::{checked_settings, drop_secret_values, setting_scope};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1067,6 +1069,7 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
     }
     apply_unsigned_policy(&mut state);
     write(path, &state)?;
+    streams::announce(path, &state);
     Ok(state)
 }
 #[derive(Deserialize, JsonSchema)]
@@ -1200,7 +1203,7 @@ pub fn register(
     path: PathBuf,
     core: Arc<Registry>,
     cache: Arc<srelens_kube::client_cache::ClientCache>,
-) {
+) -> Arc<streams::ExtensionStreams> {
     catalog::register(reg, path.with_extension("catalog.json"), core.clone());
     resource::register(reg, path.clone(), core.clone(), cache.clone());
     // One snapshot of each granted reader, shared by table columns, dashboard
@@ -1269,176 +1272,193 @@ pub fn register(
             }
         },
     ));
+    let reader_snapshots = snapshots.clone();
+    let reader_path = path.clone();
+    let reader_core = core.clone();
+    let reader_cache = cache.clone();
     reg.register(Capability::typed::<Read, Value, _, _>(
         "extensions.read",
         "Read a declared custom-resource contribution from an enabled extension",
         Annotations::READ_ONLY,
         move |input: Read| {
-            let p = path.clone();
-            let c = core.clone();
-            let k = cache.clone();
-            let snapshots = snapshots.clone();
-            async move {
-                let resolved = request_context(&k, &input.context).await;
-                if input.context.trim().is_empty() {
-                    return Err(CapabilityError::InvalidInput(
-                        "An explicit cluster context is required".into(),
-                    ));
-                }
-                if input.card.as_ref().is_some_and(|card| card.len() > 64) {
-                    return Err(CapabilityError::InvalidInput(
-                        "A dashboard card id is at most 64 characters".into(),
-                    ));
-                }
-                cards::check_card_namespaces(
-                    input.card.is_some(),
-                    &input.namespace,
-                    &input.namespaces,
-                )?;
-                if !input.namespace.is_empty()
-                    && (input.namespace.len() > 63
-                        || !input
-                            .namespace
-                            .bytes()
-                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-                        || input.namespace.starts_with('-')
-                        || input.namespace.ends_with('-'))
-                {
-                    return Err(CapabilityError::InvalidInput(
-                        "Namespace must be a Kubernetes namespace name".into(),
-                    ));
-                }
-                let state = tokio::task::spawn_blocking(move || read(&p))
-                    .await
-                    .map_err(|e| CapabilityError::Handler(e.to_string()))?
-                    .map_err(CapabilityError::Handler)?;
-                if let Some(reason) = state
-                    .plugins
-                    .iter()
-                    .find(|p| p.manifest.id == input.id)
-                    .and_then(|p| p.policy_blocked.as_ref())
-                {
-                    return Err(CapabilityError::Handler(reason.clone()));
-                }
-                let plugin = state
-                    .plugins
-                    .iter()
-                    .find(|p| {
-                        p.manifest.id == input.id && p.enabled && p.revision == input.revision
-                    })
-                    .ok_or_else(|| {
-                        CapabilityError::Handler(
-                            "Extension was disabled, removed or updated; refresh the view".into(),
-                        )
-                    })?;
-                plugin.check_scope(&resolved)?;
-                validate_app(&plugin.manifest, &plugin.grants, c.clone())
-                    .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
-                let mut manifest = plugin.manifest.clone();
-                // The kind's status rules travel in the host's binding, copied
-                // out of `statusResolvers` the way an action's preconditions
-                // are: the reader evaluates them on the whole object, which
-                // never leaves it (#541).
-                if let Some(rules) = plugin
-                    .manifest
-                    .status_rules_for_binding(&input.capability)
-                    .map(serde_json::to_value)
-                    .transpose()
-                    .map_err(|e| CapabilityError::Handler(format!("status rules: {e}")))?
-                {
-                    if let Some(binding) = manifest.capabilities.iter_mut().find(|b| {
-                        b.name == input.capability && b.target == "k8s.listCustomResource"
-                    }) {
-                        binding
-                            .arguments
-                            .insert(STATUS_RULES_ARGUMENT.into(), rules);
-                    }
-                }
-                if input.use_crd_columns {
-                    if let Some(binding) = manifest.capabilities.iter_mut().find(|b| {
-                        b.name == input.capability && b.target == "k8s.listCustomResource"
-                    }) {
-                        binding
-                            .arguments
-                            .insert("useCrdColumns".into(), json!(true));
-                    }
-                }
-                let context = resolved
-                    .ok()
-                    .and_then(|context| context.pinned_id())
-                    .unwrap_or(input.context);
-                if let Some(binding) =
-                    plugin.manifest.capabilities.iter().find(|b| {
-                        b.name == input.capability && b.target == "k8s.listCustomResource"
-                    })
-                {
-                    crd::require(&c, &context, binding).await?;
-                }
-                // A card's target shows only what the card counted. Worked out before
-                // the page's own read, so a card that cannot be evaluated fails the
-                // read rather than leaving every row on a page titled by the card.
-                let counted = match &input.card {
-                    Some(card) => Some(
-                        cards::card_rows(
-                            &snapshots,
-                            &k,
-                            &c,
-                            plugin,
-                            card,
-                            &input.capability,
-                            &context,
-                            &input.namespace,
-                            &input.namespaces,
-                        )
-                        .await?,
-                    ),
-                    None => None,
-                };
-                let mut registry = Registry::new();
-                let _registration = PluginHost::new(c)
-                    .register_with_settings(
-                        &mut registry,
-                        manifest,
-                        &plugin.grants,
-                        &plugin.settings,
-                    )
-                    .map_err(CapabilityError::Handler)?;
-                let mut args = json!({ "context": context });
-                if plugin
-                    .manifest
-                    .capabilities
-                    .iter()
-                    .find(|b| b.name == input.capability)
-                    .is_some_and(|b| b.inputs.iter().any(|k| k == "namespace"))
-                {
-                    args["namespace"] = json!(input.namespace);
-                }
-                let mut out = registry
-                    .invoke(&format!("plugin/{}/{}", input.id, input.capability), args)
-                    .await?;
-                if let Some(counted) = counted {
-                    let items = out
-                        .get_mut("items")
-                        .and_then(Value::as_array_mut)
-                        .ok_or_else(|| {
-                            CapabilityError::Handler(
-                                "The page's read returned no rows to narrow to the card's".into(),
-                            )
-                        })?;
-                    // A row the card's snapshot lacks — created since it was read — is
-                    // left out rather than shown as something the card counted.
-                    items.retain(|item| {
-                        let key = (
-                            item["namespace"].as_str().unwrap_or("").to_owned(),
-                            item["name"].as_str().unwrap_or("").to_owned(),
-                        );
-                        counted.contains(&key)
-                    });
-                }
-                Ok(out)
-            }
+            read_contribution(
+                reader_path.clone(),
+                reader_core.clone(),
+                reader_cache.clone(),
+                reader_snapshots.clone(),
+                input,
+            )
         },
     ));
+    streams::register(reg, path, core, cache, snapshots)
+}
+
+/// `extensions.read`: every check it makes is made again on each call, which
+/// is what lets a stream re-run it on every tick (#565).
+async fn read_contribution(
+    p: PathBuf,
+    c: Arc<Registry>,
+    k: Arc<srelens_kube::client_cache::ClientCache>,
+    snapshots: columns::JoinCache,
+    input: Read,
+) -> Result<Value, CapabilityError> {
+    let resolved = request_context(&k, &input.context).await;
+    if input.context.trim().is_empty() {
+        return Err(CapabilityError::InvalidInput(
+            "An explicit cluster context is required".into(),
+        ));
+    }
+    if input.card.as_ref().is_some_and(|card| card.len() > 64) {
+        return Err(CapabilityError::InvalidInput(
+            "A dashboard card id is at most 64 characters".into(),
+        ));
+    }
+    cards::check_card_namespaces(
+        input.card.is_some(),
+        &input.namespace,
+        &input.namespaces,
+    )?;
+    if !input.namespace.is_empty()
+        && (input.namespace.len() > 63
+            || !input
+                .namespace
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+            || input.namespace.starts_with('-')
+            || input.namespace.ends_with('-'))
+    {
+        return Err(CapabilityError::InvalidInput(
+            "Namespace must be a Kubernetes namespace name".into(),
+        ));
+    }
+    let state = tokio::task::spawn_blocking(move || read(&p))
+        .await
+        .map_err(|e| CapabilityError::Handler(e.to_string()))?
+        .map_err(CapabilityError::Handler)?;
+    if let Some(reason) = state
+        .plugins
+        .iter()
+        .find(|p| p.manifest.id == input.id)
+        .and_then(|p| p.policy_blocked.as_ref())
+    {
+        return Err(CapabilityError::Handler(reason.clone()));
+    }
+    let plugin = state
+        .plugins
+        .iter()
+        .find(|p| {
+            p.manifest.id == input.id && p.enabled && p.revision == input.revision
+        })
+        .ok_or_else(|| {
+            CapabilityError::Handler(
+                "Extension was disabled, removed or updated; refresh the view".into(),
+            )
+        })?;
+    plugin.check_scope(&resolved)?;
+    validate_app(&plugin.manifest, &plugin.grants, c.clone())
+        .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
+    let mut manifest = plugin.manifest.clone();
+    // The kind's status rules travel in the host's binding, copied
+    // out of `statusResolvers` the way an action's preconditions
+    // are: the reader evaluates them on the whole object, which
+    // never leaves it (#541).
+    if let Some(rules) = plugin
+        .manifest
+        .status_rules_for_binding(&input.capability)
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| CapabilityError::Handler(format!("status rules: {e}")))?
+    {
+        if let Some(binding) = manifest.capabilities.iter_mut().find(|b| {
+            b.name == input.capability && b.target == "k8s.listCustomResource"
+        }) {
+            binding
+                .arguments
+                .insert(STATUS_RULES_ARGUMENT.into(), rules);
+        }
+    }
+    if input.use_crd_columns {
+        if let Some(binding) = manifest.capabilities.iter_mut().find(|b| {
+            b.name == input.capability && b.target == "k8s.listCustomResource"
+        }) {
+            binding
+                .arguments
+                .insert("useCrdColumns".into(), json!(true));
+        }
+    }
+    let context = resolved
+        .ok()
+        .and_then(|context| context.pinned_id())
+        .unwrap_or(input.context);
+    if let Some(binding) =
+        plugin.manifest.capabilities.iter().find(|b| {
+            b.name == input.capability && b.target == "k8s.listCustomResource"
+        })
+    {
+        crd::require(&c, &context, binding).await?;
+    }
+    // A card's target shows only what the card counted. Worked out before
+    // the page's own read, so a card that cannot be evaluated fails the
+    // read rather than leaving every row on a page titled by the card.
+    let counted = match &input.card {
+        Some(card) => Some(
+            cards::card_rows(
+                &snapshots,
+                &k,
+                &c,
+                plugin,
+                card,
+                &input.capability,
+                &context,
+                &input.namespace,
+                &input.namespaces,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let mut registry = Registry::new();
+    let _registration = PluginHost::new(c)
+        .register_with_settings(
+            &mut registry,
+            manifest,
+            &plugin.grants,
+            &plugin.settings,
+        )
+        .map_err(CapabilityError::Handler)?;
+    let mut args = json!({ "context": context });
+    if plugin
+        .manifest
+        .capabilities
+        .iter()
+        .find(|b| b.name == input.capability)
+        .is_some_and(|b| b.inputs.iter().any(|k| k == "namespace"))
+    {
+        args["namespace"] = json!(input.namespace);
+    }
+    let mut out = registry
+        .invoke(&format!("plugin/{}/{}", input.id, input.capability), args)
+        .await?;
+    if let Some(counted) = counted {
+        let items = out
+            .get_mut("items")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| {
+                CapabilityError::Handler(
+                    "The page's read returned no rows to narrow to the card's".into(),
+                )
+            })?;
+        // A row the card's snapshot lacks — created since it was read — is
+        // left out rather than shown as something the card counted.
+        items.retain(|item| {
+            let key = (
+                item["namespace"].as_str().unwrap_or("").to_owned(),
+                item["name"].as_str().unwrap_or("").to_owned(),
+            );
+            counted.contains(&key)
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -3217,14 +3237,16 @@ mod tests {
             "extensions.resolveColumns",
             "extensions.resolveCards",
             "extensions.resolvePanels",
+            "extensions.resolveLinks",
             "extensions.catalog",
             "extensions.catalogManifest",
             "extensions.validate",
+            "extensions.streams",
         ] {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 11);
+        assert_eq!(mcp.list_tools().len(), 13);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

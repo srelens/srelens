@@ -12,7 +12,9 @@ Consent rules are in [permissions.md](permissions.md).
 | `extensions.resolveColumns` | Read-only | Resolve an app's native table columns and badges for up to 1,000 row summaries in one `uids[]` batch. Direct badges read the rows' metadata only, never Secrets. The host rechecks the installed revision, grants, cluster scope and joined CRD before listing; failed reads stay explicit. Desktop-only until web app isolation exists. |
 | `extensions.resolveCards` | Read-only | Answer every dashboard card an app declares for one cluster and a `namespaces[]` selection (at most 256): a figure, or on that card alone why it has none. The host rechecks the installed revision, grants, cluster scope and each source's CRD, and reads each source once through the shared five-second snapshot. `extensions.read` accepts a `card` id to return only the rows that card counted, with the card's `namespaces[]` when it counted in several. Desktop-only until web app isolation exists. |
 | `extensions.resolvePanels` | Read-only | Resolve installed declarative detail panels for a selected resource. The host rechecks the revision, grants and cluster scope, and uses only declared join readers. Desktop-only until web app isolation exists. |
+| `extensions.resolveLinks` | Read-only | Resolve an app's `resourceLinks` for a selected resource: `{ from, links: [{ id, relation, to, capability, targets: [{ namespace, name, exists, unverified? }], error? }] }`. A target the host did not look up (a bare Argo CD name with no `defaultNamespace`) carries `unverified` with why, and is never `exists`. Targets are looked up only in the granted reader for `to`, and only when the resource names one. A failed read is an `error` on that link, never an empty `targets`. Desktop-only until web app isolation exists. |
 | `extensions.resource` | Read-only | Inspect one resource of an enabled app, with its events and supported actions. |
+| `extensions.streams` | Read-only | The open app streams in this process and what each app has sent: open, opened, messages, payload bytes, streams stopped for the rate and opens refused for the cap, with the limits. For the Inspector ([#575](https://github.com/srelens/srelens/issues/575)); the streams themselves are opened by host commands, not capabilities. See [streams.md](streams.md). Desktop-only until web app isolation exists. |
 | `extensions.catalog` | Read-only | Browse the catalog, from a 24-hour cache. Reports the host's supported API versions as `hostApiVersions`; the deprecated `hostApiVersion` still gives the newest. |
 | `extensions.catalogManifest` | Read-only | Download and verify one catalog release for review. Does not install it. |
 | `extensions.validate` | Read-only | Check a manifest, with its grants and optional signature, exactly as installing it would, and return every problem as `{code, path, message}` (see [Validation errors](specification.md#validation-errors)). Does not install it. A `signature` other than 64 bytes or a `manifest` over 256 KiB is refused as invalid input, not reported as a problem. |
@@ -170,6 +172,8 @@ reports the request as accepted rather than as complete.
 
 - Every `extensions.*` capability is refused on the multi-user web host until app
   state is kept per user ([#515](https://github.com/srelens/srelens/issues/515)).
+  So are the app stream commands (`extension_stream_open`, `extension_stream_cancel`,
+  `extension_stream_close_view`); see [streams.md](streams.md#hosts).
 - The four host action primitives are refused for the same reason: what bounds one is
   an installed manifest fixing the kind and the template, which the web host has none
   of, so a caller would be naming both itself.

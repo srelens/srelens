@@ -142,6 +142,8 @@ Watches, pod exec, log tails, terminals, helm operations, and port-forwards don'
 
 The frontend side is identical in both cases and lives in `@srelens/core` (`packages/core/src/lib/`: `watch.ts`, `exec.ts`, `logsStream.ts`, `forward.ts`).
 
+Streams an app's views open go through one generic contract instead of a manager per kind: `crates/streams/src/app.rs` (frames, view ownership, per-app limits, metrics), with the extension broker deciding what an app may open. A new app stream source is a new `source` kind, not a new command. See [docs/extensions/streams.md](extensions/streams.md).
+
 ### The transport shim
 
 `packages/core/src/transport/` is the only frontend code that knows which host it is running in. `transport.ts` picks `tauriTransport` or `webTransport` at load time based on `isTauri()`, and re-exports one interface (`invokeCapability`, `invokeCommand`, `on`, `subscribe`, …). Everything else — stores, components, tests — depends only on that interface. This is what makes the UI testable in jsdom *and* what makes web mode possible at all, so keep `@tauri-apps/api` imports confined to `packages/core/src/transport/`.

@@ -214,15 +214,12 @@ export function Console({ fullView }: { fullView?: boolean }) {
    */
   const isFullView = fullView === true || route === "/agent";
   const context = activeCtx?.name ?? "";
-  // The reader's standing namespace narrowing for THIS cluster — the picker on
-  // the list screens. Without it, a question asked from a list narrowed to one
-  // namespace had the agent sweep every namespace in the cluster.
   // What a question asked from here is ABOUT. Derived from the active route,
   // which is where a resource's identity lives — a cluster name alone left the
   // agent with no target for "summarise this stream" and it went searching
   // four namespaces for one.
-  // The reader's standing namespace narrowing for THIS cluster — the picker on
-  // the list screens. Without it, a question asked from a list narrowed to one
+  // The active tab's namespace narrowing for this cluster — the picker on the
+  // list screens. Without it, a question asked from a list narrowed to one
   // namespace had the agent sweep every namespace in the cluster.
   const selected = useNamespaces(activeCtx?.stableId);
   const about = useMemo(() => askContextFor(route, context, selected), [route, context, selected]);

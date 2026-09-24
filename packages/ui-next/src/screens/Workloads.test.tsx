@@ -39,6 +39,7 @@ import { resourceStatusLine, type ClusterContext, type K8sObject } from "@srelen
 import { Workloads } from "./Workloads";
 import { ConsoleProvider } from "../console";
 import * as store from "../lib/tabsStore";
+import { TabScope } from "../lib/tabScope";
 import { defaultState } from "../lib/tabs";
 import { resetContexts, setContexts, setKubeconfigFiles } from "../lib/clusters";
 import { loadColumnPrefs } from "../lib/columnPrefs";
@@ -129,6 +130,25 @@ function open() {
 }
 
 describe("Workloads", () => {
+  it("writes a namespace pick to its own tab — another Workloads tab on the same cluster keeps its selection", async () => {
+    store.openTab("/resources");
+    const first = tabFor("/resources").id;
+    store.duplicateTab(first);
+    const second = store.currentWorkspace().activeId;
+    render(
+      <ConsoleProvider>
+        <div data-testid="first"><TabScope.Provider value={first}><Workloads route="/resources" /></TabScope.Provider></div>
+        <div data-testid="second"><TabScope.Provider value={second}><Workloads route="/resources" /></TabScope.Provider></div>
+      </ConsoleProvider>,
+    );
+    await userEvent.click(await within(screen.getByTestId("first")).findByRole("combobox", { name: "Namespaces" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Only kube-system" }));
+
+    const tab = (id: string) => store.currentWorkspace().tabs.find((t) => t.id === id)!;
+    await waitFor(() => expect(tab(first).namespaces).toEqual({ [CTX.stableId]: ["kube-system"] }));
+    expect(tab(second).namespaces).toBeUndefined();
+  });
+
   it("lists every workload kind at once, each row saying which it is", async () => {
     open();
 
@@ -288,6 +308,7 @@ describe("Workloads", () => {
   // #688: a credential scoped to a few namespaces is refused a cluster-scope
   // list, and two selected namespaces used to mean exactly that.
   it("watches each selected namespace on its own, never the cluster scope", async () => {
+    store.openTab("/resources");
     setNamespaces(CTX.stableId, ["default", "kube-system"]);
     watchResource.mockImplementation(
       async (_context: string, namespace: string, kind: string, onRows: (rows: unknown[]) => void) => {
@@ -305,6 +326,7 @@ describe("Workloads", () => {
   });
 
   it("keeps the namespace that answered and names the one that was refused", async () => {
+    store.openTab("/resources");
     setNamespaces(CTX.stableId, ["default", "kube-system"]);
     watchResource.mockImplementation(
       async (
@@ -338,6 +360,7 @@ describe("Workloads", () => {
   });
 
   it("names only the kinds refused when the others answered in every namespace", async () => {
+    store.openTab("/resources");
     setNamespaces(CTX.stableId, ["default", "kube-system"]);
     watchResource.mockImplementation(
       async (

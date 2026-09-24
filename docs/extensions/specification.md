@@ -120,11 +120,11 @@ Why a new field needs a new minor even though it is optional: manifests are stri
 (see below), so a host that predates the field would reject it. Requiring the minor
 turns that into a clear "requires API 0.x" message.
 
-Pre-1.0 exception for #538, #539, #541 and #544: `contributions.joins`,
+Pre-1.0 exception for #538, #539, #541, #544 and #545: `contributions.joins`,
 `contributions.tableColumns`, `contributions.detailPanels`,
-`contributions.statusResolvers`, `contributions.badges` and `contributions.commands`
-were added to API 0.3 in place while the extension platform is still being built, and
-so was the one predicate
+`contributions.statusResolvers`, `contributions.badges`, `contributions.commands` and
+`contributions.resourceLinks` were added to API 0.3 in place while the extension
+platform is still being built, and so was the one predicate
 path filter form, `[?(@.key=="text")]` (#541), which widens what a path accepts without
 changing what an accepted path means. Earlier signed Flux and Argo CD 0.3 releases
 without these fields remain valid — including their `statusColumns` — and a manifest
@@ -312,6 +312,12 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 - Apps may declare `commands` for the new design's command palette: open a declared
   page, or open the host confirmation for a declared action on a resource of the
   action's kind (#544). See the [manifest reference](manifest.md#commands).
+- Apps may declare `resourceLinks` from one qualified kind to another their
+  readers list, with a relation (`ownedBy`, `managedBy`, `exposedBy`,
+  `references`) and a join-style match read on the linked-from resource (#545).
+  `extensions.resolveLinks` rechecks the installed app's revision, grants and
+  cluster scope; the Inspector shows the result as a Related section. See the
+  [manifest reference](manifest.md#resourcelinks).
 - Unsigned apps declaring write actions require the default-off inventory policy
   described above (#558). Turning it off disables affected installations without
   removing them; normal read-only declarative permission grants are unchanged.

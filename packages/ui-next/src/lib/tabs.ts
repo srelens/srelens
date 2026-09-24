@@ -19,6 +19,16 @@ export interface Tab {
    * the tab does. Absent until the user sorts or filters — see `setTabView`.
    */
   view?: { sort?: TableSort | null; filter?: string; filterKey?: string | null; regex?: boolean };
+  /**
+   * The namespace selection this tab is narrowed to, per cluster, keyed by
+   * `ClusterContext.stableId`. On the tab, not the cluster: narrowing one tab
+   * must never narrow another tab looking at the same cluster. Per cluster
+   * within the tab because a tab follows the rail — the same tab shows
+   * whichever cluster is active, and one cluster's namespaces mean nothing on
+   * another. An empty array is an explicit "all namespaces"; a cluster with no
+   * entry follows the default-namespace preference.
+   */
+  namespaces?: Record<string, string[]>;
 }
 
 export interface Workspace {
