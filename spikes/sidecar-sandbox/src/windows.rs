@@ -126,6 +126,11 @@ const ALREADY_EXISTS: i32 = 0x800700B7_u32 as i32;
 /// `CreateProcessW` refuses a SID that was only derived, with `ERROR_FILE_NOT_FOUND`
 /// (observed in this spike), so the profile has to exist. `delete_profile` removes it.
 fn container_sid() -> io::Result<Sid> {
+    // Concurrent CreateAppContainerProfile calls for a profile that does not exist yet fail
+    // with 0x8007000A (observed with the tests' default parallelism), so creation is
+    // serialized.
+    static CREATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serialized = CREATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let name = wide(CONTAINER_NAME);
     let mut sid: PSID = null_mut();
     // SAFETY: valid wide strings and out-pointer; no capabilities are passed.

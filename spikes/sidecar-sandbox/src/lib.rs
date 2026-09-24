@@ -177,6 +177,17 @@ mod denial_tests {
     }
 }
 
+/// What the OS can say about a sidecar that never answered its first ping. On macOS under
+/// `seatbelt`, the sandbox's recent log entries for the probe; elsewhere, nothing more.
+pub fn start_failure_context(backend: Backend) -> String {
+    #[cfg(target_os = "macos")]
+    if backend == Backend::Seatbelt {
+        return format!("\nrecent sandbox log entries for the probe:\n{}", macos::recent_denials());
+    }
+    let _ = backend;
+    String::new()
+}
+
 /// Remove per-user state a run registered (the Windows AppContainer profile).
 pub fn cleanup() -> io::Result<()> {
     #[cfg(windows)]

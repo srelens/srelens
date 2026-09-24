@@ -1,10 +1,14 @@
 (version 1)
 ;; srelens #571 spike: the Seatbelt (SBPL) profile the probe sidecar runs under on macOS.
 ;;
-;; UNVERIFIED: written on Windows, never run. The maintainer's Mac run
-;; (spikes/sidecar-sandbox/run-macos.sh) is the first time it is exercised. If the probe
-;; does not start at all, the sandbox log lines that run-macos.sh collects name the
-;; operation that was denied; add the narrowest rule that allows it and say so in the PR.
+;; UNVERIFIED. Written on Windows. Its first run, on macOS 27.0 arm64 at c7ff2875, never let
+;; the probe start: the only denial logged was `deny(1) file-read-data /`, and the probe
+;; then aborted (SIGABRT). This revision allows that, and what startup is known to need
+;; besides. `SEATBELT_TRACE=1 sh run-macos.sh` reports every operation this profile does
+;; not allow, in one run, so the next revision can be exact. Add the narrowest rule that
+;; allows each startup need, and never one that re-opens a denial the checks rely on:
+;; ~/.kube and anything outside SCRATCH, the network, DNS (mach-lookup to mDNSResponder),
+;; and starting any process but the probe.
 ;;
 ;; Parameters, passed by the harness with `sandbox-exec -D KEY=VALUE`:
 ;;   PROBE    the probe binary
@@ -35,6 +39,25 @@
   (literal "/dev/null")
   (literal "/dev/urandom")
   (literal "/dev/random"))
+
+;; Mapping code as executable is checked apart from reading it (file-map-executable): the
+;; probe itself, and the system libraries and shared cache dyld maps.
+(allow file-map-executable
+  (literal (param "PROBE"))
+  (subpath "/usr/lib")
+  (subpath "/System/Library")
+  (subpath "/System/Cryptexes")
+  (subpath "/System/Volumes/Preboot/Cryptexes")
+  (subpath "/Library/Apple/System/Library"))
+
+;; The root directory itself. The first Mac run showed process startup reading it, and
+;; aborting when it could not: `deny(1) file-read-data /`. This is a listing of the
+;; top-level names, not the contents of any file under them.
+(allow file-read-data (literal "/"))
+
+;; Logging preferences libSystem reads at startup. System configuration, nothing of the
+;; user's.
+(allow file-read* (subpath "/Library/Preferences/Logging"))
 
 ;; Resolving a path stats every directory on the way, so metadata reads are allowed
 ;; everywhere. This lets the sidecar learn that ~/.kube/config EXISTS (and its size and

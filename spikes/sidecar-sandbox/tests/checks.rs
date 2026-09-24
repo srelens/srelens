@@ -37,10 +37,13 @@ fn start() -> Run {
     let mut sidecar = Sidecar::launch(backend, &fixture, &LIMITS)
         .unwrap_or_else(|e| panic!("[{backend}] the sidecar could not start: {e}"));
     let pong = sidecar.call("ping", json!({}));
-    assert!(
-        matches!(pong, Reply::Ok(_)),
-        "[{backend}] the sidecar must be alive before any check; ping got {pong:?}"
-    );
+    if !matches!(pong, Reply::Ok(_)) {
+        // run-macos.sh keys on this sentence to tell "never started" from "a check failed".
+        panic!(
+            "[{backend}] the sidecar must be alive before any check; ping got {pong:?}{}",
+            sidecar_sandbox_spike::start_failure_context(backend)
+        );
+    }
     Run { backend, fixture, sidecar }
 }
 

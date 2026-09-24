@@ -28,6 +28,31 @@ pub const PROFILE: &str = include_str!("seatbelt.sb");
 /// exhaust it.
 pub const CPU_BUDGET_SECONDS: u64 = 60;
 
+/// The sandbox's recent log entries for the probe, for a sidecar that never answered: on the
+/// first Mac run, the only clue to why the probe aborted was a `deny(1) file-read-data /`
+/// entry in the unified log.
+pub fn recent_denials() -> String {
+    // The unified log lags the event slightly.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let out = Command::new("/usr/bin/log")
+        .args(["show", "--style", "compact", "--last", "1m", "--predicate"])
+        .arg(r#"sender == "Sandbox" AND eventMessage CONTAINS "probe(""#)
+        .output();
+    match out {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let lines: Vec<&str> = text.lines().filter(|l| l.contains("probe(")).collect();
+            let tail = &lines[lines.len().saturating_sub(40)..];
+            if tail.is_empty() {
+                "no sandbox log entries for the probe in the last minute".into()
+            } else {
+                tail.join("\n")
+            }
+        }
+        Err(e) => format!("could not read the sandbox log: {e}"),
+    }
+}
+
 pub fn launch_seatbelt(fixture: &Fixture, limits: &Limits) -> io::Result<Child> {
     let profile = fixture.root().join("seatbelt.sb");
     std::fs::write(&profile, PROFILE)?;

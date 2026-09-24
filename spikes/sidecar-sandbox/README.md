@@ -38,7 +38,7 @@ If the host cannot do it either (no network or no DNS, for instance), the check 
 |---|---|---|
 | Windows | `none`, `appcontainer`, `job`, `appcontainer+job`, `lpac+job` | `appcontainer+job` |
 | Linux | `none`, `landlock`, `seccomp`, `cgroup`, `landlock+seccomp+cgroup`, `bwrap` | `landlock+seccomp+cgroup` |
-| macOS | `none`, `seatbelt` | `seatbelt` (candidate, **never run yet**) |
+| macOS | `none`, `seatbelt` | `seatbelt` (candidate; **has not yet started under its profile**) |
 
 `none` is the unsandboxed baseline: nine checks fail there because the operation succeeds.
 That is expected.
@@ -89,7 +89,7 @@ Prerequisite: Rust through [rustup](https://rustup.rs) and `/usr/bin/sandbox-exe
 macOS still ships though it is deprecated.
 
 ```sh
-sh spikes/sidecar-sandbox/run-macos.sh
+SEATBELT_TRACE=1 sh spikes/sidecar-sandbox/run-macos.sh
 ```
 
 - **Time:** about 2 to 4 minutes, mostly the first build.
@@ -99,16 +99,30 @@ sh spikes/sidecar-sandbox/run-macos.sh
   - the `none` baseline;
   - `seatbelt` across all seven checks (the matrix);
   - `seatbelt` again on only the checks it claims (1, 2, 3, 4, 7), which decide the exit
-    status. Checks 5 and 6 are recorded, not claimed. macOS is not known to limit
-    per-process memory or CPU rate; the launcher prints whether each `setrlimit` call was
-    accepted, and the checks record what actually happened.
-- **The Seatbelt log:** the script finishes by collecting the sandbox log's denials for
-  the probe. If the probe cannot even start under the profile, these lines name what was
-  denied.
+    status. Checks 5 and 6 are recorded, not claimed. The launcher prints whether each
+    `setrlimit` call was accepted. On the first run (macOS 27.0 arm64), `RLIMIT_DATA` and
+    `RLIMIT_AS` were refused with `EINVAL`.
+- **With `SEATBELT_TRACE=1`, a trace.** It runs the probe once under the profile with
+  `(deny default)` replaced by allow-and-report, then lists every operation the sandbox
+  reported, with counts. Those are the operations the profile does not yet allow, found
+  in one run even if the probe cannot start under the real profile. The trace also runs
+  automatically when the probe could not start. The command without `SEATBELT_TRACE=1`
+  runs the checks only.
+- **Exit status:**
+
+  | Code | Meaning |
+  |---|---|
+  | 0 | Every claimed check passed. |
+  | 1 | The probe ran and a claimed check failed. |
+  | 2 | The probe could not start under the profile, so nothing is known about Seatbelt yet. The script prints `probe could not start under the profile` and the sandbox's denials from that run. |
+
+  `sh spikes/sidecar-sandbox/test-run-macos.sh` tests this logic on any POSIX shell.
 - **Output:** `results/results-macos.txt`.
 
-The profile is `src/seatbelt.sb`. It was written without a Mac. If it needs a change to
-let the probe start, make the narrowest one, and send the diff back with the results.
+The profile is `src/seatbelt.sb`. It was written without a Mac, and the first run never
+let the probe start (`deny(1) file-read-data /`, then `SIGABRT`). The revised profile
+allows that. If it still needs a change, make the narrowest one the trace shows, and
+send the diff back with the results.
 
 ### Windows
 
