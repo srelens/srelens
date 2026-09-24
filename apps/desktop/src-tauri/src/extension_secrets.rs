@@ -304,7 +304,14 @@ mod tests {
         let vault = keychain_vault(&dir);
         // Setup as `vault_password` does it: re-key onto a password-derived
         // key, write the meta whose existence is password mode.
-        let password = format!("master-{}-passphrase", 7);
+        // Made at run time, from nothing a reader could reuse: a password
+        // compiled into the test is a hard-coded credential to CodeQL, and
+        // this test needs any passphrase, not a particular one.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let password = format!("{:x}-{:x}", std::process::id(), nanos);
         let (meta, key) = crate::vault::build_meta(&password).unwrap();
         vault.rekey_from_current(key, "password").unwrap();
         crate::vault::write_meta(&dir, &meta).unwrap();
