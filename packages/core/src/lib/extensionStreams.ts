@@ -13,8 +13,44 @@
 // one that simply ended. See docs/extensions/streams.md.
 import { invokeCapability, invokeCommand, subscribe } from "../transport/transport";
 
-/** What a stream carries. `read` re-runs a declared reader every `intervalSeconds` (5–300, default 15). */
-export type ExtensionStreamSource = { kind: "read"; capability: string; intervalSeconds?: number };
+/**
+ * What a stream carries. `read` re-runs a declared reader every `intervalSeconds`
+ * (5–300, default 15). `watch` follows the kind a declared reader lists and says
+ * when it changed, as an {@link ExtensionWatchEvent} (#566).
+ */
+export type ExtensionStreamSource =
+  | { kind: "read"; capability: string; intervalSeconds?: number }
+  | { kind: "watch"; capability: string };
+
+/**
+ * A `watch` stream's `data`. Never an object: `synced` (a full list completed —
+ * read again) and `changed` (read again) ask the view to re-read through its own
+ * path; `reconnecting` says what the view shows is not current until the next
+ * `synced`.
+ */
+export type ExtensionWatchEvent =
+  | { event: "synced" }
+  | { event: "changed" }
+  | { event: "reconnecting"; message: string };
+
+export function isExtensionWatchEvent(data: unknown): data is ExtensionWatchEvent {
+  if (!data || typeof data !== "object") return false;
+  const d = data as Record<string, unknown>;
+  if (d.event === "synced" || d.event === "changed") return true;
+  return d.event === "reconnecting" && typeof d.message === "string";
+}
+
+/** The desktop host announces every app inventory write on this channel. */
+export const EXTENSION_INVENTORY_CHANNEL = "extensions:inventory";
+
+/**
+ * Hear every app inventory write the host announces (#566). Resolves to the
+ * unsubscribe once listening; rejects when the channel is unavailable, so a
+ * caller can fall back and say it did.
+ */
+export async function onExtensionInventoryChanged(listener: () => void): Promise<() => void> {
+  return subscribe(EXTENSION_INVENTORY_CHANNEL, () => listener());
+}
 
 export interface ExtensionStreamRequest {
   /** The app's ID. */
@@ -66,8 +102,15 @@ export interface ExtensionView {
  * deserializes too.
  */
 export function extensionStreamPayload(view: string, channel: string, request: ExtensionStreamRequest) {
-  const source: ExtensionStreamSource = { kind: request.source.kind, capability: request.source.capability };
-  if (request.source.intervalSeconds !== undefined) source.intervalSeconds = request.source.intervalSeconds;
+  const asked = request.source;
+  // Field by field, so nothing the host refuses (an interval on a watch) is sent.
+  const source: ExtensionStreamSource = asked.kind === "watch"
+    ? { kind: "watch", capability: asked.capability }
+    : {
+        kind: "read",
+        capability: asked.capability,
+        ...(asked.intervalSeconds !== undefined ? { intervalSeconds: asked.intervalSeconds } : {}),
+      };
   return {
     id: request.id,
     revision: request.revision,

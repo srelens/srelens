@@ -759,3 +759,37 @@
 }
 .extension-settings-actions { padding: 0; border-bottom: 0; }
 .extension-settings-saved { color: var(--ink-muted, var(--fl-color-text-muted)); }
+
+/* Live app views (#566). The word says the state; the dot only repeats it. */
+.extension-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  font-size: var(--text-body, 0.8125rem);
+  white-space: nowrap;
+}
+.extension-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-faint, var(--fl-color-text-muted));
+}
+.extension-live[data-live="live"] .extension-live-dot { background: var(--ok, var(--fl-color-success)); }
+.extension-live[data-live="reconnecting"] .extension-live-dot { background: var(--warn, var(--fl-color-warning)); }
+.extension-live[data-live="reconnecting"] { color: var(--warn, var(--fl-color-warning)); }
+.extension-live-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 12px 0;
+}
+.extension-live-notice { font-size: var(--text-body, 0.8125rem); }
+.extension-stale-notice { color: var(--warn, var(--fl-color-warning)); }
+/* What is shown while a watch reconnects is not current. The notice beside it
+   says so in words; this rule only marks the region, and never fades its text,
+   which would drop muted ink below the contrast floor. */
+.extension-table-scroll[data-stale],
+.extension-summary[data-stale],
+.dashboard-cards[data-stale] {
+  box-shadow: inset 3px 0 0 var(--warn, var(--fl-color-warning));
+}

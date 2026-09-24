@@ -310,8 +310,11 @@ pub fn run() {
 
     let watcher_cache = cache.clone();
     let oidc_cache = cache.clone();
+    let inventory_streams = app_streams.clone();
     builder
         .setup(move |app| {
+            // Every inventory write reaches the window as an event (#566).
+            extension_streams::listen_inventory(&inventory_streams, app.handle());
             // Application logging: always write a rotating file to the OS log
             // directory so the Settings "Application logs" view (and post-hoc
             // debugging of a shipped build) has something to read; mirror to

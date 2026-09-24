@@ -22,6 +22,15 @@ impl AppExtensionStreams {
     }
 }
 
+/// Send every inventory write the registry announces to the WebView as the
+/// `extensions:inventory` event (#566), so the app list reads again when it
+/// changes instead of polling. Harmless on a host without apps.
+pub fn listen_inventory<R: Runtime>(streams: &Option<Arc<ExtensionStreams>>, app: &AppHandle<R>) {
+    if let Some(streams) = streams {
+        streams.listen_inventory(Arc::new(TauriSink(app.clone())));
+    }
+}
+
 /// Open a stream for one view of an app. `input` is `@srelens/core`'s
 /// `openExtensionView(…).open(…)` payload, parsed by the registry.
 #[tauri::command]
@@ -90,6 +99,42 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    /// An inventory write made through the registry reaches the window as
+    /// the event the app list listens for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inventory_writes_reach_the_window_as_an_event() {
+        use std::sync::{Arc, Mutex};
+        use tauri::Listener;
+        let dir = tempfile::tempdir().unwrap();
+        let (registry, streams) = srelens_registry::build_registry_and_app_streams(
+            ClientCache::new_many(vec![]),
+            vec![],
+            Some(dir.path().join("settings.json")),
+        );
+        let app = tauri::test::mock_app();
+        let heard = Arc::new(Mutex::new(Vec::<String>::new()));
+        let record = heard.clone();
+        app.listen(srelens_registry::INVENTORY_CHANNEL, move |event| {
+            record.lock().unwrap().push(event.payload().to_owned());
+        });
+        listen_inventory(&streams, app.handle());
+        registry
+            .invoke(
+                "extensions.configure",
+                json!({"action": "unsignedApps", "allowUnsignedApps": true}),
+            )
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if !heard.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(*heard.lock().unwrap(), [r#"{"type":"changed"}"#]);
+        listen_inventory(&None, app.handle());
     }
 
     #[tokio::test]

@@ -946,6 +946,95 @@ fn is_permanent_custom_watch_error(msg: &str) -> bool {
         || lower.contains("no matches for kind")
 }
 
+/// What one watch of an app's bound kind reports (#566). Carries nothing of
+/// any object: the app stream built on it tells the view *that* the kind
+/// changed, and the view reads again through the reader's own path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KindSignal {
+    /// A full list completed (the first, or the one after a fresh start).
+    Listed,
+    /// An object was added, modified or deleted.
+    Changed,
+}
+
+/// The signal an event is, if any. `Init`/`InitApply` are a list still
+/// arriving; it is reported once, on its `InitDone`.
+pub fn kind_signal<K>(event: &Event<K>) -> Option<KindSignal> {
+    match event {
+        Event::Init | Event::InitApply(_) => None,
+        Event::InitDone => Some(KindSignal::Listed),
+        Event::Apply(_) | Event::Delete(_) => Some(KindSignal::Changed),
+    }
+}
+
+/// A watch error that a fresh start will not cure: RBAC forbids it, or the
+/// cluster no longer serves the kind.
+pub fn is_permanent_kind_watch_error(msg: &str) -> bool {
+    is_permanent_custom_watch_error(msg)
+}
+
+/// The one kind watch error nothing on the cluster's side cures: RBAC forbids it.
+pub fn is_forbidden_kind_watch_error(msg: &str) -> bool {
+    is_permanent_watch_error(msg)
+}
+
+/// One watch session over `api`: list, then follow, calling `on_signal` for
+/// each [`KindSignal`], and return at the **first** error with its message.
+///
+/// No backoff and no resume here, on purpose: the caller decides whether the
+/// error is permanent, and otherwise starts a new session, which lists afresh.
+/// kube-runtime would resume from the last `resourceVersion` on its own, and
+/// a resumed watch that then stays quiet never says it recovered; a fresh
+/// list always does, and a `410 Gone` needs one anyway.
+pub async fn watch_kind_session<K, F>(api: Api<K>, mut on_signal: F) -> Result<(), String>
+where
+    K: kube::Resource + Clone + DeserializeOwned + Debug + Send + 'static,
+    F: FnMut(KindSignal) + Send,
+{
+    let mut stream = kube::runtime::watcher(api, Config::default()).boxed();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(event) => {
+                if let Some(signal) = kind_signal(&event) {
+                    on_signal(signal);
+                }
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(())
+}
+
+/// One watch session over `target` in `context`, metadata only: the host
+/// never receives a watched object's `data` or `spec` through it. A namespaced
+/// kind is watched in `namespace`, or in every namespace when it is empty; a
+/// cluster-scoped kind ignores it.
+pub async fn watch_kind_once<F>(
+    cache: Arc<ClientCache>,
+    context: String,
+    namespace: String,
+    target: CustomWatchTarget,
+    on_signal: F,
+) -> Result<(), String>
+where
+    F: FnMut(KindSignal) + Send,
+{
+    use kube::api::{DynamicObject, PartialObjectMeta};
+    let client = cache.get(&context).await?;
+    let ar = crate::crds::custom_api_resource(
+        &target.group,
+        &target.version,
+        &target.kind,
+        &target.plural,
+    );
+    let api: Api<PartialObjectMeta<DynamicObject>> = if target.namespaced && !namespace.is_empty() {
+        Api::namespaced_with(client, &namespace, &ar)
+    } else {
+        Api::all_with(client, &ar)
+    };
+    watch_kind_session(api, on_signal).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1592,5 +1681,126 @@ mod tests {
         ));
         assert!(!is_permanent_custom_watch_error("connection reset by peer"));
         assert!(!is_permanent_custom_watch_error("401 Unauthorized"));
+    }
+
+    /// #566: a list and every later event are signals; a relist in progress
+    /// is not, until its `InitDone`. A signal carries nothing of the object,
+    /// so a Secret's value cannot travel on one.
+    #[test]
+    fn kind_signals_carry_no_object() {
+        let secret: Secret = serde_json::from_value(serde_json::json!({
+            "metadata": {"name": "db", "namespace": "team"},
+            "data": {"password": "cGxhaW50ZXh0LXZhbHVl"},
+            "stringData": {"password": "plaintext-value"}
+        }))
+        .unwrap();
+        assert_eq!(kind_signal(&Event::<Secret>::Init), None);
+        assert_eq!(kind_signal(&Event::InitApply(secret.clone())), None);
+        assert_eq!(
+            kind_signal(&Event::<Secret>::InitDone),
+            Some(KindSignal::Listed)
+        );
+        let changed = kind_signal(&Event::Apply(secret.clone())).unwrap();
+        assert_eq!(changed, KindSignal::Changed);
+        assert_eq!(
+            kind_signal(&Event::Delete(secret)),
+            Some(KindSignal::Changed)
+        );
+        let shown = format!("{changed:?}");
+        assert!(
+            !shown.contains("plaintext") && !shown.contains("cGxhaW50"),
+            "{shown}"
+        );
+        assert!(is_permanent_kind_watch_error("applications is forbidden"));
+        assert!(is_permanent_kind_watch_error("404 Not Found"));
+        // Of the two, only a denial is final whatever the cluster serves; an
+        // unserved kind may be served at another version (#547).
+        assert!(is_forbidden_kind_watch_error("applications is forbidden"));
+        assert!(!is_forbidden_kind_watch_error("404 Not Found"));
+        assert!(!is_permanent_kind_watch_error(
+            "ErrorResponse { code: 410, reason: \"Expired\" }"
+        ));
+    }
+
+    /// #566: one session lists, follows, and returns at its first error — a
+    /// `410 Gone` among them — rather than resuming: the caller starts again
+    /// from a fresh list. And it asks the API server for metadata only.
+    #[tokio::test]
+    async fn a_kind_session_lists_follows_and_returns_at_410() {
+        use std::sync::Mutex;
+        let requests = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let seen = requests.clone();
+        let service = tower::service_fn(move |req: http::Request<kube::client::Body>| {
+            let accept = req
+                .headers()
+                .get(http::header::ACCEPT)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned();
+            let uri = req.uri().to_string();
+            seen.lock().unwrap().push((uri.clone(), accept));
+            async move {
+                let meta = |name: &str, rv: &str| {
+                    serde_json::json!({
+                        "apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadata",
+                        "metadata": {"name": name, "namespace": "team", "resourceVersion": rv}
+                    })
+                };
+                let body = if uri.contains("watch=true") {
+                    let added = serde_json::json!({"type": "ADDED", "object": meta("b", "2")});
+                    let gone = serde_json::json!({"type": "ERROR", "object": {
+                        "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                        "message": "too old resource version", "reason": "Expired", "code": 410
+                    }});
+                    format!("{added}\n{gone}\n")
+                } else {
+                    serde_json::json!({
+                        "apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList",
+                        "metadata": {"resourceVersion": "1"}, "items": [meta("a", "1")]
+                    })
+                    .to_string()
+                };
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(200)
+                        .body(kube::client::Body::from(body.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        let client = kube::Client::new(service, "default");
+        let ar = crate::crds::custom_api_resource(
+            "argoproj.io",
+            "v1alpha1",
+            "Application",
+            "applications",
+        );
+        let api: Api<kube::api::PartialObjectMeta<kube::api::DynamicObject>> =
+            Api::namespaced_with(client, "team", &ar);
+        let mut signals = Vec::new();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            watch_kind_session(api, |signal| signals.push(signal)),
+        )
+        .await
+        .expect("a 410 ends the session");
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("410") || error.contains("too old"),
+            "{error}"
+        );
+        assert_eq!(signals, [KindSignal::Listed, KindSignal::Changed]);
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests.iter().all(|(uri, _)| uri
+                .starts_with("/apis/argoproj.io/v1alpha1/namespaces/team/applications")),
+            "{requests:?}"
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|(_, accept)| accept.contains("PartialObjectMetadata")),
+            "metadata only: {requests:?}"
+        );
     }
 }

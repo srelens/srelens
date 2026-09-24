@@ -15,6 +15,23 @@ logo. App routes pin the cluster, so a page stays on the cluster it was opened f
 Namespace and search filters are scoped to the open cluster; they are temporary view
 state, not saved preferences. Refresh explicitly repeats a read.
 
+On the desktop, app pages are **live** ([#566](https://github.com/srelens/srelens/issues/566)):
+they follow the kinds their readers list, through `watch` app streams
+([streams.md](streams.md#watch)), and read again in place when one changes. Each says
+which it is, in words: **Live**, **Connecting…**, **Reconnecting…** (a notice says what
+is shown may be out of date until the watch lists afresh, and a warning rule marks it)
+or **Not live** with why (the host ended or refused the watch; Refresh still reads).
+Where the words are:
+
+- A **resource page** shows them once, above its list.
+- A **dashboard page** shows them on each summary, and its events section has its own
+  notice when reconnecting or stopped.
+- A **joined table column** follows the reader it joins through, and says so above the
+  table when it is reconnecting or stopped.
+
+The web app has no app streams yet, so there app pages read on open and on Refresh only,
+and say **Not live**.
+
 The Flux 0.2.0 example includes Overview, Kustomizations, Helm releases, Sources (Git
 repositories, Helm repositories, Helm charts, Buckets, OCI repositories), Image
 Automation (repositories, policies, update automations), and Notifications (alerts,
@@ -59,7 +76,14 @@ Failed reads keep their error and a retry; they never become zero-count summarie
 `dashboardCards` ([Manifest reference](manifest.md#dashboard-cards)) draw an **App
 cards** band on the cluster overview, under the capacity strip, in the new design only.
 The band follows the cluster's namespace selection — the one the resource lists use —
-reads the cluster in focus by its stable ID, and has a **Refresh** action. Each card
+reads the cluster in focus by its stable ID, and has a **Refresh** action. On the
+desktop it is live too: each app's card readers are watched, in the one selected
+namespace or, for several or none, in every namespace, and a change redraws that app's
+figures in place. While a watch reconnects, the band says its figures may be out of
+date, and a warning rule marks them. Until the cluster's namespaces are known, or when
+two contexts share the cluster's stable ID, no watch starts and the band says **Not
+live** with that reason, while its cards stay **Loading** during namespace discovery.
+Each card
 shows its figure or one of three visibly different states:
 
 - **Loading**: a spinner and no figure.

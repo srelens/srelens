@@ -156,7 +156,7 @@ fn copy_error(error: &CapabilityError) -> CapabilityError {
 /// The snapshot one reader's list is kept under. Keyed by the reader, not by
 /// whoever asked: two join rules, or a column and a dashboard card, over one
 /// granted reader need one Kubernetes list.
-fn reader_key(
+pub(super) fn reader_key(
     app: &str,
     revision: u64,
     context: &str,
@@ -172,6 +172,28 @@ fn reader_key(
         reader: reader.to_owned(),
         version: version.to_owned(),
     }
+}
+
+/// Drop every snapshot of `reader` an app's `revision` holds, in every context,
+/// namespace and resolved version (#547), because a watch saw its kind change
+/// (#566): the next column
+/// or card read lists the cluster instead of answering from before the change.
+/// A slot a read is filling now is left to it and taken out of the map, so the
+/// next caller starts a fresh list rather than waiting for that one.
+pub(super) fn forget_reader(cache: &JoinCache, app: &str, revision: u64, reader: &str) {
+    let mut map = cache.lock().expect("join cache lock poisoned");
+    map.retain(|key, slot| {
+        if key.app != app || key.revision != revision || key.reader != reader {
+            return true;
+        }
+        match slot.try_lock() {
+            Ok(mut state) => {
+                *state = Ok(None);
+                true
+            }
+            Err(_) => false,
+        }
+    });
 }
 
 #[cfg(test)]
