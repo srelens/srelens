@@ -24,8 +24,19 @@ import {
   type InstalledExtension,
   type ResolvedDashboardCard,
 } from "@srelens/core";
+// jsdom has no ResizeObserver or scrollIntoView; the namespace picker's popover wants both.
+HTMLElement.prototype.scrollIntoView ??= () => {};
+if (!("ResizeObserver" in globalThis)) {
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}
+
 import { DashboardCards } from "./DashboardCards";
 import * as tabs from "../lib/tabsStore";
+import { TabScope } from "../lib/tabScope";
 import { defaultState } from "../lib/tabs";
 import { resetView, setNamespaces } from "../lib/workspace";
 
@@ -218,6 +229,27 @@ describe("DashboardCards", () => {
     await waitFor(() =>
       expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.stableId, ["team", "prod"]),
     );
+  });
+
+  it("writes a pick to its own tab — the same cluster's cards in another tab keep their selection", async () => {
+    tabs.openTab("/overview");
+    tabs.openTab("/overview-copy");
+    const idOf = (route: string) => tabs.currentWorkspace().tabs.find((t) => t.route === route)!.id;
+    const [first, second] = [idOf("/overview"), idOf("/overview-copy")];
+    installed(app([card({ id: "c", title: "Expiring" })]));
+    answer([{ id: "c", state: "count", count: 1 }]);
+    render(
+      <>
+        <div data-testid="first"><TabScope.Provider value={first}><DashboardCards context={CTX} /></TabScope.Provider></div>
+        <div data-testid="second"><TabScope.Provider value={second}><DashboardCards context={CTX} /></TabScope.Provider></div>
+      </>,
+    );
+    await userEvent.click(await within(screen.getByTestId("first")).findByRole("combobox", { name: "Namespaces" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Only team" }));
+
+    const tab = (id: string) => tabs.currentWorkspace().tabs.find((t) => t.id === id)!;
+    await waitFor(() => expect(tab(first).namespaces).toEqual({ [CTX.stableId]: ["team"] }));
+    expect(tab(second).namespaces).toBeUndefined();
   });
 
   it("reads a namespace-restricted credential's one namespace whatever is selected", async () => {
