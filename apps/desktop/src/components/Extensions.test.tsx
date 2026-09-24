@@ -37,10 +37,15 @@ beforeEach(() => {
   vi.mocked(readExtension).mockResolvedValue({ items: [] });
 });
 it("opens backend-owned app settings through classic controls", async () => {
+  vi.mocked(listExtensions).mockResolvedValue({
+    schemaVersion: 1,
+    nextRevision: 2,
+    plugins: [{ ...plugin, manifest: { ...plugin.manifest, settings: [{ id: "team", type: "string", title: "Team" }] } }],
+  });
   render(<ExtensionManager />);
-  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-  fireEvent.change(screen.getByLabelText("App settings (JSON object)"), {
-    target: { value: '{"team":"classic"}' },
+  fireEvent.click(await screen.findByRole("button", { name: `Settings for ${manifest.name}` }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Team" }), {
+    target: { value: "classic" },
   });
   fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
   await waitFor(() =>

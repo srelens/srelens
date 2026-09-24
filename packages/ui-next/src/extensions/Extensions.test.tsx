@@ -510,6 +510,28 @@ it("inspects an installed app's source, grants and manifest, and exports or rese
     expect(configureExtensions).toHaveBeenCalledWith({ action: "settings", id: "org.test.gitops", settings: {} }),
   );
 });
+it("resets settings to their defaults but keeps a required one, which has none", async () => {
+  const app = {
+    ...updated(),
+    manifest: { ...updated().manifest, settings: [
+      { id: "url", type: "url", title: "URL", required: true },
+      { id: "team", type: "string", title: "Team", default: "ops" },
+    ] },
+    settings: { url: "https://prom", team: "platform" },
+  };
+  const details = await openDetails(app as ReturnType<typeof updated>);
+  expect(details.textContent).toContain("A secret is never saved in settings, so an export never holds one.");
+  fireEvent.click(within(details).getByRole("button", { name: "Reset settings" }));
+  // Says what reset actually keeps: required values, and secrets, whose
+  // references the host carries across every settings save.
+  const confirm = within(details).getByRole("alertdialog", { name: "Reset settings" });
+  expect(confirm.textContent).toContain("except the required ones, which have no default");
+  expect(confirm.textContent).toContain("Secrets stay set");
+  fireEvent.click(within(details).getByRole("button", { name: "Reset to defaults" }));
+  await waitFor(() =>
+    expect(configureExtensions).toHaveBeenCalledWith({ action: "settings", id: "org.test.gitops", settings: { url: "https://prom" } }),
+  );
+});
 it("reviews the permissions of a rollback whose grants differ", async () => {
   const details = await openDetails(updated());
   const versions = within(details).getByRole("list", { name: "Previous versions" });
@@ -672,18 +694,39 @@ it("only confirms a rollback whose grants are unchanged", async () => {
     }),
   );
 });
+it("says the settings were saved, though the save gives the app a new revision", async () => {
+  const typed = (revision: number) => ({
+    ...plugin, revision, manifest: { ...plugin.manifest, settings: [{ id: "team", type: "string", title: "Team" }] },
+  });
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 2, plugins: [typed(1)] } as any);
+  render(<ExtensionManager />);
+  fireEvent.click(await screen.findByRole("button", { name: "Settings for GitOps" }));
+  const settings = screen.getByRole("form", { name: "GitOps settings" });
+  fireEvent.change(within(settings).getByRole("textbox", { name: "Team" }), { target: { value: "platform" } });
+  // The host answers the save with the app at its next revision.
+  vi.mocked(listExtensions).mockResolvedValue({ schemaVersion: 1, nextRevision: 3, plugins: [{ ...typed(2), settings: { team: "platform" } }] } as any);
+  fireEvent.click(within(settings).getByRole("button", { name: "Save settings" }));
+  await waitFor(() => expect(listExtensions).toHaveBeenCalledTimes(2));
+  const form = await screen.findByRole("form", { name: "GitOps settings" });
+  expect(within(form).getByRole("status").textContent).toBe("Settings saved.");
+  expect((within(form).getByRole("textbox", { name: "Team" }) as HTMLInputElement).value).toBe("platform");
+});
 it("persists settings, disable and remove through the backend", async () => {
+  const typed = { ...plugin, manifest: { ...plugin.manifest, settings: [{ id: "team", type: "string", title: "Team" }] } };
   vi.mocked(listExtensions).mockResolvedValue({
     schemaVersion: 1,
     nextRevision: 2,
-    plugins: [plugin],
+    plugins: [typed],
   });
   render(<ExtensionManager />);
-  fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
-  fireEvent.change(screen.getByLabelText("App settings (JSON object)"), {
-    target: { value: '{"team":"platform"}' },
+  fireEvent.click(await screen.findByRole("button", { name: "Settings for GitOps" }));
+  // The app's declared settings, as a host form: no free-form JSON (#542).
+  expect(screen.queryByLabelText("App settings (JSON object)")).toBeNull();
+  const settings = screen.getByRole("form", { name: "GitOps settings" });
+  fireEvent.change(within(settings).getByRole("textbox", { name: "Team" }), {
+    target: { value: "platform" },
   });
-  fireEvent.click(screen.getByText("Save settings"));
+  fireEvent.click(within(settings).getByRole("button", { name: "Save settings" }));
   await waitFor(() =>
     expect(configureExtensions).toHaveBeenCalledWith({
       action: "settings",

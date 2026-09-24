@@ -166,3 +166,25 @@ it("uses the form-control boundary for the searchable picker too", () => {
   render(<Combobox value="alpha" onValueChange={() => {}} options={options} ariaLabel="Context" />);
   expect(screen.getByRole("combobox").style.borderColor).toBe("var(--control-line)");
 });
+
+it("carries a form field's invalid, required and description state on its trigger", () => {
+  render(
+    <>
+      <p id="help">Pick one</p>
+      <Combobox value="" onValueChange={() => {}} options={options} ariaLabel="Mode"
+        ariaInvalid ariaRequired ariaDescribedBy="help" />
+    </>,
+  );
+  const trigger = screen.getByRole("combobox", { name: "Mode" });
+  expect(trigger.getAttribute("aria-invalid")).toBe("true");
+  expect(trigger.getAttribute("aria-required")).toBe("true");
+  expect(trigger.getAttribute("aria-describedby")).toBe("help");
+});
+
+it("says nothing about validity when the caller does not", () => {
+  render(<Combobox value="" onValueChange={() => {}} options={options} ariaLabel="Mode" />);
+  const trigger = screen.getByRole("combobox", { name: "Mode" });
+  expect(trigger.hasAttribute("aria-invalid")).toBe(false);
+  expect(trigger.hasAttribute("aria-required")).toBe(false);
+  expect(trigger.hasAttribute("aria-describedby")).toBe(false);
+});

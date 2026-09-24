@@ -14,6 +14,7 @@ type Contributions = ExtensionManifest["contributions"];
 type Page = Contributions["pages"][number];
 type Dashboard = NonNullable<Page["dashboard"]>;
 type Card = NonNullable<Contributions["dashboardCards"]>[number];
+type Setting = NonNullable<ExtensionManifest["settings"]>[number];
 
 const tables: Record<string, Record<string, "required" | "optional">> = {
   Inventory: {
@@ -58,8 +59,15 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     permissions: "required",
     capabilities: "required",
     actions: "optional",
+    settings: "optional",
     contributions: "required",
   } satisfies Presence<ExtensionManifest>,
+  Setting: {
+    id: "required", type: "required", title: "required", description: "optional", required: "optional",
+    default: "optional", options: "optional", minimum: "optional", maximum: "optional", integer: "optional",
+    maxLength: "optional",
+  } satisfies Presence<Setting>,
+  SettingOption: { value: "required", label: "required" } satisfies Presence<NonNullable<Setting["options"]>[number]>,
   Binding: {
     name: "required",
     title: "required",
@@ -209,6 +217,10 @@ describe("extension TypeScript types match the Rust contract", () => {
 
   it.each([
     ["CardSize", { s: true, m: true, l: true } satisfies Record<Card["size"], true>],
+    ["SettingType", {
+      string: true, number: true, boolean: true, select: true, "multi-select": true, url: true,
+      "namespace-selector": true, "cluster-selector": true, "secret-reference": true,
+    } satisfies Record<Setting["type"], true>],
     ["CardType", { count: true, countByStatus: true, metric: true, list: true } satisfies Record<Card["type"], true>],
     ["CardAggregate", { sum: true, min: true, max: true } satisfies Record<NonNullable<Card["metric"]>["aggregate"], true>],
     ["CardOrder", { asc: true, desc: true } satisfies Record<NonNullable<NonNullable<Card["list"]>["order"]>, true>],

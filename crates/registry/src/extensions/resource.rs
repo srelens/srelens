@@ -130,7 +130,8 @@ pub(super) fn register(
             }
             let id = format!("plugin/{}/{}", plugin.manifest.id, input.action);
             let mut registry = Registry::new();
-            let _registration = PluginHost::new(c).register(&mut registry, plugin.manifest, &plugin.grants).map_err(CapabilityError::Handler)?;
+            // The settings as saved now, read with the app above (#542).
+            let _registration = PluginHost::new(c).register_with_settings(&mut registry, plugin.manifest, &plugin.grants, &plugin.settings).map_err(CapabilityError::Handler)?;
             registry.invoke(&id, json!({"context":resource.context,"namespace":resource.namespace,"name":resource.name,"uid":input.uid,"resourceVersion":input.resource_version})).await
         }
     }));

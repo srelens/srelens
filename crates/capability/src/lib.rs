@@ -4,6 +4,7 @@ mod annotations;
 pub mod audit;
 mod error;
 mod predicate;
+pub mod settings;
 pub mod status;
 mod text;
 
@@ -57,6 +58,11 @@ pub struct Capability {
     /// `None` for a capability with no such rule, which is all of them but the
     /// action primitives.
     pub bound_arguments: Option<BoundArguments>,
+    /// The arguments a manifest may fill from one of the app's settings
+    /// (#542), written `${settings.<id>}`, and the setting types each takes.
+    /// Empty for almost every capability: interpolation anywhere else is
+    /// refused at install. See [`settings`].
+    pub settable: Vec<settings::Settable>,
 }
 
 impl Capability {
@@ -74,6 +80,7 @@ impl Capability {
             output_schema: Value::Null,
             handler: Arc::new(move |v| Box::pin(f(v))),
             bound_arguments: None,
+            settable: Vec::new(),
         }
     }
 
@@ -108,6 +115,7 @@ impl Capability {
             output_schema,
             handler,
             bound_arguments: None,
+            settable: Vec::new(),
         }
     }
 
@@ -119,6 +127,40 @@ impl Capability {
     {
         self.bound_arguments = Some(Arc::new(check));
         self
+    }
+
+    /// The same capability, letting a manifest fill `argument` from a setting
+    /// of one of the `accepts` types. `stand_in` is a value this capability's
+    /// `bound_arguments` rule accepts there (see [`settings::Settable`]).
+    ///
+    /// # Panics
+    /// When `accepts` names [`settings::SettingType::SecretReference`]: a
+    /// secret is injected by the host's secret store (#543), never written
+    /// into an argument where a handler, a log line or a cluster object could
+    /// keep it. That is a host programming error, caught by the first test
+    /// that builds the capability.
+    pub fn with_settable(
+        mut self,
+        argument: &str,
+        accepts: &[settings::SettingType],
+        stand_in: Value,
+    ) -> Self {
+        assert!(
+            !accepts.contains(&settings::SettingType::SecretReference),
+            "{}: a secret-reference setting cannot be interpolated into `{argument}`",
+            self.id
+        );
+        self.settable.push(settings::Settable {
+            argument: argument.to_owned(),
+            accepts: accepts.to_vec(),
+            stand_in,
+        });
+        self
+    }
+
+    /// The settable position `argument`, if this capability marks one.
+    pub fn settable_argument(&self, argument: &str) -> Option<&settings::Settable> {
+        self.settable.iter().find(|s| s.argument == argument)
     }
 }
 

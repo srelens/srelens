@@ -679,3 +679,75 @@
   background: var(--accent-wash, transparent);
   font-size: 0.8125rem;
 }
+
+/* An app's typed settings (#542): a host form, one field per declared setting.
+   Help and problems are prose, so they wrap; values are one line each. */
+.extension-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px;
+  border-bottom: 1px solid var(--rule, var(--fl-color-border));
+}
+.extension-settings > .extension-message { padding: 0; }
+.extension-settings > .extension-error { border-bottom: 0; padding: 0; }
+.extension-setting {
+  display: grid;
+  grid-template-columns: minmax(0, 32rem);
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.extension-setting > label,
+.extension-setting > legend,
+.extension-setting-label {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.extension-setting > legend { padding: 0; margin-bottom: 4px; }
+.extension-setting input:not([type="checkbox"]) {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  /* The kit's control boundary (3:1 in every theme), as the pickers beside it use. */
+  border: 1px solid var(--control-line, var(--fl-color-border));
+  border-radius: 4px;
+  background: var(--surface, var(--fl-color-surface));
+  color: inherit;
+  font: inherit;
+}
+.extension-setting input:focus-visible {
+  outline: 2px solid var(--accent, var(--fl-color-primary));
+  outline-offset: 1px;
+}
+.extension-setting input[aria-invalid="true"] {
+  border-color: var(--sev, var(--fl-color-danger));
+}
+/* An option in a group is not a field's label; a lone checkbox's label is. */
+.extension-setting > .extension-setting-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400;
+}
+.extension-setting > .extension-setting-check:first-child { font-weight: 600; }
+.extension-setting-pair {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.extension-setting-note {
+  margin: 0;
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  overflow-wrap: anywhere;
+}
+.extension-setting-required { font-weight: 400; color: var(--ink-muted, var(--fl-color-text-muted)); }
+.extension-setting-problem {
+  margin: 0;
+  color: var(--sev, var(--fl-color-danger));
+  overflow-wrap: anywhere;
+}
+.extension-settings-actions { padding: 0; border-bottom: 0; }
+.extension-settings-saved { color: var(--ink-muted, var(--fl-color-text-muted)); }

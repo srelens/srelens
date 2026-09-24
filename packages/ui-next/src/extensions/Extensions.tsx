@@ -1,4 +1,5 @@
 import { ExtensionDetails } from "./ExtensionDetails";
+import { ExtensionSettingsForm } from "./ExtensionSettingsForm";
 import { ExtensionBindings, ReviewManifest } from "./ExtensionBindings";
 import { plainText } from "./displayText";
 import { ExtensionRequirements } from "./ExtensionRequirements";
@@ -62,9 +63,13 @@ export function ExtensionManager() {
     request: object;
   } | null>(null);
   const reviews = useRef(0);
-  const [settings, setSettings] = useState<{ id: string; text: string } | null>(
-    null,
-  );
+  /** The ID of the app whose settings form is open. */
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
+  /** Saves through the host, which checks every value; rejects with its reason (#542). */
+  async function saveSettings(id: string, settings: Record<string, unknown>) {
+    await configureExtensions({ action: "settings", id, settings });
+    inventory.reload();
+  }
   async function change(action: ExtensionChange) {
     setBusy(true);
     setError("");
@@ -323,12 +328,9 @@ export function ExtensionManager() {
             <Button
               variant="secondary"
               disabled={busy}
-              onClick={() =>
-                setSettings({
-                  id: plugin.manifest.id,
-                  text: JSON.stringify(plugin.settings, null, 2),
-                })
-              }
+              aria-label={`Settings for ${label(plugin)}`}
+              aria-expanded={settingsFor === plugin.manifest.id}
+              onClick={() => setSettingsFor(settingsFor === plugin.manifest.id ? null : plugin.manifest.id)}
             >
               Settings
             </Button>
@@ -354,6 +356,17 @@ export function ExtensionManager() {
               Disabled: {plugin.quarantined}. Remove it or reinstall it from the Catalog.
             </p>
           )}
+          {settingsFor === plugin.manifest.id && (
+            <ExtensionSettingsForm
+              // Keyed by what it draws, not by revision: a save rolls the revision
+              // too, and remounting then would drop "Settings saved." An update
+              // that declares other settings starts again from what it kept.
+              key={JSON.stringify(plugin.manifest.settings ?? [])}
+              plugin={plugin}
+              onSave={(settings) => saveSettings(plugin.manifest.id, settings)}
+              onClose={() => setSettingsFor(null)}
+            />
+          )}
           {details === plugin.manifest.id && (
             <ExtensionDetails plugin={plugin} busy={busy} change={change} onError={setError} />
           )}
@@ -365,41 +378,6 @@ export function ExtensionManager() {
           <p>This removes the app and its saved settings.</p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={()=>setRemoving(null)}>Cancel</Button>
           <Button variant="danger" disabled={busy} onClick={()=>{void change({action:"remove",id:removing.manifest.id}).then(removed=>{if(removed)setRemoving(null);});}}>Remove app</Button>
-        </section>
-      )}
-      {settings && (
-        <section className="extension-install">
-          <label htmlFor="extension-settings">
-            App settings (JSON object)
-          </label>
-          <textarea
-            id="extension-settings"
-            rows={4}
-            value={settings.text}
-            onChange={(e) => setSettings({ ...settings, text: e.target.value })}
-          />
-          <Button
-            disabled={busy}
-            onClick={() => {
-              try {
-                const value = JSON.parse(settings.text);
-                if (!value || Array.isArray(value) || typeof value !== "object")
-                  throw new Error("Settings must be a JSON object");
-                void change({
-                  action: "settings",
-                  id: settings.id,
-                  settings: value,
-                });
-              } catch (e) {
-                setError(e instanceof Error ? e.message : String(e));
-              }
-            }}
-          >
-            Save settings
-          </Button>
-          <Button variant="secondary" onClick={() => setSettings(null)}>
-            Close
-          </Button>
         </section>
       )}
       </div>

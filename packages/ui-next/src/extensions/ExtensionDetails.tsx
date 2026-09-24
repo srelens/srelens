@@ -49,6 +49,20 @@ function origin(version: InstalledExtension | ExtensionPreviousVersion) {
 
 const installedOn = (seconds: number) => new Date(seconds * 1000).toLocaleString();
 
+/**
+ * What a reset keeps: the saved values of required settings, which have no
+ * default to fall back to (the host refuses a save without them). A secret is
+ * never sent; the host keeps its reference.
+ */
+function requiredSettings(plugin: InstalledExtension): Record<string, unknown> {
+  const kept: Record<string, unknown> = {};
+  for (const setting of plugin.manifest.settings ?? []) {
+    if (setting.required && setting.type !== "secret-reference" && setting.id in plugin.settings)
+      kept[setting.id] = plugin.settings[setting.id];
+  }
+  return kept;
+}
+
 /** The manifest, grants, source, settings and kept versions of one installed app. */
 export function ExtensionDetails({
   plugin,
@@ -115,7 +129,7 @@ export function ExtensionDetails({
 
       <h3>Settings</h3>
       <p className="extension-message">
-        Settings are plain JSON and are exported as saved; apps must not keep secrets in them.
+        Settings are exported as saved. A secret is never saved in settings, so an export never holds one.
       </p>
       <div className="extension-toolbar">
         <Button variant="secondary" disabled={busy} onClick={() => void exportSettings()}>
@@ -134,7 +148,10 @@ export function ExtensionDetails({
             if (e.key === "Escape" && !busy) setResetting(false);
           }}
         >
-          <p>Reset {extensionLabel(plugin)} to its default settings? Its saved settings are removed.</p>
+          <p>
+            Reset {extensionLabel(plugin)} to its default settings? Its saved settings are removed, except the
+            required ones, which have no default. Secrets stay set; they are kept outside these settings.
+          </p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={() => setResetting(false)}>
             Cancel
           </Button>
@@ -142,7 +159,7 @@ export function ExtensionDetails({
             variant="danger"
             disabled={busy}
             onClick={() =>
-              void change({ action: "settings", id: manifest.id, settings: {} }).then((done) => {
+              void change({ action: "settings", id: manifest.id, settings: requiredSettings(plugin) }).then((done) => {
                 if (done) setResetting(false);
               })
             }
