@@ -30,6 +30,9 @@
     },
     {
       "$ref": "#/definitions/Code"
+    },
+    {
+      "$ref": "#/definitions/Timeseries"
     }
   ],
   "definitions": {
@@ -498,6 +501,149 @@
           "required": [
             "text",
             "language"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "type",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "Timeseries": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "type": {
+          "const": "Timeseries"
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "unit": {
+              "enum": [
+                "number",
+                "percent",
+                "ratio",
+                "bytes",
+                "bytesPerSecond",
+                "seconds",
+                "cores",
+                "perSecond"
+              ]
+            },
+            "range": {
+              "type": "object",
+              "properties": {
+                "start": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 8640000000000000
+                },
+                "end": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 8640000000000000
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ],
+              "additionalProperties": false
+            },
+            "times": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8640000000000000
+              },
+              "maxItems": 1000
+            },
+            "series": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "values": {
+                    "type": "array",
+                    "items": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "maxItems": 1000
+                  }
+                },
+                "required": [
+                  "name",
+                  "values"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 8
+            },
+            "thresholds": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "value": {
+                    "type": "number"
+                  },
+                  "direction": {
+                    "enum": [
+                      "above",
+                      "below"
+                    ]
+                  },
+                  "tone": {
+                    "enum": [
+                      "info",
+                      "warn",
+                      "sev"
+                    ]
+                  }
+                },
+                "required": [
+                  "label",
+                  "value",
+                  "direction",
+                  "tone"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 4
+            }
+          },
+          "required": [
+            "label",
+            "unit",
+            "range",
+            "times",
+            "series"
           ],
           "additionalProperties": false
         }
