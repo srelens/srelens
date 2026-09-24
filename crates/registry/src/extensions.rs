@@ -7,6 +7,7 @@ pub(crate) mod crd;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzzing;
 mod limits;
+mod links;
 mod panels;
 #[cfg(test)]
 mod policy_tests;
@@ -3217,6 +3218,7 @@ mod tests {
             "extensions.resolveColumns",
             "extensions.resolveCards",
             "extensions.resolvePanels",
+            "extensions.resolveLinks",
             "extensions.catalog",
             "extensions.catalogManifest",
             "extensions.validate",
@@ -3224,7 +3226,7 @@ mod tests {
             assert!(reg.get(id).unwrap().annotations.read_only);
         }
         let mcp = srelens_mcp::McpServer::new(Arc::new(reg));
-        assert_eq!(mcp.list_tools().len(), 11);
+        assert_eq!(mcp.list_tools().len(), 12);
         use srelens_mcp::{stdio::handle_request, Transport};
         for args in [
             json!({"action":"install","manifest":manifest(),"grants":["k8s.listCustomResource"]}),

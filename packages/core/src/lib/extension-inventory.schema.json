@@ -430,6 +430,13 @@
           },
           "type": "array"
         },
+        "resourceLinks": {
+          "description": "Relationships from one kind to another an app knows how to find (#545): the Inspector's \"Related\" links, and the edges a topology can draw.",
+          "items": {
+            "$ref": "#/definitions/ResourceLink"
+          },
+          "type": "array"
+        },
         "statusResolvers": {
           "description": "What status an app's custom resources have (#541). Replaces `pages[].statusColumns`, which is deprecated but still accepted in 0.3.",
           "items": {
@@ -877,6 +884,70 @@
       },
       "type": "object"
     },
+    "LinkMatch": {
+      "additionalProperties": false,
+      "description": "Where on the `from` resource the target's name is written. Exactly one of `label`, `ownerReference`, `annotation` and `name`.",
+      "properties": {
+        "annotation": {
+          "description": "The annotation whose value is the target's name, or, with `parse`, a reference in a host-known format that names it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "defaultNamespace": {
+          "description": "With `parse: \"argocd-tracking-id\"`: the namespace Argo CD runs in, where an application written as a bare name lives. Without it a bare name is shown unverified, never searched for across namespaces.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "description": "The label whose value is the target's name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The target has the `from` resource's own name and namespace.",
+          "type": "boolean"
+        },
+        "namespaceLabel": {
+          "description": "With `label`: the label whose value is the target's namespace. Without it the target is in the `from` resource's namespace.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ownerReference": {
+          "description": "The `from` resource's owner references of the `to` kind.",
+          "type": "boolean"
+        },
+        "parse": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReferenceFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "With `annotation`: the format the value is written in. The host accepts a reference only when it names the `from` resource itself."
+        }
+      },
+      "type": "object"
+    },
+    "LinkRelation": {
+      "description": "What the `from` resource is to the `to` resource.",
+      "enum": [
+        "ownedBy",
+        "managedBy",
+        "exposedBy",
+        "references"
+      ],
+      "type": "string"
+    },
     "Manifest": {
       "additionalProperties": false,
       "properties": {
@@ -1133,6 +1204,37 @@
           "type": "string"
         }
       ]
+    },
+    "ResourceLink": {
+      "additionalProperties": false,
+      "description": "A relationship from a resource of kind `from` to resources of kind `to`, found by reading the `from` resource's own metadata (#545).\n\nThe `match` selectors are a join's (`joins[].match`), read the other way round: a join indexes the *listed* resources by a key that names the row, while a link reads the key on the resource being inspected, and the key names the target. The target is then looked up by name in the list of the declared reader for `to`, through the same index a join uses.",
+      "properties": {
+        "from": {
+          "description": "The qualified kind of the resource the link is read from, e.g. `apps/Deployment`.",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "match": {
+          "$ref": "#/definitions/LinkMatch"
+        },
+        "relation": {
+          "$ref": "#/definitions/LinkRelation"
+        },
+        "to": {
+          "description": "The qualified kind of the target. A declared `k8s.listCustomResource` reader must list it: that is how the host knows the target exists.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "id",
+        "match",
+        "relation",
+        "to"
+      ],
+      "type": "object"
     },
     "Setting": {
       "additionalProperties": false,

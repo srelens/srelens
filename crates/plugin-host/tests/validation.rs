@@ -926,3 +926,270 @@ fn a_manifest_declares_at_most_sixteen_cards() {
         .pop();
     assert!(Manifest::parse(&value.to_string()).is_ok());
 }
+
+/// The test manifest with a reader that lists Argo CD Applications, and a link
+/// from a Deployment to the Application its tracking id names (#545).
+fn with_links() -> Value {
+    let mut value = manifest();
+    value["capabilities"][0]["arguments"] = json!({"group":"argoproj.io","kind":"Application"});
+    value["contributions"]["resourceLinks"] = json!([{
+        "id":"argocd-owner", "from":"apps/Deployment", "to":"argoproj.io/Application",
+        "relation":"managedBy",
+        "match":{"annotation":"argocd.argoproj.io/tracking-id","parse":"argocd-tracking-id"}
+    }]);
+    value
+}
+
+#[test]
+fn resource_links_declare_a_relation_between_two_qualified_kinds() {
+    let value = with_links();
+    let parsed = Manifest::parse(&value.to_string()).expect("a declared link is valid");
+    let link = &parsed.contributions.resource_links[0];
+    assert_eq!(link.id, "argocd-owner");
+    assert_eq!(link.from, "apps/Deployment");
+    assert_eq!(link.to, "argoproj.io/Application");
+    // It round-trips to the wire spelling it was written in.
+    let serialized = serde_json::to_value(&parsed).unwrap();
+    assert_eq!(
+        serialized["contributions"]["resourceLinks"],
+        value["contributions"]["resourceLinks"]
+    );
+    // Every relation the host knows, and every selector it matches by.
+    for (relation, matching) in [
+        ("ownedBy", json!({"ownerReference":true})),
+        (
+            "managedBy",
+            json!({"label":"kustomize.toolkit.fluxcd.io/name",
+            "namespaceLabel":"kustomize.toolkit.fluxcd.io/namespace"}),
+        ),
+        ("exposedBy", json!({"annotation":"example.io/exposed-by"})),
+        ("references", json!({"name":true})),
+    ] {
+        let mut value = with_links();
+        value["contributions"]["resourceLinks"][0]["relation"] = json!(relation);
+        value["contributions"]["resourceLinks"][0]["match"] = matching;
+        Manifest::parse(&value.to_string()).unwrap_or_else(|e| panic!("{relation}: {e}"));
+    }
+}
+
+#[test]
+fn a_relation_the_host_does_not_know_is_refused_at_its_field() {
+    let mut value = with_links();
+    value["contributions"]["resourceLinks"][0]["relation"] = json!("dependsOn");
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[(
+            "EXTENSION_INVALID_FIELD",
+            "contributions.resourceLinks[0].relation"
+        )])
+    );
+}
+
+#[test]
+fn resource_links_refuse_duplicate_ids_malformed_kinds_and_unread_targets() {
+    let mut value = with_links();
+    let link = value["contributions"]["resourceLinks"][0].clone();
+    let mut second = link.clone();
+    second["from"] = json!("Deployment");
+    let mut third = link.clone();
+    third["id"] = json!("not an id");
+    third["to"] = json!("argoproj.io/");
+    let mut fourth = link.clone();
+    fourth["id"] = json!("flux-owner");
+    // A kind no declared reader lists: the host could not look a target up.
+    fourth["to"] = json!("kustomize.toolkit.fluxcd.io/Kustomization");
+    fourth["match"] = json!({"label":"kustomize.toolkit.fluxcd.io/name"});
+    value["contributions"]["resourceLinks"] = json!([link, second, third, fourth]);
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[
+            (
+                "EXTENSION_DUPLICATE_IDENTIFIER",
+                "contributions.resourceLinks[1].id"
+            ),
+            (
+                "EXTENSION_INVALID_KIND",
+                "contributions.resourceLinks[1].from"
+            ),
+            (
+                "EXTENSION_INVALID_VALUE",
+                "contributions.resourceLinks[2].id"
+            ),
+            (
+                "EXTENSION_INVALID_KIND",
+                "contributions.resourceLinks[2].to"
+            ),
+            (
+                "EXTENSION_UNRESOLVED_CAPABILITY",
+                "contributions.resourceLinks[3].to"
+            ),
+        ])
+    );
+}
+
+#[test]
+fn a_link_match_is_exactly_one_selector_with_its_own_qualifiers() {
+    let cases: [(Value, &str, &str); 8] = [
+        (json!({}), "EXTENSION_INVALID_BINDING", ".match"),
+        (
+            json!({"name":true,"ownerReference":true}),
+            "EXTENSION_INVALID_BINDING",
+            ".match",
+        ),
+        (
+            json!({"name":true,"parse":"argocd-tracking-id"}),
+            "EXTENSION_INVALID_BINDING",
+            ".match.parse",
+        ),
+        (
+            json!({"ownerReference":true,"namespaceLabel":"example.io/ns"}),
+            "EXTENSION_INVALID_BINDING",
+            ".match.namespaceLabel",
+        ),
+        (
+            json!({"label":""}),
+            "EXTENSION_INVALID_VALUE",
+            ".match.label",
+        ),
+        (
+            json!({"annotation":"example.io/\u{202e}x"}),
+            "EXTENSION_INVALID_VALUE",
+            ".match.annotation",
+        ),
+        (
+            json!({"label":"example.io/app","namespaceLabel":"x".repeat(254)}),
+            "EXTENSION_INVALID_VALUE",
+            ".match.namespaceLabel",
+        ),
+        // `kindLabel` is a join's: a link's `to` already names the kind.
+        (
+            json!({"label":"example.io/app","kindLabel":"example.io/kind"}),
+            "EXTENSION_UNKNOWN_FIELD",
+            ".match.kindLabel",
+        ),
+    ];
+    for (matching, want_code, want_path) in cases {
+        let mut value = with_links();
+        value["contributions"]["resourceLinks"][0]["match"] = matching.clone();
+        assert_eq!(
+            problems(&errors(&value)),
+            expected(&[(
+                want_code,
+                &format!("contributions.resourceLinks[0]{want_path}")
+            )]),
+            "{matching}"
+        );
+    }
+}
+
+#[test]
+fn a_link_cannot_match_a_secret_by_its_redacted_annotations_or_name_itself() {
+    let mut value = with_links();
+    // The host blanks every annotation value of a Secret on every ungated
+    // read, so an annotation match on one could only ever read a placeholder.
+    value["contributions"]["resourceLinks"][0]["from"] = json!("/Secret");
+    value["contributions"]["resourceLinks"][0]["match"] = json!({"annotation":"example.io/owner"});
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[(
+            "EXTENSION_INVALID_BINDING",
+            "contributions.resourceLinks[0].match.annotation"
+        )])
+    );
+    // A Secret's labels are not redacted, so a label match is fine.
+    value["contributions"]["resourceLinks"][0]["match"] = json!({"label":"example.io/owner"});
+    Manifest::parse(&value.to_string()).expect("a Secret may be linked by label");
+    // A kind linked to itself by name is the resource itself.
+    let mut value = with_links();
+    value["contributions"]["resourceLinks"][0]["from"] = json!("argoproj.io/Application");
+    value["contributions"]["resourceLinks"][0]["match"] = json!({"name":true});
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[(
+            "EXTENSION_INVALID_BINDING",
+            "contributions.resourceLinks[0].match.name"
+        )])
+    );
+}
+
+#[test]
+fn resource_links_are_bounded() {
+    let mut value = with_links();
+    let link = value["contributions"]["resourceLinks"][0].clone();
+    let links: Vec<Value> = (0..33)
+        .map(|index| {
+            let mut link = link.clone();
+            link["id"] = json!(format!("link-{index}"));
+            link
+        })
+        .collect();
+    value["contributions"]["resourceLinks"] = json!(links);
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[("EXTENSION_INVALID_VALUE", "contributions.resourceLinks")])
+    );
+}
+
+#[test]
+fn an_argo_cd_tracking_id_only_links_to_an_argo_cd_application() {
+    // The parser yields an Application's name; toward any other kind the
+    // host would report a same-named Kustomization as the owner.
+    let mut value = with_links();
+    value["capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"kustomizations","title":"List Kustomizations",
+            "target":"k8s.listCustomResource",
+            "arguments":{"group":"kustomize.toolkit.fluxcd.io","kind":"Kustomization"},
+            "inputs":["context","namespace"]}));
+    value["contributions"]["resourceLinks"][0]["to"] =
+        json!("kustomize.toolkit.fluxcd.io/Kustomization");
+    assert_eq!(
+        problems(&errors(&value)),
+        expected(&[(
+            "EXTENSION_INVALID_BINDING",
+            "contributions.resourceLinks[0].match.parse"
+        )])
+    );
+}
+
+#[test]
+fn a_default_namespace_is_only_for_argo_cd_tracking_ids_and_is_a_namespace_name() {
+    // Argo CD writes an application in its own namespace as a bare name; the
+    // manifest says which namespace that is.
+    let mut value = with_links();
+    value["contributions"]["resourceLinks"][0]["match"]["defaultNamespace"] = json!("argocd");
+    let parsed = Manifest::parse(&value.to_string()).expect("a default namespace is valid");
+    assert_eq!(
+        parsed.contributions.resource_links[0]
+            .match_by
+            .default_namespace
+            .as_deref(),
+        Some("argocd")
+    );
+    let at = "contributions.resourceLinks[0].match.defaultNamespace";
+    for bad in ["Argo_CD", "-argocd", "argocd-", "", &"x".repeat(64)] {
+        let mut value = with_links();
+        value["contributions"]["resourceLinks"][0]["match"]["defaultNamespace"] = json!(bad);
+        assert_eq!(
+            problems(&errors(&value)),
+            expected(&[("EXTENSION_INVALID_VALUE", at)]),
+            "{bad}"
+        );
+    }
+    // Any other match has no bare name to place in it.
+    for matching in [
+        json!({"annotation":"example.io/owner","defaultNamespace":"argocd"}),
+        json!({"label":"example.io/owner","defaultNamespace":"argocd"}),
+        json!({"name":true,"defaultNamespace":"argocd"}),
+        json!({"ownerReference":true,"defaultNamespace":"argocd"}),
+    ] {
+        let mut value = with_links();
+        value["contributions"]["resourceLinks"][0]["match"] = matching.clone();
+        assert_eq!(
+            problems(&errors(&value)),
+            expected(&[("EXTENSION_INVALID_BINDING", at)]),
+            "{matching}"
+        );
+    }
+}
