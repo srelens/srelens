@@ -859,6 +859,22 @@
           "page": "kustomizations"
         }
       }
+    ],
+    "resourceLinks": [
+      {
+        "id": "kustomization",
+        "from": "apps/Deployment",
+        "to": "kustomize.toolkit.fluxcd.io/Kustomization",
+        "relation": "managedBy",
+        "match": {"label": "kustomize.toolkit.fluxcd.io/name", "namespaceLabel": "kustomize.toolkit.fluxcd.io/namespace"}
+      },
+      {
+        "id": "helmrelease",
+        "from": "apps/Deployment",
+        "to": "helm.toolkit.fluxcd.io/HelmRelease",
+        "relation": "managedBy",
+        "match": {"label": "helm.toolkit.fluxcd.io/name", "namespaceLabel": "helm.toolkit.fluxcd.io/namespace"}
+      }
     ]
   },
   "actions": [

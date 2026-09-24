@@ -38,6 +38,9 @@ vi.mock("../../lib/kinds/descriptors", () => ({ descriptorFor }));
 vi.mock("../../extensions/ExtensionPanelSlot", () => ({
   ExtensionPanelSlot: ({resource}:{resource:K8sObject}) => <section className="section" data-testid="extension-panel-slot">{resource.kind} app panels</section>,
 }));
+vi.mock("../../extensions/ExtensionRelatedSlot", () => ({
+  ExtensionRelatedSlot: ({context,resource}:{context:string;resource:K8sObject}) => <section className="section" data-testid="extension-related-slot">{resource.kind} related on {context}</section>,
+}));
 
 import { ConsoleProvider } from "../../console";
 import { loadSectionFolds, setSectionOpen } from "../../lib/sectionFolds";
@@ -303,6 +306,13 @@ describe("ResourceTabView — the full tab the design draws", () => {
       expect(slot.textContent).toBe("Pod app panels");
       const facts = document.querySelector("[data-slot='fact-grid']")!;
       expect(facts.compareDocumentPosition(slot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+    it("places the Related section after the host's Overview sections (#545)", async () => {
+      await openPod();
+      const related = screen.getByTestId("extension-related-slot");
+      expect(related.textContent).toBe("Pod related on prod-eu");
+      const facts = document.querySelector("[data-slot='fact-grid']")!;
+      expect(facts.compareDocumentPosition(related) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
     it("lays the facts out as three columns of label-above-value, in a grid of its own", async () => {
       await openPod();

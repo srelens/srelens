@@ -436,6 +436,14 @@
 .extension-resource-detail > .pane { flex: 1; min-height: 0; }
 .extension-detail-heading { margin: 0; padding: 8px 12px; font-size: inherit; font-weight: 600; background: var(--surface, var(--fl-color-surface)); border-block: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-detail-fields { margin: 0; }
+/* The Inspector's Related links (#545): one row per target, text and links on one gutter. */
+.extension-related { list-style: none; margin: 0; padding: 6px 0; }
+/* A row names a resource: machine text, so one line that scrolls rather than wraps. */
+.extension-related > li { padding: 4px 12px; white-space: nowrap; overflow-x: auto; }
+.extension-related > li > button { justify-content: flex-start; height: auto; min-height: 0; padding: 0; font-size: inherit; text-align: start; white-space: nowrap; text-decoration: underline; }
+/* A failure is prose, and wraps. */
+.extension-related > li.extension-related-error { color: var(--danger, var(--fl-color-danger, inherit)); white-space: normal; overflow-wrap: anywhere; overflow-x: visible; }
+.extension-related + button { margin: 0 12px 8px; }
 .extension-resource-detail pre { white-space: pre; overflow: auto; max-width: 100%; font-family: var(--font-mono); font-size: inherit; }
 .extension-detail-metadata { padding: 12px; margin: 0; }
 .extension-action-review { padding: 12px; border-block: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }

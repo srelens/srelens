@@ -2761,6 +2761,31 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
         "Source reference",
         "{panels}"
     );
+    // A Deployment Flux applied carries the Kustomization's name and
+    // namespace as labels; the link finds that Kustomization in the granted
+    // list (#545). The Deployment is the caller's, as the Inspector's is.
+    let links = h
+        .ok(
+            "extensions.resolveLinks",
+            json!({
+                "id": "org.example.flux", "revision": revision(&flux_app),
+                "context": ctx, "namespace": NS, "kind": "apps/Deployment",
+                "resource": {"apiVersion": "apps/v1", "kind": "Deployment",
+                    "metadata": {"name": "e2e-flux-managed", "namespace": NS, "labels": {
+                        "kustomize.toolkit.fluxcd.io/name": KUSTOMIZATION,
+                        "kustomize.toolkit.fluxcd.io/namespace": NS}}},
+            }),
+        )
+        .await;
+    let kustomization = links["links"]
+        .as_array()
+        .and_then(|links| links.iter().find(|link| link["id"] == "kustomization"))
+        .unwrap_or_else(|| panic!("no kustomization link: {links}"));
+    assert_eq!(
+        kustomization["targets"],
+        json!([{"namespace": NS, "name": KUSTOMIZATION, "exists": true}]),
+        "{links}"
+    );
     assert_eq!(
         detail["actions"],
         json!(["kustomizations-suspend", "kustomizations-resume", "kustomizations-reconcile"]),

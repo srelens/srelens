@@ -3,8 +3,8 @@ import argoManifest from "../../../../examples/extensions/argocd.json";
 const declaredMeta = Object.fromEntries([...fluxManifest.actions.filter(action=>action.resource==="helmreleases").map(action=>({...action,name:action.name.replace("helmreleases-","")})),...argoManifest.actions].map(action=>[action.name,{title:action.title,availableWhen:("availableWhen" in action?action.availableWhen:[]) as import("@srelens/core").ActionPredicate[],impact:"medium" as const,confirm:null}]));
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn(),resolveExtensionPanels:vi.fn()}));
-import { inspectExtensionResource, actOnExtensionResource, listExtensions, resolveExtensionPanels, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
+vi.mock("@srelens/core", async original => ({...await original<typeof import("@srelens/core")>(),inspectExtensionResource:vi.fn(),actOnExtensionResource:vi.fn(),listExtensions:vi.fn(),resolveExtensionPanels:vi.fn(),resolveExtensionLinks:vi.fn()}));
+import { inspectExtensionResource, actOnExtensionResource, listExtensions, resolveExtensionPanels, resolveExtensionLinks, EXTENSION_RESOURCE_CHANGED } from "@srelens/core";
 import { ExtensionResourceDetails } from "./ExtensionResourceDetails";
 const selection = {id:"org.srelens.flux",revision:1,capability:"kustomizations",context:"cluster/a",namespace:"team",name:"apps"};
 const detail = {resource:{apiVersion:"kustomize.toolkit.fluxcd.io/v1",kind:"Kustomization",metadata:{name:"apps",namespace:"team",uid:"uid-a",resourceVersion:"12"},spec:{suspend:false,path:"./apps",sourceRef:{kind:"GitRepository",name:"platform-config"}},status:{conditions:[{type:"Ready",status:"False",reason:"BuildFailed",message:"Missing source"}],lastAppliedRevision:"main@sha1:abcdef"}},actions:["suspend","resume","reconcile"],actionMeta:declaredMeta};
@@ -244,6 +244,29 @@ it("renders a declared app panel after the host overview sections", async () => 
  expect(screen.getByText("Missing").parentElement?.textContent).toContain("—");
  expect(resolveExtensionPanels).toHaveBeenCalledWith("org.srelens.flux",1,"cluster/a","team",
   "kustomize.toolkit.fluxcd.io/Kustomization",detail.resource);
+});
+it("shows the app resource's Related links after its host sections (#545)", async () => {
+ const app={...fluxApp,manifest:{...fluxApp.manifest,
+  capabilities:[{name:"gitrepositories",title:"Git repositories",target:"k8s.listCustomResource",
+   arguments:{group:"source.toolkit.fluxcd.io",kind:"GitRepository"},inputs:["context","namespace"]}],
+  contributions:{...fluxApp.manifest.contributions,
+   pages:[{id:"gitrepositories",title:"Git repositories",capability:"gitrepositories"}],
+   resourceLinks:[{id:"source",from:"kustomize.toolkit.fluxcd.io/Kustomization",to:"source.toolkit.fluxcd.io/GitRepository",
+    relation:"references",match:{label:"example.io/source"}}]}}};
+ installedApps([app]);
+ vi.mocked(resolveExtensionPanels).mockResolvedValue({panels:[]});
+ vi.mocked(resolveExtensionLinks).mockResolvedValue({
+  from:{kind:"kustomize.toolkit.fluxcd.io/Kustomization",namespace:"team",name:"apps"},
+  links:[{id:"source",relation:"references",to:"source.toolkit.fluxcd.io/GitRepository",capability:"gitrepositories",
+   targets:[{namespace:"team",name:"platform-config",exists:true}]}]});
+ render(<ExtensionResourceDetails selection={selection}/>);
+ const related = await screen.findByRole("region",{name:"Related"});
+ expect(await screen.findByRole("button",{name:"References GitRepository team/platform-config"})).toBeTruthy();
+ expect(related.textContent).toContain("team/platform-config");
+ // Only identity and metadata go to the resolver; the Kustomization's spec does not.
+ expect(resolveExtensionLinks).toHaveBeenCalledWith("org.srelens.flux",1,"cluster/a","team",
+  "kustomize.toolkit.fluxcd.io/Kustomization",
+  {apiVersion:detail.resource.apiVersion,kind:detail.resource.kind,metadata:detail.resource.metadata});
 });
 const withMeta={...detail,actionMeta:{...declaredMeta,suspend:{...declaredMeta.suspend,impact:"high" as const,confirm:"Suspend[ {resource}][ in cluster {cluster}]?"}}};
 afterEach(()=>{delete (window as unknown as Record<string,unknown>).__TAURI_INTERNALS__;});
