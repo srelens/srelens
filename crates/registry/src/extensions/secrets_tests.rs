@@ -5,7 +5,9 @@
 use super::tests::{fake_core, manifest};
 use super::*;
 use serde_json::json;
-use srelens_plugin_host::{secret_key, secret_reference, SecretStore, SecretValue, SECRET_STORE_PERMISSION};
+use srelens_plugin_host::{
+    secret_key, secret_reference, SecretStore, SecretValue, SECRET_STORE_PERMISSION,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
@@ -40,7 +42,10 @@ impl SecretStore for MemoryStore {
     }
     fn put(&self, key: &str, value: &SecretValue) -> Result<(), String> {
         self.status()?;
-        self.values.lock().unwrap().insert(key.into(), value.expose().into());
+        self.values
+            .lock()
+            .unwrap()
+            .insert(key.into(), value.expose().into());
         Ok(())
     }
     fn contains(&self, key: &str) -> Result<bool, String> {
@@ -50,11 +55,20 @@ impl SecretStore for MemoryStore {
         if *self.retain_fails.lock().unwrap() {
             return Err("the vault is locked".into());
         }
-        self.values.lock().unwrap().retain(|key, _| keep.contains(key));
+        self.values
+            .lock()
+            .unwrap()
+            .retain(|key, _| keep.contains(key));
         Ok(())
     }
     fn reveal(&self, key: &str) -> Result<Option<SecretValue>, String> {
-        Ok(self.values.lock().unwrap().get(key).cloned().map(SecretValue::new))
+        Ok(self
+            .values
+            .lock()
+            .unwrap()
+            .get(key)
+            .cloned()
+            .map(SecretValue::new))
     }
 }
 
@@ -128,15 +142,32 @@ async fn set_keeps_the_value_in_the_store_and_only_the_reference_in_the_inventor
     install(&reg, with_secret(declared())).await;
 
     let answer = set(&reg, "token").await.unwrap();
-    assert_eq!(answer, json!({"set": true}), "write-only: whether it is set, nothing else");
     assert_eq!(
-        store.reveal(&secret_key(ID, "token")).unwrap().unwrap().expose(),
+        answer,
+        json!({"set": true}),
+        "write-only: whether it is set, nothing else"
+    );
+    assert_eq!(
+        store
+            .reveal(&secret_key(ID, "token"))
+            .unwrap()
+            .unwrap()
+            .expose(),
         SECRET
     );
-    assert!(!on_disk(&path).contains(SECRET), "the inventory file holds the value");
+    assert!(
+        !on_disk(&path).contains(SECRET),
+        "the inventory file holds the value"
+    );
     let listed = listed(&reg).await;
-    assert!(!listed.to_string().contains(SECRET), "extensions.list returned it");
-    assert_eq!(listed["plugins"][0]["settings"]["token"], secret_reference(ID, "token"));
+    assert!(
+        !listed.to_string().contains(SECRET),
+        "extensions.list returned it"
+    );
+    assert_eq!(
+        listed["plugins"][0]["settings"]["token"],
+        secret_reference(ID, "token")
+    );
     assert_eq!(listed["secretStore"], json!({"available": true}));
 }
 
@@ -151,19 +182,30 @@ async fn clear_deletes_the_value_and_the_reference() {
     set(&reg, "webhook").await.unwrap();
 
     let answer = reg
-        .invoke("extension.secretStore", json!({"action":"clear","id":ID,"setting":"token"}))
+        .invoke(
+            "extension.secretStore",
+            json!({"action":"clear","id":ID,"setting":"token"}),
+        )
         .await
         .unwrap();
     assert_eq!(answer, json!({"set": false}));
-    assert_eq!(store.keys(), vec![secret_key(ID, "webhook")], "only the one named");
-    assert!(listed(&reg).await["plugins"][0]["settings"].get("token").is_none());
+    assert_eq!(
+        store.keys(),
+        vec![secret_key(ID, "webhook")],
+        "only the one named"
+    );
+    assert!(listed(&reg).await["plugins"][0]["settings"]
+        .get("token")
+        .is_none());
 
     // With no setting named, every secret the app keeps: what a reset does.
     reg.invoke("extension.secretStore", json!({"action":"clear","id":ID}))
         .await
         .unwrap();
     assert!(store.keys().is_empty(), "{:?}", store.keys());
-    assert!(listed(&reg).await["plugins"][0]["settings"].get("webhook").is_none());
+    assert!(listed(&reg).await["plugins"][0]["settings"]
+        .get("webhook")
+        .is_none());
 }
 
 #[tokio::test]
@@ -178,7 +220,10 @@ async fn removing_an_app_deletes_its_secrets() {
     reg.invoke("extensions.configure", json!({"action":"remove","id":ID}))
         .await
         .unwrap();
-    assert!(store.keys().is_empty(), "the removed app's secret outlived it");
+    assert!(
+        store.keys().is_empty(),
+        "the removed app's secret outlived it"
+    );
 }
 
 #[tokio::test]
@@ -295,7 +340,11 @@ async fn only_a_declared_secret_of_an_installed_app_can_be_set() {
     let store = Arc::new(MemoryStore::default());
     let reg = registry(&path, store.clone());
     install(&reg, with_secret(declared())).await;
-    for (id, setting) in [(ID, "team"), (ID, "undeclared"), ("org.example.none", "token")] {
+    for (id, setting) in [
+        (ID, "team"),
+        (ID, "undeclared"),
+        ("org.example.none", "token"),
+    ] {
         let refused = reg
             .invoke(
                 "extension.secretStore",
@@ -317,7 +366,13 @@ async fn a_secret_must_be_one_bounded_piece_of_text() {
     let reg = registry(&path, store.clone());
     install(&reg, with_secret(declared())).await;
     let long = "x".repeat(16 * 1024 + 1);
-    for secret in [json!(""), json!(long), json!("a\u{0}b"), json!(123456789), json!(["x"])] {
+    for secret in [
+        json!(""),
+        json!(long),
+        json!("a\u{0}b"),
+        json!(123456789),
+        json!(["x"]),
+    ] {
         let refused = reg
             .invoke(
                 "extension.secretStore",
@@ -326,8 +381,15 @@ async fn a_secret_must_be_one_bounded_piece_of_text() {
             .await
             .unwrap_err()
             .to_string();
-        assert!(!refused.contains("123456789"), "the refusal echoed the value: {refused}");
-        assert!(refused.len() < 400, "the refusal echoed the value: {} bytes", refused.len());
+        assert!(
+            !refused.contains("123456789"),
+            "the refusal echoed the value: {refused}"
+        );
+        assert!(
+            refused.len() < 400,
+            "the refusal echoed the value: {} bytes",
+            refused.len()
+        );
     }
     assert!(store.keys().is_empty());
 }
@@ -375,10 +437,16 @@ async fn an_unavailable_store_fails_closed_and_says_why() {
     assert!(!refused.contains(SECRET), "{refused}");
     assert!(store.keys().is_empty());
     let disk = on_disk(&path);
-    assert!(!disk.contains(SECRET) && !disk.contains("secretRef"), "{disk}");
+    assert!(
+        !disk.contains(SECRET) && !disk.contains("secretRef"),
+        "{disk}"
+    );
     let listed = listed(&reg).await;
     assert_eq!(listed["secretStore"]["available"], false);
-    assert!(listed["secretStore"]["reason"].as_str().unwrap().contains("locked"));
+    assert!(listed["secretStore"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("locked"));
     // The state is reported, never saved to disk.
     let saved: Value = serde_json::from_str(&on_disk(&path)).unwrap();
     assert!(saved.get("secretStore").is_none(), "{saved}");
@@ -394,7 +462,9 @@ async fn a_reference_whose_value_is_gone_reads_as_not_set() {
     set(&reg, "token").await.unwrap();
     // The vault was replaced, reset or restored from elsewhere.
     store.values.lock().unwrap().clear();
-    assert!(listed(&reg).await["plugins"][0]["settings"].get("token").is_none());
+    assert!(listed(&reg).await["plugins"][0]["settings"]
+        .get("token")
+        .is_none());
 
     // While the store cannot be asked, the reference is what is known.
     set(&reg, "token").await.unwrap();
@@ -433,20 +503,35 @@ async fn neither_mcp_nor_the_audit_log_ever_carries_the_value() {
                 .unwrap()
         }
     };
-    let stored = handle(call(json!({"action":"set","id":ID,"setting":"token","secret":SECRET,"_confirm":true}))).await;
+    let stored = handle(call(
+        json!({"action":"set","id":ID,"setting":"token","secret":SECRET,"_confirm":true}),
+    ))
+    .await;
     assert_eq!(stored["result"]["isError"], false, "{stored}");
     // Refused calls quote nothing either: unconfirmed, and with the store locked.
-    let unconfirmed = handle(call(json!({"action":"set","id":ID,"setting":"token","secret":SECRET}))).await;
+    let unconfirmed = handle(call(
+        json!({"action":"set","id":ID,"setting":"token","secret":SECRET}),
+    ))
+    .await;
     *store.unavailable.lock().unwrap() = Some("locked".into());
-    let locked = handle(call(json!({"action":"set","id":ID,"setting":"token","secret":SECRET,"_confirm":true}))).await;
+    let locked = handle(call(
+        json!({"action":"set","id":ID,"setting":"token","secret":SECRET,"_confirm":true}),
+    ))
+    .await;
     for answer in [&stored, &unconfirmed, &locked] {
-        assert!(!answer.to_string().contains(SECRET), "MCP answered with it: {answer}");
+        assert!(
+            !answer.to_string().contains(SECRET),
+            "MCP answered with it: {answer}"
+        );
     }
     let records = spy.0.lock().unwrap();
     assert!(records.len() >= 3, "{}", records.len());
     for record in records.iter() {
         let line = format!("{:?} {:?} {:?}", record.args, record.error, record.resource);
-        assert!(!line.contains(SECRET), "the audit record carried it: {line}");
+        assert!(
+            !line.contains(SECRET),
+            "the audit record carried it: {line}"
+        );
     }
 }
 
@@ -480,7 +565,8 @@ fn a_secret_is_refused_in_a_settable_position_at_install() {
     // Required, so the only rule that can refuse it is the one about secrets.
     value["settings"] =
         json!([{"id":"token","type":"secret-reference","title":"Token","required":true}]);
-    let mut permissions: Vec<String> = serde_json::from_value(value["permissions"].clone()).unwrap();
+    let mut permissions: Vec<String> =
+        serde_json::from_value(value["permissions"].clone()).unwrap();
     permissions.push(SECRET_STORE_PERMISSION.into());
     value["permissions"] = json!(permissions);
     value["actions"][0]["arguments"]["value"] = json!("${settings.token}");
@@ -489,17 +575,23 @@ fn a_secret_is_refused_in_a_settable_position_at_install() {
         refused
             .0
             .iter()
-            .any(|p| p.path == "actions[0].arguments.value" && p.message.contains("never interpolated")),
+            .any(|p| p.path == "actions[0].arguments.value"
+                && p.message.contains("never interpolated")),
         "{refused}"
     );
     // And the host position itself takes no secret, whatever the manifest
     // says: `k8s.annotate` and `k8s.setStatusCondition` accept string and
     // select only, and no host capability declares a secret slot.
     let core = crate::build_registry();
-    for (id, argument) in [("k8s.annotate", "value"), ("k8s.setStatusCondition", "message")] {
+    for (id, argument) in [
+        ("k8s.annotate", "value"),
+        ("k8s.setStatusCondition", "message"),
+    ] {
         let target = core.get(id).unwrap();
         let position = target.settable_argument(argument).unwrap();
-        assert!(!position.accepts.contains(&srelens_capability::settings::SettingType::SecretReference));
+        assert!(!position
+            .accepts
+            .contains(&srelens_capability::settings::SettingType::SecretReference));
         assert!(!target.takes_secret(argument));
     }
 }
@@ -515,13 +607,15 @@ fn the_access_review_names_the_secrets_an_app_keeps() {
         &grants,
     );
     assert!(
-        diff.added.iter().any(|item| item.contains(SECRET_STORE_PERMISSION)),
+        diff.added
+            .iter()
+            .any(|item| item.contains(SECRET_STORE_PERMISSION)),
         "{diff:?}"
     );
     assert!(
-        diff.added
-            .iter()
-            .any(|item| item.contains("Keep secrets") && item.contains("token") && item.contains("webhook")),
+        diff.added.iter().any(|item| item.contains("Keep secrets")
+            && item.contains("token")
+            && item.contains("webhook")),
         "an update that keeps another secret is new access: {diff:?}"
     );
 }

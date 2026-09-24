@@ -176,7 +176,11 @@ fn change(path: &Path, store: &dyn SecretStore, input: SecretIn) -> Result<Secre
     let _lock = crate::settings::write_lock(path)?;
     let mut state = read(path)?;
     let set = match input {
-        SecretIn::Set { id, setting, secret } => {
+        SecretIn::Set {
+            id,
+            setting,
+            secret,
+        } => {
             let app = app(&mut state, &id)?;
             if let Some(reason) = &app.quarantined {
                 return Err(format!("This app can't keep secrets: {reason}"));
@@ -184,7 +188,11 @@ fn change(path: &Path, store: &dyn SecretStore, input: SecretIn) -> Result<Secre
             if !is_secret(app, &setting) {
                 return Err(format!("{id} declares no secret setting \"{setting}\""));
             }
-            if !app.grants.iter().any(|grant| grant == SECRET_STORE_PERMISSION) {
+            if !app
+                .grants
+                .iter()
+                .any(|grant| grant == SECRET_STORE_PERMISSION)
+            {
                 return Err(format!(
                     "{id} was not granted {SECRET_STORE_PERMISSION}, so it cannot keep secrets"
                 ));

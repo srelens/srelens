@@ -39,13 +39,19 @@ impl VaultSecretStore {
     /// is then handed over with [`attach`](Self::attach). Until then the store
     /// is unavailable, and says so.
     pub fn attached_later() -> Self {
-        Self { vault: OnceLock::new(), open_at: None }
+        Self {
+            vault: OnceLock::new(),
+            open_at: None,
+        }
     }
 
     /// Opens the vault under `dir` the first time a secret is asked for, so a
     /// headless run that never touches one never touches the keychain.
     pub fn opening(dir: PathBuf) -> Self {
-        Self { vault: OnceLock::new(), open_at: Some(dir) }
+        Self {
+            vault: OnceLock::new(),
+            open_at: Some(dir),
+        }
     }
 
     /// The vault the GUI manages: the SAME instance the password and
@@ -80,7 +86,9 @@ fn unavailable(source: &str) -> &'static str {
     match source {
         "file" => "This system has no usable keychain, so srelens cannot protect an app's secret",
         "password-locked" => "The secrets vault is locked. Unlock it with your master password",
-        "biometric-locked" => "The secrets vault is locked behind biometric unlock. Unlock it in srelens",
+        "biometric-locked" => {
+            "The secrets vault is locked behind biometric unlock. Unlock it in srelens"
+        }
         "locked" => "The system keychain holding the secrets vault's key can't be reached",
         _ => "The secrets vault cannot keep a secret right now",
     }
@@ -113,11 +121,20 @@ impl SecretStore for VaultSecretStore {
         let vault = self.unlocked()?;
         // Rewrite the vault only when something goes: most changes delete
         // nothing, and each write is a keychain-keyed re-encryption.
-        if vault.load().extension_secrets.keys().all(|key| keep.contains(key)) {
+        if vault
+            .load()
+            .extension_secrets
+            .keys()
+            .all(|key| keep.contains(key))
+        {
             return Ok(());
         }
         vault
-            .update(|secrets| secrets.extension_secrets.retain(|key, _| keep.contains(key)))
+            .update(|secrets| {
+                secrets
+                    .extension_secrets
+                    .retain(|key, _| keep.contains(key))
+            })
             .map_err(|e| e.to_string())
     }
 
@@ -171,7 +188,10 @@ mod tests {
 
         assert_eq!(store.reveal(KEY).unwrap().unwrap().expose(), SECRET);
         assert_eq!(store.contains(KEY), Ok(true));
-        assert_eq!(vault.load().extension_secrets.get(KEY).map(String::as_str), Some(SECRET));
+        assert_eq!(
+            vault.load().extension_secrets.get(KEY).map(String::as_str),
+            Some(SECRET)
+        );
         // The same `secrets.enc` the MCP token lives in, and never in the clear.
         let raw = std::fs::read(dir.join("secrets.enc")).unwrap();
         assert!(!raw.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()));
@@ -210,14 +230,21 @@ mod tests {
         struct Shared(Arc<Mutex<Option<String>>>);
         impl crate::vault::KeychainBackend for Shared {
             fn get_password(&self) -> Result<String, keyring::Error> {
-                self.0.lock().unwrap().clone().ok_or(keyring::Error::NoEntry)
+                self.0
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .ok_or(keyring::Error::NoEntry)
             }
             fn set_password(&self, value: &str) -> Result<(), keyring::Error> {
                 *self.0.lock().unwrap() = Some(value.into());
                 Ok(())
             }
         }
-        let first = Arc::new(Vault::with_backend(&dir, Box::new(Shared(keychain.clone()))));
+        let first = Arc::new(Vault::with_backend(
+            &dir,
+            Box::new(Shared(keychain.clone())),
+        ));
         VaultSecretStore::with(first)
             .put(KEY, &SecretValue::new(SECRET.into()))
             .unwrap();
@@ -228,7 +255,10 @@ mod tests {
         assert!(store.status().unwrap_err().contains("can't be reached"));
         assert!(store.put(KEY, &SecretValue::new("other".into())).is_err());
         assert!(store.reveal(KEY).is_err(), "a locked store reveals nothing");
-        assert!(store.contains(KEY).is_err(), "and does not claim it is gone");
+        assert!(
+            store.contains(KEY).is_err(),
+            "and does not claim it is gone"
+        );
         assert!(store.retain(&BTreeSet::new()).is_err(), "nor deletes blind");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -256,11 +286,16 @@ mod tests {
             .unwrap();
         let store = VaultSecretStore::with(vault.clone());
         store.put(KEY, &SecretValue::new(SECRET.into())).unwrap();
-        store.put("org.example.gone/token", &SecretValue::new("old".into())).unwrap();
+        store
+            .put("org.example.gone/token", &SecretValue::new("old".into()))
+            .unwrap();
 
         store.retain(&BTreeSet::from([KEY.to_string()])).unwrap();
         let secrets = vault.load();
-        assert_eq!(secrets.extension_secrets.keys().collect::<Vec<_>>(), vec![KEY]);
+        assert_eq!(
+            secrets.extension_secrets.keys().collect::<Vec<_>>(),
+            vec![KEY]
+        );
         assert!(secrets.mcp_token.is_some(), "the MCP token is not an app's");
         assert_eq!(secrets.llm_keys.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -274,6 +309,9 @@ mod tests {
         let printed = format!("{secrets:?}");
         assert!(!printed.contains(SECRET), "{printed}");
         assert!(!printed.contains(&"cd".repeat(32)), "{printed}");
-        assert!(printed.contains(KEY), "which app secrets are held is not secret: {printed}");
+        assert!(
+            printed.contains(KEY),
+            "which app secrets are held is not secret: {printed}"
+        );
     }
 }

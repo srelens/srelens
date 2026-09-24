@@ -4,8 +4,8 @@
 use serde_json::{json, Map, Value};
 use srelens_capability::Capability;
 use srelens_plugin_host::{
-    secret_key, secret_reference, Manifest, PluginHost, SecretStore, SecretValue,
-    ValidationCode, SECRET_STORE_PERMISSION,
+    secret_key, secret_reference, Manifest, PluginHost, SecretStore, SecretValue, ValidationCode,
+    SECRET_STORE_PERMISSION,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -43,7 +43,11 @@ fn a_secret_setting_needs_the_secret_store_permission() {
         problems(&missing)
     );
     let granted = manifest(&["test.read", SECRET_STORE_PERMISSION], token_setting());
-    assert_eq!(problems(&granted), vec![], "the permission and the setting go together");
+    assert_eq!(
+        problems(&granted),
+        vec![],
+        "the permission and the setting go together"
+    );
 }
 
 #[test]
@@ -79,7 +83,10 @@ fn a_secret_value_never_prints() {
     let value = SecretValue::new(TOKEN.to_owned());
     assert_eq!(value.expose(), TOKEN);
     let printed = format!("{value:?}");
-    assert!(!printed.contains(TOKEN), "Debug printed the secret: {printed}");
+    assert!(
+        !printed.contains(TOKEN),
+        "Debug printed the secret: {printed}"
+    );
     // Nested inside anything that derives Debug, as a panic message would be.
     let nested = format!("{:?}", Some(vec![value]));
     assert!(!nested.contains(TOKEN), "{nested}");
@@ -87,7 +94,10 @@ fn a_secret_value_never_prints() {
 
 #[test]
 fn the_reference_and_its_key_name_the_same_place() {
-    assert_eq!(secret_key("org.example.metrics", "token"), "org.example.metrics/token");
+    assert_eq!(
+        secret_key("org.example.metrics", "token"),
+        "org.example.metrics/token"
+    );
     assert_eq!(
         secret_reference("org.example.metrics", "token"),
         json!({"secretRef": "org.example.metrics/token"})
@@ -103,7 +113,10 @@ impl SecretStore for MemoryStore {
         Ok(())
     }
     fn put(&self, key: &str, value: &SecretValue) -> Result<(), String> {
-        self.0.lock().unwrap().insert(key.into(), value.expose().into());
+        self.0
+            .lock()
+            .unwrap()
+            .insert(key.into(), value.expose().into());
         Ok(())
     }
     fn contains(&self, key: &str) -> Result<bool, String> {
@@ -114,19 +127,29 @@ impl SecretStore for MemoryStore {
         Ok(())
     }
     fn reveal(&self, key: &str) -> Result<Option<SecretValue>, String> {
-        Ok(self.0.lock().unwrap().get(key).cloned().map(SecretValue::new))
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .get(key)
+            .cloned()
+            .map(SecretValue::new))
     }
 }
 
 fn stored() -> (Manifest, Map<String, Value>, MemoryStore) {
-    let manifest =
-        Manifest::parse(&manifest(&["test.read", SECRET_STORE_PERMISSION], token_setting()).to_string())
-            .unwrap();
+    let manifest = Manifest::parse(
+        &manifest(&["test.read", SECRET_STORE_PERMISSION], token_setting()).to_string(),
+    )
+    .unwrap();
     let mut settings = Map::new();
     settings.insert("token".into(), secret_reference(&manifest.id, "token"));
     let store = MemoryStore::default();
     store
-        .put(&secret_key(&manifest.id, "token"), &SecretValue::new(TOKEN.into()))
+        .put(
+            &secret_key(&manifest.id, "token"),
+            &SecretValue::new(TOKEN.into()),
+        )
         .unwrap();
     (manifest, settings, store)
 }
@@ -143,18 +166,43 @@ fn http() -> Capability {
 #[test]
 fn a_secret_is_injected_only_where_the_target_declares_a_slot() {
     let (manifest, settings, store) = stored();
-    let got = PluginHost::inject_secret(&http(), "headers", &manifest, &grants(), &settings, "token", &store)
-        .expect("declared slot, declared secret, granted, set");
+    let got = PluginHost::inject_secret(
+        &http(),
+        "headers",
+        &manifest,
+        &grants(),
+        &settings,
+        "token",
+        &store,
+    )
+    .expect("declared slot, declared secret, granted, set");
     assert_eq!(got.expose(), TOKEN);
 
     // No current host capability declares a slot: `k8s.annotate`'s `value`
     // is the kind of position a setting may fill, and a secret may not.
-    let annotate = Capability::read_only("k8s.annotate", "annotate", |_: Value| async { Ok(json!({})) });
-    let refused = PluginHost::inject_secret(&annotate, "value", &manifest, &grants(), &settings, "token", &store)
-        .unwrap_err();
+    let annotate = Capability::read_only("k8s.annotate", "annotate", |_: Value| async {
+        Ok(json!({}))
+    });
+    let refused = PluginHost::inject_secret(
+        &annotate,
+        "value",
+        &manifest,
+        &grants(),
+        &settings,
+        "token",
+        &store,
+    )
+    .unwrap_err();
     assert!(refused.contains("value"), "{refused}");
-    let wrong_slot =
-        PluginHost::inject_secret(&http(), "url", &manifest, &grants(), &settings, "token", &store);
+    let wrong_slot = PluginHost::inject_secret(
+        &http(),
+        "url",
+        &manifest,
+        &grants(),
+        &settings,
+        "token",
+        &store,
+    );
     assert!(wrong_slot.is_err());
 }
 
@@ -164,31 +212,88 @@ fn injection_needs_the_grant_the_declaration_and_the_hosts_own_reference() {
     let target = http();
     // Not granted: an inventory edited by hand, or an older grant list.
     let ungranted = PluginHost::inject_secret(
-        &target, "headers", &manifest, &["test.read".to_owned()], &settings, "token", &store,
+        &target,
+        "headers",
+        &manifest,
+        &["test.read".to_owned()],
+        &settings,
+        "token",
+        &store,
     );
     assert!(ungranted.unwrap_err().contains(SECRET_STORE_PERMISSION));
     // Not a declared secret.
-    assert!(PluginHost::inject_secret(&target, "headers", &manifest, &grants(), &settings, "other", &store).is_err());
+    assert!(PluginHost::inject_secret(
+        &target,
+        "headers",
+        &manifest,
+        &grants(),
+        &settings,
+        "other",
+        &store
+    )
+    .is_err());
     // A reference to another app's secret is never followed.
     let mut foreign = settings.clone();
-    foreign.insert("token".into(), secret_reference("org.example.other", "token"));
+    foreign.insert(
+        "token".into(),
+        secret_reference("org.example.other", "token"),
+    );
     store
-        .put(&secret_key("org.example.other", "token"), &SecretValue::new("theirs".into()))
+        .put(
+            &secret_key("org.example.other", "token"),
+            &SecretValue::new("theirs".into()),
+        )
         .unwrap();
-    let crossed = PluginHost::inject_secret(&target, "headers", &manifest, &grants(), &foreign, "token", &store);
+    let crossed = PluginHost::inject_secret(
+        &target,
+        "headers",
+        &manifest,
+        &grants(),
+        &foreign,
+        "token",
+        &store,
+    );
     assert!(crossed.is_err());
     // Not set.
-    let empty = PluginHost::inject_secret(&target, "headers", &manifest, &grants(), &Map::new(), "token", &store);
+    let empty = PluginHost::inject_secret(
+        &target,
+        "headers",
+        &manifest,
+        &grants(),
+        &Map::new(),
+        "token",
+        &store,
+    );
     assert!(empty.unwrap_err().contains("not set"));
 }
 
 #[test]
 fn a_refused_injection_never_names_the_value() {
     let (manifest, settings, store) = stored();
-    let annotate = Capability::read_only("k8s.annotate", "annotate", |_: Value| async { Ok(json!({})) });
+    let annotate = Capability::read_only("k8s.annotate", "annotate", |_: Value| async {
+        Ok(json!({}))
+    });
     for why in [
-        PluginHost::inject_secret(&annotate, "value", &manifest, &grants(), &settings, "token", &store).unwrap_err(),
-        PluginHost::inject_secret(&http(), "headers", &manifest, &[], &settings, "token", &store).unwrap_err(),
+        PluginHost::inject_secret(
+            &annotate,
+            "value",
+            &manifest,
+            &grants(),
+            &settings,
+            "token",
+            &store,
+        )
+        .unwrap_err(),
+        PluginHost::inject_secret(
+            &http(),
+            "headers",
+            &manifest,
+            &[],
+            &settings,
+            "token",
+            &store,
+        )
+        .unwrap_err(),
     ] {
         assert!(!why.contains(TOKEN), "{why}");
     }

@@ -18,6 +18,7 @@ const EXCLUDED: Record<string, string> = {
   "k8s.nodeServiceRestart": "node service remediation is surfaced in Node view / incident actions and requires an SSH target",
   "extensions.action": "not a static entry: reached only through an app's contributed action command (see below), which opens the host confirmation in the app resource inspector",
   "extensions.configure": "extension lifecycle and permissions are managed in Settings → Apps",
+  "extension.secretStore": "an app's secret is typed into its own write-only field in Settings → Apps, never passed through a palette command",
   "k8s.applyManifest": "reached via the manifest editor, not a one-click palette action",
   "k8s.updateConfigData": "ConfigMap/Secret data edits happen in the ResourceOverview drawer, which needs a key/value patch beyond a bare resource ref",
   "k8s.deleteContext": "kubeconfig management lives in Settings",
