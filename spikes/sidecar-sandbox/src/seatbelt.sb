@@ -1,0 +1,55 @@
+(version 1)
+;; srelens #571 spike: the Seatbelt (SBPL) profile the probe sidecar runs under on macOS.
+;;
+;; UNVERIFIED: written on Windows, never run. The maintainer's Mac run
+;; (spikes/sidecar-sandbox/run-macos.sh) is the first time it is exercised. If the probe
+;; does not start at all, the sandbox log lines that run-macos.sh collects name the
+;; operation that was denied; add the narrowest rule that allows it and say so in the PR.
+;;
+;; Parameters, passed by the harness with `sandbox-exec -D KEY=VALUE`:
+;;   PROBE    the probe binary
+;;   SCRATCH  the one directory the sidecar may read and write
+;; Both must be real paths (canonicalized): Seatbelt matches the resolved path, and on
+;; macOS /tmp and /var are symlinks into /private.
+;;
+;; The seven checks this profile is meant to satisfy are in tests/checks.rs. Memory and CPU
+;; (checks 5 and 6) are not Seatbelt's job: the launcher sets rlimits and records what
+;; happens.
+
+(deny default)
+
+;; Start the probe, and nothing else. There is no process-fork rule, so the sidecar may not
+;; create processes (check 4).
+(allow process-exec (literal (param "PROBE")))
+
+;; What dyld and libSystem read to load a Rust binary: the binary itself, the system
+;; libraries and the dyld shared cache (inside a cryptex on macOS 13 and later).
+(allow file-read* (literal (param "PROBE")))
+(allow file-read*
+  (subpath "/usr/lib")
+  (subpath "/System/Library")
+  (subpath "/System/Cryptexes")
+  (subpath "/System/Volumes/Preboot/Cryptexes")
+  (subpath "/Library/Apple/System/Library")
+  (subpath "/private/var/db/dyld")
+  (literal "/dev/null")
+  (literal "/dev/urandom")
+  (literal "/dev/random"))
+
+;; Resolving a path stats every directory on the way, so metadata reads are allowed
+;; everywhere. This lets the sidecar learn that ~/.kube/config EXISTS (and its size and
+;; times), but not read it. Whether this can be narrowed is an open question for the Mac run.
+(allow file-read-metadata)
+(allow sysctl-read)
+(allow signal (target self))
+
+;; The granted scratch directory, read and write (check 2).
+(allow file-read* file-write* (subpath (param "SCRATCH")))
+
+;; Everything else is denied by (deny default): other file reads and writes (checks 1 and
+;; 2), all network operations (check 3), and every mach-lookup, which includes
+;; mDNSResponder, so DNS resolution fails too.
+;;
+;; stdin and stdout are pipes the host created and passed in. Seatbelt checks access when a
+;; file is opened, not on each read or write of a descriptor already open, so the JSON-RPC
+;; exchange (check 7) is expected to keep working. Check 7 is what verifies that.

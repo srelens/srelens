@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod windows;
 
@@ -52,6 +54,9 @@ pub enum Backend {
     LandlockSeccompCgroup,
     /// Linux: bubblewrap with every namespace unshared, nothing else.
     Bwrap,
+    /// macOS: `sandbox-exec` with `src/seatbelt.sb`, plus rlimits. Unverified until run on
+    /// a Mac.
+    Seatbelt,
 }
 
 const BACKENDS: &[(Backend, &str)] = &[
@@ -65,6 +70,7 @@ const BACKENDS: &[(Backend, &str)] = &[
     (Backend::Cgroup, "cgroup"),
     (Backend::LandlockSeccompCgroup, "landlock+seccomp+cgroup"),
     (Backend::Bwrap, "bwrap"),
+    (Backend::Seatbelt, "seatbelt"),
 ];
 
 impl Backend {
@@ -89,6 +95,9 @@ impl Backend {
             Some(Backend::AppContainerJob)
         } else if cfg!(target_os = "linux") {
             Some(Backend::LandlockSeccompCgroup)
+        } else if cfg!(target_os = "macos") {
+            // The candidate under test, not a recommendation: see the ADR.
+            Some(Backend::Seatbelt)
         } else {
             None
         }
@@ -99,6 +108,72 @@ impl fmt::Display for Backend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = BACKENDS.iter().find(|(b, _)| b == self).map(|(_, n)| *n).unwrap_or("?");
         f.write_str(name)
+    }
+}
+
+#[cfg(test)]
+mod denial_tests {
+    use super::{Denial, Failure};
+
+    fn failure(kind: &str, os: Option<i64>) -> Failure {
+        Failure { message: String::new(), kind: kind.into(), os }
+    }
+
+    #[test]
+    fn invalid_input_is_never_a_denial() {
+        for denial in [Denial::File, Denial::Network, Denial::Dns, Denial::Process, Denial::Memory] {
+            assert!(!denial.accepts(&failure("InvalidInput", None)), "{denial:?}");
+        }
+    }
+
+    #[test]
+    fn file_denials_are_permission_not_found_or_read_only() {
+        for kind in ["PermissionDenied", "NotFound", "ReadOnlyFilesystem"] {
+            assert!(Denial::File.accepts(&failure(kind, None)), "{kind}");
+        }
+        assert!(!Denial::File.accepts(&failure("TimedOut", None)));
+    }
+
+    #[test]
+    fn network_denials_are_the_ways_a_connect_is_refused() {
+        for kind in [
+            "PermissionDenied",
+            "TimedOut",
+            "ConnectionRefused",
+            "NetworkUnreachable",
+            "HostUnreachable",
+        ] {
+            assert!(Denial::Network.accepts(&failure(kind, None)), "{kind}");
+        }
+        assert!(!Denial::Network.accepts(&failure("NotFound", None)));
+    }
+
+    #[test]
+    fn dns_denial_is_a_resolver_failure() {
+        assert!(Denial::Dns.accepts(&failure("ResolverFailed", None)));
+        assert!(!Denial::Dns.accepts(&failure("Uncategorized", None)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_denial_is_eperm_not_a_filesystem_refusal() {
+        assert!(Denial::Process.accepts(&failure("PermissionDenied", Some(1))));
+        // EACCES is what a filesystem layer returns (for example on /dev/null): not a
+        // refusal to create the process.
+        assert!(!Denial::Process.accepts(&failure("PermissionDenied", Some(13))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_denial_is_the_job_process_quota_not_access_denied() {
+        assert!(Denial::Process.accepts(&failure("Uncategorized", Some(1816))));
+        assert!(!Denial::Process.accepts(&failure("PermissionDenied", Some(5))));
+    }
+
+    #[test]
+    fn memory_denial_is_a_refused_allocation() {
+        assert!(Denial::Memory.accepts(&failure("OutOfMemory", None)));
+        assert!(!Denial::Memory.accepts(&failure("Uncategorized", None)));
     }
 }
 
@@ -182,13 +257,65 @@ fn built_binary(name: &str) -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::other(format!("no built {name} near {}", exe.display())))
 }
 
+/// An operation the probe reports as failed: the message, the `std::io::ErrorKind` name
+/// (or `ResolverFailed` / `OutOfMemory` / `InvalidInput`, which the probe sets itself), and
+/// the raw OS error code when there is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    pub message: String,
+    pub kind: String,
+    pub os: Option<i64>,
+}
+
+/// Which kind of denial a check expects. A failure counts as the sandbox's refusal only if
+/// its kind is one a sandbox produces for that operation. For the network, DNS and
+/// filesystem, several kinds qualify (a dropped connection times out, a hidden file is not
+/// found), so those checks also run a host-side positive control first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Denial {
+    File,
+    Network,
+    Dns,
+    Process,
+    Memory,
+}
+
+impl Denial {
+    pub fn accepts(self, failure: &Failure) -> bool {
+        let kind = failure.kind.as_str();
+        match self {
+            Denial::File => matches!(kind, "PermissionDenied" | "NotFound" | "ReadOnlyFilesystem"),
+            Denial::Network => matches!(
+                kind,
+                "PermissionDenied"
+                    | "TimedOut"
+                    | "ConnectionRefused"
+                    | "NetworkUnreachable"
+                    | "HostUnreachable"
+            ),
+            // Resolver errors carry no distinctive code on either OS, so this accepts any
+            // failure of the resolver; the host control is what makes it meaningful.
+            Denial::Dns => matches!(kind, "ResolverFailed" | "PermissionDenied"),
+            // seccomp's EPERM, not EACCES, which is a filesystem refusal.
+            #[cfg(unix)]
+            Denial::Process => failure.os == Some(libc::EPERM as i64),
+            // The Job Object's active-process limit: ERROR_NOT_ENOUGH_QUOTA.
+            #[cfg(windows)]
+            Denial::Process => failure.os == Some(1816),
+            #[cfg(not(any(unix, windows)))]
+            Denial::Process => false,
+            Denial::Memory => kind == "OutOfMemory",
+        }
+    }
+}
+
 /// What came back from one call.
 #[derive(Debug)]
 pub enum Reply {
     /// The probe ran the operation and it worked.
     Ok(Value),
-    /// The probe answered that the operation failed, with the OS error.
-    Refused(String),
+    /// The probe answered that the operation failed.
+    Refused(Failure),
     /// The probe did not answer: its stdout closed. Carries how the process ended.
     Stopped(String),
     /// Something other than a well-formed reply to this request came back (for example a
@@ -256,6 +383,13 @@ impl Sidecar {
                     Box::new(confined.child.stdout.take().expect("piped stdout"));
                 Ok(Sidecar::new(stdin, stdout, Process::Linux(confined)))
             }
+            #[cfg(target_os = "macos")]
+            Backend::Seatbelt => {
+                let mut child = macos::launch_seatbelt(fixture, limits)?;
+                let stdin = Box::new(child.stdin.take().expect("piped stdin"));
+                let stdout: Box<dyn Read + Send> = Box::new(child.stdout.take().expect("piped"));
+                Ok(Sidecar::new(stdin, stdout, Process::Plain(child)))
+            }
             #[allow(unreachable_patterns)]
             other => {
                 let _ = limits;
@@ -281,7 +415,12 @@ impl Sidecar {
             Ok(_) => match serde_json::from_str::<Value>(&line) {
                 Ok(v) if v["id"] != id => Reply::Garbled(format!("reply for the wrong id: {line}")),
                 Ok(v) if v.get("error").is_some() => {
-                    Reply::Refused(v["error"]["message"].as_str().unwrap_or("?").to_owned())
+                    let error = &v["error"];
+                    Reply::Refused(Failure {
+                        message: error["message"].as_str().unwrap_or("?").to_owned(),
+                        kind: error["data"]["kind"].as_str().unwrap_or("?").to_owned(),
+                        os: error["data"]["os"].as_i64(),
+                    })
                 }
                 Ok(v) => Reply::Ok(v["result"].clone()),
                 Err(_) => Reply::Garbled(self.rest_of_garble(line)),

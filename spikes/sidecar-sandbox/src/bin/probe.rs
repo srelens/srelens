@@ -23,9 +23,13 @@ fn main() {
                 let id = req["id"].clone();
                 match handle(req["method"].as_str().unwrap_or(""), &req["params"]) {
                     Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-                    Err(message) => json!({
+                    Err(Fail { message, kind, os }) => json!({
                         "jsonrpc": "2.0", "id": id,
-                        "error": { "code": -32000, "message": message }
+                        "error": {
+                            "code": -32000,
+                            "message": message,
+                            "data": { "kind": kind, "os": os }
+                        }
                     }),
                 }
             }
@@ -40,35 +44,67 @@ fn main() {
     }
 }
 
-fn handle(method: &str, params: &Value) -> Result<Value, String> {
+/// A failed operation: the message, the `std::io::ErrorKind` name (or a kind the probe
+/// names itself: `ResolverFailed`, `OutOfMemory`, `InvalidInput`), and the raw OS code.
+struct Fail {
+    message: String,
+    kind: String,
+    os: Option<i32>,
+}
+
+impl Fail {
+    fn new(kind: &str, message: impl Into<String>) -> Fail {
+        Fail { message: message.into(), kind: kind.into(), os: None }
+    }
+}
+
+impl From<std::io::Error> for Fail {
+    fn from(e: std::io::Error) -> Fail {
+        Fail { message: e.to_string(), kind: format!("{:?}", e.kind()), os: e.raw_os_error() }
+    }
+}
+
+/// A bad request, never a sandbox's doing.
+impl From<&str> for Fail {
+    fn from(message: &str) -> Fail {
+        Fail::new("InvalidInput", message)
+    }
+}
+
+impl From<String> for Fail {
+    fn from(message: String) -> Fail {
+        Fail::new("InvalidInput", message)
+    }
+}
+
+fn handle(method: &str, params: &Value) -> Result<Value, Fail> {
     match method {
         "ping" => Ok(json!({ "pid": std::process::id() })),
         "echo" => Ok(params.clone()),
         "read_file" => {
-            let bytes = std::fs::read(str_param(params, "path")?).map_err(|e| e.to_string())?;
+            let bytes = std::fs::read(str_param(params, "path")?)?;
             Ok(json!({ "bytes": bytes.len() }))
         }
         "write_file" => {
-            std::fs::write(str_param(params, "path")?, str_param(params, "text")?)
-                .map_err(|e| e.to_string())?;
+            std::fs::write(str_param(params, "path")?, str_param(params, "text")?)?;
             Ok(json!({}))
         }
         "tcp_connect" => {
             let addr: SocketAddr =
                 str_param(params, "addr")?.parse().map_err(|e| format!("bad addr: {e}"))?;
-            let stream =
-                TcpStream::connect_timeout(&addr, Duration::from_secs(5)).map_err(|e| e.to_string())?;
+            let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
             Ok(json!({ "local": stream.local_addr().map(|a| a.to_string()).ok() }))
         }
         "resolve" => {
             let host = str_param(params, "host")?;
+            // Resolver errors carry no distinctive ErrorKind, so name the failure here.
             let addrs: Vec<String> = (host, 443)
                 .to_socket_addrs()
-                .map_err(|e| e.to_string())?
+                .map_err(|e| Fail { kind: "ResolverFailed".into(), ..Fail::from(e) })?
                 .map(|a| a.ip().to_string())
                 .collect();
             if addrs.is_empty() {
-                return Err(format!("{host} resolved to no addresses"));
+                return Err(Fail::new("ResolverFailed", format!("{host} resolved to no addresses")));
             }
             Ok(json!({ "addrs": addrs }))
         }
@@ -76,11 +112,8 @@ fn handle(method: &str, params: &Value) -> Result<Value, String> {
             // The child inherits stdio and exits at once without touching it. Not
             // `Stdio::null()`: opening /dev/null is a filesystem access, and a sandbox that
             // refuses it would look as if it had refused the process.
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let status = std::process::Command::new(exe)
-                .arg("--child")
-                .status()
-                .map_err(|e| e.to_string())?;
+            let exe = std::env::current_exe()?;
+            let status = std::process::Command::new(exe).arg("--child").status()?;
             Ok(json!({ "status": status.to_string() }))
         }
         "allocate" => {
@@ -88,7 +121,7 @@ fn handle(method: &str, params: &Value) -> Result<Value, String> {
             let len = mib * 1024 * 1024;
             let mut buf: Vec<u8> = Vec::new();
             buf.try_reserve_exact(len)
-                .map_err(|e| format!("allocation of {mib} MiB refused: {e}"))?;
+                .map_err(|e| Fail::new("OutOfMemory", format!("allocation of {mib} MiB refused: {e}")))?;
             // Touch every byte so the pages are really committed, not just reserved.
             buf.resize(len, 0xA5);
             let sum = buf.iter().step_by(4096).map(|b| *b as u64).sum::<u64>();
@@ -114,13 +147,13 @@ fn handle(method: &str, params: &Value) -> Result<Value, String> {
                 })
                 .collect();
             for w in workers {
-                w.join().map_err(|_| "worker panicked")?;
+                w.join().map_err(|_| Fail::new("Other", "worker panicked"))?;
             }
             let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
             let cpu_ms = process_cpu_ms() - cpu_before;
             Ok(json!({ "cpu_ms": cpu_ms, "wall_ms": wall_ms, "threads": threads }))
         }
-        other => Err(format!("unknown method {other}")),
+        other => Err(format!("unknown method {other}").into()),
     }
 }
 

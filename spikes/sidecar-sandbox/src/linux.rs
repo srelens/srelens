@@ -53,14 +53,27 @@ impl Drop for Confined {
 }
 
 fn cgroup(limits: &Limits) -> io::Result<PathBuf> {
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
     let root = PathBuf::from(std::env::var("SPIKE_CGROUP_ROOT").unwrap_or("/sys/fs/cgroup".into()));
+    cgroup_in(&root, limits)
+}
+
+fn cgroup_in(root: &std::path::Path, limits: &Limits) -> io::Result<PathBuf> {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
     let dir = root.join(format!(
         "srelens-sidecar-{}-{}",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir(&dir).map_err(|e| io::Error::other(format!("mkdir {}: {e}", dir.display())))?;
+    std::fs::create_dir(&dir).map_err(|e| {
+        io::Error::other(format!(
+            "the cgroup layer cannot create {} ({e}). The cgroup backends need a writable, \
+             delegated cgroup v2 directory with the memory and cpu controllers enabled for its \
+             children; an ordinary user has none under /sys/fs/cgroup. Set SPIKE_CGROUP_ROOT to \
+             one (for example a systemd scope started with Delegate=yes), or run run-linux.sh \
+             in Docker",
+            dir.display()
+        ))
+    })?;
     let set = |file: &str, value: String| {
         std::fs::write(dir.join(file), &value)
             .map_err(|e| io::Error::other(format!("{}/{file} = {value}: {e}", dir.display())))
@@ -70,6 +83,23 @@ fn cgroup(limits: &Limits) -> io::Result<PathBuf> {
     let period = 100_000u64;
     set("cpu.max", format!("{} {period}", (limits.cpus * period as f64) as u64))?;
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cgroup_in;
+    use crate::Limits;
+    use std::path::Path;
+
+    #[test]
+    fn an_unusable_cgroup_root_says_what_the_backend_needs() {
+        let err = cgroup_in(Path::new("/nonexistent-srelens-cgroup-root"), &Limits::SPIKE)
+            .expect_err("no cgroup can be made under a missing root");
+        let message = err.to_string();
+        for needle in ["/nonexistent-srelens-cgroup-root", "delegated", "SPIKE_CGROUP_ROOT", "run-linux.sh"] {
+            assert!(message.contains(needle), "{needle:?} missing from: {message}");
+        }
+    }
 }
 
 pub fn launch_layered(fixture: &Fixture, limits: &Limits, layers: Layers) -> io::Result<Confined> {
