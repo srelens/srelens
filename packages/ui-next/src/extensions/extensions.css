@@ -436,6 +436,14 @@
 .extension-resource-detail > .pane { flex: 1; min-height: 0; }
 .extension-detail-heading { margin: 0; padding: 8px 12px; font-size: inherit; font-weight: 600; background: var(--surface, var(--fl-color-surface)); border-block: 1px solid var(--rule, var(--fl-color-border)); }
 .extension-detail-fields { margin: 0; }
+/* The Inspector's Related links (#545): one row per target, text and links on one gutter. */
+.extension-related { list-style: none; margin: 0; padding: 6px 0; }
+/* A row names a resource: machine text, so one line that scrolls rather than wraps. */
+.extension-related > li { padding: 4px 12px; white-space: nowrap; overflow-x: auto; }
+.extension-related > li > button { justify-content: flex-start; height: auto; min-height: 0; padding: 0; font-size: inherit; text-align: start; white-space: nowrap; text-decoration: underline; }
+/* A failure is prose, and wraps. */
+.extension-related > li.extension-related-error { color: var(--danger, var(--fl-color-danger, inherit)); white-space: normal; overflow-wrap: anywhere; overflow-x: visible; }
+.extension-related + button { margin: 0 12px 8px; }
 .extension-resource-detail pre { white-space: pre; overflow: auto; max-width: 100%; font-family: var(--font-mono); font-size: inherit; }
 .extension-detail-metadata { padding: 12px; margin: 0; }
 .extension-action-review { padding: 12px; border-block: 1px solid var(--rule, var(--fl-color-border)); background: var(--surface, var(--fl-color-surface)); }
@@ -751,3 +759,37 @@
 }
 .extension-settings-actions { padding: 0; border-bottom: 0; }
 .extension-settings-saved { color: var(--ink-muted, var(--fl-color-text-muted)); }
+
+/* Live app views (#566). The word says the state; the dot only repeats it. */
+.extension-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-muted, var(--fl-color-text-muted));
+  font-size: var(--text-body, 0.8125rem);
+  white-space: nowrap;
+}
+.extension-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-faint, var(--fl-color-text-muted));
+}
+.extension-live[data-live="live"] .extension-live-dot { background: var(--ok, var(--fl-color-success)); }
+.extension-live[data-live="reconnecting"] .extension-live-dot { background: var(--warn, var(--fl-color-warning)); }
+.extension-live[data-live="reconnecting"] { color: var(--warn, var(--fl-color-warning)); }
+.extension-live-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 6px 12px 0;
+}
+.extension-live-notice { font-size: var(--text-body, 0.8125rem); }
+.extension-stale-notice { color: var(--warn, var(--fl-color-warning)); }
+/* What is shown while a watch reconnects is not current. The notice beside it
+   says so in words; this rule only marks the region, and never fades its text,
+   which would drop muted ink below the contrast floor. */
+.extension-table-scroll[data-stale],
+.extension-summary[data-stale],
+.dashboard-cards[data-stale] {
+  box-shadow: inset 3px 0 0 var(--warn, var(--fl-color-warning));
+}

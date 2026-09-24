@@ -13,7 +13,7 @@ vi.mock("../transport/transport", async (importOriginal) => {
   };
 });
 
-import { helmUpgrade, helmRollback, helmVersion, helmSearchRepo, diffTextLines, startHelmOp, getHelmRelease } from "./helm";
+import { helmUpgrade, helmRollback, helmVersion, helmSearchRepo, diffTextLines, startHelmOp, getHelmRelease, listHelmReleases, listHelmReleasesIn } from "./helm";
 
 beforeEach(() => {
   invokeCommandMock.mockReset();
@@ -145,5 +145,72 @@ describe("diffTextLines", () => {
     expect(rows.length).toBe(size);
     expect(rows[1234]).toEqual({ tag: "replace", left: "line 1234", right: "line 1234 (changed)" });
     expect(rows[0]).toEqual({ tag: "same", left: "line 0", right: "line 0" });
+  });
+});
+
+// #688: `helm list --namespace` takes one namespace, and "all" reads release
+// Secrets cluster-wide — which a namespace-scoped credential is refused.
+describe("listHelmReleasesIn", () => {
+  const rel = (name: string, namespace: string) => ({
+    name, namespace, revision: 1, status: "deployed", updated: "", chart: "c", chartVersion: "1", appVersion: "", description: "",
+  });
+  // A capability double run through the REAL `listHelmReleases`, so a thrown
+  // refusal reaches the fan-out exactly as `listHelmReleases` words it.
+  const invokerFor = (answers: Record<string, () => unknown>) => {
+    const invoke = vi.fn(async (_cap: string, input: unknown) => answers[(input as { namespace: string }).namespace]());
+    const list = (context: string, namespace: string | null) =>
+      listHelmReleases(context, namespace, invoke as unknown as Parameters<typeof listHelmReleases>[2]);
+    return Object.assign(list, { mock: invoke.mock });
+  };
+
+  it("lists each selected namespace on its own and merges the releases", async () => {
+    const invoke = invokerFor({
+      "team-a": () => ({ releases: [rel("api", "team-a")] }),
+      "team-b": () => ({ releases: [rel("web", "team-b")] }),
+    });
+    const out = await listHelmReleasesIn("c", ["team-a", "team-b"], invoke);
+    expect(invoke.mock.calls.map((c) => (c[1] as { namespace: string }).namespace))
+      .toEqual(["team-a", "team-b"]);
+    expect(out.releases?.map((r) => r.name)).toEqual(["api", "web"]);
+    expect(out.failures).toEqual([]);
+    expect(out.error).toBeUndefined();
+  });
+
+  it("asks for every namespace at once for an empty selection", async () => {
+    const invoke = invokerFor({ "": () => ({ releases: [rel("api", "team-a")] }) });
+    const out = await listHelmReleasesIn("c", [], invoke);
+    expect(out.releases).toHaveLength(1);
+  });
+
+  it("keeps the namespaces that answered and names the one that was refused", async () => {
+    const invoke = invokerFor({
+      "team-a": () => ({ releases: [rel("api", "team-a")] }),
+      "team-b": () => {
+        throw new Error("secrets is forbidden");
+      },
+    });
+    const out = await listHelmReleasesIn("c", ["team-a", "team-b"], invoke);
+    expect(out.releases?.map((r) => r.name)).toEqual(["api"]);
+    expect(out.failures).toEqual([{ namespace: "team-b", error: "Error: secrets is forbidden" }]);
+    expect(out.error).toBeUndefined();
+  });
+
+  it("is the list's error when every namespace was refused", async () => {
+    const boom = () => {
+      throw new Error("secrets is forbidden");
+    };
+    const out = await listHelmReleasesIn("c", ["team-a", "team-b"], invokerFor({ "team-a": boom, "team-b": boom }));
+    expect(out.releases).toBeUndefined();
+    expect(out.error).toBe("Error: secrets is forbidden");
+  });
+
+  it("reports no namespace failures for a one-namespace listing", async () => {
+    const out = await listHelmReleasesIn("c", ["team-a"], invokerFor({
+      "team-a": () => {
+        throw new Error("secrets is forbidden");
+      },
+    }));
+    expect(out.error).toBe("Error: secrets is forbidden");
+    expect(out.failures).toEqual([]);
   });
 });

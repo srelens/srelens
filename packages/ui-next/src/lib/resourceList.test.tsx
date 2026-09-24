@@ -5,34 +5,37 @@ import { render, renderHook, act, waitFor } from "@testing-library/react";
 // file — a plain `const watchResource = vi.fn(...)` below it would be read
 // before it's initialized (see AppLog.test.tsx / Window.test.tsx for the
 // same pattern elsewhere in this package).
-const { stop, watchResource, mockState } = vi.hoisted(() => {
+const { stop, watchNamespaces, mockState } = vi.hoisted(() => {
   const mockState: {
     emitRows: ((rows: unknown[]) => void) | null;
     emitStatus: ((s: string) => void) | null;
-  } = { emitRows: null, emitStatus: null };
+    emitError: ((error: string, namespace: string) => void) | null;
+  } = { emitRows: null, emitStatus: null, emitError: null };
   const stop = vi.fn();
-  const watchResource = vi.fn(
+  const watchNamespaces = vi.fn(
     async (
       _context: string,
-      _namespace: string,
+      _selection: string[],
       _kind: string,
       onRows: (rows: unknown[]) => void,
       onStatus: (s: string) => void,
+      onError: (error: string, namespace: string) => void,
     ) => {
       mockState.emitRows = onRows;
       mockState.emitStatus = onStatus;
+      mockState.emitError = onError;
       return { stop };
     },
   );
-  return { stop, watchResource, mockState };
+  return { stop, watchNamespaces, mockState };
 });
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
-  watchResource,
+  watchNamespaces,
 }));
 
 import { useResourceList, resetListCache } from "./resourceList";
-import { rowKey, type KindDescriptor, type ListRow } from "./kinds/types";
+import { rowKey, type KindDescriptor, type ListRow, type RowKey } from "./kinds/types";
 
 // Typed via an explicit annotation, not `as const`: an `as const` object
 // literal narrows its array properties to `readonly`, which then can't
@@ -47,10 +50,11 @@ describe("useResourceList", () => {
     vi.clearAllMocks();
     mockState.emitRows = null;
     mockState.emitStatus = null;
+    mockState.emitError = null;
   });
 
   it("starts on loading and settles on the first snapshot", async () => {
-    const { result } = renderHook(() => useResourceList("prod", "pods", watched, "default", []));
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["default"], []));
     expect(result.current.status).toBe("loading");
     await waitFor(() => expect(mockState.emitRows).not.toBeNull());
     act(() => mockState.emitRows!([{ name: "a" }]));
@@ -59,22 +63,22 @@ describe("useResourceList", () => {
   });
 
   it("settles on error, not stuck loading, when the watch fails to start", async () => {
-    watchResource.mockRejectedValueOnce(new Error("rbac denied"));
-    const { result } = renderHook(() => useResourceList("prod", "pods", watched, "default", []));
+    watchNamespaces.mockRejectedValueOnce(new Error("rbac denied"));
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["default"], []));
     expect(result.current.status).toBe("loading");
     await waitFor(() => expect(result.current.status).toBe("error"));
     expect(result.current.error).toBe("rbac denied");
   });
 
   it("says empty, not ready, when the kind has none — the states differ to a reader", async () => {
-    const { result } = renderHook(() => useResourceList("prod", "pods", watched, "default", []));
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["default"], []));
     await waitFor(() => expect(mockState.emitRows).not.toBeNull());
     act(() => mockState.emitRows!([]));
     expect(result.current.status).toBe("empty");
   });
 
   it("reports a reconnecting watch without emptying the table", async () => {
-    const { result } = renderHook(() => useResourceList("prod", "pods", watched, "default", []));
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["default"], []));
     await waitFor(() => expect(mockState.emitRows).not.toBeNull());
     act(() => mockState.emitRows!([{ name: "a" }]));
     act(() => mockState.emitStatus!("reconnecting"));
@@ -83,17 +87,17 @@ describe("useResourceList", () => {
   });
 
   it("stops the old watch before the new view starts one", async () => {
-    const { rerender } = renderHook((p: { ns: string }) => useResourceList("prod", "pods", watched, p.ns, []), {
+    const { rerender } = renderHook((p: { ns: string }) => useResourceList("prod", "pods", watched, [p.ns], []), {
       initialProps: { ns: "default" },
     });
-    await waitFor(() => expect(watchResource).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(watchNamespaces).toHaveBeenCalledTimes(1));
     rerender({ ns: "kube-system" });
     await waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
-    expect(watchResource).toHaveBeenCalledTimes(2);
+    expect(watchNamespaces).toHaveBeenCalledTimes(2);
   });
 
   it("drops a snapshot that arrives after the view changed", async () => {
-    const { result, rerender } = renderHook((p: { ns: string }) => useResourceList("prod", "pods", watched, p.ns, []), {
+    const { result, rerender } = renderHook((p: { ns: string }) => useResourceList("prod", "pods", watched, [p.ns], []), {
       initialProps: { ns: "default" },
     });
     await waitFor(() => expect(mockState.emitRows).not.toBeNull());
@@ -104,11 +108,11 @@ describe("useResourceList", () => {
   });
 
   it("paints the cached rows on a remount instead of flashing empty", async () => {
-    const first = renderHook(() => useResourceList("prod", "pods", watched, "default", []));
+    const first = renderHook(() => useResourceList("prod", "pods", watched, ["default"], []));
     await waitFor(() => expect(mockState.emitRows).not.toBeNull());
     act(() => mockState.emitRows!([{ name: "a" }]));
     first.unmount();
-    const second = renderHook(() => useResourceList("prod", "pods", watched, "default", []));
+    const second = renderHook(() => useResourceList("prod", "pods", watched, ["default"], []));
     expect(second.result.current.rows).toHaveLength(1);
   });
 
@@ -117,7 +121,7 @@ describe("useResourceList", () => {
       .mockResolvedValueOnce({ rows: [{ name: "a" }] })
       .mockResolvedValueOnce({ error: "connection refused" });
     const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
-    const { result } = renderHook(() => useResourceList("prod", "leases", polled, "default", []));
+    const { result } = renderHook(() => useResourceList("prod", "leases", polled, ["default"], []));
     await waitFor(() => expect(result.current.rows).toHaveLength(1));
     act(() => result.current.reload());
     await waitFor(() => expect(result.current.error).toBe("connection refused"));
@@ -129,7 +133,7 @@ describe("useResourceList", () => {
       .mockResolvedValueOnce({ rows: [{ name: "a" }], truncated: true })
       .mockResolvedValueOnce({ error: "connection refused" });
     const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
-    const { result } = renderHook(() => useResourceList("prod", "widgets", polled, "default", []));
+    const { result } = renderHook(() => useResourceList("prod", "widgets", polled, ["default"], []));
     await waitFor(() => expect(result.current.truncated).toBe(true));
     expect(result.current.rows).toHaveLength(1);
     act(() => result.current.reload());
@@ -144,7 +148,7 @@ describe("useResourceList", () => {
     // and refreshes (an existing key, moved to most-recently-written) the
     // same way, since cacheSet always re-inserts on write.
     const seed = async (ctx: string, name: string) => {
-      const { unmount } = renderHook(() => useResourceList(ctx, "pods", watched, "default", []));
+      const { unmount } = renderHook(() => useResourceList(ctx, "pods", watched, ["default"], []));
       await waitFor(() => expect(mockState.emitRows).not.toBeNull());
       act(() => mockState.emitRows!([{ name }]));
       unmount();
@@ -159,10 +163,10 @@ describe("useResourceList", () => {
     // entry (ctx1, not the just-refreshed ctx0) must be the one evicted.
     await seed("ctx40", "row40");
 
-    const refreshed = renderHook(() => useResourceList("ctx0", "pods", watched, "default", []));
+    const refreshed = renderHook(() => useResourceList("ctx0", "pods", watched, ["default"], []));
     expect(refreshed.result.current.rows).toHaveLength(1);
 
-    const evicted = renderHook(() => useResourceList("ctx1", "pods", watched, "default", []));
+    const evicted = renderHook(() => useResourceList("ctx1", "pods", watched, ["default"], []));
     expect(evicted.result.current.status).toBe("loading");
     expect(evicted.result.current.rows).toHaveLength(0);
   }, 20000);
@@ -170,7 +174,7 @@ describe("useResourceList", () => {
   it("merges metrics into the rows by their identity, without waiting for them", async () => {
     const enrich = vi.fn().mockResolvedValue(new Map([[rowKey({ name: "a", namespace: "shop" }), { cpu: 12 }]]));
     const d = { ...watched, enrich, enrichMs: 10000 } as const;
-    const { result, rerender } = renderHook(() => useResourceList("prod", "pods", d, "shop", []));
+    const { result, rerender } = renderHook(() => useResourceList("prod", "pods", d, ["shop"], []));
     await waitFor(() => expect(mockState.emitRows).not.toBeNull());
     act(() => mockState.emitRows!([{ name: "a", namespace: "shop" }, { name: "b", namespace: "shop" }]));
     expect(result.current.rows[0]).toMatchObject({ name: "a" }); // rows are on screen at once
@@ -197,7 +201,7 @@ describe("useResourceList", () => {
       ]),
     );
     const d = { ...watched, enrich, enrichMs: 10000 } as const;
-    const { result } = renderHook(() => useResourceList("prod", "pods", d, "", []));
+    const { result } = renderHook(() => useResourceList("prod", "pods", d, [], []));
     await waitFor(() => expect(mockState.emitRows).not.toBeNull());
     act(() =>
       mockState.emitRows!([
@@ -212,11 +216,262 @@ describe("useResourceList", () => {
   it("lists the pods anyway when there is no metrics-server", async () => {
     const enrich = vi.fn().mockRejectedValue(new Error("metrics API not available"));
     const d = { ...watched, enrich, enrichMs: 10000 } as const;
-    const { result } = renderHook(() => useResourceList("prod", "pods", d, "default", []));
+    const { result } = renderHook(() => useResourceList("prod", "pods", d, ["default"], []));
     await waitFor(() => expect(mockState.emitRows).not.toBeNull());
     act(() => mockState.emitRows!([{ name: "a" }]));
     await waitFor(() => expect(result.current.status).toBe("ready"));
     expect(result.current.error).toBeUndefined();
+  });
+});
+
+/**
+ * Several selected namespaces are listed one namespace at a time (#688): a
+ * credential scoped to a handful of namespaces is refused the cluster-scope
+ * list outright, and that refusal used to be the whole screen.
+ */
+describe("useResourceList — several namespaces", () => {
+  beforeEach(() => {
+    resetListCache();
+    vi.clearAllMocks();
+    mockState.emitRows = null;
+    mockState.emitStatus = null;
+    mockState.emitError = null;
+  });
+
+  it("hands the whole selection to the watch, not a cluster scope", async () => {
+    renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(watchNamespaces).toHaveBeenCalledTimes(1));
+    expect(watchNamespaces.mock.calls[0][1]).toEqual(["team-a", "team-b"]);
+  });
+
+  it("keeps the rows that answered and names the namespace that did not", async () => {
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(mockState.emitError).not.toBeNull());
+    act(() => mockState.emitError!('pods is forbidden in the namespace "team-b"', "team-b"));
+    act(() => mockState.emitRows!([{ name: "web", namespace: "team-a" }]));
+    expect(result.current.status).toBe("ready");
+    expect(result.current.rows).toHaveLength(1);
+    expect(result.current.namespaceFailures).toEqual([
+      { namespace: "team-b", error: 'pods is forbidden in the namespace "team-b"' },
+    ]);
+    // Still an error, so a screen that knows nothing of namespaces is not silent.
+    expect(result.current.error).toBe('pods is forbidden in the namespace "team-b"');
+  });
+
+  it("stays loading while one namespace has refused and another has not answered", async () => {
+    // A fast refusal must not flash the whole list as failed before the
+    // namespaces that can answer have had the chance to.
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(mockState.emitError).not.toBeNull());
+    act(() => mockState.emitError!("pods is forbidden", "team-b"));
+    expect(result.current.status).toBe("loading");
+  });
+
+  it("is an error naming the refused namespace when the one that answered is empty", async () => {
+    // Not "empty": team-b was never listed, so nobody knows it has no pods.
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(mockState.emitError).not.toBeNull());
+    act(() => mockState.emitError!("pods is forbidden", "team-b"));
+    act(() => mockState.emitRows!([]));
+    expect(result.current.status).toBe("error");
+    expect(result.current.namespaceFailures).toEqual([{ namespace: "team-b", error: "pods is forbidden" }]);
+  });
+
+  it("is an error once every namespace has refused", async () => {
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(mockState.emitError).not.toBeNull());
+    act(() => mockState.emitError!("pods is forbidden", "team-b"));
+    act(() => mockState.emitError!("pods is forbidden", "team-a"));
+    expect(result.current.status).toBe("error");
+  });
+
+  it("reports no namespace failures for a one-namespace view", async () => {
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a"], []));
+    await waitFor(() => expect(mockState.emitError).not.toBeNull());
+    act(() => mockState.emitError!("pods is forbidden", "team-a"));
+    expect(result.current.status).toBe("error");
+    expect(result.current.namespaceFailures).toEqual([]);
+  });
+
+  it("never serves the all-namespaces cache to a view of several", async () => {
+    const all = renderHook(() => useResourceList("prod", "pods", watched, [], []));
+    await waitFor(() => expect(mockState.emitRows).not.toBeNull());
+    act(() => mockState.emitRows!([{ name: "elsewhere", namespace: "team-z" }]));
+    all.unmount();
+    const several = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    expect(several.result.current.status).toBe("loading");
+    expect(several.result.current.rows).toHaveLength(0);
+  });
+
+  it("polls each namespace, merges what answered, and names what did not", async () => {
+    const load = vi.fn(async (_c: string, ns: string) =>
+      ns === "team-b" ? { error: "leases is forbidden" } : { rows: [{ name: "lock", namespace: ns }] },
+    );
+    const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+    const { result } = renderHook(() => useResourceList("prod", "leases", polled, ["team-a", "team-b"], []));
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(load.mock.calls.map((c) => c[1]).sort()).toEqual(["team-a", "team-b"]);
+    expect(result.current.rows).toEqual([{ name: "lock", namespace: "team-a" }]);
+    expect(result.current.namespaceFailures).toEqual([{ namespace: "team-b", error: "leases is forbidden" }]);
+  });
+
+  it("calls the kept rows stale once every namespace's poll has failed", async () => {
+    let fail = false;
+    const load = vi.fn(async (_c: string, ns: string) =>
+      fail ? { error: "connection refused" } : { rows: [{ name: "lock", namespace: ns }] },
+    );
+    const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+    const { result } = renderHook(() => useResourceList("prod", "leases", polled, ["team-a", "team-b"], []));
+    await waitFor(() => expect(result.current.rows).toHaveLength(2));
+    expect(result.current.stale).toBe(false);
+
+    fail = true;
+    act(() => result.current.reload());
+    await waitFor(() => expect(result.current.error).toBe("connection refused"));
+    // The last good rows stay, and they are no longer being refreshed.
+    expect(result.current.rows).toHaveLength(2);
+    expect(result.current.stale).toBe(true);
+  });
+
+  it("calls cached rows stale when the watch could not even start", async () => {
+    const first = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(mockState.emitRows).not.toBeNull());
+    act(() => mockState.emitRows!([{ name: "a", namespace: "team-a" }]));
+    first.unmount();
+    watchNamespaces.mockRejectedValueOnce(new Error("backend unavailable"));
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(result.current.error).toBe("backend unavailable"));
+    expect(result.current.rows).toHaveLength(1);
+    expect(result.current.stale).toBe(true);
+  });
+
+  it("calls cached rows stale when one namespace failed and the watch then could not start", async () => {
+    const first = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(mockState.emitRows).not.toBeNull());
+    act(() => mockState.emitRows!([{ name: "a", namespace: "team-a" }]));
+    first.unmount();
+    // team-b's watch refuses at once; team-a's then fails to start, so
+    // `watchNamespaces` stops everything and rejects. Nothing is refreshing.
+    watchNamespaces.mockImplementationOnce(
+      async (_c: string, _s: string[], _k: string, _r: unknown, _st: unknown, onError: (e: string, ns: string) => void) => {
+        onError("pods is forbidden", "team-b");
+        throw new Error("backend unavailable");
+      },
+    );
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a", "team-b"], []));
+    await waitFor(() => expect(result.current.error).toBe("backend unavailable"));
+    expect(result.current.rows).toHaveLength(1);
+    expect(result.current.stale).toBe(true);
+  });
+
+  it("does not call a partial failure stale: the rows that answered are live", async () => {
+    const load = vi.fn(async (_c: string, ns: string) =>
+      ns === "team-b" ? { error: "leases is forbidden" } : { rows: [{ name: "lock", namespace: ns }] },
+    );
+    const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+    const { result } = renderHook(() => useResourceList("prod", "leases", polled, ["team-a", "team-b"], []));
+    await waitFor(() => expect(result.current.status).toBe("ready"));
+    expect(result.current.stale).toBe(false);
+  });
+
+  it("calls a one-namespace list stale when it failed with rows on screen", async () => {
+    const { result } = renderHook(() => useResourceList("prod", "pods", watched, ["team-a"], []));
+    await waitFor(() => expect(mockState.emitRows).not.toBeNull());
+    act(() => mockState.emitRows!([{ name: "a", namespace: "team-a" }]));
+    act(() => mockState.emitError!("watch closed", "team-a"));
+    expect(result.current.stale).toBe(true);
+  });
+
+  it("never lets a slow poll overwrite the newer one that finished first", async () => {
+    // A poll waits on its slowest namespace; the next one starts on the
+    // interval regardless. If the newer poll answers first, the older must
+    // not land afterwards and put its older rows back.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let poll = 0;
+      let releaseSlow!: () => void;
+      const load = vi.fn((_c: string, ns: string) => {
+        if (ns === "team-a") poll++;
+        const n = poll;
+        const answer = { rows: [{ name: `v${n}`, namespace: ns }] };
+        if (n === 1 && ns === "team-b") {
+          return new Promise<typeof answer>((resolve) => {
+            releaseSlow = () => resolve(answer);
+          });
+        }
+        return Promise.resolve(answer);
+      });
+      const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+      const { result } = renderHook(() => useResourceList("prod", "leases", polled, ["team-a", "team-b"], []));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      await waitFor(() => expect(result.current.rows.map((r) => r.name)).toEqual(["v2", "v2"]));
+
+      await act(async () => {
+        releaseSlow();
+      });
+      expect(result.current.rows.map((r) => r.name)).toEqual(["v2", "v2"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still commits a slow poll when no newer one has answered yet", async () => {
+    // A namespace slower than the interval must not starve the list: every
+    // poll would be overtaken by the next one's START, never by an answer.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const releases: Array<() => void> = [];
+      let poll = 0;
+      const load = vi.fn((_c: string, ns: string) => {
+        if (ns === "team-a") poll++;
+        const answer = { rows: [{ name: `v${poll}`, namespace: ns }] };
+        if (ns === "team-a") return Promise.resolve(answer);
+        return new Promise<typeof answer>((resolve) => releases.push(() => resolve(answer)));
+      });
+      const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+      const { result } = renderHook(() => useResourceList("prod", "leases", polled, ["team-a", "team-b"], []));
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      // Poll 2 has started and not answered; poll 1 answers now.
+      await act(async () => {
+        releases[0]();
+      });
+      expect(result.current.rows.map((r) => r.name)).toEqual(["v1", "v1"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("marks the merged poll truncated when any one namespace's list was", async () => {
+    const load = vi.fn(async (_c: string, ns: string) => ({ rows: [{ name: "x", namespace: ns }], truncated: ns === "team-b" }));
+    const polled: KindDescriptor<ListRow> = { ...watched, source: "poll", load };
+    const { result } = renderHook(() => useResourceList("prod", "widgets", polled, ["team-a", "team-b"], []));
+    await waitFor(() => expect(result.current.rows).toHaveLength(2));
+    expect(result.current.truncated).toBe(true);
+  });
+
+  it("enriches each namespace and merges the readings, one failure costing only its own", async () => {
+    const enrich = vi.fn(async (_c: string, ns: string) => {
+      if (ns === "team-b") throw new Error("metrics forbidden");
+      return new Map<RowKey, Partial<ListRow>>([[rowKey({ name: "api-0", namespace: ns }), { cpu: 10 } as Partial<ListRow>]]);
+    });
+    const d: KindDescriptor<ListRow> = { ...watched, enrich, enrichMs: 10000 };
+    const { result } = renderHook(() => useResourceList("prod", "pods", d, ["team-a", "team-b"], []));
+    await waitFor(() => expect(mockState.emitRows).not.toBeNull());
+    act(() =>
+      mockState.emitRows!([
+        { name: "api-0", namespace: "team-a" },
+        { name: "api-0", namespace: "team-b" },
+      ]),
+    );
+    await waitFor(() => expect(result.current.rows[0]).toMatchObject({ namespace: "team-a", cpu: 10 }));
+    expect(enrich.mock.calls.map((c) => c[1]).sort()).toEqual(["team-a", "team-b"]);
+    expect(result.current.rows[1]).not.toHaveProperty("cpu");
   });
 });
 
@@ -242,12 +497,13 @@ describe("useResourceList — the render the view changes", () => {
     vi.clearAllMocks();
     mockState.emitRows = null;
     mockState.emitStatus = null;
+    mockState.emitError = null;
   });
 
   it("reports loading, never the previous view's rows, on that render", async () => {
     const seen: Array<{ asked: string; status: string; rows: ListRow[] }> = [];
     function Probe({ ns }: { ns: string }) {
-      const list = useResourceList("prod", "pods", watched, ns, []);
+      const list = useResourceList("prod", "pods", watched, [ns], []);
       seen.push({ asked: ns, status: list.status, rows: list.rows });
       return null;
     }
@@ -278,7 +534,7 @@ describe("useResourceList — the render the view changes", () => {
 
     const seen: Array<{ asked: string; rows: ListRow[] }> = [];
     function Probe({ ns }: { ns: string }) {
-      const list = useResourceList("prod", "pods", d, ns, []);
+      const list = useResourceList("prod", "pods", d, [ns], []);
       seen.push({ asked: ns, rows: list.rows });
       return null;
     }
@@ -302,7 +558,7 @@ describe("useResourceList — the render the view changes", () => {
     const seen: string[] = [];
     let reload!: () => void;
     function Probe() {
-      const list = useResourceList("prod", "leases", polled, "default", []);
+      const list = useResourceList("prod", "leases", polled, ["default"], []);
       reload = list.reload;
       seen.push(list.status);
       return null;

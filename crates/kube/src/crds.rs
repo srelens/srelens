@@ -479,6 +479,24 @@ pub async fn custom_resource_serves(
     version: &str,
     plural: &str,
 ) -> Result<bool, String> {
+    Ok(
+        custom_resource_first_served(client, group, &[version.to_owned()], plural)
+            .await?
+            .is_some(),
+    )
+}
+
+/// The first of `versions`, in their order, that a CustomResourceDefinition named
+/// `{plural}.{group}` serves for that group and plural: how an app reader that accepts
+/// several versions picks one on this cluster (#547). One lookup answers the whole list.
+/// `Ok(None)` means only that the API server answered and no such CRD serves any of them;
+/// a failed lookup is an error, never an absence.
+pub async fn custom_resource_first_served(
+    client: kube::Client,
+    group: &str,
+    versions: &[String],
+    plural: &str,
+) -> Result<Option<String>, String> {
     let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
         "apiextensions.k8s.io",
         "v1",
@@ -489,7 +507,20 @@ pub async fn custom_resource_serves(
         .await
         .map_err(|_| "CustomResourceDefinition lookup timed out".to_string())?
         .map_err(|e| e.to_string())?;
-    Ok(found.is_some_and(|crd| crd_serves(&crd.data["spec"], group, version, plural)))
+    Ok(found.and_then(|crd| first_served(&crd.data["spec"], group, versions, plural)))
+}
+
+/// The first of `versions` a CRD `spec` serves for this group and plural.
+fn first_served(
+    spec: &serde_json::Value,
+    group: &str,
+    versions: &[String],
+    plural: &str,
+) -> Option<String> {
+    versions
+        .iter()
+        .find(|version| crd_serves(spec, group, version, plural))
+        .cloned()
 }
 /// Whether a CRD `spec` declares this group and plural and serves this version.
 fn crd_serves(spec: &serde_json::Value, group: &str, version: &str, plural: &str) -> bool {
@@ -1441,6 +1472,85 @@ mod tests {
             custom_resource_serves(client, "argoproj.io", "v1alpha1", "applications")
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn one_crd_lookup_answers_the_first_listed_version_it_serves() {
+        let listed = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let (client, paths) = answering(200);
+        assert_eq!(
+            custom_resource_first_served(
+                client,
+                "argoproj.io",
+                &listed(&["v1", "v1beta1", "v1alpha1"]),
+                "applications"
+            )
+            .await,
+            Ok(Some("v1alpha1".to_owned()))
+        );
+        // The whole list is answered from one lookup of the CRD.
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["/apis/apiextensions.k8s.io/v1/customresourcedefinitions/applications.argoproj.io"]
+        );
+        // Listed but not served — v1beta1 is declared unserved — is no answer.
+        let (client, _) = answering(200);
+        assert_eq!(
+            custom_resource_first_served(
+                client,
+                "argoproj.io",
+                &listed(&["v1", "v1beta1"]),
+                "applications"
+            )
+            .await,
+            Ok(None)
+        );
+        let (client, _) = answering(404);
+        assert_eq!(
+            custom_resource_first_served(
+                client,
+                "argoproj.io",
+                &listed(&["v1alpha1"]),
+                "applications"
+            )
+            .await,
+            Ok(None)
+        );
+        // Forbidden is a failed lookup, never "serves none of them".
+        let (client, _) = answering(403);
+        assert!(custom_resource_first_served(
+            client,
+            "argoproj.io",
+            &listed(&["v1alpha1"]),
+            "applications"
+        )
+        .await
+        .is_err());
+    }
+
+    #[test]
+    fn the_first_served_version_follows_the_listed_order_not_the_crds() {
+        let spec = serde_json::json!({"group":"helm.toolkit.fluxcd.io","names":{"plural":"helmreleases"},
+            "versions":[{"name":"v2beta1","served":true},{"name":"v2beta2","served":true},
+                {"name":"v2","served":true}]});
+        let first = |names: &[&str]| {
+            let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            first_served(&spec, "helm.toolkit.fluxcd.io", &names, "helmreleases")
+        };
+        assert_eq!(first(&["v2", "v2beta2"]).as_deref(), Some("v2"));
+        assert_eq!(first(&["v2beta2", "v2"]).as_deref(), Some("v2beta2"));
+        assert_eq!(first(&["v3", "v2beta2"]).as_deref(), Some("v2beta2"));
+        assert_eq!(first(&["v3"]), None);
+        assert_eq!(first(&[]), None);
+        assert_eq!(
+            first_served(
+                &spec,
+                "helm.toolkit.fluxcd.io",
+                &["v2".into()],
+                "kustomizations"
+            ),
+            None
         );
     }
 

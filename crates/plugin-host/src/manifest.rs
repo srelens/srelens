@@ -3,13 +3,15 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use srelens_capability::status::{self, StatusRule};
-use srelens_capability::{Predicate, MAX_PREDICATES};
-use std::collections::BTreeSet;
+use srelens_capability::{Predicate, ReferenceFormat, MAX_PREDICATES};
+use std::collections::{BTreeMap, BTreeSet};
 
 mod cards;
 mod settings;
+mod versions;
 pub use cards::*;
 pub use settings::*;
+pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
 
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
 /// its `srelensApiVersion` range matches any of them. How versions are added and retired
@@ -183,6 +185,9 @@ fn field_present(value: &Value, path: &str) -> bool {
 
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 
+/// Most capability bindings one manifest may declare.
+pub const MAX_CAPABILITIES: usize = 32;
+
 /// Most printer columns a binding may declare (#609). Refused at
 /// `capabilities[i].arguments.printerColumns` with `EXTENSION_INVALID_VALUE`.
 pub const MAX_PRINTER_COLUMNS: usize = 32;
@@ -310,6 +315,21 @@ pub struct Binding {
     pub name: String,
     pub title: String,
     pub target: String,
+    /// A `k8s.listCustomResource` reader's API versions, most preferred first, instead of
+    /// one fixed `arguments.version` (#547). On each cluster the host reads the first one
+    /// the CustomResourceDefinition serves, and refuses the read when it serves none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<String>,
+    /// For a listed version whose objects keep a field elsewhere: each JSONPath this
+    /// manifest reads the binding's objects through, mapped to the path to read at that
+    /// version instead. Applied everywhere the objects are read: printer columns, status
+    /// resolvers, declared actions, joined columns, badges and panels, and cards.
+    #[serde(
+        default,
+        rename = "jsonPathOverrides",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub json_path_overrides: BTreeMap<String, BTreeMap<String, String>>,
     pub arguments: Map<String, Value>,
     pub inputs: Vec<String>,
 }
@@ -358,6 +378,14 @@ pub struct Contributions {
     /// or run one of its declared actions on the resource the reader has open.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<PaletteCommand>,
+    /// Relationships from one kind to another an app knows how to find (#545):
+    /// the Inspector's "Related" links, and the edges a topology can draw.
+    #[serde(
+        default,
+        rename = "resourceLinks",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub resource_links: Vec<ResourceLink>,
 }
 
 /// Most palette commands one manifest may declare.
@@ -387,6 +415,82 @@ pub enum CommandTarget {
     Page(String),
     /// The `name` of a declared action in `actions`.
     Action(String),
+}
+
+/// Most resource links one manifest may declare.
+pub const MAX_RESOURCE_LINKS: usize = 32;
+
+/// A relationship from a resource of kind `from` to resources of kind `to`,
+/// found by reading the `from` resource's own metadata (#545).
+///
+/// The `match` selectors are a join's (`joins[].match`), read the other way
+/// round: a join indexes the *listed* resources by a key that names the row,
+/// while a link reads the key on the resource being inspected, and the key
+/// names the target. The target is then looked up by name in the list of the
+/// declared reader for `to`, through the same index a join uses.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceLink {
+    pub id: String,
+    /// The qualified kind of the resource the link is read from, e.g. `apps/Deployment`.
+    pub from: String,
+    /// The qualified kind of the target. A declared `k8s.listCustomResource`
+    /// reader must list it: that is how the host knows the target exists.
+    pub to: String,
+    pub relation: LinkRelation,
+    #[serde(rename = "match")]
+    pub match_by: LinkMatch,
+}
+
+/// What the `from` resource is to the `to` resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum LinkRelation {
+    OwnedBy,
+    ManagedBy,
+    ExposedBy,
+    References,
+}
+
+/// Where on the `from` resource the target's name is written. Exactly one of
+/// `label`, `ownerReference`, `annotation` and `name`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LinkMatch {
+    /// The label whose value is the target's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// With `label`: the label whose value is the target's namespace. Without
+    /// it the target is in the `from` resource's namespace.
+    #[serde(
+        default,
+        rename = "namespaceLabel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub namespace_label: Option<String>,
+    /// The `from` resource's owner references of the `to` kind.
+    #[serde(default, rename = "ownerReference", skip_serializing_if = "is_false")]
+    pub owner_reference: bool,
+    /// The annotation whose value is the target's name, or, with `parse`, a
+    /// reference in a host-known format that names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<String>,
+    /// With `annotation`: the format the value is written in. The host
+    /// accepts a reference only when it names the `from` resource itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse: Option<ReferenceFormat>,
+    /// With `parse: "argocd-tracking-id"`: the namespace Argo CD runs in,
+    /// where an application written as a bare name lives. Without it a bare
+    /// name is shown unverified, never searched for across namespaces.
+    #[serde(
+        default,
+        rename = "defaultNamespace",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default_namespace: Option<String>,
+    /// The target has the `from` resource's own name and namespace.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub name: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -638,6 +742,18 @@ fn predicate_problems(
     }
 }
 
+/// A Kubernetes namespace name: an RFC 1123 label of 1–63 lowercase letters,
+/// digits and `-`, starting and ending with a letter or digit.
+pub fn namespace_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        && !value.starts_with('-')
+        && !value.ends_with('-')
+}
+
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -678,6 +794,22 @@ fn unique<'a>(
     }
     seen
 }
+/// Reports `value` at `at` unless it is a qualified kind, `group/Kind`.
+fn qualified_kind(problems: &mut ValidationErrors, at: String, value: &str) {
+    match value.split_once('/') {
+        None => problems.push(
+            Code::InvalidKind,
+            at,
+            format!("Qualify \"{value}\" with its API group, for example apps/Deployment, or /Pod for the core group"),
+        ),
+        Some((group, kind))
+            if !identifier(kind) || (!group.is_empty() && !group.split('.').all(identifier)) =>
+        {
+            problems.push(Code::InvalidKind, at, format!("\"{value}\" is not a qualified Kubernetes kind"))
+        }
+        Some(_) => {}
+    }
+}
 fn kinds(problems: &mut ValidationErrors, path: &str, values: &[String]) {
     if values.is_empty() || values.len() > 32 {
         problems.push(
@@ -687,20 +819,7 @@ fn kinds(problems: &mut ValidationErrors, path: &str, values: &[String]) {
         );
     }
     for (index, value) in values.iter().enumerate() {
-        let at = format!("{path}[{index}]");
-        match value.split_once('/') {
-            None => problems.push(
-                Code::InvalidKind,
-                at,
-                format!("Qualify \"{value}\" with its API group, for example apps/Deployment, or /Pod for the core group"),
-            ),
-            Some((group, kind))
-                if !identifier(kind) || (!group.is_empty() && !group.split('.').all(identifier)) =>
-            {
-                problems.push(Code::InvalidKind, at, format!("\"{value}\" is not a qualified Kubernetes kind"))
-            }
-            Some(_) => {}
-        }
+        qualified_kind(problems, format!("{path}[{index}]"), value);
     }
     unique(
         problems,
@@ -936,6 +1055,15 @@ impl Manifest {
             .iter()
             .find(|binding| binding.name == action.resource)
             .ok_or_else(|| format!("\"{}\" is not a declared capability", action.resource))?;
+        // Which version the action writes is chosen per cluster (#547); until then there
+        // is no version to write, and no binding.
+        if !reader.versions.is_empty() {
+            return Err(format!(
+                "\"{}\" reads one of {}; an action on it is bound once a cluster resolves one",
+                action.resource,
+                reader.versions.join(", ")
+            ));
+        }
         let mut arguments = Map::new();
         let builtin = builtin_reader_identity(&reader.target);
         if let Some(identity) = &builtin {
@@ -983,6 +1111,8 @@ impl Manifest {
             name: action.name.clone(),
             title: action.title.clone(),
             target: action.target.clone(),
+            versions: Vec::new(),
+            json_path_overrides: BTreeMap::new(),
             arguments,
             inputs: ACTION_INPUTS.iter().map(|i| (*i).to_owned()).collect(),
         })
@@ -990,6 +1120,17 @@ impl Manifest {
 
     /// Checks the manifest's rules, reporting every violation with the path at fault.
     pub fn validate(&self) -> Result<(), ValidationErrors> {
+        let mut problems = self.rule_problems();
+        self.version_problems(&mut problems);
+        self.override_path_problems(&mut problems);
+        problems.into_result()
+    }
+
+    /// Every rule violation except those about a binding's `versions` and
+    /// `jsonPathOverrides` (#547). Those are checked once, by `validate`; an override is
+    /// checked by running these rules on the manifest read at its version, which must
+    /// not check every other binding's overrides again for each one.
+    fn rule_problems(&self) -> ValidationErrors {
         const LABEL: &str =
             "Must be 1–120 characters with no control characters and no bidirectional or invisible format characters";
         const IDENTIFIER: &str = "Must be 1–64 letters, digits and -";
@@ -1030,11 +1171,11 @@ impl Manifest {
                 }
             }
         }
-        if self.capabilities.is_empty() || self.capabilities.len() > 32 {
+        if self.capabilities.is_empty() || self.capabilities.len() > MAX_CAPABILITIES {
             problems.push(
                 Code::InvalidValue,
                 "capabilities",
-                "Declare 1–32 capabilities",
+                format!("Declare 1–{MAX_CAPABILITIES} capabilities"),
             );
         }
         let names = unique(
@@ -1571,7 +1712,8 @@ impl Manifest {
         cards::card_problems(self, &mut problems);
         settings::setting_problems(self, &mut problems);
         self.command_problems(&mut problems);
-        problems.into_result()
+        self.link_problems(&mut problems);
+        problems
     }
 
     /// `commands` (#544).
@@ -1676,6 +1818,145 @@ impl Manifest {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// `resourceLinks` (#545).
+    fn link_problems(&self, problems: &mut ValidationErrors) {
+        const IDENTIFIER: &str = "Must be 1–64 letters, digits and -";
+        let links = &self.contributions.resource_links;
+        if links.len() > MAX_RESOURCE_LINKS {
+            problems.push(
+                Code::InvalidValue,
+                "contributions.resourceLinks",
+                format!("Declare at most {MAX_RESOURCE_LINKS} resource links"),
+            );
+            return;
+        }
+        let readable: BTreeSet<String> = self
+            .capabilities
+            .iter()
+            .filter_map(Self::reader_kind)
+            .collect();
+        unique(
+            problems,
+            links.iter().enumerate().map(|(index, link)| {
+                (
+                    format!("contributions.resourceLinks[{index}].id"),
+                    link.id.as_str(),
+                )
+            }),
+        );
+        for (index, link) in links.iter().enumerate() {
+            let at = format!("contributions.resourceLinks[{index}]");
+            if !identifier(&link.id) {
+                problems.push(Code::InvalidValue, format!("{at}.id"), IDENTIFIER);
+            }
+            let before = problems.0.len();
+            qualified_kind(problems, format!("{at}.from"), &link.from);
+            qualified_kind(problems, format!("{at}.to"), &link.to);
+            let kinds_ok = problems.0.len() == before;
+            if kinds_ok && !readable.contains(&link.to) {
+                problems.push(
+                    Code::UnresolvedCapability,
+                    format!("{at}.to"),
+                    format!(
+                        "No declared k8s.listCustomResource reader lists {}",
+                        link.to
+                    ),
+                );
+            }
+            let matching = &link.match_by;
+            let selectors = usize::from(matching.label.is_some())
+                + usize::from(matching.owner_reference)
+                + usize::from(matching.annotation.is_some())
+                + usize::from(matching.name);
+            if selectors != 1 {
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.match"),
+                    "Choose exactly one of label, ownerReference, annotation or name",
+                );
+            }
+            if matching.namespace_label.is_some() && matching.label.is_none() {
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.match.namespaceLabel"),
+                    "namespaceLabel requires label",
+                );
+            }
+            if matching.parse.is_some() && matching.annotation.is_none() {
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.match.parse"),
+                    "parse requires annotation",
+                );
+            }
+            // The parser yields an Argo CD Application's name, and nothing
+            // else's: toward another kind it would name a stranger.
+            if kinds_ok
+                && matching.parse == Some(ReferenceFormat::ArgocdTrackingId)
+                && link.to != "argoproj.io/Application"
+            {
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.match.parse"),
+                    "An argocd-tracking-id names an Argo CD Application; `to` must be argoproj.io/Application",
+                );
+            }
+            if let Some(namespace) = &matching.default_namespace {
+                let path = format!("{at}.match.defaultNamespace");
+                if matching.annotation.is_none()
+                    || matching.parse != Some(ReferenceFormat::ArgocdTrackingId)
+                {
+                    problems.push(
+                        Code::InvalidBinding,
+                        path,
+                        "defaultNamespace places a bare Argo CD application name; it requires annotation with parse: \"argocd-tracking-id\"",
+                    );
+                } else if !namespace_name(namespace) {
+                    problems.push(
+                        Code::InvalidValue,
+                        path,
+                        "defaultNamespace must be a namespace name: 1–63 lowercase letters, digits and -, starting and ending with a letter or digit",
+                    );
+                }
+            }
+            for (field, key) in [
+                ("label", &matching.label),
+                ("namespaceLabel", &matching.namespace_label),
+                ("annotation", &matching.annotation),
+            ] {
+                if key.as_ref().is_some_and(|key| {
+                    key.is_empty()
+                        || key.len() > 253
+                        || key
+                            .chars()
+                            .any(|c| c.is_control() || is_format_character(c))
+                }) {
+                    problems.push(
+                        Code::InvalidValue,
+                        format!("{at}.match.{field}"),
+                        "Metadata key must be 1–253 visible characters",
+                    );
+                }
+            }
+            // The host blanks every annotation value of a Secret on every
+            // ungated read: an annotation match could only read placeholders.
+            if link.from == "/Secret" && matching.annotation.is_some() {
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.match.annotation"),
+                    "A Secret's annotation values are redacted on every read; match it by label, ownerReference or name",
+                );
+            }
+            if matching.name && link.from == link.to {
+                problems.push(
+                    Code::InvalidBinding,
+                    format!("{at}.match.name"),
+                    "A kind linked to itself by name is the resource itself",
+                );
             }
         }
     }

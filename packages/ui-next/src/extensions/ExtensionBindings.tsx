@@ -29,6 +29,10 @@ interface Binding {
   name: string;
   title: string;
   target: string;
+  /** A custom-resource reader's accepted API versions, most preferred first (#547). */
+  versions: unknown[];
+  /** Per listed version, each path the app reads mapped to the one read there instead. */
+  overrides: Fields;
   arguments: Fields;
   inputs: unknown[];
 }
@@ -40,10 +44,50 @@ function bindingsOf(manifest: unknown): Binding[] {
       name: typeof binding.name === "string" ? binding.name : "",
       title: typeof binding.title === "string" ? binding.title : "",
       target: typeof binding.target === "string" ? binding.target : "",
+      versions: items(binding.versions),
+      overrides: fields(binding.jsonPathOverrides),
       arguments: fields(binding.arguments),
       inputs: items(binding.inputs),
     };
   });
+}
+
+/** A reader's version cell: the one it fixes, or each it accepts in the order tried. */
+function Versions({ binding }: { binding: Binding }) {
+  const args = binding.arguments;
+  if (binding.versions.length === 0)
+    return <>{"version" in args ? <code>{show(args.version)}</code> : "Not set"}</>;
+  return (
+    <>
+      {binding.versions.map((version, index) => (
+        <span key={index}>
+          {index > 0 && ", "}
+          <code>{show(version)}</code>
+        </span>
+      ))}{" "}
+      (first served)
+    </>
+  );
+}
+
+/** Each path a reader reads elsewhere at one of its versions, as `version: path → path`. */
+const overridesOf = (binding: Binding) =>
+  Object.entries(binding.overrides).flatMap(([version, paths]) =>
+    Object.entries(fields(paths)).map(([from, to]) => [version, from, to] as const),
+  );
+
+function Overrides({ binding }: { binding: Binding }) {
+  const overrides = overridesOf(binding);
+  if (overrides.length === 0) return <>None</>;
+  return (
+    <ul aria-label={`${plainText(binding.name)} path overrides`}>
+      {overrides.map(([version, from, to], position) => (
+        <li key={position}>
+          At <code>{show(version)}</code>, <code>{show(from)}</code> is read from <code>{show(to)}</code>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /** The dashboards that show a binding's events, and the API groups each filters them on. */
@@ -86,6 +130,7 @@ function CustomResourceReaders({ bindings }: { bindings: Binding[] }) {
     Object.entries(binding.arguments).filter(([key]) => !RESOURCE_KEYS.includes(key)),
   );
   const anyExtra = extra.some((values) => values.length > 0);
+  const anyOverrides = bindings.some((binding) => overridesOf(binding).length > 0);
   return (
     <div className="extension-binding-table">
       <table aria-label="Custom resources read">
@@ -99,6 +144,7 @@ function CustomResourceReaders({ bindings }: { bindings: Binding[] }) {
             ))}
             <th scope="col">Scope</th>
             <th scope="col">Printer columns</th>
+            {anyOverrides && <th scope="col">Path overrides</th>}
             {anyExtra && <th scope="col">Other fixed arguments</th>}
           </tr>
         </thead>
@@ -111,7 +157,15 @@ function CustomResourceReaders({ bindings }: { bindings: Binding[] }) {
               <tr key={`${index}:${binding.name}`} aria-label={`Binding ${name}`}>
                 <th scope="row">{label(binding)}</th>
                 {RESOURCE_FIELDS.map(([key]) => (
-                  <td key={key}>{key in args ? <code>{show(args[key])}</code> : "Not set"}</td>
+                  <td key={key}>
+                    {key === "version" ? (
+                      <Versions binding={binding} />
+                    ) : key in args ? (
+                      <code>{show(args[key])}</code>
+                    ) : (
+                      "Not set"
+                    )}
+                  </td>
                 ))}
                 <td>
                   {args.namespaced === true
@@ -147,6 +201,11 @@ function CustomResourceReaders({ bindings }: { bindings: Binding[] }) {
                     </details>
                   )}
                 </td>
+                {anyOverrides && (
+                  <td>
+                    <Overrides binding={binding} />
+                  </td>
+                )}
                 {anyExtra && (
                   <td>
                     <Arguments values={extra[index]} />

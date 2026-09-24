@@ -72,6 +72,15 @@
     "confirm": null
   },
   {
+    "id": "extensions.resolveLinks",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
     "id": "extensions.resolvePanels",
     "readOnly": true,
     "destructive": false,
@@ -82,6 +91,15 @@
   },
   {
     "id": "extensions.resource",
+    "readOnly": true,
+    "destructive": false,
+    "requiresConfirm": false,
+    "sensitive": false,
+    "impact": "low",
+    "confirm": null
+  },
+  {
+    "id": "extensions.streams",
     "readOnly": true,
     "destructive": false,
     "requiresConfirm": false,

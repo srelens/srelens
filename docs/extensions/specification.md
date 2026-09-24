@@ -120,11 +120,11 @@ Why a new field needs a new minor even though it is optional: manifests are stri
 (see below), so a host that predates the field would reject it. Requiring the minor
 turns that into a clear "requires API 0.x" message.
 
-Pre-1.0 exception for #538, #539, #541 and #544: `contributions.joins`,
+Pre-1.0 exception for #538, #539, #541, #544 and #545: `contributions.joins`,
 `contributions.tableColumns`, `contributions.detailPanels`,
-`contributions.statusResolvers`, `contributions.badges` and `contributions.commands`
-were added to API 0.3 in place while the extension platform is still being built, and
-so was the one predicate
+`contributions.statusResolvers`, `contributions.badges`, `contributions.commands` and
+`contributions.resourceLinks` were added to API 0.3 in place while the extension
+platform is still being built, and so was the one predicate
 path filter form, `[?(@.key=="text")]` (#541), which widens what a path accepts without
 changing what an accepted path means. Earlier signed Flux and Argo CD 0.3 releases
 without these fields remain valid — including their `statusColumns` — and a manifest
@@ -137,6 +137,10 @@ includes #540. It also covers the top-level `settings` (#542), under the same te
 An installed app's settings are now held to its manifest's declarations, so values
 saved as free-form JSON by an earlier host that the manifest does not declare are
 refused on the next save. Nothing had been released that relied on them.
+
+It also covers a binding's `versions` and `jsonPathOverrides` (#547): added to API 0.3
+in place, absent from every published signed manifest, and requiring a host that
+includes #547. A binding that fixes `arguments.version` means what it did before.
 
 The host enforces this for fields. `API_FIELDS` in `crates/plugin-host/src/manifest.rs`
 lists fields whose availability differs across supported API lines. It is empty while
@@ -312,6 +316,17 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 - Apps may declare `commands` for the new design's command palette: open a declared
   page, or open the host confirmation for a declared action on a resource of the
   action's kind (#544). See the [manifest reference](manifest.md#commands).
+- A custom-resource reader may list `versions` in preference order instead of one
+  `arguments.version`, with optional per-version `jsonPathOverrides`. Each cluster reads
+  the first listed version its CRD serves, through that version's paths, for every read,
+  action and contribution, and a cluster serving none is refused (#547). See
+  [Several served versions](manifest.md#several-served-versions).
+- Apps may declare `resourceLinks` from one qualified kind to another their
+  readers list, with a relation (`ownedBy`, `managedBy`, `exposedBy`,
+  `references`) and a join-style match read on the linked-from resource (#545).
+  `extensions.resolveLinks` rechecks the installed app's revision, grants and
+  cluster scope; the Inspector shows the result as a Related section. See the
+  [manifest reference](manifest.md#resourcelinks).
 - Unsigned apps declaring write actions require the default-off inventory policy
   described above (#558). Turning it off disables affected installations without
   removing them; normal read-only declarative permission grants are unchanged.
@@ -322,6 +337,8 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 - Current examples are Flux 0.5.0 and Argo CD 0.4.0, requiring `^0.3` and naming
   `schemas/extension-manifest.v0.3.json`. Publishing them requires fresh signed
   external releases and a catalog update; existing signed release bytes stay unchanged.
+  The Flux example reads HelmReleases at `v2` or `v2beta2` and OCIRepositories at `v1`
+  or `v1beta2` (#547), which also needs a new signed release.
 
 
 ### 0.1.0

@@ -24,6 +24,23 @@ describe("useResource", () => {
     await waitFor(() => expect(result.current.status).toBe("ready"));
     expect(load).toHaveBeenCalledTimes(2);
   });
+  it("refreshes in place, keeping what it shows until the new answer lands (#566)", async () => {
+    let finish!: (v: string) => void;
+    const load = vi.fn()
+      .mockResolvedValueOnce("first")
+      .mockImplementationOnce(() => new Promise<string>((r) => { finish = r; }))
+      .mockResolvedValue("third");
+    const { result } = renderHook(() => useResource(load, []));
+    await waitFor(() => expect(result.current.data).toBe("first"));
+    act(() => result.current.refresh());
+    expect(result.current.status).toBe("ready");
+    expect(result.current.data).toBe("first");
+    await act(async () => { finish("second"); await Promise.resolve(); });
+    expect(result.current.data).toBe("second");
+    // A plain reload still says it is loading.
+    act(() => result.current.reload());
+    expect(result.current.status).toBe("loading");
+  });
   it("ignores a result that lands after a newer load began", async () => {
     let resolveFirst!: (v: string) => void;
     const load = vi.fn()

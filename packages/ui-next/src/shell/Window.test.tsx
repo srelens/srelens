@@ -159,14 +159,28 @@ vi.mock("../lib/tabsStore", async (importOriginal) => {
  */
 vi.mock("../lib/routes", async (importOriginal) => {
   const real = await importOriginal<typeof import("../lib/routes")>();
+  const workspaceHooks = await import("../lib/workspace");
   const LockProbe = ({ onLocked }: import("../lib/routes").RoutedScreenProps) => (
     <button type="button" onClick={onLocked}>
       seal the workspace
     </button>
   );
+  // Reads and writes the namespace selection exactly as a list screen does,
+  // with no provider of its own — whatever tab it sees is the one `Window` gave it.
+  const NamespaceProbe = ({ route }: import("../lib/routes").RoutedScreenProps) => {
+    const selection = workspaceHooks.useNamespaces("prod");
+    const setNamespaces = workspaceHooks.useSetNamespaces();
+    return (
+      <>
+        <span data-testid={`namespaces ${route}`}>{selection.join(",")}</span>
+        <button type="button" onClick={() => setNamespaces("prod", ["payments"])}>narrow {route}</button>
+      </>
+    );
+  };
   return {
     ...real,
-    screenFor: (route: string) => (route === "/lock-probe" ? LockProbe : real.screenFor(route)),
+    screenFor: (route: string) =>
+      route === "/lock-probe" ? LockProbe : route.startsWith("/ns-probe") ? NamespaceProbe : real.screenFor(route),
   };
 });
 
@@ -692,6 +706,22 @@ describe("Window strip", () => {
     act(() => store.openTab("/incidents"));
     await userEvent.click(screen.getByRole("button", { name: /open in classic/i }));
     expect(onOpenInClassic).toHaveBeenCalledWith("/incidents", "prod");
+  });
+});
+
+describe("Window — each tab's namespace selection", () => {
+  it("gives every tab body its own selection, so narrowing one tab leaves another on the same cluster alone", async () => {
+    await booted();
+    act(() => store.openTab("/ns-probe-a"));
+    act(() => store.openTab("/ns-probe-b"));
+    // Tab b is in front; tab a stays mounted behind it.
+    await userEvent.click(screen.getByRole("button", { name: "narrow /ns-probe-b" }));
+
+    expect(screen.getByTestId("namespaces /ns-probe-b").textContent).toBe("payments");
+    expect(screen.getByTestId("namespaces /ns-probe-a").textContent).toBe("");
+    const tabFor = (route: string) => store.currentWorkspace().tabs.find((t) => t.route === route)!;
+    expect(tabFor("/ns-probe-b").namespaces).toEqual({ prod: ["payments"] });
+    expect(tabFor("/ns-probe-a").namespaces).toBeUndefined();
   });
 });
 

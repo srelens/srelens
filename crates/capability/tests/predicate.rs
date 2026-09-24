@@ -322,3 +322,46 @@ fn a_condition_is_a_predicate_without_a_reason() {
     )
     .is_err());
 }
+
+/// A Deployment as the Inspector holds it, carrying Argo CD's tracking id.
+fn tracked(tracking: &str) -> Value {
+    json!({"apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": "api", "namespace": "team",
+            "annotations": {"argocd.argoproj.io/tracking-id": tracking}}})
+}
+
+#[test]
+fn a_tracking_id_names_its_owner_only_when_it_names_the_object_it_is_on() {
+    use srelens_capability::ReferenceFormat;
+    let format = ReferenceFormat::ArgocdTrackingId;
+    let object = tracked("guestbook:apps/Deployment:team/api");
+    // The application part, split the way Argo CD writes an application
+    // outside its controller namespace: `<namespace>_<name>`.
+    assert_eq!(
+        format.owner("guestbook:apps/Deployment:team/api", &object),
+        Some((None, "guestbook".to_owned()))
+    );
+    assert_eq!(
+        format.owner("apps_guestbook:apps/Deployment:team/api", &object),
+        Some((Some("apps".to_owned()), "guestbook".to_owned()))
+    );
+    // A tracking id copied from another workload names that one, not this.
+    assert_eq!(
+        format.owner("guestbook:apps/Deployment:team/web", &object),
+        None
+    );
+    assert_eq!(
+        format.owner("guestbook:apps/StatefulSet:team/api", &object),
+        None
+    );
+    // Malformed ids, and an empty application, name no owner at all.
+    for broken in [
+        "guestbook",
+        ":apps/Deployment:team/api",
+        "_x:apps/Deployment:team/api",
+        "x_:apps/Deployment:team/api",
+        "guestbook:Deployment:team/api",
+    ] {
+        assert_eq!(format.owner(broken, &object), None, "{broken}");
+    }
+}

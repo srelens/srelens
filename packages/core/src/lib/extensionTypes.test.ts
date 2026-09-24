@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import inventorySchema from "./extension-inventory.schema.json";
 import type { ActionPredicate } from "./actionPredicates";
-import type { ExtensionInventory, ExtensionManifest, ExtensionStatusRule, InstalledExtension, NormalizedStatus } from "./extensions";
+import type { ExtensionInventory, ExtensionLinkRelation, ExtensionManifest, ExtensionStatusRule, InstalledExtension, NormalizedStatus } from "./extensions";
 
 // extension-inventory.schema.json is generated from the Rust inventory and manifest
 // types (crates/registry/src/extensions.rs keeps it current). Each table below is held
@@ -72,6 +72,8 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     name: "required",
     title: "required",
     target: "required",
+    versions: "optional",
+    jsonPathOverrides: "optional",
     arguments: "required",
     inputs: "required",
   } satisfies Presence<ExtensionManifest["capabilities"][number]>,
@@ -103,8 +105,11 @@ const tables: Record<string, Record<string, "required" | "optional">> = {
     statusResolvers: "optional",
     badges: "optional",
     commands: "optional",
+    resourceLinks: "optional",
   } satisfies Presence<Contributions>,
   PaletteCommand: { id:"required", title:"required", target:"required", forKinds:"optional" } satisfies Presence<NonNullable<Contributions["commands"]>[number]>,
+  ResourceLink: { id:"required", from:"required", to:"required", relation:"required", match:"required" } satisfies Presence<NonNullable<Contributions["resourceLinks"]>[number]>,
+  LinkMatch: { label:"optional", namespaceLabel:"optional", ownerReference:"optional", annotation:"optional", parse:"optional", defaultNamespace:"optional", name:"optional" } satisfies Presence<NonNullable<Contributions["resourceLinks"]>[number]["match"]>,
   StatusResolver: { forKinds:"required", rules:"required" } satisfies Presence<NonNullable<Contributions["statusResolvers"]>[number]>,
   Badge: { id:"required", forKinds:"required", join:"optional", rules:"required" } satisfies Presence<NonNullable<Contributions["badges"]>[number]>,
   StatusRule: { when:"required", status:"required", label:"required", reason:"optional" } satisfies Presence<ExtensionStatusRule>,
@@ -209,6 +214,11 @@ describe("extension TypeScript types match the Rust contract", () => {
     const values = rust.enum ?? (rust.oneOf ?? []).flatMap((variant) => variant.enum ?? []);
     expect(values.length).toBeGreaterThan(0);
     expect(Object.keys(formats).sort()).toEqual([...values].sort());
+  });
+
+  it("has the Rust link relations", () => {
+    const relations = { ownedBy: true, managedBy: true, exposedBy: true, references: true } satisfies Record<ExtensionLinkRelation, true>;
+    expect(Object.keys(relations).sort()).toEqual([...(schema.definitions.LinkRelation.enum ?? [])].sort());
   });
 
   it("has the Rust manifest kinds", () => {

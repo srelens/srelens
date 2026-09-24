@@ -7,6 +7,7 @@ edition.workspace = true
 srelens-kube = { path = "../kube" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = "0.8"
 tokio = { version = "1", features = ["rt", "sync", "io-util", "process", "time"] }
 portable-pty = "0.9"
 

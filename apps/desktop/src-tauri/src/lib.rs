@@ -14,6 +14,7 @@ mod cluster_oidc_cmd;
 mod llm_agent;
 mod llm_config;
 mod exec;
+mod extension_streams;
 mod external;
 mod files;
 mod forward;
@@ -274,7 +275,11 @@ pub fn run() {
     // One shared client cache: request/response capabilities AND live watches
     // reuse the same authenticated kube-rs clients.
     let cache = ClientCache::new_many(capabilities::all_kubeconfig_paths());
-    let registry = capabilities::build_registry_with(cache.clone());
+    let (registry, app_streams) = capabilities::build_registry_and_app_streams(
+        cache.clone(),
+        capabilities::default_kubeconfig_paths(),
+        capabilities::default_settings_path(),
+    );
 
     // single-instance is registered BEFORE every other plugin, as the plugin
     // requires: it has to claim the lock and hand a second launch's argv over
@@ -305,8 +310,11 @@ pub fn run() {
 
     let watcher_cache = cache.clone();
     let oidc_cache = cache.clone();
+    let inventory_streams = app_streams.clone();
     builder
         .setup(move |app| {
+            // Every inventory write reaches the window as an event (#566).
+            extension_streams::listen_inventory(&inventory_streams, app.handle());
             // Application logging: always write a rotating file to the OS log
             // directory so the Settings "Application logs" view (and post-hoc
             // debugging of a shipped build) has something to read; mirror to
@@ -442,6 +450,7 @@ pub fn run() {
             Ok(())
         })
         .manage(AppRegistry(registry))
+        .manage(extension_streams::AppExtensionStreams(app_streams))
         // The cache itself, for commands that need the live kubeconfig paths
         // (overview_snapshot resolves context → cluster identity from them).
         .manage(cache.clone())
@@ -482,6 +491,9 @@ pub fn run() {
             invoke_capability,
             start_resource_watch,
             stop_watch,
+            extension_streams::extension_stream_open,
+            extension_streams::extension_stream_cancel,
+            extension_streams::extension_stream_close_view,
             start_pod_exec,
             exec_input,
             exec_resize,

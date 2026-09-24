@@ -20,53 +20,73 @@ struct ResolvedPanels {
 }
 
 fn check_input(input: &ResolvePanels) -> Result<(), CapabilityError> {
-    if input.id.is_empty()
-        || input.id.len() > 128
-        || input.context.trim().is_empty()
-        || input.context.len() > 4_096
-        || input.kind.trim().is_empty()
-        || input.kind.len() > 317
-        || input.namespace.len() > 63
-        || (!input.namespace.is_empty()
-            && (input.namespace.starts_with('-')
-                || input.namespace.ends_with('-')
-                || !input
-                    .namespace
+    check_resource_scope(
+        "Panel",
+        &input.id,
+        &input.context,
+        &input.namespace,
+        &input.kind,
+        &input.resource,
+    )
+}
+
+/// The limits an Inspector resolver holds its one resource to: the app id,
+/// context and qualified kind bounded, and the resource's own identity equal
+/// to the scope it was sent with. Shared by panels and links (#545).
+pub(super) fn check_resource_scope(
+    what: &str,
+    id: &str,
+    context: &str,
+    namespace: &str,
+    kind: &str,
+    resource: &Value,
+) -> Result<(), CapabilityError> {
+    if id.is_empty()
+        || id.len() > 128
+        || context.trim().is_empty()
+        || context.len() > 4_096
+        || kind.trim().is_empty()
+        || kind.len() > 317
+        || namespace.len() > 63
+        || (!namespace.is_empty()
+            && (namespace.starts_with('-')
+                || namespace.ends_with('-')
+                || !namespace
                     .bytes()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')))
     {
-        return Err(CapabilityError::InvalidInput(
-            "Panel scope exceeds the supported limits".into(),
-        ));
+        return Err(CapabilityError::InvalidInput(format!(
+            "{what} scope exceeds the supported limits"
+        )));
     }
-    let bytes = serde_json::to_vec(&input.resource)
+    let bytes = serde_json::to_vec(resource)
         .map_err(|error| CapabilityError::InvalidInput(error.to_string()))?;
     if bytes.len() > 1_048_576 {
-        return Err(CapabilityError::InvalidInput(
-            "Panel resource exceeds 1 MiB".into(),
-        ));
+        return Err(CapabilityError::InvalidInput(format!(
+            "{what} resource exceeds 1 MiB"
+        )));
     }
-    let metadata = &input.resource["metadata"];
+    let metadata = &resource["metadata"];
     let name = metadata["name"].as_str().unwrap_or("");
     if name.is_empty()
         || name.len() > 253
         || metadata["uid"].as_str().is_some_and(|uid| uid.len() > 128)
-        || metadata["namespace"].as_str().unwrap_or("") != input.namespace
+        || metadata["namespace"].as_str().unwrap_or("") != namespace
     {
-        return Err(CapabilityError::InvalidInput(
-            "Panel resource identity does not match its scope".into(),
-        ));
+        return Err(CapabilityError::InvalidInput(format!(
+            "{what} resource identity does not match its scope"
+        )));
     }
-    let kind = input.resource["kind"].as_str().unwrap_or("");
-    let api_version = input.resource["apiVersion"].as_str().unwrap_or("");
+    let resource_kind = resource["kind"].as_str().unwrap_or("");
+    let api_version = resource["apiVersion"].as_str().unwrap_or("");
     let group = api_version
         .split_once('/')
         .map(|(group, _)| group)
         .unwrap_or("");
-    if format!("{group}/{kind}") != input.kind {
-        return Err(CapabilityError::InvalidInput(
-            "Panel resource kind does not match its scope".into(),
-        ));
+    if format!("{group}/{resource_kind}") != kind {
+        return Err(CapabilityError::InvalidInput(format!(
+            "{what} resource kind does not match its scope"
+        )));
     }
     Ok(())
 }
@@ -118,15 +138,24 @@ pub(super) fn register(
                 )
                 .await?;
                 let plugin = &state.plugins[index];
-                let panels: Vec<_> = plugin
-                    .manifest
-                    .contributions
-                    .detail_panels
-                    .iter()
-                    .filter(|panel| panel.for_kinds.contains(&input.kind))
-                    .collect();
+                let for_kind = |manifest: &Manifest| -> Vec<DetailPanel> {
+                    manifest
+                        .contributions
+                        .detail_panels
+                        .iter()
+                        .filter(|panel| panel.for_kinds.contains(&input.kind))
+                        .cloned()
+                        .collect()
+                };
+                let panels = for_kind(&plugin.manifest);
+                // Fields without a join read the resource the panel is shown for, at the
+                // version it was read at. For a reader of its kind that lists versions,
+                // they are read through that version's paths, and not at all at a
+                // version the reader does not list (#547).
+                let (mut manifest, own) =
+                    own_version(&plugin.manifest, &input.kind, &input.resource);
                 let mut sources = PanelSources::new();
-                for join_id in used_joins(&panels) {
+                for join_id in used_joins(&panels.iter().collect::<Vec<_>>()) {
                     let join = plugin
                         .manifest
                         .contributions
@@ -147,12 +176,20 @@ pub(super) fn register(
                     )
                     .await
                     {
-                        Ok(objects) => objects,
+                        Ok(read) => read,
                         Err(error) => {
                             sources.insert(join_id, Err(error.to_string()));
                             continue;
                         }
                     };
+                    let (objects, version) = objects;
+                    match super::columns::read_at(&manifest, &join.capability, &version) {
+                        Ok(at) => manifest = at,
+                        Err(error) => {
+                            sources.insert(join_id, Err(error.to_string()));
+                            continue;
+                        }
+                    }
                     let matched = match_joined(
                         &join.match_by,
                         &objects,
@@ -169,9 +206,16 @@ pub(super) fn register(
                     );
                 }
                 Ok(ResolvedPanels {
-                    panels: panels
-                        .into_iter()
-                        .map(|panel| resolve_panel(panel, &input.resource, &sources))
+                    panels: for_kind(&manifest)
+                        .iter()
+                        .map(|panel| {
+                            resolve_panel(
+                                panel,
+                                &input.resource,
+                                own.as_ref().map(|_| ()).map_err(String::as_str),
+                                &sources,
+                            )
+                        })
                         .collect(),
                 })
             }
@@ -181,13 +225,47 @@ pub(super) fn register(
 
 type PanelSources = HashMap<String, Result<Option<Value>, String>>;
 
-fn resolve_panel(panel: &DetailPanel, resource: &Value, sources: &PanelSources) -> Value {
+/// `manifest` as it reads a `kind` resource read at its own `apiVersion`, and why its
+/// own fields cannot be read when they cannot: a reader of the kind that lists
+/// versions, and the resource at a version that reader does not list.
+fn own_version(
+    manifest: &Manifest,
+    kind: &str,
+    resource: &Value,
+) -> (Manifest, Result<(), String>) {
+    let Some(reader) = manifest.capabilities.iter().find(|binding| {
+        !binding.versions.is_empty() && Manifest::reader_kind(binding).as_deref() == Some(kind)
+    }) else {
+        return (manifest.clone(), Ok(()));
+    };
+    let version = resource["apiVersion"]
+        .as_str()
+        .and_then(|api| api.rsplit_once('/'))
+        .map_or("", |(_, version)| version);
+    match manifest.at_version(&reader.name, version) {
+        Ok(at) => (at, Ok(())),
+        Err(_) => (
+            manifest.clone(),
+            Err(format!(
+                "This app reads {kind} at {}, and this resource was read at {version}",
+                reader.versions.join(", ")
+            )),
+        ),
+    }
+}
+
+fn resolve_panel(
+    panel: &DetailPanel,
+    resource: &Value,
+    own: Result<(), &str>,
+    sources: &PanelSources,
+) -> Value {
     let sections: Vec<Value> = panel.sections.iter().map(|section| match section {
         DetailSection::Fields { fields } => json!({
             "type":"fields",
             "fields":fields.iter().map(|field| {
                 let target = match field.join.as_ref().map(|id| sources.get(id)) {
-                    None => Ok(Some(resource)),
+                    None => own.map(|()| Some(resource)),
                     Some(Some(Ok(object))) => Ok(object.as_ref()),
                     Some(Some(Err(reason))) => Err(reason.as_str()),
                     Some(None) => Err("Declared join is unavailable"),
@@ -210,7 +288,7 @@ fn resolve_panel(panel: &DetailPanel, resource: &Value, sources: &PanelSources) 
         }),
         DetailSection::Conditions { json_path, join } => {
             let target = match join.as_ref().map(|id| sources.get(id)) {
-                None => Ok(Some(resource)),
+                None => own.map(|()| Some(resource)),
                 Some(Some(Ok(object))) => Ok(object.as_ref()),
                 Some(Some(Err(reason))) => Err(reason.as_str()),
                 Some(None) => Err("Declared join is unavailable"),
@@ -289,7 +367,7 @@ mod tests {
                 {"type":"Ready","status":"True","reason":"Issued","message":"Certificate is ready"}
             ]
         }});
-        let resolved = resolve_panel(&panel, &resource, &HashMap::new());
+        let resolved = resolve_panel(&panel, &resource, Ok(()), &HashMap::new());
         assert_eq!(
             resolved["sections"][0]["fields"][0]["value"],
             "2026-12-01T00:00:00Z"
@@ -310,7 +388,7 @@ mod tests {
             ]}]
         })).unwrap();
         let source = HashMap::from([("reports".into(), Ok(Some(json!({"report":{"count":7}}))))]);
-        let resolved = resolve_panel(&panel, &json!({"metadata":{"name":"api"}}), &source);
+        let resolved = resolve_panel(&panel, &json!({"metadata":{"name":"api"}}), Ok(()), &source);
         assert_eq!(resolved["sections"][0]["fields"][0]["value"], "api");
         assert_eq!(resolved["sections"][0]["fields"][1]["value"], "7");
     }
@@ -325,6 +403,7 @@ mod tests {
         let resolved = resolve_panel(
             &panel,
             &json!({"status":{"conditions":"bad data"}}),
+            Ok(()),
             &HashMap::new(),
         );
         assert_eq!(
@@ -334,6 +413,7 @@ mod tests {
         let resolved = resolve_panel(
             &panel,
             &json!({"status":{"conditions":["bad entry"]}}),
+            Ok(()),
             &HashMap::new(),
         );
         assert_eq!(

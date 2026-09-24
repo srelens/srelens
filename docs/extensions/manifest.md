@@ -44,7 +44,7 @@ before publishing.
 | `capabilities` | Yes | 1–32 bindings, below. |
 | `actions` | No | Up to 32 declared mutations, below. |
 | `settings` | No | Up to 32 typed settings, drawn as a host form. See [Settings](#settings). |
-| `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns`, `detailPanels` and `dashboardCards`, below. |
+| `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns`, `detailPanels`, `statusResolvers`, `badges`, `dashboardCards`, `commands` and `resourceLinks`, below. |
 
 Unknown fields are errors at every level. A manifest is at most 256 KiB.
 
@@ -57,12 +57,79 @@ Each entry in `capabilities` binds a local operation to a trusted host capabilit
 | `name` | Local operation name, unique within the manifest. Addressed as `plugin/<id>/<name>`. |
 | `title` | Display title, held to the same rules as `name`. |
 | `target` | The host capability ID. It cannot start with `plugin/`; apps cannot call other apps. |
+| `versions` | Optional, `k8s.listCustomResource` only: the API versions the reader accepts, most preferred first, instead of one `arguments.version`. See [Several served versions](#several-served-versions). |
+| `jsonPathOverrides` | Optional, with `versions`: per listed version, the paths read differently at that version. See [Several served versions](#several-served-versions). |
 | `arguments` | Fixed arguments, merged into every call. Callers cannot override them. A `k8s.listCustomResource` binding may declare at most 32 `printerColumns`. |
 | `inputs` | The argument names a caller may supply. They cannot overlap with `arguments`. |
 
 Every required argument of the target must come from `arguments` or `inputs`, and the
 target's own handler validates the values. `permissions` must name exactly the set of
 targets used.
+
+### Several served versions
+
+A custom-resource reader fixes one API version in `arguments.version`, or lists several
+in `versions`, most preferred first. It never does both: a binding with `versions` and
+`arguments.version` is refused at `capabilities[i].versions` ([#547](https://github.com/srelens/srelens/issues/547)).
+
+```json
+{
+  "name": "helmreleases",
+  "title": "List Helm releases",
+  "target": "k8s.listCustomResource",
+  "versions": ["v2", "v2beta2"],
+  "jsonPathOverrides": {
+    "v2beta2": { ".status.history[0].chartVersion": ".status.lastAttemptedRevision" }
+  },
+  "arguments": { "group": "helm.toolkit.fluxcd.io", "plural": "helmreleases",
+                 "kind": "HelmRelease", "namespaced": true },
+  "inputs": ["context", "namespace"]
+}
+```
+
+The override is illustrative. It is accepted only if the manifest reads
+`.status.history[0].chartVersion` from HelmReleases somewhere, for example in a printer
+column or a status rule.
+
+- **Resolution.** On each cluster, every read, inspection and action looks up the
+  CustomResourceDefinition `{plural}.{group}` and uses the first listed version it serves.
+  The CRD's own version order does not matter. Resolution is per cluster: two clusters
+  can read the same app at different versions. It is not cached. The lookup is the one
+  the host already makes on every call, so a cluster that starts or stops serving a
+  version is followed on the next call. The five-second snapshot that joins and
+  dashboard cards share is keyed by the resolved version as well.
+- **Fail closed.** A cluster that serves none of the listed versions is refused, and the
+  requirements page shows *Required version unavailable*. For the example above the
+  refusal reads
+  `No CustomResourceDefinition helmreleases.helm.toolkit.fluxcd.io serving any of v2, v2beta2 on this cluster; an app reads only custom resources`.
+  A binding that fixes one version is told `serving v2` instead of `serving any of …`.
+  The host never reads a version the binding does not list.
+- **Everything that reads the objects uses the resolved version.** That covers the
+  list and its printer columns and status resolver, the Inspector's object read, a
+  declared action's fresh read, patch and `preconditions`, `availableWhen`, joined
+  table columns and badges, detail panels, and dashboard cards and their target pages.
+  The UID and `resourceVersion` an action pins are the same at every version of an
+  object.
+- **`jsonPathOverrides`** maps, for one listed version, a path the manifest reads
+  the binding's objects through to the path to read at that version. It applies
+  everywhere that path is read for this binding: printer columns, the kind's status
+  resolver, declared action predicates, joined columns, badges and panel fields, a panel
+  on the kind itself, and cards over the reader. At install, `jsonPathOverrides` names
+  at most 8 versions, as `versions` lists at most 8, and each must be a listed version,
+  with at most 32 paths per version and only paths the binding is actually read through.
+  A binding past either limit, or a manifest past 32 capabilities, is refused without its
+  overrides being checked one by one. The replacement must also be a valid path wherever
+  it replaces one: for example, a status rule condition's path has no wildcard. An
+  override cannot rewrite a declaration that also reads another kind, such as a status
+  resolver whose `forKinds` lists several kinds; give the kind its own resolver or panel.
+- A detail panel with no join reads the resource it is shown for at that resource's own
+  `apiVersion`. For a kind whose reader lists versions, its fields read that version's
+  paths. A resource read at a version the reader does not list shows an error on those
+  fields instead of values.
+- An action on the reader is bound only once a cluster has resolved the version, so the
+  host never writes through a version it did not check.
+- Adding a version, or changing an override, changes what the app reads. The permission
+  review lists both, and an update shows them as a permission change.
 
 The author cannot supply a handler, JavaScript, a schema or safety annotations.
 Annotations come from the host: mutations, destructive operations and sensitive reads
@@ -498,6 +565,75 @@ at `target.action`), `forKinds` on a page command (`EXTENSION_INVALID_BINDING`),
 a kind the action does not act on (`EXTENSION_INVALID_BINDING` at `forKinds[i]`),
 and the usual identifier, label, count, kind and duplicate rules.
 
+### `resourceLinks`
+
+An app can say how a resource of one kind relates to resources of another: a
+Deployment is managed by an Argo CD Application, or by a Flux Kustomization.
+The Inspector shows these as a **Related** section of links, and the resolved
+links are edges (`from`, `relation`, targets) a topology view can draw too.
+
+```json
+"resourceLinks": [
+  { "id": "argocd-owner", "from": "apps/Deployment", "to": "argoproj.io/Application",
+    "relation": "managedBy",
+    "match": { "annotation": "argocd.argoproj.io/tracking-id", "parse": "argocd-tracking-id",
+               "defaultNamespace": "argocd" } },
+  { "id": "kustomization", "from": "apps/Deployment", "to": "kustomize.toolkit.fluxcd.io/Kustomization",
+    "relation": "managedBy",
+    "match": { "label": "kustomize.toolkit.fluxcd.io/name",
+               "namespaceLabel": "kustomize.toolkit.fluxcd.io/namespace" } }
+]
+```
+
+| Field | Rule |
+| --- | --- |
+| `id` | 1–64 letters, digits and `-`; unique among the app's links. |
+| `from` | The group-qualified kind the link is read from (`apps/Deployment`, `/Pod`). Built-in or custom. |
+| `to` | The group-qualified kind of the target. A declared `k8s.listCustomResource` reader must list it: that list is where the host looks the target up, so it can say whether it exists. The Inspector opens a target only when one of the app's `pages` is backed by that reader; otherwise it names the target as text. |
+| `relation` | `ownedBy`, `managedBy`, `exposedBy` or `references` — what `from` is to `to`. |
+| `match` | Exactly one of `label`, `ownerReference`, `annotation` and `name`. |
+
+`match` uses a join's selectors, read the other way round: a join indexes the
+listed resources by a key that names the row, while a link reads the key on
+the resource being inspected, and that key names the target. The target is
+then found by name through the same index a join uses.
+
+- `label`: the label's value is the target's name. `namespaceLabel` names the
+  label holding its namespace; without it the target is in the resource's own
+  namespace. A set name label with an unset namespace label is an error, not
+  "no link".
+- `ownerReference: true`: each owner reference whose API group and kind are
+  `to`'s. An owner whose uid no longer matches is shown as not found. A
+  resource with more than 64 owner references is reported as a failure on the
+  link rather than read.
+- `annotation`: the annotation's value is the target's name — or, with
+  `parse`, a reference in a host-known format. `argocd-tracking-id` is the only
+  one, and it requires `to` to be `argoproj.io/Application`: it counts only
+  when it names the resource it is on (a copied id is not
+  ownership), and its application part is the target. `<namespace>_<name>`
+  names its own namespace. A bare name is an application in Argo CD's own
+  namespace, which the id does not say, so declare it as `defaultNamespace`
+  (for example `"argocd"`, a namespace name, allowed only beside this `parse`):
+  the target is then looked up in that namespace alone, and a same-named
+  Application elsewhere is not it. Without `defaultNamespace` a bare name is
+  never searched for across namespaces: the Inspector names it as plain text,
+  *namespace unknown*, and never calls it found or missing. A Secret's
+  annotation values are redacted on every read, so a link from `/Secret` may not
+  match by annotation.
+- `name: true`: the target has the resource's own name and namespace. Not
+  allowed from a kind to itself.
+
+A cluster-scoped resource (a Namespace, a Node) has no namespace of its own, so a
+target it names without one is found by name: in a cluster-scoped kind directly,
+and in a namespaced kind across namespaces, reported as ambiguous if more than
+one has that name.
+
+At most 32 links may be declared. Each resolution rechecks the installed
+revision, grants and cluster scope. A resource that names no target shows no
+link; a target the resource names but the cluster does not have is listed as
+not found; a failed list or an ambiguous name is shown as a failure with its
+reason and a Retry — never as "No related resources".
+
 ## Settings
 
 An app declares its settings, and the host draws them as a form in Settings → Apps
@@ -598,7 +734,8 @@ The desktop app accepts a narrower surface than the developer broker:
   read-only with no confirmation, sensitive or destructive annotation.
 - Inputs are only `context` and `namespace`.
 - A `k8s.listCustomResource` binding fixes a non-empty `group`, `version`, `plural`
-  and `kind` (letters, digits, `.` and `-`) and a boolean `namespaced`. It must accept
+  and `kind` (letters, digits, `.` and `-`) and a boolean `namespaced`, or lists
+  `versions` held to the same characters instead of fixing `version`. It must accept
   `context`, may not fix `context` or `namespace`, and a namespaced binding must accept
   `namespace`.
 - That `group` must be shaped like a CustomResourceDefinition group: dot-separated labels
@@ -606,9 +743,9 @@ The desktop app accepts a narrower surface than the developer broker:
   and `batch` are refused. The problem is reported at `capabilities[i].arguments.group`,
   and an installed app that breaks the rule is quarantined when the inventory loads.
   Every read, inspection and action also checks that a CustomResourceDefinition named
-  `{plural}.{group}` serves the bound `version` on the cluster, and is refused when none
-  does. That refuses dotted built-in groups such as `networking.k8s.io` and aggregated
-  APIs.
+  `{plural}.{group}` serves the bound `version`, or one of the listed `versions`, on the
+  cluster, and is refused when none does. That refuses dotted built-in groups such as
+  `networking.k8s.io` and aggregated APIs.
 - A `k8s.listEvents` binding has no fixed arguments and accepts both `context` and
   `namespace`.
 - Every page, detail tab and detail link references a `k8s.listCustomResource` binding.
@@ -622,7 +759,8 @@ Settings → Apps checks these rules together with the manifest's own before it 
 to install, and lists every problem with its path. See
 [Validation errors](specification.md#validation-errors).
 
-The examples bind `argoproj.io/v1alpha1` Applications and Flux's
-`kustomize.toolkit.fluxcd.io/v1` Kustomizations and `helm.toolkit.fluxcd.io/v2`
-HelmReleases. The cluster must serve those versions; see
+The examples bind `argoproj.io/v1alpha1` Applications, Flux's
+`kustomize.toolkit.fluxcd.io/v1` Kustomizations, `helm.toolkit.fluxcd.io` HelmReleases at
+`v2` or `v2beta2`, and `source.toolkit.fluxcd.io` OCIRepositories at `v1` or `v1beta2`.
+The cluster must serve one of each binding's versions; see
 [requirement checks](ui-contributions.md#requirement-checks).

@@ -131,7 +131,8 @@ pub(super) struct ListRow {
 }
 
 /// One call's reads, by reader and namespace: the objects, or why they could not be listed.
-type ReadsThisCall = std::collections::HashMap<(String, String), Result<Arc<Vec<Value>>, String>>;
+type ReadsThisCall =
+    std::collections::HashMap<(String, String), Result<columns::ReaderObjects, String>>;
 
 /// How an app's objects map to a status word.
 pub(super) type StatusResolver = dyn Fn(&Value) -> Option<String> + Send + Sync;
@@ -419,6 +420,24 @@ fn usable_app<'a>(
     Ok(plugin)
 }
 
+/// The app's manifest as it reads `card`'s source at `version`, where its objects were
+/// read (#547), and the card as declared there: its predicate, metric and list paths.
+fn at_version(
+    plugin: &Installed,
+    card: &DashboardCard,
+    version: &str,
+) -> Result<(Manifest, DashboardCard), CapabilityError> {
+    let manifest = columns::read_at(&plugin.manifest, &card.source, version)?;
+    let card = manifest
+        .contributions
+        .dashboard_cards
+        .iter()
+        .find(|declared| declared.id == card.id)
+        .cloned()
+        .ok_or_else(|| CapabilityError::Handler("The card is no longer declared".into()))?;
+    Ok((manifest, card))
+}
+
 fn source_binding<'a>(plugin: &'a Installed, source: &str) -> Result<&'a Binding, CapabilityError> {
     plugin
         .manifest
@@ -504,7 +523,7 @@ pub(super) async fn card_rows(
         namespaces.to_vec()
     };
     let (read_in, selection) = read_scope(binding, &selected);
-    let objects = columns::reader_objects(
+    let (objects, version) = columns::reader_objects(
         snapshots,
         client_cache,
         core,
@@ -514,7 +533,8 @@ pub(super) async fn card_rows(
         &read_in,
     )
     .await?;
-    Ok(matching(card, &objects, selection, now())
+    let (_, card) = at_version(plugin, card, &version)?;
+    Ok(matching(&card, &objects, selection, now())
         .map(|object| (namespace_of(object).to_owned(), name_of(object).to_owned()))
         .collect())
 }
@@ -554,7 +574,6 @@ pub(super) fn register(
                 let mut reads: ReadsThisCall = std::collections::HashMap::new();
                 let mut cards = Vec::new();
                 for card in &plugin.manifest.contributions.dashboard_cards {
-                    let status = status_resolver(&plugin.manifest, &card.source);
                     let resolved = match source_binding(plugin, &card.source) {
                         Err(error) => Resolved::Error { reason: reason(&error) },
                         Ok(binding) => {
@@ -570,7 +589,15 @@ pub(super) fn register(
                                 reads.insert(key.clone(), read);
                             }
                             match &reads[&key] {
-                                Ok(objects) => resolve_card(card, objects, selection, now, status.as_deref()),
+                                // The card, and the status rules it counts by, read the
+                                // objects through the version they were read at (#547).
+                                Ok((objects, version)) => match at_version(plugin, card, version) {
+                                    Ok((manifest, card)) => {
+                                        let status = status_resolver(&manifest, &card.source);
+                                        resolve_card(&card, objects, selection, now, status.as_deref())
+                                    }
+                                    Err(error) => Resolved::Error { reason: reason(&error) },
+                                },
                                 Err(reason) => Resolved::Error { reason: reason.clone() },
                             }
                         }
@@ -1271,6 +1298,8 @@ mod tests {
             name: "r".into(),
             title: "R".into(),
             target: "k8s.listCustomResource".into(),
+            versions: Vec::new(),
+            json_path_overrides: Default::default(),
             arguments: json!({"namespaced":namespaced})
                 .as_object()
                 .unwrap()
