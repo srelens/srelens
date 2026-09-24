@@ -215,6 +215,14 @@ export interface ExtensionManifest {
     name: string;
     title: string;
     target: string;
+    /**
+     * A custom-resource reader's API versions, most preferred first, instead of one
+     * `arguments.version` (#547). The host reads, on each cluster, the first one its
+     * CustomResourceDefinition serves.
+     */
+    versions?: string[];
+    /** Per listed version: a JSONPath the manifest reads, mapped to the one to read there. */
+    jsonPathOverrides?: Record<string, Record<string, string>>;
     arguments: Record<string, unknown>;
     inputs: string[];
   }>;

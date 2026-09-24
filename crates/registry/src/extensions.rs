@@ -16,6 +16,8 @@ mod resource;
 mod settings_tests;
 mod signing;
 pub mod streams;
+#[cfg(test)]
+mod version_tests;
 use app_settings::{checked_settings, drop_secret_values, setting_scope};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -547,7 +549,12 @@ fn validate_app(
             continue;
         }
         // Core resources, including Secrets, must not be disguised as custom resources.
+        // A reader that lists `versions` binds none here; the manifest's own rules hold
+        // each listed one to the same characters (#547).
         for key in ["group", "version", "plural", "kind"] {
+            if key == "version" && !binding.versions.is_empty() {
+                continue;
+            }
             let text = binding
                 .arguments
                 .get(key)
@@ -1131,11 +1138,27 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
     for grant in grants {
         access.insert(format!("Grant {grant}"));
     }
+    // What a reader reads: its arguments and, when it lists several, the versions it may
+    // read and the paths each moves (#547). Another accepted version reads more, and a
+    // moved path changes what an action's precondition checks there.
+    let reads = |binding: &srelens_plugin_host::Binding| {
+        let mut identity = binding.arguments.clone();
+        if !binding.versions.is_empty() {
+            identity.insert("versions".into(), json!(binding.versions));
+        }
+        if !binding.json_path_overrides.is_empty() {
+            identity.insert(
+                "jsonPathOverrides".into(),
+                json!(binding.json_path_overrides),
+            );
+        }
+        canonical(&Value::Object(identity))
+    };
     for binding in &manifest.capabilities {
         access.insert(format!(
             "Read {} with {}{}",
             binding.target,
-            canonical(&Value::Object(binding.arguments.clone())),
+            reads(binding),
             setting_scope(manifest, &binding.arguments)
         ));
     }
@@ -1145,7 +1168,7 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
             .iter()
             .find(|binding| binding.name == action.resource);
         let scope = reader
-            .map(|binding| format!("{} {}", binding.target, canonical(&Value::Object(binding.arguments.clone()))))
+            .map(|binding| format!("{} {}", binding.target, reads(binding)))
             .unwrap_or_else(|| action.resource.clone());
         // Preconditions are enforced on the fresh object by the host action
         // binding. Removing one broadens access even if its primitive and
@@ -1357,13 +1380,30 @@ async fn read_contribution(
     plugin.check_scope(&resolved)?;
     validate_app(&plugin.manifest, &plugin.grants, c.clone())
         .map_err(|errors| CapabilityError::Handler(errors.to_string()))?;
-    let mut manifest = plugin.manifest.clone();
+    let context = resolved
+        .ok()
+        .and_then(|context| context.pinned_id())
+        .unwrap_or(input.context);
+    // A custom-resource reader reads the version this cluster serves, through
+    // that version's paths (#547); `crd::resolved` is also the #601 check. A
+    // stream re-runs this on every tick, so it follows a discovery change too.
+    let custom = plugin
+        .manifest
+        .capabilities
+        .iter()
+        .any(|b| b.name == input.capability && b.target == "k8s.listCustomResource");
+    let mut manifest = if custom {
+        crd::resolved(&c, &context, &plugin.manifest, &input.capability)
+            .await?
+            .0
+    } else {
+        plugin.manifest.clone()
+    };
     // The kind's status rules travel in the host's binding, copied
     // out of `statusResolvers` the way an action's preconditions
     // are: the reader evaluates them on the whole object, which
     // never leaves it (#541).
-    if let Some(rules) = plugin
-        .manifest
+    if let Some(rules) = manifest
         .status_rules_for_binding(&input.capability)
         .map(serde_json::to_value)
         .transpose()
@@ -1385,17 +1425,6 @@ async fn read_contribution(
                 .arguments
                 .insert("useCrdColumns".into(), json!(true));
         }
-    }
-    let context = resolved
-        .ok()
-        .and_then(|context| context.pinned_id())
-        .unwrap_or(input.context);
-    if let Some(binding) =
-        plugin.manifest.capabilities.iter().find(|b| {
-            b.name == input.capability && b.target == "k8s.listCustomResource"
-        })
-    {
-        crd::require(&c, &context, binding).await?;
     }
     // A card's target shows only what the card counted. Worked out before
     // the page's own read, so a card that cannot be evaluated fails the
@@ -2909,19 +2938,27 @@ mod tests {
         Arc::new(core)
     }
     /// Answers the broker's CRD check as a cluster whose CRDs serve exactly these
-    /// `{plural}.{group}/{version}` would.
+    /// `{plural}.{group}/{version}` would: the first listed version served, or none.
     pub(super) fn serve_crds(core: &mut Registry, names: &'static [&'static str]) {
         let mut cap =
             crd::check_capability(srelens_kube::client_cache::ClientCache::new_many(vec![]));
         cap.handler = Arc::new(move |args| {
             Box::pin(async move {
-                let name = format!(
-                    "{}.{}/{}",
-                    args["plural"].as_str().unwrap_or_default(),
-                    args["group"].as_str().unwrap_or_default(),
-                    args["version"].as_str().unwrap_or_default()
-                );
-                Ok(json!(names.contains(&name.as_str())))
+                let served = args["versions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .find(|version| {
+                        let name = format!(
+                            "{}.{}/{version}",
+                            args["plural"].as_str().unwrap_or_default(),
+                            args["group"].as_str().unwrap_or_default(),
+                        );
+                        names.contains(&name.as_str())
+                    })
+                    .map(str::to_owned);
+                Ok(json!(served))
             })
         });
         core.register(cap);

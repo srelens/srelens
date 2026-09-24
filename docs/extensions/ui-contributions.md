@@ -109,6 +109,9 @@ those of dashboard summaries.
 
 - A missing CRD or version shows a requirements page with the exact API names and a
   **Check again** action. It does not uninstall or disable the app.
+- A reader that lists several `versions` is available when the cluster serves any of
+  them. The page lists every accepted version in order of preference and, under
+  **Reads**, the one this cluster resolves to, or *None served* (#547).
 - A CRD discovery failure is reported as an unverifiable requirement and does not
   block reads the user's RBAC allows.
 - Switching clusters never reuses another cluster's discovery result.
