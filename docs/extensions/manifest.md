@@ -98,10 +98,12 @@ column or a status rule.
   the host already makes on every call, so a cluster that starts or stops serving a
   version is followed on the next call. The five-second snapshot that joins and
   dashboard cards share is keyed by the resolved version as well.
-- **Fail closed.** A cluster that serves none of the listed versions is refused with
-  "No CustomResourceDefinition … serving any of …", and the requirements page shows
-  *Required version unavailable*. The host never reads a version the binding does not
-  list.
+- **Fail closed.** A cluster that serves none of the listed versions is refused, and the
+  requirements page shows *Required version unavailable*. For the example above the
+  refusal reads
+  `No CustomResourceDefinition helmreleases.helm.toolkit.fluxcd.io serving any of v2, v2beta2 on this cluster; an app reads only custom resources`.
+  A binding that fixes one version is told `serving v2` instead of `serving any of …`.
+  The host never reads a version the binding does not list.
 - **Everything that reads the objects uses the resolved version.** That covers the
   list and its printer columns and status resolver, the Inspector's object read, a
   declared action's fresh read, patch and `preconditions`, `availableWhen`, joined

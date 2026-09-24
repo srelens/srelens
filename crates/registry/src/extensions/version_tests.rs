@@ -537,6 +537,29 @@ async fn a_discovery_change_is_followed_on_the_next_read_even_within_the_snapsho
     assert_eq!(cluster.resource_requests(), [LIST_V2, LIST_V2BETA2]);
 }
 
+/// What a cluster serving none of the HelmRelease reader's versions is told. The
+/// manifest reference quotes it for its own `["v2", "v2beta2"]` example.
+const NONE_SERVED: &str = "No CustomResourceDefinition helmreleases.helm.toolkit.fluxcd.io serving any of v2, v2beta2 on this cluster; an app reads only custom resources";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_refusal_is_the_one_the_manifest_reference_quotes() {
+    let dir = tempfile::tempdir().unwrap();
+    let ancient = Cluster::serving(&["v2beta1"]);
+    let (registry, revision) = host(dir.path(), &[("ancient", &ancient)]).await;
+    let refused = read(&registry, revision, "ancient")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.ends_with(NONE_SERVED), "{refused}");
+    // The reference wraps its prose; the quoted message is compared as words.
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let reference = words(include_str!("../../../../docs/extensions/manifest.md"));
+    assert!(
+        reference.contains(&format!("`{NONE_SERVED}`")),
+        "docs/extensions/manifest.md must quote the refusal exactly: {NONE_SERVED}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_resource_link_finds_its_target_at_the_resolved_version() {
     // #545: a link from a Deployment to the HelmRelease that manages it looks the
