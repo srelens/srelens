@@ -4,6 +4,7 @@ import { Badge, type Column } from "@srelens/ui-kit";
 import type { ListRow } from "../lib/kinds/types";
 import { plainText } from "./displayText";
 import { StatusBadge } from "./StatusBadge";
+import { useLiveApps } from "./liveReaders";
 
 type Result = { plugin: InstalledExtension; state: "loading" | "ready" | "error"; pending?: boolean; data?: ExtensionColumnResult; error?: string };
 const EMPTY_RESULTS: Result[] = [];
@@ -83,6 +84,19 @@ export function useResolvedColumns<Row extends ListRow>(args: {
       plugin.manifest.contributions.badges?.some((badge) => badge.forKinds.includes(kind))));
   const signature = JSON.stringify(offers.map((plugin) => [plugin.manifest.id, plugin.revision]));
   const [retry, setRetry] = useState(0);
+  // A joined column's value lives on another kind (#566): follow each reader a
+  // column or badge for this kind joins through, and resolve again, in place,
+  // when one changes. Values from the row itself follow the row.
+  const watched = offers.map((plugin) => {
+    const contributions = plugin.manifest.contributions;
+    const joinIds = new Set([
+      ...(contributions.tableColumns ?? []).filter((column) => column.forKinds.includes(kind)).map((column) => column.source.join),
+      ...(contributions.badges ?? []).filter((badge) => badge.forKinds.includes(kind)).map((badge) => badge.join),
+    ].filter((id): id is string => !!id));
+    return { plugin, capabilities: (contributions.joins ?? []).filter((join) => joinIds.has(join.id)).map((join) => join.capability) };
+  });
+  const [pulse, setPulse] = useState(0);
+  const liveState = useLiveApps({ apps: watched, context, namespace, label: `columns:${kind}`, onChange: () => setPulse((n) => n + 1) });
   const scope = JSON.stringify([context, namespace, kind, signature, refresh, retry]);
   const [answer, setAnswer] = useState<{ scope: string; rows: Row[]; results: Result[] } | null>(null);
   useEffect(() => {
@@ -125,7 +139,7 @@ export function useResolvedColumns<Row extends ListRow>(args: {
       );
     }
     return () => { current = false; };
-  }, [scope, rows]);
+  }, [scope, rows, pulse]);
   const live = answer?.scope === scope ? answer.results : EMPTY_RESULTS;
   const rowsPending = answer?.scope === scope && answer.rows !== rows;
   const reload = () => setRetry((value) => value + 1);
@@ -188,5 +202,5 @@ export function useResolvedColumns<Row extends ListRow>(args: {
   const errors = live.filter((result) => result.state === "error").map((result) => ({
     id: result.plugin.manifest.id, title: result.plugin.manifest.name, message: result.error ?? "Read failed",
   }));
-  return { columns, errors, reload };
+  return { columns, errors, reload, live: liveState };
 }

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   describeError,
   extensionCardRoute,
@@ -20,6 +20,7 @@ import { NamespaceErrorAlert, NamespacePicker } from "../screens/resourceShell";
 import { SHARED_CONTEXT_ID_MESSAGE } from "./contextIds";
 import { plainText } from "./displayText";
 import { extensionLabel, useExtensions } from "./inventoryStore";
+import { LiveNotice, LiveStatus, useLiveApps } from "./liveReaders";
 
 /**
  * The cluster dashboard's app cards (#540): one band of host-drawn figures,
@@ -73,6 +74,23 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
   const effective = scope ? [scope] : selection;
   // Two contexts with one stable ID: a read pinned by it cannot say which cluster it is for.
   const shared = contexts.filter((c) => c.stableId === context.stableId).length > 1;
+  // Each app's card readers are followed (#566): a change redraws that app's
+  // figures in place. One namespace is watched there; several, or none, in
+  // every namespace — the scope the cards themselves are read in.
+  const [pulses, setPulses] = useState<Record<string, number>>({});
+  const live = useLiveApps({
+    apps: shared || namespaces === null ? [] : apps.map((plugin) => ({
+      plugin, capabilities: (plugin.manifest.contributions.dashboardCards ?? []).map((card) => card.source),
+    })),
+    context: context.stableId,
+    namespace: effective.length === 1 ? effective[0] : "",
+    label: "dashboard:cards",
+    // Why nothing is followed yet: the same two reasons nothing is read yet.
+    off: shared ? SHARED_CONTEXT_ID_MESSAGE
+      : namespaces === null ? "Waiting for the cluster's namespaces before following the cards." : undefined,
+    onChange: (id) => setPulses((current) => ({ ...current, [id]: (current[id] ?? 0) + 1 })),
+  });
+  const stale = live.state === "reconnecting";
   return (
     <Section title="App cards" smallCaps padded={false} className="dashboard-cards-band">
       <div className="dashboard-cards-toolbar">
@@ -81,15 +99,17 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
           selection={selection}
           onChange={(next) => setNamespaces(context.stableId, next)}
         />
+        <LiveStatus live={live} />
         <Button variant="secondary" size="sm" aria-label="Refresh app cards" onClick={() => setRefresh((n) => n + 1)}>
           Refresh
         </Button>
       </div>
       <NamespaceErrorAlert error={namespaceError} />
+      <LiveNotice live={live} what="figures" />
       {shared ? (
         <p className="dashboard-cards-message">{SHARED_CONTEXT_ID_MESSAGE}</p>
       ) : (
-        <div className="dashboard-cards">
+        <div className="dashboard-cards" data-stale={stale || undefined}>
           {apps.map((plugin) =>
             // Until the namespaces answer, a restricted credential's scope is not
             // known, and a read of "every namespace" would draw its refusal as a
@@ -97,7 +117,8 @@ function CardsBand({ context, apps }: { context: ClusterContext; apps: Installed
             namespaces === null ? (
               <PendingAppCards key={plugin.manifest.id} plugin={plugin} />
             ) : (
-              <AppCards key={plugin.manifest.id} plugin={plugin} context={context} selection={effective} refresh={refresh} />
+              <AppCards key={plugin.manifest.id} plugin={plugin} context={context} selection={effective} refresh={refresh}
+                pulse={pulses[plugin.manifest.id] ?? 0} />
             ),
           )}
         </div>
@@ -124,11 +145,14 @@ function AppCards({
   context,
   selection,
   refresh,
+  pulse,
 }: {
   plugin: InstalledExtension;
   context: ClusterContext;
   selection: string[];
   refresh: number;
+  /** Bumped when a watch saw one of this app's card readers change. */
+  pulse: number;
 }) {
   const { id } = plugin.manifest;
   const answers = useResource(
@@ -136,6 +160,9 @@ function AppCards({
     [id, plugin.revision, context.stableId, selection.join("\u0000"), refresh],
     () => false,
   );
+  const { refresh: reread } = answers;
+  // Redrawn in place: a figure that flashed back to a spinner on every change would be unreadable.
+  useEffect(() => { if (pulse) reread(); }, [pulse, reread]);
   const appName = extensionLabel(plugin);
   // The target page reads the one namespace in its path, or all of them narrowed to the selection.
   const namespace = selection.length === 1 ? selection[0] : "";

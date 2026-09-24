@@ -20,7 +20,7 @@ mod settings;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use extensions::fuzzing;
-pub use extensions::streams::{ExtensionStreams, OpenStreamOut};
+pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
 pub use settings::default_settings_path;
 
 // Test-only: every consumer of this module — `render_catalog` (regenerated via

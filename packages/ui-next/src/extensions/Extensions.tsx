@@ -150,6 +150,11 @@ export function ExtensionManager() {
           Refresh
         </Button>
       </div>
+      {inventory.updates?.mode === "polling" && (
+        <p role="status" className="extension-message">
+          Live updates to this list are unavailable ({inventory.updates.reason}); a change made elsewhere shows within five seconds.
+        </p>
+      )}
       <div className="extension-install">
         <label>
           <input type="checkbox" checked={state.allowUnsignedApps ?? false} disabled={busy}

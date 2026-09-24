@@ -14,6 +14,7 @@ vi.mock("@srelens/core", async (importOriginal) => ({
   actOnExtensionResource: vi.fn(),
   saveTextFile: vi.fn(),
   listContexts: vi.fn(),
+  onExtensionInventoryChanged: vi.fn(),
 }));
 import {
   listExtensionCatalog,
@@ -25,6 +26,7 @@ import {
   resolveExtensionColumns,
   saveTextFile,
   listContexts,
+  onExtensionInventoryChanged,
 } from "@srelens/core";
 import { ExtensionManager, ExtensionResults } from "./Extensions";
 
@@ -73,6 +75,13 @@ beforeEach(() => {
   vi.mocked(validateExtension).mockResolvedValue({ errors: [], permissionDiff: { previousRevision: null, added: ["Grant k8s.listCustomResource"], removed: [], unchanged: [] } });
   vi.mocked(listContexts).mockResolvedValue({ contexts: [] });
   vi.mocked(resolveExtensionColumns).mockResolvedValue({ columns: [], cells: [] });
+  vi.mocked(onExtensionInventoryChanged).mockResolvedValue(() => {});
+});
+
+it("says when the app list cannot hear the host's announcements and is polling instead (#566)", async () => {
+  vi.mocked(onExtensionInventoryChanged).mockRejectedValue(new Error("no event channel"));
+  render(<ExtensionManager />);
+  expect(await screen.findByText(/Live updates to this list are unavailable \(no event channel\)/)).toBeTruthy();
 });
 
 it("shows a declared native table column on the app's own resource page", async () => {
@@ -1062,6 +1071,8 @@ it("refreshes external lifecycle changes without unmounting enabled content", as
   const { useExtensions } = await import("./Extensions");
   const Consumer = () => <>{useExtensions().data?.plugins.map(p => <span key={p.manifest.id}>Installed plugin</span>)}</>;
   vi.mocked(listExtensions).mockResolvedValue({plugins:[plugin]} as any);
+  let announce: () => void = () => {};
+  vi.mocked(onExtensionInventoryChanged).mockImplementation(async (listener) => { announce = listener; return () => {}; });
   const {act}=await import("@testing-library/react");
   vi.useFakeTimers();
   let view: ReturnType<typeof render>;
@@ -1069,7 +1080,10 @@ it("refreshes external lifecycle changes without unmounting enabled content", as
     await act(async()=>{view=render(<Consumer />);});
     expect(screen.getByText("Installed plugin")).toBeTruthy();
     vi.mocked(listExtensions).mockResolvedValue({plugins:[]} as any);
-    await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+    // No poll: nothing changes until the host announces the write (#566).
+    await act(async()=>{await vi.advanceTimersByTimeAsync(30000);});
+    expect(screen.getByText("Installed plugin")).toBeTruthy();
+    await act(async()=>{announce(); await vi.advanceTimersByTimeAsync(0);});
     expect(screen.queryByText("Installed plugin")).toBeNull();
   } finally {view!.unmount();vi.useRealTimers();}
 });
@@ -1137,24 +1151,22 @@ it("advances app resource ages without refreshing backend data", async () => {
   } finally {view!.unmount();vi.useRealTimers();}
 });
 
-it("shares one inventory poll and stops it after the last consumer unmounts", async () => {
+it("shares one inventory feed and stops it after the last consumer unmounts", async () => {
   const {useExtensions}=await import("./Extensions");
   const {act}=await import("@testing-library/react");
   const Consumer=()=>{useExtensions();return null;};
-  vi.useFakeTimers();
+  const stop=vi.fn();
+  vi.mocked(onExtensionInventoryChanged).mockResolvedValue(stop);
   let first:ReturnType<typeof render>,second:ReturnType<typeof render>;
   try {
     await act(async()=>{first=render(<Consumer/>);second=render(<Consumer/>);});
     expect(listExtensions).toHaveBeenCalledTimes(1);
-    await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
-    expect(listExtensions).toHaveBeenCalledTimes(2);
+    expect(onExtensionInventoryChanged).toHaveBeenCalledTimes(1);
     first!.unmount();
-    await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
-    expect(listExtensions).toHaveBeenCalledTimes(3);
+    expect(stop).not.toHaveBeenCalled();
     second!.unmount();
-    await act(async()=>{await vi.advanceTimersByTimeAsync(10000);});
-    expect(listExtensions).toHaveBeenCalledTimes(3);
-  } finally {first!?.unmount();second!?.unmount();vi.useRealTimers();}
+    expect(stop).toHaveBeenCalledTimes(1);
+  } finally {first!?.unmount();second!?.unmount();}
 });
 
 it("queues lifecycle refreshes behind one pending poll and discards its stale result", async () => {

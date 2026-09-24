@@ -1,11 +1,13 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { resolve } = vi.hoisted(() => ({ resolve: vi.fn() }));
+const { resolve, openView, tauri } = vi.hoisted(() => ({ resolve: vi.fn(), openView: vi.fn(), tauri: { on: false } }));
 vi.mock("@srelens/core", async (original) => ({
   ...(await original<typeof import("@srelens/core")>()),
   resolveExtensionColumns: resolve,
+  openExtensionView: openView,
+  isTauri: () => tauri.on,
 }));
 
 import { useResolvedColumns } from "./useResolvedColumns";
@@ -19,6 +21,8 @@ const plugin = {
 } as InstalledExtension;
 
 beforeEach(() => { vi.clearAllMocks(); });
+// A live test turns the desktop on and scripts the host; neither may outlive it, even when it fails.
+afterEach(() => { tauri.on = false; openView.mockReset(); });
 
 it("resolves 1,000 deployment rows with one call, then removes the column on disable", async () => {
   resolve.mockResolvedValue({ columns: plugin.manifest.contributions.tableColumns, cells: [
@@ -156,4 +160,33 @@ it("shows one cell's resolver error without hiding another row's value", async (
     .toContain("matched multiple joined resources");
   expect(view.result.current.columns[0].getValue?.(rows[0])).toBe("");
   expect(view.result.current.errors).toEqual([]);
+});
+
+it("re-resolves a joined column in place when the joined reader's kind changes (#566)", async () => {
+  tauri.on = true;
+  const watched: Array<{ capability: string; namespace?: string; onData: (data: unknown, seq: number) => void }> = [];
+  openView.mockImplementation((app: string) => ({
+    view: app, close: vi.fn(async () => {}),
+    open: async (request: { namespace?: string; source: { capability: string } }, handlers: { onData: (data: unknown, seq: number) => void }) => {
+      watched.push({ capability: request.source.capability, namespace: request.namespace, onData: handlers.onData });
+      return { stream: "s", cancel: vi.fn(async () => {}) };
+    },
+  }));
+  const joined = { ...plugin, manifest: { ...plugin.manifest, contributions: { ...plugin.manifest.contributions,
+    joins: [{ id: "vulns", capability: "reports", match: { name: true } }, { id: "unused", capability: "other", match: { name: true } }] } } } as InstalledExtension;
+  let finish!: (result: unknown) => void;
+  resolve.mockResolvedValueOnce({ columns: [], cells: [{ uid: null, name: "api", namespace: "team", values: { critical: "3" } }] })
+    .mockImplementationOnce(() => new Promise((done) => { finish = done; }));
+  const rows = [{ name: "api", namespace: "team" }];
+  const view = renderHook(() => useResolvedColumns({ plugins: [joined], context: "prod", namespace: "team", kind: "apps/Deployment", rows }));
+  await waitFor(() => expect(view.result.current.columns[0].getValue?.(rows[0])).toBe("3"));
+  await waitFor(() => expect(watched.map((w) => [w.capability, w.namespace])).toEqual([["reports", "team"]]));
+  act(() => watched[0].onData({ event: "changed" }, 1));
+  await waitFor(() => expect(resolve).toHaveBeenCalledTimes(2));
+  // The old value stays while the new one is read.
+  expect(view.result.current.columns[0].getValue?.(rows[0])).toBe("3");
+  await act(async () => { finish({ columns: [], cells: [{ uid: null, name: "api", namespace: "team", values: { critical: "5" } }] }); });
+  expect(view.result.current.columns[0].getValue?.(rows[0])).toBe("5");
+  act(() => watched[0].onData({ event: "reconnecting", message: "reset" }, 2));
+  expect(view.result.current.live).toEqual({ state: "reconnecting", message: "reset" });
 });
