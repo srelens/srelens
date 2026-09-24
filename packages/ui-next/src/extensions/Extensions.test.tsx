@@ -965,6 +965,17 @@ it("explains a missing app API and keeps the server error collapsed", async () =
     await screen.findByText("No resources returned by this app."),
   ).toBeTruthy();
 });
+it("explains a missing app API by every version a reader accepts (#547)", async () => {
+  const installed = structuredClone(plugin);
+  const binding = installed.manifest.capabilities[0];
+  binding.versions = ["v2", "v2beta2"];
+  delete binding.arguments.version;
+  Object.assign(binding.arguments, { group: "helm.toolkit.fluxcd.io", plural: "helmreleases", kind: "HelmRelease" });
+  vi.mocked(readExtension).mockRejectedValueOnce(new Error("ApiError: 404 page not found"));
+  render(<ExtensionResults plugin={installed} capability="list" context="M01" />);
+  expect(await screen.findByText("HelmRelease API unavailable")).toBeTruthy();
+  expect(screen.getByRole("alert").textContent).toContain("helm.toolkit.fluxcd.io/v2 or v2beta2");
+});
 it.each(["ApiError: Forbidden (code: 403)", "list custom resource timed out"])(
   "does not turn %s into an API absence",
   async (message) => {

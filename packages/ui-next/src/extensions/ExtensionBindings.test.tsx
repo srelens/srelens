@@ -19,6 +19,7 @@ import {
   validateExtension,
 } from "@srelens/core";
 import { ExtensionManager } from "./Extensions";
+import { ExtensionBindings } from "./ExtensionBindings";
 import { plainText } from "./displayText";
 
 // Written by code point, so the source itself holds no invisible character.
@@ -315,4 +316,32 @@ it("lists a custom-resource reader's other fixed arguments in their own column",
   expect(within(review).getByRole("columnheader", { name: "Other fixed arguments" })).toBeTruthy();
   expect(cells(reader(review, "providers")).at(-1)).toBe("labelSelector team=platform");
   expect(cells(reader(review, "kustomizations")).at(-1)).toBe("none");
+});
+
+it("reviews every version a reader may read, and each path it reads elsewhere there (#547)", () => {
+  const manifest = {
+    capabilities: [{
+      name: "helmreleases", title: "List Helm releases", target: "k8s.listCustomResource",
+      versions: ["v2", "v2beta2"],
+      jsonPathOverrides: { v2beta2: { ".status.lastAttemptedRevision": ".status.lastReleaseRevision" } },
+      arguments: { group: "helm.toolkit.fluxcd.io", plural: "helmreleases", kind: "HelmRelease", namespaced: true },
+      inputs: ["context", "namespace"],
+    }],
+  };
+  render(<ExtensionBindings manifest={manifest} permissions={["k8s.listCustomResource"]} />);
+  const row = screen.getByRole("row", { name: "Binding helmreleases" });
+  // The version cell names each, in the order the host tries them; nothing is "Not set".
+  expect(cells(row).slice(0, 5)).toEqual([
+    "helm.toolkit.fluxcd.io",
+    "v2, v2beta2 (first served)",
+    "HelmRelease",
+    "helmreleases",
+    "Namespaced",
+  ]);
+  const overrides = within(row).getByRole("list", { name: "helmreleases path overrides" });
+  expect(within(overrides).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+    "At v2beta2, .status.lastAttemptedRevision is read from .status.lastReleaseRevision",
+  ]);
+  // Neither field is shown again as an unexplained fixed argument.
+  expect(screen.queryByRole("columnheader", { name: "Other fixed arguments" })).toBeNull();
 });

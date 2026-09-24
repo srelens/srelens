@@ -231,15 +231,21 @@ export function ExtensionResults({
       /\bApiError:\s*404\b|\bcode:\s*404\b|\b404 page not found\b/i.test(
         data.error ?? "",
       );
+    // A reader fixes one version or accepts several, the first served (#547).
+    const versions = binding?.versions?.length
+      ? binding.versions
+      : typeof args?.version === "string"
+        ? [args.version]
+        : [];
     const guidance =
       notFound &&
       typeof args?.group === "string" &&
-      typeof args.version === "string" &&
+      versions.length > 0 &&
       typeof args.plural === "string" &&
       typeof args.kind === "string"
         ? {
             title: `${args.kind} API unavailable`,
-            detail: `This extension reads ${args.plural} from ${args.group}/${args.version}. Check that the selected cluster serves this API version. Installing an extension does not install its Kubernetes APIs.`,
+            detail: `This extension reads ${args.plural} from ${args.group}/${versions.join(" or ")}. Check that the selected cluster serves ${versions.length > 1 ? "one of these API versions" : "this API version"}. Installing an extension does not install its Kubernetes APIs.`,
           }
         : undefined;
     return (
