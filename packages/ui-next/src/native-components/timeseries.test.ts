@@ -1,9 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { breaches, downsample, formatValue, MAX_DRAWN_POINTS, TIME_STEPS, timeTicks, unitName, valueTicks, yTicks } from "./timeseries";
 
+// A zone a case pins in process.env.TZ is put back after it by src/test-setup.ts.
 describe("timeTicks", () => {
-  const zone = process.env.TZ;
-  afterEach(() => { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; });
   const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
   const start = Date.UTC(2026, 8, 24, 12, 0, 0);
   const local = (time: number) => new Date(time);
@@ -22,6 +21,14 @@ describe("timeTicks", () => {
     const { step, ticks } = timeTicks(start + 3 * MIN + 17_000, start + HOUR + 3 * MIN + 17_000, () => 5);
     expect([5 * MIN, 10 * MIN, 15 * MIN]).toContain(step);
     expect(ticks.every(tick => local(tick).getMinutes() % (step / MIN) === 0 && tick % MIN === 0)).toBe(true);
+  });
+  it("aligns a sub-hour step to the reader's clock, even 45 minutes off the hour", () => {
+    // Kathmandu is UTC+5:45, so UTC's :00 and :30 are its :45 and :15.
+    process.env.TZ = "Asia/Kathmandu";
+    const { step, ticks } = timeTicks(start + 3 * MIN + 17_000, start + HOUR + 3 * MIN + 17_000, () => 3);
+    expect(step).toBe(30 * MIN);
+    expect(ticks.length).toBeGreaterThanOrEqual(2);
+    expect(ticks.map(tick => local(tick).getMinutes() % 30)).toEqual(ticks.map(() => 0));
   });
   it("lands a 7-day range on local midnights or 12-hour boundaries, even east of UTC", () => {
     process.env.TZ = "Asia/Kolkata";
