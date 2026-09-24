@@ -100,12 +100,44 @@ harness (`spikes/sidecar-sandbox/src/lib.rs`) starts it under one backend, and
 | 6 | Burn two threads for 3 s | Throttled to at most 1.5× the limit, or stopped |
 | 7 | 50 JSON-RPC round trips over stdin/stdout | Works |
 
-Every check first pings the sidecar. A denial counts only when the probe itself answers
-that the operation failed, so a backend that stops the sidecar from starting, or crashes
-it, cannot pass a "must be denied" check. That rule caught two false passes during the
-spike: LPAC's network checks, where the probe had crashed (below), and a child process
-that looked refused under Landlock because opening `/dev/null` for its stdio had been
-denied.
+A "must be denied" check passes only when three things hold:
+
+1. **The sidecar is alive.** Every check first pings it, and a denial counts only when
+   the probe itself answers that the operation failed. A backend that stops the sidecar
+   from starting, or crashes it, cannot pass.
+2. **A host-side positive control succeeded.** Before asking the sidecar, the host does
+   the same operation itself: it reads the same file, writes to the same directory,
+   connects to the same address, resolves the same name, or starts the same program. If
+   the host cannot do it either, a failure inside the sandbox says nothing about the
+   sandbox. The check then fails as INCONCLUSIVE and never passes.
+3. **The error is a sandbox's refusal for that operation** (`Denial::accepts` in
+   `spikes/sidecar-sandbox/src/lib.rs`), not just any error:
+   - a file refusal is `PermissionDenied`, `NotFound` or `ReadOnlyFilesystem`;
+   - a connection refusal is `PermissionDenied`, `TimedOut`, `ConnectionRefused` or an
+     unreachable network or host;
+   - a DNS refusal is a resolver failure. It has no distinctive code on either OS, so the
+     control carries the weight;
+   - a process refusal is `EPERM` on Unix and error 1816 (the Job Object's process
+     quota) on Windows. An `EACCES` from a filesystem layer does not count;
+   - a memory refusal is the allocation failing.
+
+   `ConnectionRefused`, `TimedOut` and "unreachable" count only because the host's own
+   connection to the same address succeeded moments before.
+
+These rules caught three false passes:
+
+- **LPAC's network checks.** The probe had crashed (below).
+- **A child process under Landlock.** It looked refused because opening `/dev/null` for
+  the child's stdio had been denied.
+- **All three network checks with no network**, found in review. Without the positive
+  controls, all three passed with no sandbox at all when the network was unavailable.
+  The run that showed it used `SPIKE_BACKEND=none` under `unshare --net`, and the
+  unreachable network looked like a denial. With the controls, the same run fails all
+  three as INCONCLUSIVE.
+
+The recorded runs used for the matrix were re-run under the controls and the error-kind
+rule. No cell changed. Every enforced network cell had a working host network behind it,
+and no enforced cell was actually inconclusive.
 
 With no sandbox, every "must be denied" check fails because the operation succeeds, on
 both Windows and Linux. The recorded runs are in the pull request for #571.
@@ -119,12 +151,14 @@ the check failed. **Unverified** means it was not run.
 Windows was run on Windows 11 Pro 10.0.26200 (x64, 24 logical processors), from an
 unelevated process at medium integrity. Linux was run
 in Docker Desktop 29.7.2 on the WSL2 kernel `6.6.87.2-microsoft-standard-WSL2`, which
-reports Landlock ABI 3, with cgroup v2, Debian bookworm and bubblewrap 0.8.0. macOS was
-researched only, not run.
+reports Landlock ABI 3, with cgroup v2, Debian bookworm and bubblewrap 0.8.0. macOS has
+not been run. The spike has a `seatbelt` backend and `run-macos.sh` for it, compiled
+from Windows for `aarch64-apple-darwin` and `x86_64-apple-darwin`. Every macOS cell is
+UNVERIFIED, pending the maintainer's Mac run.
 
 | Backend | 1 Read | 2 Write | 3 Network and DNS | 4 Child process | 5 Memory | 6 CPU | 7 Stdio JSON-RPC |
 |---|---|---|---|---|---|---|---|
-| **Windows** AppContainer, no capabilities | Enforced (error 5) | Enforced | Enforced: loopback dropped (5 s timeout), internet `WSAEACCES`, DNS `WSAHOST_NOT_FOUND` | Not provided | Not provided | Not provided | Works |
+| **Windows** AppContainer, no capabilities | Enforced (error 5) | Enforced | Enforced: loopback dropped (5 s timeout; the host's own connect succeeded), internet `WSAEACCES`, DNS `WSAHOST_NOT_FOUND` | Not provided | Not provided | Not provided | Works |
 | **Windows** Job Object | Not provided | Not provided | Not provided | Enforced (error 1816, active-process limit 1) | Enforced: allocation refused, sidecar keeps running | Enforced: 0.28 CPUs under a hard cap | Works |
 | **Windows** AppContainer + Job Object | Enforced | Enforced | Enforced | Enforced | Enforced | Enforced: 0.25 CPUs | Works |
 | **Windows** LPAC + Job Object | Enforced | Enforced | Partial: no connection is made, but `WSAStartup` fails (10107) and Rust's standard library panics, so the sidecar dies on its first socket call | Enforced | Enforced | Enforced | Works |
@@ -134,8 +168,8 @@ researched only, not run.
 | **Linux** Landlock + seccomp + cgroup v2 | Enforced | Enforced | Enforced | Enforced | Enforced | Enforced: 0.26 CPUs | Works |
 | **Linux** bubblewrap, all namespaces unshared | Enforced (paths not mounted, `ENOENT`) | Enforced | Enforced (network namespace) | Not provided | Not provided | Not provided | Works |
 | **Linux** Landlock with TCP rules (ABI ≥ 4, kernel ≥ 6.7) | Unverified | Unverified | Unverified | — | — | — | Unverified |
-| **macOS** Seatbelt profile (`sandbox-exec` or `sandbox_init_with_parameters`) | Unverified | Unverified | Unverified | Unverified | Not provided (research) | Not provided (research) | Unverified |
-| **macOS** App Sandbox helper | Unverified | Unverified | Unverified | Unverified | Not provided (research) | Not provided (research) | Unverified |
+| **macOS** `seatbelt`: `sandbox-exec` with `src/seatbelt.sb`, plus `RLIMIT_DATA`, `RLIMIT_AS` and a 60 s `RLIMIT_CPU` budget | Unverified, pending the maintainer's Mac run | Unverified, pending | Unverified, pending | Unverified, pending | Unverified, pending (research: not provided; the run records what `setrlimit` does) | Unverified, pending (research: not provided; `RLIMIT_CPU` is a budget, not a rate) | Unverified, pending |
+| **macOS** App Sandbox helper | Not built (follow-up) | Not built | Not built | Not built | Not provided (research) | Not provided (research) | Not built |
 
 The Landlock-only and seccomp-only rows gave the same results in an unprivileged
 container (Docker's default security settings, no `--security-opt`) as in a
@@ -163,8 +197,12 @@ across the AppContainer boundary. The code is in `spikes/sidecar-sandbox/src/win
 **Linux.** A small launcher, part of the host (`spikes/sidecar-sandbox/src/bin/sandbox-launch.rs`),
 confines itself and then `exec`s the sidecar, which inherits every layer. It joins a
 cgroup the host created with `memory.max`, `memory.swap.max = 0` and `cpu.max`. It
-applies a Landlock ruleset that handles every right the kernel's ABI knows, in
-best-effort mode. The ruleset grants the scratch directory, read and execute on the
+applies a Landlock ruleset that targets **ABI 5**: the filesystem rights of ABIs 1 to 5,
+and TCP bind and connect (ABI 4). The ruleset is best-effort, so an older kernel
+enforces the subset it knows. It does not handle what later ABIs added: ABI 6 scoping of
+abstract Unix sockets and signals, ABI 9 `RESOLVE_UNIX` (connecting to a pathname Unix
+socket), and ABI 10 UDP. The `landlock` crate it uses, 0.4.7, knows ABIs up to 9 and
+has no UDP rights. The ruleset grants the scratch directory, read and execute on the
 sidecar binary, read and execute under `/usr` for the dynamic loader and libc, and read
 of the few `/etc` files libc's resolver opens. It then installs a seccomp filter that
 fails `socket` for any family but `AF_UNIX`, `io_uring_setup`, `fork`, `vfork` and
@@ -172,7 +210,31 @@ fails `socket` for any family but `AF_UNIX`, `io_uring_setup`, `fork`, `vfork` a
 falls back to an inspectable `clone`. Threads keep working and new processes do not.
 The code is in `spikes/sidecar-sandbox/src/linux.rs`.
 
-**macOS (research only).**
+**macOS (built, not run).** The `seatbelt` backend starts the same launcher. The
+launcher sets `RLIMIT_DATA` and `RLIMIT_AS` to the memory limit and `RLIMIT_CPU` to a
+60-second budget, and prints whether macOS accepted each one. It then `exec`s
+`/usr/bin/sandbox-exec -f seatbelt.sb -D PROBE=… -D SCRATCH=…` on the probe. The profile
+is its own file, `spikes/sidecar-sandbox/src/seatbelt.sb`:
+
+- `(deny default)`, allowing `process-exec` of the probe only, with no `process-fork`;
+- reads of the probe, the system libraries and the dyld shared cache;
+- metadata reads everywhere, so that paths resolve;
+- `sysctl-read`, and signals to itself;
+- reads and writes under the scratch directory.
+
+Network and every `mach-lookup` are denied, and denying the second is expected to deny
+DNS through mDNSResponder. The paths are canonicalized first, because Seatbelt matches
+resolved paths and `/var` and `/tmp` are symlinks on macOS.
+
+The CPU budget is deliberately larger than check 6 can spend. `RLIMIT_CPU` kills a
+process once a total is used up, which is not a rate limit. A small budget would pass
+check 6 by stopping the sidecar, and that would report a guarantee macOS does not give.
+
+`run-macos.sh` runs the baseline and `seatbelt` and collects the sandbox log's denials.
+It fails only if `seatbelt` fails a check it claims: 1 to 4 and 7. All of this is
+written from the research below and has never run.
+
+The research:
 
 - Seatbelt profiles in SBPL can deny file reads and writes by path, `network-outbound`,
   `process-fork` and `process-exec`, so checks 1 to 4 look expressible. But
@@ -217,9 +279,10 @@ The code is in `spikes/sidecar-sandbox/src/linux.rs`.
   isolation, but not process, memory or CPU limits, so seccomp and cgroups are still
   needed beside it. It also depends on unprivileged user namespaces, which some
   distributions restrict (not tested here).
-- **macOS: no backend yet.** Under the ADR's rule, executables are refused on macOS
-  until a Mac follow-up verifies a Seatbelt profile for checks 1 to 4 and 7, and a
-  memory and CPU strategy is accepted. None exists today that enforces a limit.
+- **macOS: no verified backend yet.** Under the ADR's rule, executables are refused on
+  macOS until the maintainer's Mac run verifies the `seatbelt` backend for checks 1 to 4
+  and 7, and a memory and CPU strategy is accepted. No macOS facility found in the
+  research enforces either limit.
 
 ### Recommendation on the SDK milestone (for decision)
 
@@ -247,14 +310,15 @@ limits requirement.
   checked.
 - **Landlock TCP rules** (ABI 4, kernel 6.7 and later) could not be exercised. Docker
   Desktop's WSL2 kernel has ABI 3.
-- **Architectures.** Only x86-64 was run. The seccomp filter names `fork` and `vfork`,
-  which do not exist on arm64, and it was not built for arm64. Windows on Arm was not
-  run.
-- **Unix sockets.** The seccomp filter here still allows `AF_UNIX`, and Landlock below
-  ABI 9 does not restrict connecting to a pathname socket. A sidecar may therefore
-  reach host sockets such as the D-Bus session bus. This is outside the seven checks
-  and was not tested. The sidecar's stdio is pipes, so a production filter can deny
-  `AF_UNIX` too.
+- **Architectures.** Only x86-64 was run. The spike compiles for arm64 Linux. There,
+  the seccomp filter leaves out `fork` and `vfork`, which arm64 does not have, and it has
+  not been run. That is what Docker on an Apple-silicon Mac would run. Windows on Arm
+  was not run.
+- **Unix sockets.** The seccomp filter here still allows `AF_UNIX`, and the launcher's
+  Landlock ruleset (ABI 5) does not handle ABI 9 `RESOLVE_UNIX`, whatever the kernel
+  supports. A sidecar may therefore reach host sockets such as the D-Bus session bus.
+  This is outside the seven checks and was not tested. The sidecar's stdio is pipes, so
+  a production filter can deny `AF_UNIX` too.
 - **Memory-limit behaviour differs by OS.** On Windows the allocation fails and the
   sidecar lives on. On Linux the kernel kills the sidecar. SDKs and the supervisor must
   handle both.
@@ -272,17 +336,28 @@ limits requirement.
 - **#572: a sandbox conformance suite.** `spikes/sidecar-sandbox/tests/checks.rs` is
   meant to seed it: the same seven checks, run against each production backend in CI on
   Windows and Linux runners.
-- **macOS, on a Mac.** Add a `seatbelt` backend to the spike and run the checks. Write a
-  deny-by-default SBPL profile that allows the dyld shared cache and system libraries,
-  reads and writes in the scratch directory only, `process-exec` of the sidecar only,
-  and denies `network*` and `process-fork`. Confirm DNS is refused, which includes the
-  `mach-lookup` path to mDNSResponder. Check that `sandbox-exec` still exists on the
-  current macOS, and decide whether `sandbox_init_with_parameters` is acceptable to
-  depend on. Measure whether `RLIMIT_AS` or `RLIMIT_DATA` limit anything (expected:
-  no). Measure a supervisor that polls the footprint and kills, `RLIMIT_CPU`, and
-  `SIGSTOP`/`SIGCONT` duty-cycling. Determine whether a separately signed,
-  App-Sandboxed third-party helper can be started other than as srelens's child. Run on
-  both Apple silicon and Intel.
+- **macOS: the maintainer's Mac run** (`sh spikes/sidecar-sandbox/run-macos.sh`,
+  instructions in [the spike's README](../../spikes/sidecar-sandbox/README.md)). It
+  should confirm or correct:
+  - that the probe starts under `src/seatbelt.sb`. If it does not, the collected sandbox
+    log names what was denied;
+  - checks 1 to 4 and 7, including that DNS is refused through the `mach-lookup` path
+    to mDNSResponder;
+  - whether the global metadata-read rule can be narrowed;
+  - what `setrlimit` does for `RLIMIT_DATA` and `RLIMIT_AS` (expected: accepted or
+    refused, and not enforced);
+  - on both Apple silicon and Intel if possible.
+
+  After that run: decide whether `sandbox_init_with_parameters` (private) is acceptable
+  instead of the deprecated `sandbox-exec`, and measure a supervisor that polls the
+  footprint and kills, and `SIGSTOP`/`SIGCONT` duty-cycling, as the memory and CPU
+  fallbacks.
+- **macOS: an App Sandbox helper variant.** Not built: it needs code signing with
+  entitlements. An ad-hoc signature (`codesign -s - --entitlements …`, no developer
+  account) may be enough for a local test. It would still have to answer whether an
+  App-Sandboxed third-party binary can be given a per-extension scratch directory, and
+  whether it can be started other than as srelens's child. Re-signing a third-party
+  binary also replaces its publisher's signature.
 - **Linux on a desktop.** Run the checks as an ordinary user on current Ubuntu and
   Fedora with a kernel of 6.7 or later. Cover the Landlock TCP rules, a
   systemd-delegated cgroup and unprivileged user namespaces (for bubblewrap).
@@ -298,27 +373,45 @@ limits requirement.
 - Can the host-side broker callbacks (#573) stay on stdio, so that no backend has to
   open even loopback networking? Loopback is denied under the recommended Windows and
   Linux backends.
-- What is the Landlock ABI floor? ABI 1 already covers checks 1 and 2 when seccomp
-  covers the network.
+- What are the Landlock ABI floor and target? ABI 1 already covers checks 1 and 2 when
+  seccomp covers the network. The spike targets ABI 5, which leaves two gaps that a
+  newer target would close on newer kernels. Both tie to the Unix-socket item under
+  [What the spike did not establish](#what-the-spike-did-not-establish).
+  - **Unix sockets:** ABI 6 scopes abstract Unix sockets and signals, and ABI 9
+    `RESOLVE_UNIX` restricts connecting to pathname sockets. Until then, seccomp must
+    deny `AF_UNIX`.
+  - **UDP:** ABI 10 adds UDP rights. The `landlock` crate used here has none, so DNS
+    and other UDP rest on seccomp alone.
+
+  Should the supervisor target the newest ABI its Landlock library knows, and require a
+  minimum for a sidecar to run at all?
 
 ### Running the spike
 
 It is its own Cargo workspace, like `fuzz/`, so the root workspace and CI do not build
-it.
+it. [Its README](../../spikes/sidecar-sandbox/README.md) has the prerequisites, the
+commands for Windows, for Linux in Docker and for macOS, how long each takes, and what
+to send back. In short, from the repository root:
 
 ```bash
-cd spikes/sidecar-sandbox
-SPIKE_BACKEND=none cargo test -- --nocapture --test-threads=1   # the unsandboxed baseline: nine checks fail
-cargo test                                                     # this OS's recommended backend
-cargo run --bin cleanup                                        # Windows: delete the AppContainer profile
+# Linux, in Docker (writes spikes/sidecar-sandbox/results/results-linux.txt)
+docker run --rm --privileged -v "$PWD/spikes/sidecar-sandbox:/spike" rust:1-bookworm sh /spike/run-linux.sh
+# macOS (writes spikes/sidecar-sandbox/results/results-macos.txt)
+sh spikes/sidecar-sandbox/run-macos.sh
+# Windows or any OS: this OS's recommended or candidate backend
+cd spikes/sidecar-sandbox && cargo test
 ```
 
-Linux backends, from the repository root:
+On Linux outside Docker, `cargo test` defaults to `landlock+seccomp+cgroup`. Its cgroup
+layer needs a writable, delegated cgroup v2 directory, which `SPIKE_CGROUP_ROOT` names.
+An ordinary user has none under `/sys/fs/cgroup`, so without one the checks fail at
+start, with a message saying so. `run-linux.sh` exits non-zero if
+`landlock+seccomp+cgroup` fails. `run-macos.sh` exits non-zero if `seatbelt` fails a
+check it claims.
 
-```bash
-docker run --rm --privileged -v "$PWD/spikes/sidecar-sandbox:/spike:ro" rust:1-bookworm sh /spike/run-linux.sh
-```
+`SPIKE_BACKEND` takes:
 
-`SPIKE_BACKEND` takes `none`, `appcontainer`, `job`, `appcontainer+job` and `lpac+job`
-on Windows, and `none`, `landlock`, `seccomp`, `cgroup`, `landlock+seccomp+cgroup` and
-`bwrap` on Linux.
+- **Windows:** `none`, `appcontainer`, `job`, `appcontainer+job` and `lpac+job`;
+- **Linux:** `none`, `landlock`, `seccomp`, `cgroup`, `landlock+seccomp+cgroup` and
+  `bwrap`;
+- **macOS:** `none` and `seatbelt`.
