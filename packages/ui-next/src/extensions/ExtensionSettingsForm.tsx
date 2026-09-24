@@ -445,7 +445,7 @@ function SecretField({
 
   return (
     <fieldset className="extension-setting" aria-describedby={described}>
-      <legend>{title}</legend>
+      <legend id={`${id}-title`}>{title}</legend>
       {help && (
         <p id={`${id}-help`} className="extension-setting-note">
           {help}
@@ -461,12 +461,10 @@ function SecretField({
           {refusal}
         </p>
       )}
-      <label htmlFor={id} className="extension-setting-label">
-        {title}
-      </label>
       <div className="extension-setting-pair">
         <input
           id={id}
+          aria-labelledby={`${id}-title`}
           type="password"
           autoComplete="off"
           spellCheck={false}

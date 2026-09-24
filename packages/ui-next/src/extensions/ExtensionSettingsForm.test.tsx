@@ -320,6 +320,13 @@ it("keeps a secret write-only: the typed value goes to the store, then leaves th
   expect(JSON.stringify(onSave.mock.calls)).not.toContain("s3cret-typed");
 });
 
+it("names the secret's field by its title once, not twice (found in the harness)", () => {
+  const { field } = secretForm();
+  // The legend names the group and the input alike; a second visible label
+  // drew the title twice in a row.
+  expect(field.textContent!.split("API token").length - 1).toBe(1);
+  expect(within(field).getByLabelText("API token").tagName).toBe("INPUT");
+});
 it("pressing Enter in the secret field saves the secret, not the settings", async () => {
   const { field, onSave, onSetSecret } = secretForm();
   const input = within(field).getByLabelText("API token");
