@@ -494,14 +494,28 @@ pub fn redact_error(error: &str, args: &Value, redacted: &Value) -> String {
         patterns.push(value);
     }
 
+    // A value longer than the message cannot occur in it, so it is never
+    // compiled: a 4 MiB argument behind a one-line refusal costs nothing.
+    patterns.retain(|pattern| pattern.len() <= error.len());
+    if patterns.is_empty() {
+        return error.to_string();
+    }
     patterns.sort_by_key(|s| std::cmp::Reverse(s.len()));
     patterns.dedup();
 
     // A matcher that will not build drops the message rather than passing it
     // through — see `scrub_or_drop`, which takes the `Result` so that policy
     // has a test.
+    //
+    // An NFA, named rather than left to the builder (#543): for a few
+    // patterns the builder picks a DFA, whose construction grew with the
+    // square of one long pattern's length — 80 s in a debug build for a
+    // single 16 KiB secret. A contiguous NFA builds in time linear in the
+    // patterns' total length and scans an error message of a few hundred
+    // bytes no slower that matters.
     let built = aho_corasick::AhoCorasick::builder()
         .match_kind(aho_corasick::MatchKind::LeftmostFirst)
+        .kind(Some(aho_corasick::AhoCorasickKind::ContiguousNFA))
         .build(&patterns);
     scrub_or_drop(built, error, &patterns)
 }
@@ -1336,6 +1350,44 @@ mod tests {
             took < std::time::Duration::from_secs(5),
             "scrubbing 100k hidden values took {took:?}; the scan is not linear"
         );
+    }
+
+    /// #543. The same scrub, over ONE long value rather than many short ones.
+    /// `extension.secretStore` takes a secret of up to 16 KiB, and a refusal
+    /// may echo it; the automaton was built as a DFA whose cost grew with the
+    /// square of a pattern's length — 35 s in a debug build, 1.6 s in release,
+    /// for one 16 KiB value, on every audited error that carried one.
+    #[test]
+    fn redact_error_stays_near_linear_in_the_length_of_one_value() {
+        let secret = "s".repeat(16 * 1024);
+        let args = json!({ "action": "set", "id": "org.example.app", "secret": secret });
+        let redacted = redact(&args, true);
+        let error = format!("invalid value: string \"{secret}\", expected a token");
+
+        let started = std::time::Instant::now();
+        let out = redact_error(&error, &args, &redacted);
+        let took = started.elapsed();
+
+        assert!(!out.contains(&secret), "the value leaked");
+        assert!(out.contains("<redacted>"), "{out}");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "scrubbing one 16 KiB value took {took:?}; the build is not linear in its length"
+        );
+    }
+
+    /// A value longer than the message cannot appear in it, so it is not
+    /// compiled into the scrub at all: one value as large as an MCP request
+    /// (4 MiB) behind a short refusal costs nothing to record. Even as an
+    /// NFA, building it took over 2 s in a debug build under a parallel suite.
+    #[test]
+    fn a_value_longer_than_the_message_costs_nothing_to_scrub() {
+        let args = json!({ "secret": "x".repeat(4 * 1024 * 1024), "id": "org.example.app" });
+        let redacted = redact(&args, true);
+        let started = std::time::Instant::now();
+        let out = redact_error("the vault is locked", &args, &redacted);
+        assert_eq!(out, "the vault is locked");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
     }
 
     /// The other `extensions.configure` actions carry no settings. Keep the
