@@ -75,8 +75,9 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
   setting reaches a capability only through a binding argument the capability marks
   settable, checked at install, on save and on every request. A secret-reference
   setting's value never enters the inventory; it holds only a reference, and the value is
-  one more entry in the desktop's existing vault (`secrets.enc`, one master key in the OS
-  keychain). The registry sees the vault only as a `SecretStore`, which follows the
+  one more entry in srelens's encrypted secrets vault (`secrets.enc`), whose one master
+  key is held by the OS keychain or derived from the master password. The registry sees
+  the vault only as a `SecretStore`, which follows the
   inventory: whatever the inventory stops referencing is deleted (#543). See
   [Secret settings](manifest.md#secret-settings).
 

@@ -338,6 +338,55 @@ async fn setting_a_secret_needs_the_secret_store_grant() {
     assert!(!on_disk(&path).contains("secretRef"));
 }
 
+/// Review of #543: #691 shipped in the pre-release `srelens-v0.15.1-185`,
+/// where a manifest could declare a `secret-reference` without requesting
+/// `extension.secretStore`. Such an app, already installed, keeps working —
+/// it is not quarantined on upgrade — and simply cannot keep a secret until
+/// it is reinstalled with the permission. A new install is held to the rule.
+#[tokio::test]
+async fn an_app_installed_before_the_permission_existed_keeps_working() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("apps.json");
+    let store = Arc::new(MemoryStore::default());
+    let reg = registry(&path, store.clone());
+    install(&reg, with_secret(declared())).await;
+    // The inventory as v0.15.1-185 wrote it: the setting, but no permission
+    // and no grant.
+    let mut raw: Value = serde_json::from_str(&on_disk(&path)).unwrap();
+    raw["plugins"][0]["manifest"]["permissions"] = json!(["k8s.listCustomResource"]);
+    raw["plugins"][0]["grants"] = json!(["k8s.listCustomResource"]);
+    fs::write(&path, raw.to_string()).unwrap();
+
+    let app = listed(&reg).await["plugins"][0].clone();
+    assert!(
+        app["quarantined"].is_null(),
+        "quarantined on upgrade: {}",
+        app["quarantined"]
+    );
+    assert_eq!(app["enabled"], true);
+    let refused = set(&reg, "token").await.unwrap_err().to_string();
+    assert_secret_absent(&refused, "the refusal");
+    assert!(refused.contains(SECRET_STORE_PERMISSION), "{refused}");
+    assert!(store.keys().is_empty());
+
+    // Installing that shape now is refused, with the reason.
+    let mut old_shape: Value = serde_json::from_str(&with_secret(declared())).unwrap();
+    old_shape["permissions"] = json!(["k8s.listCustomResource"]);
+    let refused = reg
+        .invoke(
+            "extensions.configure",
+            json!({"action":"install","manifest":old_shape.to_string(),
+                   "grants":["k8s.listCustomResource"],"reviewedRevision":app["revision"]}),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("permissions") && refused.contains(SECRET_STORE_PERMISSION),
+        "{refused}"
+    );
+}
+
 /// An app this host no longer trusts keeps nothing new, whatever it was
 /// granted (review of #543).
 #[tokio::test]

@@ -840,6 +840,8 @@ fn check_install(
     let mut problems = validate_app(&manifest, grants, core)
         .err()
         .unwrap_or_default();
+    // The rules a new install meets that an installed app is not re-held to.
+    problems.0.extend(manifest.install_problems());
     // Without this, a pasted manifest could replace a signed app, or take an
     // official ID and its logo, differing from the real one only by a label.
     if let Some(reason) = unsigned_reserved(&manifest.id, signature.is_some()) {

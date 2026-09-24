@@ -102,6 +102,33 @@ impl SecretStore for NoSecretStore {
 }
 
 impl Manifest {
+    /// The rules a manifest must meet to be installed now, beyond
+    /// [`Manifest::validate`], which also runs on every load and request and
+    /// so must keep accepting what an earlier host installed.
+    ///
+    /// Today one: a manifest that declares a `secret-reference` setting
+    /// requests [`SECRET_STORE_PERMISSION`]. An app installed before the
+    /// permission existed keeps working and cannot keep a secret until it is
+    /// reinstalled with it.
+    pub fn install_problems(&self) -> Vec<crate::ValidationError> {
+        let mut problems = Vec::new();
+        if self.declares_secrets()
+            && !self
+                .permissions
+                .iter()
+                .any(|permission| permission == SECRET_STORE_PERMISSION)
+        {
+            problems.push(crate::ValidationError::new(
+                crate::ValidationCode::PermissionMismatch,
+                "permissions",
+                format!(
+                    "A manifest that declares a secret-reference setting requests {SECRET_STORE_PERMISSION}"
+                ),
+            ));
+        }
+        problems
+    }
+
     /// Whether this app declares a `secret-reference` setting.
     pub fn declares_secrets(&self) -> bool {
         self.settings

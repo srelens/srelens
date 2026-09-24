@@ -721,28 +721,35 @@ access.
 ### Secret settings
 
 A `secret-reference` setting is kept by the host's secret store (#543). On the desktop
-that is the existing encrypted vault, `secrets.enc`, whose one master key is held by the OS
-keychain (or, once a master password is set, derived from it); the app secret is one more
+that is srelens's encrypted secrets vault (`secrets.enc`), whose one master key is held
+by the OS keychain or derived from the master password; the app secret is one more
 entry in it, beside the MCP token and the provider API keys, keyed by
 `<app id>/<setting id>`. The inventory holds only the reference.
 
-- **Permission.** A manifest that declares a `secret-reference` setting lists
-  `extension.secretStore` in `permissions`, and one that declares none may not
-  (`EXTENSION_PERMISSION_MISMATCH`). It is granted at install like any other permission
-  and is never a binding target (`EXTENSION_UNSUPPORTED_TARGET`). The install and update
-  review names it, the secret settings it covers, and the host's metadata for it:
-  sensitive, `medium` impact, and its confirmation wording.
+- **Permission.** A manifest installed or updated now that declares a
+  `secret-reference` setting lists `extension.secretStore` in `permissions`, and one
+  that declares none may not (`EXTENSION_PERMISSION_MISMATCH`). It is granted at install
+  like any other permission and is never a binding target
+  (`EXTENSION_UNSUPPORTED_TARGET`). The install and update review names it, the secret
+  settings it covers, and the host's metadata for it: sensitive, `medium` impact, and its
+  confirmation wording.
+- **Migration.** Secret settings shipped before the permission existed (#542, in the
+  pre-release `srelens-v0.15.1-185`), so an app installed then may declare one without
+  requesting `extension.secretStore`. It is not quarantined: it keeps working, and its
+  secret settings cannot be set, with the form saying the app was not granted the
+  permission, until it is reinstalled or updated to a version that requests it.
 - **Write-only.** Settings → Apps sets, replaces and clears a secret, and shows whether
   it is set. Nothing returns the value: not `extensions.list`, not the capability's own
   answer (`{"set": true}`), not an error, not the audit log, not an MCP response or
   consent prompt, not exported settings or the settings bundle. The consent prompt shows
   only the action, and the app and setting when they name an installed app's declared
   secret; anything else the call carried is left out.
-- **Fails closed.** A secret is stored only while the vault's key is protected by the OS
-  keychain, the biometric gate or the master password, and the vault is unlocked. With
-  no usable keychain (the headless file fallback), a locked vault, or no store at all, a
-  set is refused with the reason, which Settings → Apps shows beside the field. Nothing is
-  ever written in plain text instead.
+- **Fails closed.** A secret is stored only while the vault's key is held by the OS
+  keychain (or its biometric gate) or derived from the master password, and the vault is
+  unlocked. When the vault's key is only in a plain file beside it (no keychain and no
+  master password), the vault is locked, or there is no store at all, a set is refused
+  with the reason, which Settings → Apps shows beside the field. Nothing is ever written
+  in plain text instead.
 - **Deleted with the app.** Removing the app, or an update or rollback that no longer
   declares the setting as a secret, deletes the secret. The inventory is the source of
   truth and the store follows it: after every inventory change the host deletes each

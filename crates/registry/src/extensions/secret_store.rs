@@ -1,8 +1,9 @@
 //! `extension.secretStore` (#543): set, clear and report an app's secret
 //! settings, write-only.
 //!
-//! The value goes to the host's [`SecretStore`] (on the desktop, the vault
-//! whose master key is in the OS keychain) and the inventory keeps only the
+//! The value goes to the host's [`SecretStore`] (on the desktop, srelens's
+//! encrypted secrets vault, whose master key is held by the OS keychain or
+//! derived from the master password) and the inventory keeps only the
 //! host-minted reference, written after the value is stored. The inventory is
 //! the source of truth and the store follows it: every inventory change ends
 //! with [`sweep`], which deletes each stored secret no app references any

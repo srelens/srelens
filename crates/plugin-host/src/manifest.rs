@@ -1323,9 +1323,13 @@ impl Manifest {
                 );
             }
         }
-        // What the app uses: its bound targets, plus the secret store exactly
-        // when it declares a secret setting.
-        if self.declares_secrets() {
+        // What the app uses: its bound targets, plus the secret store, which
+        // it may request only when it declares a secret setting. That a new
+        // install declaring one must request it is `install_problems`'s: a
+        // manifest stored before the permission existed (#691 shipped in
+        // `srelens-v0.15.1-185`) is re-checked here on every load and must
+        // stay valid, or its app would be quarantined on upgrade.
+        if self.declares_secrets() && permissions.contains(crate::SECRET_STORE_PERMISSION) {
             targets.insert(crate::SECRET_STORE_PERMISSION);
         }
         if targets != permissions {

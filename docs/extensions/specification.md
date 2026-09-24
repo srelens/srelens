@@ -312,7 +312,7 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   capability marks the argument settable (`k8s.annotate`'s `value`,
   `k8s.setStatusCondition`'s `message`), and is checked at install, on save and on
   every request. A `secret-reference` value never enters the inventory (#542): it is
-  kept, write-only, in the desktop's keychain-backed vault through
+  kept, write-only, in srelens's encrypted secrets vault through
   `extension.secretStore`, which an app declaring one must request as a permission
   (#543). See [Manifest reference](manifest.md#settings) and
   [Secret settings](manifest.md#secret-settings).

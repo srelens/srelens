@@ -34,20 +34,40 @@ fn problems(value: &Value) -> Vec<(ValidationCode, String)> {
     }
 }
 
+fn install_problems(value: &Value) -> Vec<(ValidationCode, String)> {
+    let manifest = Manifest::parse(&value.to_string()).expect("a manifest a host keeps");
+    manifest
+        .install_problems()
+        .into_iter()
+        .map(|e| (e.code, e.path))
+        .collect()
+}
+
 #[test]
-fn a_secret_setting_needs_the_secret_store_permission() {
+fn a_new_install_of_a_secret_setting_needs_the_secret_store_permission() {
     let missing = manifest(&["test.read"], token_setting());
     assert!(
-        problems(&missing).contains(&(ValidationCode::PermissionMismatch, "permissions".into())),
+        install_problems(&missing)
+            .contains(&(ValidationCode::PermissionMismatch, "permissions".into())),
         "{:?}",
-        problems(&missing)
+        install_problems(&missing)
     );
     let granted = manifest(&["test.read", SECRET_STORE_PERMISSION], token_setting());
+    assert_eq!(problems(&granted), vec![]);
     assert_eq!(
-        problems(&granted),
+        install_problems(&granted),
         vec![],
         "the permission and the setting go together"
     );
+}
+
+/// #691 shipped in `srelens-v0.15.1-185`, before the permission existed. A
+/// manifest stored then is still one the host keeps (it is re-checked on
+/// every load and request); only a new install is held to the rule.
+#[test]
+fn a_stored_manifest_from_before_the_permission_is_still_valid() {
+    let stored = manifest(&["test.read"], token_setting());
+    assert_eq!(problems(&stored), vec![]);
 }
 
 #[test]
