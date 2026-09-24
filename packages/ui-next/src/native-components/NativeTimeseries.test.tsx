@@ -100,9 +100,8 @@ describe("Timeseries", () => {
     expect(shown[0]).not.toBe(shown[1]);
     expect(/[.,]000\b/.test(shown[0]!)).toBe(milliseconds);
   });
+  // A zone a case pins in process.env.TZ is put back after it by src/test-setup.ts.
   describe("across a daylight-saving fall-back", () => {
-    const zone = process.env.TZ;
-    afterEach(() => { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; });
     // 05:30Z and 06:30Z are both 01:30 in New York on 1 November 2026: EDT, then EST.
     const repeated = [Date.parse("2026-11-01T05:30:00Z"), Date.parse("2026-11-01T06:30:00Z")];
     it("tells the repeated hour apart by its UTC offset in table rows and axis labels", () => {
@@ -184,29 +183,33 @@ describe("Timeseries", () => {
   describe("time axis on round steps", () => {
     const axis = (container: HTMLElement) => [...container.querySelectorAll("text[data-axis='time']")]
       .map(tick => ({ text: tick.textContent!, time: Date.parse(tick.getAttribute("data-time")!) }));
-    const minutes = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
     const draw = (from: number, to: number) => render(<NativeComponent label="Pod CPU" payload={chart({ range: { start: from, end: to },
       times: [from, to], series: [{ name: "web", values: [1, 2] }], thresholds: [] })}/>).container;
-    it("labels a 5 min + 1 ms range at 640px only with minutes its ticks are on", () => {
+    // The axis is in the reader's zone, so each case pins several rather than taking the machine's:
+    // UTC, east and west of it, and Kathmandu, 45 minutes off the hour.
+    const zones = ["UTC", "Europe/Berlin", "America/Los_Angeles", "Asia/Kathmandu"];
+    const inEachZone = (check: (zone: string) => void) => { for (const zone of zones) { process.env.TZ = zone; check(zone); cleanup(); } };
+    it("labels a 5 min + 1 ms range at 640px only with minutes its ticks are on, in the reader's zone", () => inEachZone(zone => {
+      const minutes = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", timeZone: zone });
       const ticks = axis(draw(start + 7_000, start + 7_000 + 5 * minute + 1));
-      expect(ticks.length).toBeGreaterThanOrEqual(2);
+      expect(ticks.length, zone).toBeGreaterThanOrEqual(2);
       for (const tick of ticks) {
-        expect(tick.time % minute).toBe(0);
-        expect(tick.text).toBe(minutes.format(tick.time));
+        expect(tick.time % minute, zone).toBe(0);
+        expect(tick.text, zone).toBe(minutes.format(tick.time));
       }
-    });
-    it("marks a 1 h range at 5, 10 or 15 minutes", () => {
+    }));
+    it("marks a 1 h range at 5, 10 or 15 minutes of the reader's clock", () => inEachZone(zone => {
       const ticks = axis(draw(start + 3 * minute + 17_000, start + 63 * minute + 17_000));
       const gaps = ticks.slice(1).map((tick, index) => tick.time - ticks[index].time);
-      expect(new Set(gaps).size).toBe(1);
-      expect([5, 10, 15].map(step => step * minute)).toContain(gaps[0]);
-      expect(ticks.every(tick => new Date(tick.time).getMinutes() % (gaps[0] / minute) === 0)).toBe(true);
-    });
-    it("marks a 7-day range at local days or half days", () => {
+      expect(new Set(gaps).size, zone).toBe(1);
+      expect([5, 10, 15].map(step => step * minute), zone).toContain(gaps[0]);
+      expect(ticks.every(tick => new Date(tick.time).getMinutes() % (gaps[0] / minute) === 0), zone).toBe(true);
+    }));
+    it("marks a 7-day range at local days or half days", () => inEachZone(zone => {
       const ticks = axis(draw(start + 5 * 60 * minute, start + 7 * 24 * 60 * minute + 5 * 60 * minute));
-      expect(ticks.length).toBeGreaterThanOrEqual(2);
-      expect(ticks.every(tick => new Date(tick.time).getHours() % 12 === 0 && new Date(tick.time).getMinutes() === 0)).toBe(true);
-    });
+      expect(ticks.length, zone).toBeGreaterThanOrEqual(2);
+      expect(ticks.every(tick => new Date(tick.time).getHours() % 12 === 0 && new Date(tick.time).getMinutes() === 0), zone).toBe(true);
+    }));
     it("fits its labels into the 352px peek without crowding", () => {
       vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(352);
       vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });

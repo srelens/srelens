@@ -20,7 +20,7 @@ mod settings;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use extensions::fuzzing;
-pub use extensions::streams::{ExtensionStreams, OpenStreamOut};
+pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
 pub use settings::default_settings_path;
 /// The secret store a host supplies for apps' secret settings (#543), so a
 /// host implements it against this crate alone.

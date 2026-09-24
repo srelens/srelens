@@ -108,6 +108,25 @@ pub(super) async fn resolve(
     context: &str,
     binding: &Binding,
 ) -> Result<String, CapabilityError> {
+    match serves(core, context, binding).await {
+        Served::Yes(version) => Ok(version),
+        Served::No(why) | Served::Unknown(why) => Err(CapabilityError::Handler(why)),
+    }
+}
+
+/// What the cluster answered about a binding's kind: served, with what (the
+/// resolved version, or a watch's target), or not.
+pub(super) enum Served<T = String> {
+    Yes(T),
+    /// The cluster answered: no such CRD serves any version the binding accepts. With why.
+    No(String),
+    /// The lookup itself failed, so it is not known either way. With why.
+    Unknown(String),
+}
+
+/// [`resolve`]'s answer with its two refusals kept apart, for a caller that
+/// treats a failed lookup (a watch reconnecting) unlike an absence (#566).
+pub(super) async fn serves(core: &Registry, context: &str, binding: &Binding) -> Served {
     let field = |key: &str| {
         binding
             .arguments
@@ -129,13 +148,13 @@ pub(super) async fn resolve(
         )
         .await
     {
-        Ok(Value::String(version)) if versions.contains(&version) => Ok(version),
-        Ok(_) => Err(CapabilityError::Handler(format!(
+        Ok(Value::String(version)) if versions.contains(&version) => Served::Yes(version),
+        Ok(_) => Served::No(format!(
             "No CustomResourceDefinition {name} serving {listed} on this cluster; an app reads only custom resources"
-        ))),
-        Err(error) => Err(CapabilityError::Handler(format!(
+        )),
+        Err(error) => Served::Unknown(format!(
             "Could not confirm that a CustomResourceDefinition {name} serves {listed}: {error}"
-        ))),
+        )),
     }
 }
 

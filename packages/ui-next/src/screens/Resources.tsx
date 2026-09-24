@@ -564,6 +564,18 @@ function KindList({
           <Button variant="secondary" onClick={appColumns.reload}>Retry columns</Button>
         </Alert>
       ))}
+      {/* A joined app column follows its reader's kind (#566); say when it cannot. */}
+      {appColumns.live.state === "reconnecting" && (
+        <Alert tone="warn" title="App columns may be out of date" className="mx-3 mt-3 mb-3">
+          Reconnecting to the cluster ({appColumns.live.message}); app column values are as of the last read until it reconnects.
+        </Alert>
+      )}
+      {appColumns.live.state === "stopped" && (
+        <Alert tone="warn" title="App columns are not live" className="mx-3 mt-3 mb-3">
+          {appColumns.live.message} App column values are as of the last read.{" "}
+          <Button variant="secondary" onClick={appColumns.reload}>Read columns again</Button>
+        </Alert>
+      )}
 
       {!clusterScoped && (
         <StaleSelectionAlert

@@ -15,11 +15,36 @@ import {
   describeStreamEnd,
   extensionStreamMetrics,
   extensionStreamPayload,
+  EXTENSION_INVENTORY_CHANNEL,
+  isExtensionWatchEvent,
+  onExtensionInventoryChanged,
   openExtensionView,
   type ExtensionStreamEnd,
 } from "./extensionStreams";
 // What the Rust `OpenStreamIn` test deserializes, byte for byte.
 import wrapperPayload from "./extension-stream-open.json";
+import watchPayload from "./extension-stream-watch.json";
+
+describe("watch events (#566)", () => {
+  it("accepts exactly the three events a watch sends", () => {
+    expect(isExtensionWatchEvent({ event: "synced" })).toBe(true);
+    expect(isExtensionWatchEvent({ event: "changed" })).toBe(true);
+    expect(isExtensionWatchEvent({ event: "reconnecting", message: "reset" })).toBe(true);
+    expect(isExtensionWatchEvent({ event: "reconnecting" })).toBe(false);
+    expect(isExtensionWatchEvent({ event: "other" })).toBe(false);
+    expect(isExtensionWatchEvent(null)).toBe(false);
+  });
+
+  it("hears the host's inventory announcements on their channel", async () => {
+    const heard = vi.fn();
+    const stop = await onExtensionInventoryChanged(heard);
+    expect(calls).toEqual([`subscribe ${EXTENSION_INVENTORY_CHANNEL}`]);
+    emit(EXTENSION_INVENTORY_CHANNEL, { type: "changed" });
+    expect(heard).toHaveBeenCalledTimes(1);
+    stop();
+    expect(channels.get(EXTENSION_INVENTORY_CHANNEL)?.dispose).toHaveBeenCalled();
+  });
+});
 
 // Every channel the client subscribed to, with its handler and its dispose spy.
 const channels = new Map<string, { handler: (payload: unknown) => void; dispose: ReturnType<typeof vi.fn> }>();
@@ -66,6 +91,11 @@ describe("extensionStreamPayload", () => {
     // The camelCase spelling, never the struct's own.
     expect(Object.keys(payload.source)).toContain("intervalSeconds");
     expect(JSON.stringify(payload)).not.toContain("interval_seconds");
+  });
+
+  it("sends a watch exactly as the host's OpenStreamIn accepts it (#566)", () => {
+    const watch = { ...request, source: { kind: "watch" as const, capability: "applications" } };
+    expect(extensionStreamPayload("org.example.argocd/page:applications#1", "extstream:2-a8f3k1", watch)).toEqual(watchPayload);
   });
 
   it("sends an empty namespace rather than leaving it out", () => {
