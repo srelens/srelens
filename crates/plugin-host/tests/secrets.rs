@@ -80,16 +80,15 @@ fn the_secret_store_is_granted_never_bound() {
 
 #[test]
 fn a_secret_value_never_prints() {
+    // Facts only in the messages: every value compared here holds, or would
+    // on failure print, the secret.
     let value = SecretValue::new(TOKEN.to_owned());
-    assert_eq!(value.expose(), TOKEN);
-    let printed = format!("{value:?}");
-    assert!(
-        !printed.contains(TOKEN),
-        "Debug printed the secret: {printed}"
-    );
+    assert!(value.expose() == TOKEN, "expose returns the value it holds");
+    let printed_it = format!("{value:?}").contains(TOKEN);
+    assert!(!printed_it, "Debug printed the secret");
     // Nested inside anything that derives Debug, as a panic message would be.
-    let nested = format!("{:?}", Some(vec![value]));
-    assert!(!nested.contains(TOKEN), "{nested}");
+    let nested_it = format!("{:?}", Some(vec![value])).contains(TOKEN);
+    assert!(!nested_it, "Debug of a value holding it printed the secret");
 }
 
 #[test]
@@ -176,7 +175,10 @@ fn a_secret_is_injected_only_where_the_target_declares_a_slot() {
         &store,
     )
     .expect("declared slot, declared secret, granted, set");
-    assert_eq!(got.expose(), TOKEN);
+    assert!(
+        got.expose() == TOKEN,
+        "the declared slot gets the stored value"
+    );
 
     // No current host capability declares a slot: `k8s.annotate`'s `value`
     // is the kind of position a setting may fill, and a secret may not.
@@ -193,6 +195,7 @@ fn a_secret_is_injected_only_where_the_target_declares_a_slot() {
         &store,
     )
     .unwrap_err();
+    assert!(!refused.contains(TOKEN), "the refusal carried the secret");
     assert!(refused.contains("value"), "{refused}");
     let wrong_slot = PluginHost::inject_secret(
         &http(),
@@ -295,6 +298,9 @@ fn a_refused_injection_never_names_the_value() {
         )
         .unwrap_err(),
     ] {
-        assert!(!why.contains(TOKEN), "{why}");
+        assert!(
+            !why.contains(TOKEN),
+            "a refused injection carried the secret"
+        );
     }
 }

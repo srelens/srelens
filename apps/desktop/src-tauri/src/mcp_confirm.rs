@@ -477,14 +477,17 @@ mod tests {
             ),
             &|app, setting| app == "org.example.metrics" && setting.is_none_or(|s| s == "token"),
         );
-        let shown = serde_json::to_string(&got).unwrap();
-        assert!(!shown.contains(secret), "the window was sent the secret: {shown}");
-        assert_eq!(got.args["setting"], json!("token"));
-        assert_eq!(got.args["action"], json!("set"));
+        // Facts only in the messages: what the window would get is not
+        // printed, since in the failing case it holds the secret.
+        let leaked = serde_json::to_string(&got).unwrap().contains(secret);
+        assert!(!leaked, "the window was sent the secret");
+        assert!(got.args["setting"] == json!("token"), "the setting is named");
+        assert!(got.args["action"] == json!("set"), "the action is named");
         let p = Pending::default();
         let (tx, _rx) = oneshot::channel();
         p.register(got, tx);
-        assert!(!serde_json::to_string(&p.snapshot()).unwrap().contains(secret));
+        let replayed = serde_json::to_string(&p.snapshot()).unwrap().contains(secret);
+        assert!(!replayed, "a late subscriber was sent the secret");
     }
 
     /// Review of #543: consent is asked before the call is parsed, so an agent
@@ -498,21 +501,26 @@ mod tests {
         let known = |app: &str, setting: Option<&str>| {
             app == "org.example.metrics" && setting.is_none_or(|s| s == "token")
         };
-        for args in [
+        for (case, args) in [
             json!({"action":"set","id":"org.example.metrics","setting":"token","value":secret}),
             json!({"action":"set","id":"org.example.metrics","setting":"token","nested":{"deep":[secret]}}),
             json!({"action":secret,"id":"org.example.metrics","setting":"token"}),
             json!({"action":"set","id":"org.example.metrics","setting":secret,"secret":"x"}),
             json!({"action":"set","id":secret,"setting":"token","secret":"x"}),
             json!({"action":"set","id":"org.example.metrics","setting":"token","name":secret,"context":secret}),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let got = PendingRequest::from_consent_checked(
                 "id-10".into(),
                 &consent("extension.secretStore", srelens_registry::SECRET_STORE_ANNOTATIONS, args.clone()),
                 &known,
             );
-            let shown = serde_json::to_string(&got).unwrap();
-            assert!(!shown.contains(secret), "{args} → the window was sent: {shown}");
+            // Facts only in the message: every case's arguments carry the
+            // secret, so neither they nor what was shown are printed.
+            let leaked = serde_json::to_string(&got).unwrap().contains(secret);
+            assert!(!leaked, "case {case}: the window was sent the secret");
         }
         // The names a person needs to decide are still there.
         let got = PendingRequest::from_consent_checked(
@@ -524,8 +532,15 @@ mod tests {
             ),
             &known,
         );
-        assert_eq!(got.args, json!({"action":"set","id":"org.example.metrics","setting":"token","secret":"<redacted>"}));
-        assert!(got.prompt.as_deref().is_some_and(|p| p.ends_with(" (set)?")), "{:?}", got.prompt);
+        assert!(
+            got.args
+                == json!({"action":"set","id":"org.example.metrics","setting":"token","secret":"<redacted>"}),
+            "the window is shown the action, the app, the setting, and that a secret is present"
+        );
+        assert!(
+            got.prompt.as_deref().is_some_and(|p| p.ends_with(" (set)?")),
+            "the sentence names the action"
+        );
     }
 
     /// No template is not a hole: the window falls back to what it always

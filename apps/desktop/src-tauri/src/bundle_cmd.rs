@@ -474,8 +474,12 @@ mod tests {
             },
         );
         let exported = secrets_for_export(&vault, true).unwrap().unwrap();
-        assert!(exported.extension_secrets.is_empty(), "{exported:?}");
-        assert_eq!(exported.mcp_token.as_deref(), Some("tok"));
+        // Facts only in the messages: the export itself holds secrets.
+        let carries_app_secrets = !exported.extension_secrets.is_empty();
+        let carries_token = exported.mcp_token.is_some();
+        drop(exported);
+        assert!(!carries_app_secrets, "the export carried an app secret");
+        assert!(carries_token, "the MCP token the person chose to export is kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -496,8 +500,11 @@ mod tests {
         };
         import_secrets(&vault, &bundle_with(Some(incoming))).unwrap();
         let stored = vault.load();
-        assert!(stored.extension_secrets.is_empty(), "{stored:?}");
-        assert_eq!(stored.llm_keys.len(), 1);
+        // Facts only in the messages: the vault's contents are secrets.
+        let (planted, keys) = (!stored.extension_secrets.is_empty(), stored.llm_keys.len());
+        drop(stored);
+        assert!(!planted, "the import wrote an app secret into the vault");
+        assert_eq!(keys, 1, "the bundle's API key is imported");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

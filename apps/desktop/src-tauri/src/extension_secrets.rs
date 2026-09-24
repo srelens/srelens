@@ -215,15 +215,18 @@ mod tests {
         assert_eq!(store.status(), Ok(()));
         store.put(KEY, &SecretValue::new(SECRET.into())).unwrap();
 
-        assert_eq!(store.reveal(KEY).unwrap().unwrap().expose(), SECRET);
+        // Facts only in the messages: the values compared are secrets.
+        let revealed = store.reveal(KEY).unwrap().unwrap().expose() == SECRET;
+        assert!(revealed, "the store returns the value it kept");
         assert_eq!(store.contains(KEY), Ok(true));
-        assert_eq!(
-            vault.load().extension_secrets.get(KEY).map(String::as_str),
-            Some(SECRET)
-        );
+        let in_vault = vault.load().extension_secrets.get(KEY).map(String::as_str) == Some(SECRET);
+        assert!(in_vault, "the value is one more entry in the vault");
         // The same `secrets.enc` the MCP token lives in, and never in the clear.
         let raw = std::fs::read(dir.join("secrets.enc")).unwrap();
-        assert!(!raw.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()));
+        assert!(
+            !raw.windows(SECRET.len()).any(|w| w == SECRET.as_bytes()),
+            "secrets.enc holds the value in the clear"
+        );
         // No second storage scheme: nothing else was written beside it.
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
@@ -367,12 +370,21 @@ mod tests {
         let mut secrets = crate::vault::Secrets::default();
         secrets.extension_secrets.insert(KEY.into(), SECRET.into());
         secrets.mcp_token = Some("cd".repeat(32));
+        // Only facts about the output reach an assertion message, never the
+        // output: were the redaction to regress, the message would otherwise
+        // print the very value this checks is absent.
         let printed = format!("{secrets:?}");
-        assert!(!printed.contains(SECRET), "{printed}");
-        assert!(!printed.contains(&"cd".repeat(32)), "{printed}");
-        assert!(
+        let (holds_app_secret, holds_token, names_key) = (
+            printed.contains(SECRET),
+            printed.contains(&"cd".repeat(32)),
             printed.contains(KEY),
-            "which app secrets are held is not secret: {printed}"
+        );
+        drop(printed);
+        assert!(!holds_app_secret, "Debug printed an app secret's value");
+        assert!(!holds_token, "Debug printed the MCP token");
+        assert!(
+            names_key,
+            "which app secrets are held is not secret, and Debug should name them"
         );
     }
 }

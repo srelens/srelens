@@ -1368,8 +1368,12 @@ mod tests {
         let out = redact_error(&error, &args, &redacted);
         let took = started.elapsed();
 
-        assert!(!out.contains(&secret), "the value leaked");
-        assert!(out.contains("<redacted>"), "{out}");
+        // Facts only in the messages: were the scrub to miss, the message
+        // would otherwise print the value it failed to hide.
+        let (leaked, marked) = (out.contains(&secret), out.contains("<redacted>"));
+        drop(out);
+        assert!(!leaked, "the value leaked");
+        assert!(marked, "the scrub did not mark where the value was");
         assert!(
             took < std::time::Duration::from_secs(2),
             "scrubbing one 16 KiB value took {took:?}; the build is not linear in its length"
@@ -1386,7 +1390,7 @@ mod tests {
         let redacted = redact(&args, true);
         let started = std::time::Instant::now();
         let out = redact_error("the vault is locked", &args, &redacted);
-        assert_eq!(out, "the vault is locked");
+        assert!(out == "the vault is locked", "a message holding no value is changed by the scrub");
         assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
     }
 

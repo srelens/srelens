@@ -133,6 +133,13 @@ fn on_disk(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
 }
 
+/// That `text` does not hold the secret, with a message that prints nothing
+/// of `text`: in the failing case it holds the very value. Called before any
+/// assertion that prints `text`, so no failure message can carry the secret.
+fn assert_secret_absent(text: &str, what: &str) {
+    assert!(!text.contains(SECRET), "{what} carried the secret");
+}
+
 #[tokio::test]
 async fn set_keeps_the_value_in_the_store_and_only_the_reference_in_the_inventory() {
     let dir = tempfile::tempdir().unwrap();
@@ -142,18 +149,16 @@ async fn set_keeps_the_value_in_the_store_and_only_the_reference_in_the_inventor
     install(&reg, with_secret(declared())).await;
 
     let answer = set(&reg, "token").await.unwrap();
+    assert_secret_absent(&answer.to_string(), "the capability's answer");
     assert_eq!(
         answer,
         json!({"set": true}),
         "write-only: whether it is set, nothing else"
     );
-    assert_eq!(
-        store
-            .reveal(&secret_key(ID, "token"))
-            .unwrap()
-            .unwrap()
-            .expose(),
-        SECRET
+    let kept = store.reveal(&secret_key(ID, "token")).unwrap().unwrap();
+    assert!(
+        kept.expose() == SECRET,
+        "the store keeps the value it was given"
     );
     assert!(
         !on_disk(&path).contains(SECRET),
@@ -327,8 +332,8 @@ async fn setting_a_secret_needs_the_secret_store_grant() {
     fs::write(&path, raw.to_string()).unwrap();
 
     let refused = set(&reg, "token").await.unwrap_err().to_string();
+    assert_secret_absent(&refused, "the refusal");
     assert!(refused.contains(SECRET_STORE_PERMISSION), "{refused}");
-    assert!(!refused.contains(SECRET), "{refused}");
     assert!(store.keys().is_empty());
     assert!(!on_disk(&path).contains("secretRef"));
 }
@@ -349,6 +354,7 @@ async fn a_quarantined_app_cannot_keep_a_secret() {
     assert!(listed(&reg).await["plugins"][0]["quarantined"].is_string());
 
     let refused = set(&reg, "token").await.unwrap_err().to_string();
+    assert_secret_absent(&refused, "the refusal");
     assert!(refused.contains("can't keep secrets"), "{refused}");
     assert!(store.keys().is_empty());
 }
@@ -373,7 +379,15 @@ async fn only_a_declared_secret_of_an_installed_app_can_be_set() {
             .await
             .unwrap_err()
             .to_string();
-        assert!(!refused.contains(SECRET), "{refused}");
+        assert_secret_absent(&refused, "the refusal");
+        // The cause, stable across refusals of this kind (the e2e suite
+        // asserts the same text against a live cluster).
+        let expected = if id == ID {
+            "declares no secret setting"
+        } else {
+            "not installed"
+        };
+        assert!(refused.contains(expected), "{refused}");
     }
     assert!(store.keys().is_empty());
 }
@@ -403,7 +417,7 @@ async fn a_secret_must_be_one_bounded_piece_of_text() {
             .to_string();
         assert!(
             !refused.contains("123456789"),
-            "the refusal echoed the value: {refused}"
+            "the refusal echoed the numeric value"
         );
         assert!(
             refused.len() < 400,
@@ -424,7 +438,7 @@ async fn a_malformed_call_is_refused_without_quoting_it() {
     let store = Arc::new(MemoryStore::default());
     let reg = registry(&path, store.clone());
     install(&reg, with_secret(declared())).await;
-    for input in [
+    for (case, input) in [
         json!(SECRET),
         json!([SECRET]),
         json!({"action": SECRET}),
@@ -436,13 +450,17 @@ async fn a_malformed_call_is_refused_without_quoting_it() {
         json!({"action":"set","id":ID,"setting":SECRET,"secret":"x"}),
         json!({"action":"clear","id":ID,"setting":SECRET}),
         json!({"action":"set","id":SECRET,"setting":"token","secret":"x"}),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let refused = reg
             .invoke("extension.secretStore", input.clone())
             .await
             .unwrap_err()
             .to_string();
-        assert!(!refused.contains(SECRET), "{input} → {refused}");
+        // Every case's input carries the secret, so it is never printed.
+        assert_secret_absent(&refused, &format!("the refusal of case {case}"));
     }
     assert!(store.keys().is_empty());
 }
@@ -481,14 +499,12 @@ async fn an_unavailable_store_fails_closed_and_says_why() {
         Some("the secrets vault is locked — unlock it with your master password".into());
 
     let refused = set(&reg, "token").await.unwrap_err().to_string();
+    assert_secret_absent(&refused, "the refusal");
     assert!(refused.contains("locked"), "{refused}");
-    assert!(!refused.contains(SECRET), "{refused}");
     assert!(store.keys().is_empty());
     let disk = on_disk(&path);
-    assert!(
-        !disk.contains(SECRET) && !disk.contains("secretRef"),
-        "{disk}"
-    );
+    assert_secret_absent(&disk, "the inventory file");
+    assert!(!disk.contains("secretRef"), "{disk}");
     let listed = listed(&reg).await;
     assert_eq!(listed["secretStore"]["available"], false);
     assert!(listed["secretStore"]["reason"]
@@ -555,6 +571,7 @@ async fn neither_mcp_nor_the_audit_log_ever_carries_the_value() {
         json!({"action":"set","id":ID,"setting":"token","secret":SECRET,"_confirm":true}),
     ))
     .await;
+    assert_secret_absent(&stored.to_string(), "the MCP answer to a set");
     assert_eq!(stored["result"]["isError"], false, "{stored}");
     // Refused calls quote nothing either: unconfirmed, and with the store locked.
     let unconfirmed = handle(call(
@@ -567,19 +584,13 @@ async fn neither_mcp_nor_the_audit_log_ever_carries_the_value() {
     ))
     .await;
     for answer in [&stored, &unconfirmed, &locked] {
-        assert!(
-            !answer.to_string().contains(SECRET),
-            "MCP answered with it: {answer}"
-        );
+        assert_secret_absent(&answer.to_string(), "an MCP answer");
     }
     let records = spy.0.lock().unwrap();
     assert!(records.len() >= 3, "{}", records.len());
     for record in records.iter() {
         let line = format!("{:?} {:?} {:?}", record.args, record.error, record.resource);
-        assert!(
-            !line.contains(SECRET),
-            "the audit record carried it: {line}"
-        );
+        assert_secret_absent(&line, "an audit record");
     }
 }
 

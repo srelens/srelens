@@ -2784,7 +2784,14 @@ async fn extensions_and_gitops(h: &mut Harness, ctx: &str, settings: &TempSettin
             json!({"action": "set", "id": "org.example.flux", "setting": "token", "secret": "e2e-secret-value"}),
         )
         .await;
-    assert!(!err.contains("e2e-secret-value"), "{err}");
+    // Absence first, with a message that prints nothing of the refusal; then
+    // the cause, which the refusal may be printed for once the value is known
+    // not to be in it.
+    assert!(!err.contains("e2e-secret-value"), "the refusal repeated the secret");
+    assert!(
+        err.contains("declares no secret setting"),
+        "refused for another reason than an undeclared secret setting: {err}"
+    );
 
     println!("=== extensions: read ===");
     let out = h
