@@ -122,8 +122,9 @@ function tickLabels(step: number, ticks: number[]): (time: number) => string {
 function labelsThatFit(width: number, plotWidth: number, start: number, end: number) {
   const most = width >= 640 ? 6 : 4;
   return (step: number) => {
-    // Too many ticks at this step whatever their labels: no need to format them.
-    if (Math.floor((end - start) / step) + 1 > most) return most;
+    // Far too many ticks at this step whatever their labels: no need to format them. The fallback in
+    // timeTicks asks about a finer step with a few more ticks than fit, so those are still measured.
+    if (Math.floor((end - start) / step) + 1 > 4 * most) return most;
     // Measure the labels this step would really draw, with any offset or year they carry.
     const ticks = stepTicks(start, end, step);
     const label = tickLabels(step, ticks);
