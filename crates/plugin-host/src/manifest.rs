@@ -348,6 +348,39 @@ pub struct Contributions {
     /// joined resource (#541).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub badges: Vec<Badge>,
+    /// Entries in the command palette (#544): open one of this app's pages,
+    /// or run one of its declared actions on the resource the reader has open.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<PaletteCommand>,
+}
+
+/// Most palette commands one manifest may declare.
+pub const MAX_COMMANDS: usize = 32;
+
+/// One command palette entry. The host shows it under the app's name, so an
+/// app cannot pass its command off as the host's own.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PaletteCommand {
+    pub id: String,
+    pub title: String,
+    pub target: CommandTarget,
+    /// For an action command: the qualified kinds it is offered on, which must
+    /// be the kind of the reader binding its action acts on. A page command
+    /// has no subject and takes none.
+    #[serde(default, rename = "forKinds", skip_serializing_if = "Vec::is_empty")]
+    pub for_kinds: Vec<String>,
+}
+
+/// What a palette command does: exactly one of opening a declared page or
+/// running a declared action through the host's confirmation.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub enum CommandTarget {
+    /// The `id` of a page in `contributions.pages`.
+    Page(String),
+    /// The `name` of a declared action in `actions`.
+    Action(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1530,7 +1563,114 @@ impl Manifest {
         }
         self.status_problems(&mut problems, &join_ids);
         cards::card_problems(self, &mut problems);
+        self.command_problems(&mut problems);
         problems.into_result()
+    }
+
+    /// `commands` (#544).
+    fn command_problems(&self, problems: &mut ValidationErrors) {
+        const LABEL: &str =
+            "Must be 1–120 characters with no control characters and no bidirectional or invisible format characters";
+        const IDENTIFIER: &str = "Must be 1–64 letters, digits and -";
+        let commands = &self.contributions.commands;
+        if commands.len() > MAX_COMMANDS {
+            problems.push(
+                Code::InvalidValue,
+                "contributions.commands",
+                format!("Declare at most {MAX_COMMANDS} commands"),
+            );
+        }
+        unique(
+            problems,
+            commands.iter().enumerate().map(|(index, command)| {
+                (
+                    format!("contributions.commands[{index}].id"),
+                    command.id.as_str(),
+                )
+            }),
+        );
+        for (index, command) in commands.iter().enumerate() {
+            let at = format!("contributions.commands[{index}]");
+            if !identifier(&command.id) {
+                problems.push(Code::InvalidValue, format!("{at}.id"), IDENTIFIER);
+            }
+            if !label(&command.title) {
+                problems.push(Code::InvalidValue, format!("{at}.title"), LABEL);
+            }
+            match &command.target {
+                CommandTarget::Page(page) => {
+                    if !self.contributions.pages.iter().any(|p| &p.id == page) {
+                        problems.push(
+                            Code::UnresolvedPage,
+                            format!("{at}.target.page"),
+                            format!("Page \"{page}\" is not declared"),
+                        );
+                    }
+                    if !command.for_kinds.is_empty() {
+                        problems.push(
+                            Code::InvalidBinding,
+                            format!("{at}.forKinds"),
+                            "A page command has no resource to be scoped to; forKinds is for action commands",
+                        );
+                    }
+                }
+                CommandTarget::Action(name) => {
+                    kinds(problems, &format!("{at}.forKinds"), &command.for_kinds);
+                    let path = format!("{at}.target.action");
+                    let Some(action) = self.actions.iter().find(|a| &a.name == name) else {
+                        problems.push(
+                            Code::UnresolvedCapability,
+                            path,
+                            format!("Action \"{name}\" is not declared"),
+                        );
+                        continue;
+                    };
+                    // The palette runs an action where the host already asks
+                    // for it: in the app's resource inspector, which reads a
+                    // custom resource through one of the app's pages.
+                    let Some(kind) = self
+                        .capabilities
+                        .iter()
+                        .find(|b| b.name == action.resource)
+                        .and_then(Self::reader_kind)
+                    else {
+                        // An undeclared reader is reported at the action itself.
+                        if self.capabilities.iter().any(|b| b.name == action.resource) {
+                            problems.push(
+                                Code::InvalidBinding,
+                                path,
+                                "A command runs only an action on a k8s.listCustomResource reader that fixes its group and kind",
+                            );
+                        }
+                        continue;
+                    };
+                    if !self
+                        .contributions
+                        .pages
+                        .iter()
+                        .any(|page| page.capability == action.resource)
+                    {
+                        problems.push(
+                            Code::InvalidBinding,
+                            path,
+                            format!(
+                                "No page lists \"{}\", so there is no resource view to run this action from",
+                                action.resource
+                            ),
+                        );
+                    }
+                    for (position, candidate) in command.for_kinds.iter().enumerate() {
+                        if candidate != &kind && candidate.contains('/') {
+                            problems.push(
+                                Code::InvalidBinding,
+                                format!("{at}.forKinds[{position}]"),
+                                format!("Action \"{name}\" acts on {kind}, not {candidate}"),
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// `statusResolvers` and `badges` (#541).

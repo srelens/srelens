@@ -54,11 +54,14 @@
  * keystroke that built this list and the pick that runs one of its commands,
  * and the write must still reach the cluster the reader read this list on.
  */
-import { K8S_KIND } from "@srelens/core";
+import { K8S_KIND, appPaletteCommands, extensionClusterRoute, parseExtensionRoute, type PaletteApp } from "@srelens/core";
+import type { ExtensionActionRequest } from "../extensions/actionRequests";
 import { parseDetailRoute } from "./detailRoute";
 import { descriptorFor } from "./kinds/descriptors";
 
-export type CommandGroup = "Action" | "Go" | "Cluster" | "Workspace";
+/** `Apps` holds installed apps' page commands (#544): app-scoped screens, which
+ *  `Go` deliberately is not (see the module doc). */
+export type CommandGroup = "Action" | "Go" | "Apps" | "Cluster" | "Workspace";
 
 export interface Command {
   id: string;
@@ -120,6 +123,15 @@ export interface CommandDeps {
     context: string;
     as: "logs" | "shell" | "forward";
   }) => void;
+  /** The stable ID of the cluster in focus, which app routes pin (#544). */
+  clusterId?: string;
+  /** The enabled apps allowed on a cluster, by its stable ID, named as the host names them. */
+  apps?: (clusterId: string) => readonly PaletteApp[];
+  /**
+   * Asks the app resource tab at `route` for its own review of one declared
+   * action. Never the write: the inspector there owns the host confirmation.
+   */
+  openAppAction?: (a: { route: string; request: ExtensionActionRequest }) => void;
 }
 
 /**
@@ -282,8 +294,53 @@ function workspaceCommands(deps: CommandDeps): Command[] {
   ];
 }
 
+/**
+ * Installed apps' commands (#544), from `appPaletteCommands` in core — which is
+ * what names each one `<app>: <title>` and decides where an action applies.
+ *
+ * Page commands open on the cluster in focus, as the sidebar's Apps entries do.
+ * Action commands are offered only on an app resource tab, and read that
+ * resource's cluster from its ROUTE: the tab pins the cluster it was opened on,
+ * and the rail may have moved since. Running one asks that tab's inspector for
+ * its review; it is not `danger`, for the same reason `restart` is not — the
+ * review it lands on is where the danger is. A legacy `/extensions/` route
+ * names its cluster by display name only, so it offers no action command.
+ */
+function appCommands(deps: CommandDeps): Command[] {
+  if (!deps.apps) return [];
+  const commands: Command[] = [];
+  if (deps.clusterId) {
+    const clusterId = deps.clusterId;
+    for (const app of deps.apps(clusterId)) {
+      for (const c of appPaletteCommands(app, null)) {
+        if (c.target.kind !== "page") continue;
+        const route = extensionClusterRoute(clusterId, app.id, c.target.page);
+        commands.push({ id: c.id, group: "Apps", label: c.label, hint: "app page",
+          run: () => deps.openTab(route, { clusterName: deps.context }) });
+      }
+    }
+  }
+  const open = parseExtensionRoute(deps.route);
+  if (open?.clusterId && open.resourceName && deps.openAppAction) {
+    const { clusterId, id, page: pageId, namespace, resourceName: name } = open;
+    const app = deps.apps(clusterId).find((a) => a.id === id);
+    const page = app?.manifest.contributions.pages.find((p) => p.id === pageId);
+    if (app && page) {
+      for (const c of appPaletteCommands(app, { capability: page.capability })) {
+        if (c.target.kind !== "action") continue;
+        const request = { id, capability: page.capability, context: clusterId, namespace, name, action: c.target.action };
+        const route = deps.route;
+        const openAppAction = deps.openAppAction;
+        commands.push({ id: c.id, group: "Action", label: c.label, hint: `${name} · review first`,
+          run: () => openAppAction({ route, request }) });
+      }
+    }
+  }
+  return commands;
+}
+
 export function commandsFor(deps: CommandDeps): readonly Command[] {
-  return [...resourceCommands(deps), ...clusterCommands(deps), ...workspaceCommands(deps)];
+  return [...resourceCommands(deps), ...appCommands(deps), ...clusterCommands(deps), ...workspaceCommands(deps)];
 }
 
 /** Case-insensitive substring match on the label — nothing else, so a match

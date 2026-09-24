@@ -35,9 +35,12 @@ import { logsRoute } from "../screens/Logs";
 import { Transcript } from "../screens/agent/Transcript";
 import { useWorkspaceSealed } from "./LockGate";
 import { isContextPaused } from "../lib/pausedContext";
+import { extensionLabel, useExtensions } from "../extensions/inventoryStore";
+import { requestExtensionAction } from "../extensions/actionRequests";
+import { extensionEnabledFor, type PaletteApp } from "@srelens/core";
 
 /** §F's four palette groups, in the order the mock lists them. */
-const GROUPS: readonly CommandGroup[] = ["Action", "Go", "Cluster", "Workspace"];
+const GROUPS: readonly CommandGroup[] = ["Action", "Go", "Apps", "Cluster", "Workspace"];
 
 /** §F's empty-palette line, verbatim. */
 const NO_COMMAND_MATCH = "No command matches. Press ⏎ to ask the agent instead.";
@@ -274,10 +277,30 @@ export function Console({ fullView }: { fullView?: boolean }) {
   const shownClusterLabel = useContextLabel(shown?.about.cluster ?? "", contexts.find(c => c.name === shown?.about.cluster)?.stableId);
   const askScope = shown ? contextLabelFor(shown.route, shownClusterLabel) : scope;
 
+  // Installed apps' commands (#544). Scoped as the sidebar's Apps entries are:
+  // enabled, allowed on the cluster, and not on a stable ID two contexts share,
+  // which the host refuses anyway. Named by `extensionLabel`, the host's name.
+  const plugins = useExtensions().data?.plugins;
+  const appsOn = useMemo(() => (clusterId: string): readonly PaletteApp[] => {
+    const matches = contexts.filter((c) => c.stableId === clusterId);
+    if (matches.length !== 1 || !plugins) return [];
+    return plugins
+      .filter((p) => p.enabled && !p.quarantined && extensionEnabledFor(p, matches[0].key))
+      .map((p) => ({ id: p.manifest.id, name: extensionLabel(p), manifest: p.manifest }));
+  }, [contexts, plugins]);
+
   const deps = useMemo<CommandDeps>(
     () => ({
       route,
       context,
+      clusterId: activeCtx?.stableId,
+      apps: appsOn,
+      openAppAction: ({ route: target, request }) => {
+        // Held first, then the tab opened: a tab that mounts takes the request
+        // on mount, and one already showing hears it.
+        requestExtensionAction(request);
+        openTab(target, { clusterName: contexts.find((c) => c.stableId === request.context)?.name });
+      },
       // Only the clusters THIS workspace holds. `setActiveCluster` refuses an
       // id outside `workspace.clusters` and returns the workspace untouched
       // (`tabsStore.ts:426`), but the command went on to `openTab` regardless —
@@ -332,7 +355,7 @@ export function Console({ fullView }: { fullView?: boolean }) {
         openTab(r.as === "shell" ? "/terminals" : "/forwards", { clusterName: r.context });
       },
     }),
-    [route, context, contexts, workspace, workspaces, onToggleTheme],
+    [route, context, contexts, workspace, workspaces, onToggleTheme, activeCtx?.stableId, appsOn],
   );
 
   const commands = useMemo(() => commandsFor(deps), [deps]);
