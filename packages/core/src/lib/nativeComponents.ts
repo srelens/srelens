@@ -13,6 +13,23 @@ export interface NativeComponentData {
   Timeline: { items: Array<{ time: string; title: string; detail?: string; tone?: NativeTone }> };
   Markdown: { text: string };
   Code: { text: string; language: "yaml" | "none" };
+  Timeseries: NativeTimeseriesData;
+}
+/** How the host formats a timeseries' values. A closed set: apps name a unit, never a format string. */
+export type NativeTimeseriesUnit = "number" | "percent" | "ratio" | "bytes" | "bytesPerSecond" | "seconds" | "cores" | "perSecond";
+export interface NativeTimeseriesThreshold { label: string; value: number; direction: "above" | "below"; tone: "info" | "warn" | "sev" }
+/**
+ * One or more series on a shared time axis. Times are integer epoch
+ * milliseconds, strictly increasing and inside `range`; each series has one
+ * value per time, and `null` is a gap (no sample), never zero.
+ */
+export interface NativeTimeseriesData {
+  label: string;
+  unit: NativeTimeseriesUnit;
+  range: { start: number; end: number };
+  times: number[];
+  series: Array<{ name: string; values: Array<number | null> }>;
+  thresholds?: NativeTimeseriesThreshold[];
 }
 export type NativeComponentType = keyof NativeComponentData;
 export type NativeComponentPayload = {
@@ -54,6 +71,18 @@ function boundedJson(value: unknown): boolean {
   return true;
 }
 
+/** What the schema cannot say: ordering, alignment and uniqueness. */
+function timeseriesError({ range, times, series, thresholds = [] }: NativeTimeseriesData): string | null {
+  if (range.start >= range.end) return "Timeseries range must start before it ends.";
+  if (times.some((time, index) => time < range.start || time > range.end || (index > 0 && time <= times[index - 1]))) {
+    return "Timeseries times must strictly increase and lie within the range.";
+  }
+  if (series.some(entry => entry.values.length !== times.length)) return "Each timeseries series must have exactly one value per time.";
+  if (new Set(series.map(entry => entry.name)).size !== series.length) return "Timeseries series names must be unique.";
+  if (new Set(thresholds.map(entry => entry.label)).size !== thresholds.length) return "Timeseries threshold labels must be unique.";
+  return null;
+}
+
 export type NativeComponentValidation =
   | { ok: true; value: NativeComponentPayload }
   | { ok: false; error: string };
@@ -69,6 +98,10 @@ export function validateNativeComponent(value: unknown): NativeComponentValidati
       if (new Set(columns.map(column => column.key)).size !== columns.length || rows.some(row => row.length !== columns.length)) {
         return { ok: false, error: "Table columns must have unique keys and each row must match the columns." };
       }
+    }
+    if (component.type === "Timeseries") {
+      const error = timeseriesError(component.data);
+      if (error) return { ok: false, error };
     }
     return { ok: true, value: component };
   } catch {

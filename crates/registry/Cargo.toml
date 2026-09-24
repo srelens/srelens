@@ -7,6 +7,8 @@ edition.workspace = true
 srelens-plugin-host = { path = "../plugin-host" }
 srelens-capability = { path = "../capability" }
 srelens-kube = { path = "../kube" }
+# App streams (#565): the generic stream contract the extension broker drives.
+srelens-streams = { path = "../streams" }
 # `kind_resolver` returns `dyn srelens_mcp::resources::KindResolver`, so this is
 # real API surface, not test-only. `crates/mcp` also has `srelens-registry` as
 # a dev-dependency (for its own e2e prompt test), making this a dev-only cycle:

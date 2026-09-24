@@ -87,6 +87,21 @@ A Namespace's resource overview has an **Apps** section with the app's declared 
 views and an **App links** menu, scoped to that namespace. `detailLinks` open read
 panels there; they do not write to the cluster.
 
+## Related resources
+
+A resource's Inspector — the peek, the full tab, and an app resource's own
+Inspector — has a **Related** section when an enabled app declares
+[`resourceLinks`](manifest.md#resourcelinks) from its kind. Each row reads
+"Managed by Application argocd/guestbook". A link needs only a declared reader
+for its target kind, but a row opens the target only when one of the app's
+`pages` is backed by that reader: it opens in the app's resource view, on a
+route that carries the cluster and that page, whose reader pins the target's
+group and kind, so two targets are always two tabs and opening one again
+focuses its tab. With no such page the row names the target as plain text. A target the resource names but the cluster does not have
+is listed as *not found*, without a link. A link the host could not answer shows
+*Couldn't read* with its reason and a Retry; only when every link answered with
+nothing does the section say *No related resources.*
+
 ## Requirement checks
 
 When a page opens, the host checks the CRDs and served versions it needs, including

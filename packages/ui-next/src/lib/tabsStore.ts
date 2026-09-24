@@ -427,6 +427,54 @@ export function useTabView(tabId: string): NonNullable<Tab["view"]> {
 }
 
 /**
+ * A tab's namespace selection for one cluster, or `undefined` when that tab
+ * has made no choice for it. The stored array itself, so a caller reading it
+ * through `useSyncExternalStore` sees the same reference until it changes.
+ */
+export function tabNamespaces(tabId: string, clusterId: string): string[] | undefined {
+  return currentWorkspace().tabs.find((t) => t.id === tabId)?.namespaces?.[clusterId];
+}
+
+/**
+ * Sets one tab's namespace selection for one cluster. Every other tab keeps
+ * its own. Guarded like `setTabView`: the same selection again does not emit.
+ */
+export function setTabNamespaces(tabId: string, clusterId: string, namespaces: readonly string[]): void {
+  patchCurrent((w) => {
+    const at = w.tabs.findIndex((t) => t.id === tabId);
+    if (at < 0) return w;
+    const current = w.tabs[at].namespaces?.[clusterId];
+    if (current && current.length === namespaces.length && current.every((x, i) => x === namespaces[i])) return w;
+    const tabs = w.tabs.map((t, i) =>
+      i === at ? { ...t, namespaces: { ...t.namespaces, [clusterId]: [...namespaces] } } : t);
+    return { ...w, tabs };
+  });
+}
+
+/** Forget a removed cluster's selection in every tab of every workspace, open or recently closed. */
+export function forgetClusterNamespaces(clusterId: string): void {
+  const strip = (tabs: Tab[]) => {
+    if (!tabs.some((t) => t.namespaces && clusterId in t.namespaces)) return tabs;
+    return tabs.map((t) => {
+      if (!t.namespaces || !(clusterId in t.namespaces)) return t;
+      const namespaces = { ...t.namespaces };
+      delete namespaces[clusterId];
+      return { ...t, namespaces };
+    });
+  };
+  const state = cur();
+  let changed = false;
+  const workspaces = state.workspaces.map((w) => {
+    const tabs = strip(w.tabs);
+    const closed = strip(w.closed);
+    if (tabs === w.tabs && closed === w.closed) return w;
+    changed = true;
+    return { ...w, tabs, closed };
+  });
+  if (changed) emit({ ...state, workspaces });
+}
+
+/**
  * `null` for "no cluster in focus"; anything the workspace does not have is
  * refused rather than stored, so the field is always an id in `clusters`.
  *

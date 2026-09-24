@@ -29,7 +29,18 @@ fn error(status: StatusCode, message: &str) -> Response {
 /// as the shared UID and could read every other user's materialized
 /// kubeconfigs and sealed tokens. Web users get the RBAC-scoped in-pod
 /// `start_pod_exec` terminal instead; the host shell stays desktop-only.
-pub const WEB_DENIED_COMMANDS: &[&str] = &["start_terminal"];
+///
+/// The app stream commands (#565) are refused for the reason every
+/// `extensions.*` capability is (`WEB_DENIED_CAPABILITIES`): the web host
+/// keeps no per-user app inventory yet (#515), so there is no installed app
+/// to authorize a stream against. Their frames already travel over `/api/ws`
+/// like every other stream's once that lands.
+pub const WEB_DENIED_COMMANDS: &[&str] = &[
+    "start_terminal",
+    "extension_stream_open",
+    "extension_stream_cancel",
+    "extension_stream_close_view",
+];
 
 /// Helm subcommands with no safe multi-user form on the shared server:
 /// `plugin install <url>` downloads and runs code (RCE as the shared UID) and
@@ -503,6 +514,27 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"], json!("command not available in web mode"));
+    }
+
+    /// App streams (#565) are refused with every other app surface until app
+    /// state is kept per user (#515): refused as not available here, not
+    /// answered as an unknown command, so the client can say which it is.
+    #[tokio::test]
+    async fn app_streams_are_denied_in_web_mode() {
+        let state = AppState::for_tests(Arc::new(Registry::new())).await;
+        for (command, body) in [
+            ("extension_stream_open", json!({ "input": {} })),
+            ("extension_stream_cancel", json!({ "stream": "s-1" })),
+            ("extension_stream_close_view", json!({ "view": "v" })),
+        ] {
+            let (status, body) = authed_post(&state, command, body).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{command}");
+            assert_eq!(
+                body["error"],
+                json!("command not available in web mode"),
+                "{command}"
+            );
+        }
     }
 
     #[test]

@@ -67,6 +67,9 @@ extension replaced by `extensions.json`, so `settings.extensions.json`.
 - Every read checks the durable inventory and revision, so a disabled, removed or
   replaced installation cannot be invoked through an old registry instance. Calls
   already admitted may finish.
+- Streams do not finish: every inventory write ends the streams the new state no
+  longer authorizes — a disabled, updated or removed app's — and nothing else. See
+  [streams.md](streams.md#ownership).
 - Nothing is persisted in browser storage.
 - Stored settings are held to the typed `settings` the manifest declares (#542). A
   setting reaches a capability only through a binding argument the capability marks

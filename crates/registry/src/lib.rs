@@ -20,6 +20,7 @@ mod settings;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use extensions::fuzzing;
+pub use extensions::streams::{ExtensionStreams, OpenStreamOut};
 pub use settings::default_settings_path;
 /// The secret store a host supplies for apps' secret settings (#543), so a
 /// host implements it against this crate alone.
@@ -237,12 +238,7 @@ pub fn build_registry_with_paths_and_settings(
     kubeconfig_paths: Vec<PathBuf>,
     settings_path: Option<PathBuf>,
 ) -> Registry {
-    build_registry_with_paths_settings_and_secrets(
-        cache,
-        kubeconfig_paths,
-        settings_path,
-        Arc::new(srelens_plugin_host::NoSecretStore),
-    )
+    build_registry_and_app_streams(cache, kubeconfig_paths, settings_path).0
 }
 
 /// [`build_registry_with_paths_and_settings`], with `secrets` keeping apps'
@@ -254,7 +250,33 @@ pub fn build_registry_with_paths_settings_and_secrets(
     settings_path: Option<PathBuf>,
     secrets: Arc<dyn SecretStore>,
 ) -> Registry {
-    let mut reg = Registry::new();
+    build_registry_app_streams_and_secrets(cache, kubeconfig_paths, settings_path, secrets).0
+}
+
+/// The desktop build, plus the app streams (#565) its host opens streams
+/// through. `None` when there is no settings path, so no apps either.
+pub fn build_registry_and_app_streams(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
+    build_registry_app_streams_and_secrets(
+        cache,
+        kubeconfig_paths,
+        settings_path,
+        Arc::new(srelens_plugin_host::NoSecretStore),
+    )
+}
+
+/// [`build_registry_and_app_streams`], with `secrets` keeping apps' secret
+/// settings (#543). A store the host does not have is
+/// [`srelens_plugin_host::NoSecretStore`], which stores and deletes nothing.
+pub fn build_registry_app_streams_and_secrets(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    settings_path: Option<PathBuf>,
+    secrets: Arc<dyn SecretStore>,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {    let mut reg = Registry::new();
 
     reg.register(Capability::read_only(
         "ping",
@@ -509,22 +531,23 @@ pub fn build_registry_with_paths_settings_and_secrets(
         cache.clone(),
     ));
 
+    let mut app_streams = None;
     if let Some(path) = settings_path {
         let mut core = reg.clone();
         // Broker-only: kept out of `reg`, so neither the catalog nor MCP offers it.
         core.register(extensions::crd::check_capability(cache.clone()));
         let core = Arc::new(core);
-        extensions::register_with_secrets(
+        app_streams = Some(extensions::register_with_secrets(
             &mut reg,
             path.with_extension("extensions.json"),
             core,
             cache,
             secrets,
-        );
+        ));
         settings::register(&mut reg, path);
     }
 
-    reg
+    (reg, app_streams)
 }
 
 /// Build the registry using a caller-provided client cache with the host's
@@ -702,6 +725,7 @@ mod tests {
             "extensions.read",
             "extensions.resolveColumns",
             "extensions.resolveCards",
+            "extensions.streams",
             // Web storage of app secrets is #522's; until then the web host
             // has no secret store and registers no way to set one.
             "extension.secretStore",

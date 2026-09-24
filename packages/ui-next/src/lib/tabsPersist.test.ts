@@ -207,6 +207,29 @@ describe("parseStoredState", () => {
     expect(parsed!.workspaces[0].tabs[0].view).toEqual({ filter: "crash" });
   });
 
+  it("round-trips a tab's per-cluster namespace selection, including an explicit all", () => {
+    const s = valid();
+    s.workspaces[0].tabs[1].namespaces = { prod: ["billing", "shop"], dev: [] };
+    const storage = memory();
+    saveTabsState(s, storage);
+    const parsed = parseStoredState(storage.getItem(BASE_STORAGE_KEY));
+    expect(parsed!.workspaces[0].tabs[1].namespaces).toEqual({ prod: ["billing", "shop"], dev: [] });
+    expect(parsed!.workspaces[0].tabs[0].namespaces).toBeUndefined();
+  });
+
+  it("drops one cluster's malformed namespace entry without losing the others or the tab", () => {
+    const doc = {
+      version: 1,
+      currentId: "w",
+      workspaces: [{
+        id: "w", name: "N", clusters: [], activeId: "t1", closed: [],
+        tabs: [{ id: "t1", route: "/k/pods", title: "Pods", kind: "workloads", namespaces: { prod: ["a"], dev: "b", stage: [1] } }],
+      }],
+    };
+    const parsed = parseStoredState(JSON.stringify(doc));
+    expect(parsed!.workspaces[0].tabs[0].namespaces).toEqual({ prod: ["a"] });
+  });
+
   it("round-trips a null sort and a null filterKey", () => {
     const s = valid();
     s.workspaces[0].tabs[1].view = { sort: null, filterKey: null };

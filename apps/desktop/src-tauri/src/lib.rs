@@ -15,6 +15,7 @@ mod cluster_oidc_cmd;
 mod llm_agent;
 mod llm_config;
 mod exec;
+mod extension_streams;
 mod external;
 mod files;
 mod forward;
@@ -279,14 +280,13 @@ pub fn run() {
     // is handed to the registry now and the vault attached to it there.
     let extension_secrets =
         std::sync::Arc::new(extension_secrets::VaultSecretStore::attached_later());
-    let registry = registry_for(
+    let (registry, app_streams) = registry_and_app_streams_for(
         cache.clone(),
         capabilities::default_kubeconfig_paths(),
         capabilities::default_settings_path(),
         extension_secrets.clone(),
     );
     let setup_secrets = extension_secrets.clone();
-
     // single-instance is registered BEFORE every other plugin, as the plugin
     // requires: it has to claim the lock and hand a second launch's argv over
     // before anything else initializes. Its `deep-link` feature forwards those
@@ -457,6 +457,7 @@ pub fn run() {
         })
         .manage(AppRegistry(registry))
         .manage(ExtensionSecrets(extension_secrets))
+        .manage(extension_streams::AppExtensionStreams(app_streams))
         // The cache itself, for commands that need the live kubeconfig paths
         // (overview_snapshot resolves context → cluster identity from them).
         .manage(cache.clone())
@@ -497,6 +498,9 @@ pub fn run() {
             invoke_capability,
             start_resource_watch,
             stop_watch,
+            extension_streams::extension_stream_open,
+            extension_streams::extension_stream_cancel,
+            extension_streams::extension_stream_close_view,
             start_pod_exec,
             exec_input,
             exec_resize,
@@ -573,7 +577,20 @@ pub fn registry_for(
     settings_path: Option<std::path::PathBuf>,
     secrets: std::sync::Arc<extension_secrets::VaultSecretStore>,
 ) -> srelens_capability::Registry {
-    srelens_registry::build_registry_with_paths_settings_and_secrets(
+    registry_and_app_streams_for(cache, kubeconfig_paths, settings_path, secrets).0
+}
+
+/// [`registry_for`], plus the app streams (#565) the GUI opens streams through.
+pub fn registry_and_app_streams_for(
+    cache: std::sync::Arc<ClientCache>,
+    kubeconfig_paths: Vec<std::path::PathBuf>,
+    settings_path: Option<std::path::PathBuf>,
+    secrets: std::sync::Arc<extension_secrets::VaultSecretStore>,
+) -> (
+    srelens_capability::Registry,
+    Option<std::sync::Arc<srelens_registry::ExtensionStreams>>,
+) {
+    srelens_registry::build_registry_app_streams_and_secrets(
         cache,
         kubeconfig_paths,
         settings_path,

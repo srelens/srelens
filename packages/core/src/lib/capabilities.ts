@@ -165,7 +165,7 @@ export const CAPABILITY_CATALOG: readonly CapabilityFacts[] = rows as readonly C
  * fixing a large one is how the large one came to be.
  */
 export const HOST_ONLY_CAPABILITY_IDS: readonly string[] = [
-  "settings.get", "settings.set", "extension.secretStore", "extensions.catalog", "extensions.catalogManifest", "extensions.list", "extensions.configure", "extensions.validate", "extensions.read", "extensions.resolveColumns", "extensions.resolveCards", "extensions.resolvePanels", "extensions.resource", "extensions.action",
+  "settings.get", "settings.set", "extension.secretStore", "extensions.catalog", "extensions.catalogManifest", "extensions.list", "extensions.configure", "extensions.validate", "extensions.read", "extensions.resolveColumns", "extensions.resolveCards", "extensions.resolvePanels", "extensions.resolveLinks", "extensions.streams", "extensions.resource", "extensions.action",
 ];
 
 /**

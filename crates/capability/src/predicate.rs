@@ -134,6 +134,32 @@ pub enum ReferenceFormat {
 }
 
 impl ReferenceFormat {
+    /// The resource that owns `object` according to `reference`, as
+    /// `(namespace, name)` — but only when `reference` names `object` itself
+    /// (#545). A copied tracking id names another workload, and Argo CD does
+    /// not manage this one because of it, so neither does a link.
+    ///
+    /// For Argo CD the owner is the application part of the id. Argo CD
+    /// writes an application outside its controller namespace as
+    /// `<namespace>_<name>` (`Application.InstanceName`); a bare name is an
+    /// application in the controller namespace, which the id does not name,
+    /// so the namespace is `None`. A Kubernetes name never holds `_`, so the
+    /// split is unambiguous.
+    pub fn owner(self, reference: &str, object: &Value) -> Option<(Option<String>, String)> {
+        if !self.names(reference, object) {
+            return None;
+        }
+        let app = reference.split(':').next()?;
+        match app.split_once('_') {
+            Some((namespace, name)) if !namespace.is_empty() && !name.is_empty() => {
+                Some((Some(namespace.to_owned()), name.to_owned()))
+            }
+            Some(_) => None,
+            None if app.is_empty() => None,
+            None => Some((None, app.to_owned())),
+        }
+    }
+
     /// Whether `reference` names `object`: its `apiVersion` group, `kind`,
     /// `metadata.namespace` and `metadata.name`. An object without a kind or
     /// a name is named by nothing.
