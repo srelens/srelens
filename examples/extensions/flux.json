@@ -55,9 +55,12 @@
       "name": "helmreleases",
       "title": "List Helm releases",
       "target": "k8s.listCustomResource",
+      "versions": [
+        "v2",
+        "v2beta2"
+      ],
       "arguments": {
         "group": "helm.toolkit.fluxcd.io",
-        "version": "v2",
         "plural": "helmreleases",
         "kind": "HelmRelease",
         "namespaced": true,
@@ -245,9 +248,12 @@
       "name": "ocirepositories",
       "title": "List OCI repositories",
       "target": "k8s.listCustomResource",
+      "versions": [
+        "v1",
+        "v1beta2"
+      ],
       "arguments": {
         "group": "source.toolkit.fluxcd.io",
-        "version": "v1beta2",
         "plural": "ocirepositories",
         "kind": "OCIRepository",
         "namespaced": true,

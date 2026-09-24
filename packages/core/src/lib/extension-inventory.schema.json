@@ -97,6 +97,16 @@
           },
           "type": "array"
         },
+        "jsonPathOverrides": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "description": "For a listed version whose objects keep a field elsewhere: each JSONPath this manifest reads the binding's objects through, mapped to the path to read at that version instead. Applied everywhere the objects are read: printer columns, status resolvers, declared actions, joined columns, badges and panels, and cards.",
+          "type": "object"
+        },
         "name": {
           "type": "string"
         },
@@ -105,6 +115,13 @@
         },
         "title": {
           "type": "string"
+        },
+        "versions": {
+          "description": "A `k8s.listCustomResource` reader's API versions, most preferred first, instead of one fixed `arguments.version` (#547). On each cluster the host reads the first one the CustomResourceDefinition serves, and refuses the read when it serves none.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [

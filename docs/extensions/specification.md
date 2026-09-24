@@ -135,6 +135,10 @@ The same pre-1.0 exception covers `contributions.dashboardCards` (#540): added t
 0.3 in place, absent from every published signed manifest, and requiring a host that
 includes #540.
 
+It also covers a binding's `versions` and `jsonPathOverrides` (#547): added to API 0.3
+in place, absent from every published signed manifest, and requiring a host that
+includes #547. A binding that fixes `arguments.version` means what it did before.
+
 The host enforces this for fields. `API_FIELDS` in `crates/plugin-host/src/manifest.rs`
 lists fields whose availability differs across supported API lines. It is empty while
 0.3 is the only supported line. A rename is a removal plus an addition.
@@ -301,6 +305,11 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 - Apps may declare `commands` for the new design's command palette: open a declared
   page, or open the host confirmation for a declared action on a resource of the
   action's kind (#544). See the [manifest reference](manifest.md#commands).
+- A custom-resource reader may list `versions` in preference order instead of one
+  `arguments.version`, with optional per-version `jsonPathOverrides`. Each cluster reads
+  the first listed version its CRD serves, through that version's paths, for every read,
+  action and contribution, and a cluster serving none is refused (#547). See
+  [Several served versions](manifest.md#several-served-versions).
 - Unsigned apps declaring write actions require the default-off inventory policy
   described above (#558). Turning it off disables affected installations without
   removing them; normal read-only declarative permission grants are unchanged.
@@ -311,6 +320,8 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
 - Current examples are Flux 0.5.0 and Argo CD 0.4.0, requiring `^0.3` and naming
   `schemas/extension-manifest.v0.3.json`. Publishing them requires fresh signed
   external releases and a catalog update; existing signed release bytes stay unchanged.
+  The Flux example reads HelmReleases at `v2` or `v2beta2` and OCIRepositories at `v1`
+  or `v1beta2` (#547), which also needs a new signed release.
 
 
 ### 0.1.0

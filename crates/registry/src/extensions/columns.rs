@@ -20,6 +20,10 @@ pub(super) struct CacheKey {
     context: String,
     namespace: String,
     reader: String,
+    /// The API version the reader resolved to (#547). A cluster that stops serving the
+    /// version a snapshot was read at gets a new snapshot on its next read, rather than
+    /// the old version's objects read through the new version's paths.
+    version: String,
 }
 pub(super) type JoinCache = Arc<Mutex<HashMap<CacheKey, Arc<tokio::sync::Mutex<SlotState>>>>>;
 
@@ -152,19 +156,27 @@ fn copy_error(error: &CapabilityError) -> CapabilityError {
 /// The snapshot one reader's list is kept under. Keyed by the reader, not by
 /// whoever asked: two join rules, or a column and a dashboard card, over one
 /// granted reader need one Kubernetes list.
-fn reader_key(app: &str, revision: u64, context: &str, namespace: &str, reader: &str) -> CacheKey {
+fn reader_key(
+    app: &str,
+    revision: u64,
+    context: &str,
+    namespace: &str,
+    reader: &str,
+    version: &str,
+) -> CacheKey {
     CacheKey {
         app: app.to_owned(),
         revision,
         context: context.to_owned(),
         namespace: namespace.to_owned(),
         reader: reader.to_owned(),
+        version: version.to_owned(),
     }
 }
 
 #[cfg(test)]
 fn key_for_join(app: &str, revision: u64, context: &str, namespace: &str, join: &Join) -> CacheKey {
-    reader_key(app, revision, context, namespace, &join.capability)
+    reader_key(app, revision, context, namespace, &join.capability, "v1")
 }
 
 async fn cached_objects<F, Fut>(
@@ -226,7 +238,7 @@ pub(super) async fn join_objects(
     join: &Join,
     context: &str,
     namespace: &str,
-) -> Result<Arc<Vec<Value>>, CapabilityError> {
+) -> Result<ReaderObjects, CapabilityError> {
     reader_objects(
         cache,
         client_cache,
@@ -244,6 +256,10 @@ pub(super) async fn join_objects(
 /// table and a dashboard open on one reader list it once per five seconds.
 /// A list that reached the read limit is an error, because anything computed
 /// over it would be silently incomplete.
+///
+/// The objects are those of the version the reader resolved to on this cluster,
+/// and come back with the app's manifest as it reads them there (#547): whatever
+/// is computed over the objects takes its paths from that manifest.
 pub(super) async fn reader_objects(
     cache: &JoinCache,
     client_cache: &srelens_kube::client_cache::ClientCache,
@@ -252,20 +268,20 @@ pub(super) async fn reader_objects(
     reader: &str,
     context: &str,
     namespace: &str,
-) -> Result<Arc<Vec<Value>>, CapabilityError> {
-    let binding = plugin
-        .manifest
+) -> Result<ReaderObjects, CapabilityError> {
+    let (manifest, version) = crd::resolved(core, context, &plugin.manifest, reader).await?;
+    let binding = manifest
         .capabilities
         .iter()
         .find(|binding| binding.name == reader && binding.target == "k8s.listCustomResource")
         .ok_or_else(|| CapabilityError::Handler("Declared reader is unavailable".into()))?;
-    crd::require(core, context, binding).await?;
     let key = reader_key(
         &plugin.manifest.id,
         plugin.revision,
         context,
         namespace,
         reader,
+        &version,
     );
     let argument = |key: &str| {
         binding
@@ -279,7 +295,7 @@ pub(super) async fn reader_objects(
         .get("namespaced")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    cached_objects(cache, key, || async {
+    let objects = cached_objects(cache, key, || async {
         let (objects, truncated) = srelens_kube::crds::list_custom_resource_join_objects(
             client_cache, context, namespace, argument("group"), argument("version"),
             argument("kind"), argument("plural"), namespaced,
@@ -290,7 +306,25 @@ pub(super) async fn reader_objects(
             ));
         }
         Ok(objects)
-    }).await
+    }).await?;
+    Ok((objects, version))
+}
+
+/// A reader's objects, and the API version they were read at (#547). Whatever reads
+/// them takes its paths from the manifest at that version: `Manifest::at_version`.
+pub(super) type ReaderObjects = (Arc<Vec<Value>>, String);
+
+/// `manifest` as it reads `reader`'s objects at `version`, where they were read. Two
+/// reads of one reader in one request that resolved differently — discovery changed in
+/// between — cannot both be answered through one set of paths, and are refused.
+pub(super) fn read_at(
+    manifest: &Manifest,
+    reader: &str,
+    version: &str,
+) -> Result<Manifest, CapabilityError> {
+    manifest
+        .at_version(reader, version)
+        .map_err(|why| CapabilityError::Handler(format!("{why}; refresh the view")))
 }
 
 fn resolved_cells(
@@ -493,22 +527,27 @@ pub(super) fn register(
                 )
                 .await?;
                 let plugin = &state.plugins[index];
-                let columns: Vec<_> = plugin
-                    .manifest
-                    .contributions
-                    .table_columns
-                    .iter()
-                    .filter(|column| column.for_kinds.contains(&input.kind))
-                    .cloned()
-                    .collect();
-                let badges: Vec<_> = plugin
-                    .manifest
-                    .contributions
-                    .badges
-                    .iter()
-                    .filter(|badge| badge.for_kinds.contains(&input.kind))
-                    .cloned()
-                    .collect();
+                let for_kind = |manifest: &Manifest| {
+                    let columns: Vec<_> = manifest
+                        .contributions
+                        .table_columns
+                        .iter()
+                        .filter(|column| column.for_kinds.contains(&input.kind))
+                        .cloned()
+                        .collect();
+                    let badges: Vec<_> = manifest
+                        .contributions
+                        .badges
+                        .iter()
+                        .filter(|badge| badge.for_kinds.contains(&input.kind))
+                        .cloned()
+                        .collect();
+                    (columns, badges)
+                };
+                let (columns, badges) = for_kind(&plugin.manifest);
+                // Each joined reader is read at the version this cluster serves, and the
+                // columns and badges over it take their paths from that version (#547).
+                let mut manifest = plugin.manifest.clone();
                 let mut joins = HashMap::new();
                 for join_id in columns
                     .iter()
@@ -527,7 +566,7 @@ pub(super) fn register(
                         .ok_or_else(|| {
                             CapabilityError::Handler("Column join is no longer declared".into())
                         })?;
-                    let objects = join_objects(
+                    let (objects, version) = join_objects(
                         &cache,
                         &client_cache,
                         &core,
@@ -537,8 +576,10 @@ pub(super) fn register(
                         &input.namespace,
                     )
                     .await?;
+                    manifest = read_at(&manifest, &join.capability, &version)?;
                     joins.insert(join_id.clone(), (join.match_by.clone(), objects));
                 }
+                let (columns, badges) = for_kind(&manifest);
                 // A direct badge reads the rows' own metadata, listed once per
                 // namespace through the same snapshot cache a join uses.
                 let metadata = if badges.iter().any(|badge| badge.join.is_none()) {
@@ -548,6 +589,8 @@ pub(super) fn register(
                         context: context.clone(),
                         namespace: input.namespace.clone(),
                         reader: format!("builtin:{}", input.kind),
+                        // A built-in kind's metadata is not read through an app's version.
+                        version: String::new(),
                     };
                     Some(
                         cached_objects(&cache, key, || async {

@@ -234,18 +234,44 @@ fn gitops_examples_bind_to_the_real_host_contract() {
         include_str!("../../../examples/extensions/argocd.json"),
         include_str!("../../../examples/extensions/flux.json"),
     ] {
-        let manifest = Manifest::parse(source).unwrap();
-        let readers: std::collections::BTreeSet<_> = manifest.capabilities.iter().map(|binding| format!("plugin/{}/{}", manifest.id, binding.name)).collect();
-        let count = manifest.capabilities.len() + manifest.actions.len();
-        let grants = manifest.permissions.clone();
-        let mut reg = Registry::new();
-        let _installed = host.register(&mut reg, manifest, &grants).unwrap();
-        assert_eq!(reg.ids().len(), count);
-        for cap in reg.entries() {
-            assert_eq!(cap.annotations.read_only, readers.contains(&cap.id));
-            if !cap.annotations.read_only { assert!(cap.annotations.requires_confirm); }
-            assert!(cap.input_schema["properties"].get("group").is_none());
-            assert!(cap.input_schema["properties"].get("context").is_some());
+        let parsed = Manifest::parse(source).unwrap();
+        // A reader that lists versions is registered once a cluster resolves it to one
+        // (#547): every listed version binds to the real contract.
+        let most = parsed
+            .capabilities
+            .iter()
+            .map(|b| b.versions.len())
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        for choice in 0..most {
+            let mut manifest = parsed.clone();
+            for binding in parsed
+                .capabilities
+                .iter()
+                .filter(|b| !b.versions.is_empty())
+            {
+                let version = &binding.versions[choice.min(binding.versions.len() - 1)];
+                manifest = manifest.at_version(&binding.name, version).unwrap();
+            }
+            let readers: std::collections::BTreeSet<_> = manifest
+                .capabilities
+                .iter()
+                .map(|binding| format!("plugin/{}/{}", manifest.id, binding.name))
+                .collect();
+            let count = manifest.capabilities.len() + manifest.actions.len();
+            let grants = manifest.permissions.clone();
+            let mut reg = Registry::new();
+            let _installed = host.register(&mut reg, manifest, &grants).unwrap();
+            assert_eq!(reg.ids().len(), count);
+            for cap in reg.entries() {
+                assert_eq!(cap.annotations.read_only, readers.contains(&cap.id));
+                if !cap.annotations.read_only {
+                    assert!(cap.annotations.requires_confirm);
+                }
+                assert!(cap.input_schema["properties"].get("group").is_none());
+                assert!(cap.input_schema["properties"].get("context").is_some());
+            }
         }
     }
 }

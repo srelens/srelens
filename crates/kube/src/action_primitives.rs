@@ -1146,6 +1146,10 @@ mod tests {
                         for field in ["group", "version", "plural", "kind", "namespaced"] {
                             input[field] = reader["arguments"][field].clone();
                         }
+                        // A reader listing versions (#547) is bound to one per cluster.
+                        if let Some(preferred) = reader["versions"].get(0) {
+                            input["version"] = preferred.clone();
+                        }
                         merge(
                             &mut input,
                             &json!({"context":"cluster/a","namespace":"team","name":"api","uid":"u","resourceVersion":"2","preconditions":action.get("preconditions").cloned().unwrap_or(json!([]))}),
