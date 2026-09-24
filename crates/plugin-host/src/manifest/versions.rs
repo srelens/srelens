@@ -71,6 +71,14 @@ impl Manifest {
     /// that reads the binding's objects. Refuses a version the binding does not list, so
     /// nothing can read it at a version its author did not name.
     pub fn at_version(&self, binding: &str, version: &str) -> Result<Manifest, String> {
+        let mut resolved = self.clone();
+        resolved.apply_version(binding, version, true)?;
+        Ok(resolved)
+    }
+
+    /// [`Manifest::at_version`] in place, with that version's overrides applied or, to
+    /// find what an override itself breaks, left out.
+    fn apply_version(&mut self, binding: &str, version: &str, apply: bool) -> Result<(), String> {
         let accepted = self.accepted_versions(binding);
         if !accepted.iter().any(|v| v == version) {
             return Err(if accepted.is_empty() {
@@ -79,13 +87,13 @@ impl Manifest {
                 format!("\"{binding}\" reads {}, not {version}", accepted.join(", "))
             });
         }
-        let mut resolved = self.clone();
-        let Some(reader) = resolved.capabilities.iter_mut().find(|b| b.name == binding) else {
+        let Some(reader) = self.capabilities.iter_mut().find(|b| b.name == binding) else {
             return Err(format!("\"{binding}\" is not declared"));
         };
         let overrides = reader
             .json_path_overrides
             .remove(version)
+            .filter(|_| apply)
             .unwrap_or_default();
         reader.versions.clear();
         reader.json_path_overrides.clear();
@@ -93,7 +101,7 @@ impl Manifest {
             .arguments
             .insert("version".to_owned(), Value::String(version.to_owned()));
         if !overrides.is_empty() {
-            resolved.visit_binding_paths(binding, &mut |path, site| {
+            self.visit_binding_paths(binding, &mut |path, site| {
                 if site.shared.is_none() {
                     if let Some(replacement) = overrides.get(path.as_str()) {
                         *path = replacement.clone();
@@ -101,7 +109,7 @@ impl Manifest {
                 }
             });
         }
-        Ok(resolved)
+        Ok(())
     }
 
     /// Calls `visit` with every path that reads `binding`'s objects, and where it is.
@@ -259,10 +267,52 @@ impl Manifest {
         }
     }
 
+    /// Whether a binding's overrides are within every limit, so checking them is bounded
+    /// work. Past any limit the manifest is already refused, and its overrides are not
+    /// looked at: each one costs a walk of the manifest and, in
+    /// [`Manifest::override_path_problems`], two resolutions and two rule checks
+    /// (CWE-400, PR #692 review).
+    fn overrides_in_bounds(&self, binding: &Binding) -> bool {
+        self.capabilities.len() <= MAX_CAPABILITIES
+            && binding.versions.len() <= MAX_BINDING_VERSIONS
+            && binding.json_path_overrides.len() <= MAX_BINDING_VERSIONS
+    }
+
+    /// Every path the manifest reads `binding`'s objects through, with each place it is
+    /// declared: one walk, however many versions override it.
+    fn binding_sites(&self, binding: &str) -> BTreeMap<String, Vec<Site>> {
+        let mut sites: BTreeMap<String, Vec<Site>> = BTreeMap::new();
+        // The walk takes the manifest mutably, since `at_version` rewrites through it;
+        // this one clone per binding reads it.
+        self.clone()
+            .visit_binding_paths(binding, &mut |read, site| {
+                sites.entry(read.clone()).or_default().push(Site {
+                    at: site.at.clone(),
+                    shared: site.shared.clone(),
+                });
+            });
+        sites
+    }
+
     /// `versions` and `jsonPathOverrides` problems that need no other version's rules.
     pub(super) fn version_problems(&self, problems: &mut ValidationErrors) {
         for (index, binding) in self.capabilities.iter().enumerate() {
             let at = format!("capabilities[{index}]");
+            if binding.json_path_overrides.len() > MAX_BINDING_VERSIONS {
+                problems.push(
+                    Code::InvalidValue,
+                    format!("{at}.jsonPathOverrides"),
+                    format!("Override at most {MAX_BINDING_VERSIONS} versions"),
+                );
+            }
+            if binding.versions.len() > MAX_BINDING_VERSIONS {
+                // Refused whole: neither its entries nor its overrides are checked.
+                problems.push(
+                    Code::InvalidValue,
+                    format!("{at}.versions"),
+                    format!("List at most {MAX_BINDING_VERSIONS} versions"),
+                );
+            }
             if !binding.versions.is_empty() {
                 if binding.target != "k8s.listCustomResource" {
                     problems.push(
@@ -277,13 +327,8 @@ impl Manifest {
                         "Bind one version in arguments.version or list several in versions, not both",
                     );
                 }
-                if binding.versions.len() > MAX_BINDING_VERSIONS {
-                    problems.push(
-                        Code::InvalidValue,
-                        format!("{at}.versions"),
-                        format!("List at most {MAX_BINDING_VERSIONS} versions"),
-                    );
-                }
+            }
+            if !binding.versions.is_empty() && binding.versions.len() <= MAX_BINDING_VERSIONS {
                 for (position, version) in binding.versions.iter().enumerate() {
                     if !version_name(version) {
                         problems.push(
@@ -304,6 +349,14 @@ impl Manifest {
                         }),
                 );
             }
+            if !self.overrides_in_bounds(binding) {
+                continue;
+            }
+            let sites = if binding.json_path_overrides.is_empty() {
+                BTreeMap::new()
+            } else {
+                self.binding_sites(&binding.name)
+            };
             for (version, overrides) in &binding.json_path_overrides {
                 let path = format!("{at}.jsonPathOverrides.{version}");
                 if !binding.versions.contains(version) {
@@ -322,14 +375,6 @@ impl Manifest {
                     );
                     continue;
                 }
-                let mut sites: BTreeMap<String, Vec<Site>> = BTreeMap::new();
-                self.clone()
-                    .visit_binding_paths(&binding.name, &mut |read, site| {
-                        sites.entry(read.clone()).or_default().push(Site {
-                            at: site.at.clone(),
-                            shared: site.shared.clone(),
-                        });
-                    });
                 for from in overrides.keys() {
                     match sites.get(from) {
                         None => problems.push(
@@ -360,33 +405,107 @@ impl Manifest {
     /// Whether each override is a valid path everywhere it replaces one: the manifest
     /// read at that version must break no rule the manifest without the override keeps.
     /// Reported at the override, since that is what has to change.
+    ///
+    /// Bounded work (CWE-400, PR #692 review): overrides of different bindings rewrite
+    /// disjoint declarations — one another binding or kind also reads is refused — so
+    /// round `k` checks every binding's `k`th override together, in one manifest read at
+    /// all of them, and a new problem belongs to the binding whose declaration it is
+    /// reported under. That is one clone and one rule check per round, at most
+    /// [`MAX_BINDING_VERSIONS`] rounds, plus one for the baseline, whatever the number
+    /// of bindings.
     pub(super) fn override_path_problems(&self, problems: &mut ValidationErrors) {
+        // Per binding: the versions whose overrides are to be checked, and where each
+        // declaration it may rewrite sits in the manifest.
+        let mut pending: Vec<(usize, Vec<&String>, Vec<String>)> = Vec::new();
         for (index, binding) in self.capabilities.iter().enumerate() {
-            for version in binding.json_path_overrides.keys() {
-                let at = format!("capabilities[{index}].jsonPathOverrides.{version}");
-                // Anything already wrong with this override is reported as that.
-                if problems.0.iter().any(|problem| problem.path == at) {
+            if !self.overrides_in_bounds(binding) {
+                continue;
+            }
+            let versions: Vec<&String> = binding
+                .json_path_overrides
+                .iter()
+                // Nothing to check in an empty override, and anything already wrong
+                // with one is reported as that.
+                .filter(|(version, overrides)| {
+                    let at = format!("capabilities[{index}].jsonPathOverrides.{version}");
+                    !overrides.is_empty() && !problems.0.iter().any(|problem| problem.path == at)
+                })
+                .map(|(version, _)| version)
+                .collect();
+            if versions.is_empty() {
+                continue;
+            }
+            let owned: Vec<String> = self
+                .binding_sites(&binding.name)
+                .into_values()
+                .flatten()
+                .filter(|site| site.shared.is_none())
+                .map(|site| site.at)
+                .collect();
+            pending.push((index, versions, owned));
+        }
+        let rounds = pending.iter().map(|(_, versions, _)| versions.len()).max();
+        let Some(rounds) = rounds else {
+            return;
+        };
+        // Every binding read at a version without its overrides: what the rules say
+        // before any override is applied.
+        let read = |round: Option<usize>| {
+            let mut manifest = self.clone();
+            for (index, versions, _) in &pending {
+                let name = &self.capabilities[*index].name;
+                let (version, apply) = match round.and_then(|round| versions.get(round)) {
+                    Some(version) => (*version, true),
+                    None => (versions[0], false),
+                };
+                // Each version was checked to be listed; a failure leaves it unresolved.
+                let _ = manifest.apply_version(name, version, apply);
+            }
+            manifest.rule_problems().0
+        };
+        let before = read(None);
+        for round in 0..rounds {
+            let owners: Vec<(String, &Vec<String>)> = pending
+                .iter()
+                .filter_map(|(index, versions, owned)| {
+                    versions.get(round).map(|version| {
+                        (
+                            format!("capabilities[{index}].jsonPathOverrides.{version}"),
+                            owned,
+                        )
+                    })
+                })
+                .collect();
+            for problem in read(Some(round)) {
+                if before.contains(&problem) {
                     continue;
                 }
-                let mut plain = self.clone();
-                plain.capabilities[index]
-                    .json_path_overrides
-                    .remove(version);
-                let (Ok(with), Ok(without)) = (
-                    self.at_version(&binding.name, version),
-                    plain.at_version(&binding.name, version),
-                ) else {
-                    continue;
+                let within = |site: &String| {
+                    problem
+                        .path
+                        .strip_prefix(site.as_str())
+                        .is_some_and(|rest| {
+                            rest.is_empty() || rest.starts_with('.') || rest.starts_with('[')
+                        })
                 };
-                let before = without.rule_problems().0;
-                for problem in with.rule_problems().0 {
-                    if !before.contains(&problem) {
-                        problems.push(
-                            Code::InvalidValue,
-                            at.clone(),
-                            format!("With this override, {}: {}", problem.path, problem.message),
-                        );
-                    }
+                let found: Vec<&String> = owners
+                    .iter()
+                    .filter(|(_, owned)| owned.iter().any(within))
+                    .map(|(at, _)| at)
+                    .collect();
+                // A problem under no rewritten declaration came of this round's
+                // overrides all the same: every one of them is told, rather than none.
+                let blamed = if found.is_empty() {
+                    owners.iter().map(|(at, _)| at).collect()
+                } else {
+                    found
+                };
+                for at in blamed {
+                    problems.push(
+                        Code::InvalidValue,
+                        at.clone(),
+                        format!("With this override, {}: {}", problem.path, problem.message),
+                    );
                 }
             }
         }

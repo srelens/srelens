@@ -5,7 +5,9 @@
 //! `jsonPathOverrides`. Everything that reads the binding's objects is rewritten for the
 //! version resolved, and nothing is ever read at a version the binding does not list.
 use serde_json::{json, Value};
-use srelens_plugin_host::{DetailSection, Manifest, ValidationCode, ValidationError};
+use srelens_plugin_host::{
+    DetailSection, Manifest, ValidationCode, ValidationError, MAX_BINDING_VERSIONS,
+};
 
 const MOVED: &str = ".status.lastAttemptedRevision";
 const THERE: &str = ".status.lastReleaseRevision";
@@ -235,6 +237,101 @@ fn listed_versions_are_distinct_bounded_names() {
     );
 }
 
+/// Every problem, as sorted (code, path) pairs: how many there are is how much of the
+/// manifest validation went through.
+fn problem_list(value: &Value) -> Vec<(String, String)> {
+    problems(value)
+}
+
+#[test]
+fn an_oversized_override_map_is_refused_whole_without_checking_each_entry() {
+    // CWE-400 (PR #692 review): 2,000 override entries, none a listed version.
+    let mut value = manifest();
+    let overrides: serde_json::Map<String, Value> = (0..2_000)
+        .map(|n| (format!("x{n}"), json!({MOVED: THERE})))
+        .collect();
+    value["capabilities"][0]["jsonPathOverrides"] = Value::Object(overrides);
+    let found = errors(&value);
+    // One bounded-input refusal, not one problem per entry.
+    assert_eq!(found.len(), 1, "{:?}", &found[..found.len().min(3)]);
+    assert_eq!(code(found[0].code), "EXTENSION_INVALID_VALUE");
+    assert_eq!(found[0].path, "capabilities[0].jsonPathOverrides");
+    assert!(
+        found[0]
+            .message
+            .contains(&format!("at most {MAX_BINDING_VERSIONS} versions")),
+        "{}",
+        found[0].message
+    );
+}
+
+#[test]
+fn too_many_versions_stop_the_override_checks_as_well() {
+    // The review's shape: thousands of listed versions, each with an override entry,
+    // within the 256 KiB manifest limit. Each entry used to cost a manifest clone, a
+    // walk and two full validations.
+    let mut value = manifest();
+    let versions: Vec<String> = (0..1_000).map(|n| format!("v{n}")).collect();
+    let overrides: serde_json::Map<String, Value> = versions
+        .iter()
+        .map(|version| (version.clone(), json!({".status.unread": THERE})))
+        .collect();
+    value["capabilities"][0]["versions"] = json!(versions);
+    value["capabilities"][0]["jsonPathOverrides"] = Value::Object(overrides);
+    assert_eq!(
+        problem_list(&value),
+        [
+            (
+                "EXTENSION_INVALID_VALUE".to_owned(),
+                "capabilities[0].jsonPathOverrides".to_owned()
+            ),
+            (
+                "EXTENSION_INVALID_VALUE".to_owned(),
+                "capabilities[0].versions".to_owned()
+            ),
+        ]
+    );
+    // Within the version limit, the same unread path is still reported per entry.
+    let mut value = manifest();
+    value["capabilities"][0]["jsonPathOverrides"]["v2beta2"][".status.unread"] = json!(THERE);
+    assert_eq!(
+        problem_list(&value),
+        one(
+            "EXTENSION_INVALID_BINDING",
+            "capabilities[0].jsonPathOverrides.v2beta2"
+        )
+    );
+}
+
+#[test]
+fn past_the_binding_limit_no_override_is_checked() {
+    // Validation goes on past 32 capabilities to report everything else; the override
+    // checks, whose cost grows with every binding, do not.
+    let mut value = manifest();
+    let reader = value["capabilities"][0].clone();
+    let capabilities = value["capabilities"].as_array_mut().unwrap();
+    for n in 0..40 {
+        let mut copy = reader.clone();
+        copy["name"] = json!(format!("copy{n}"));
+        copy["jsonPathOverrides"] = json!({"v2beta2": {".status.unread": THERE}});
+        capabilities.push(copy);
+    }
+    let found = problem_list(&value);
+    assert!(
+        found.contains(&(
+            "EXTENSION_INVALID_VALUE".to_owned(),
+            "capabilities".to_owned()
+        )),
+        "{found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .all(|(_, path)| !path.contains("jsonPathOverrides")),
+        "{found:?}"
+    );
+}
+
 #[test]
 fn an_override_names_a_listed_version() {
     let mut value = manifest();
@@ -292,6 +389,59 @@ fn an_override_is_a_valid_path_wherever_it_is_read() {
         &value,
         "capabilities[0].jsonPathOverrides.v2beta2"
     ));
+}
+
+#[test]
+fn each_bad_override_is_reported_at_its_own_binding_and_version() {
+    // Two readers that list versions; a bad override on each, and a good one.
+    let mut value = manifest();
+    let kustomizations = &mut value["capabilities"][1];
+    kustomizations["arguments"]
+        .as_object_mut()
+        .unwrap()
+        .remove("version");
+    kustomizations["versions"] = json!(["v1", "v1beta2"]);
+    // Read by the Kustomization status resolver's condition, which has no wildcard.
+    kustomizations["jsonPathOverrides"] = json!({"v1beta2": {MOVED: ".status.history[*].x"}});
+    // v2 (bad) is checked beside Kustomization's v1beta2; v2beta2 (good) after.
+    value["capabilities"][0]["jsonPathOverrides"]["v2"] = json!({MOVED: ".status.list[*].x"});
+    let found = errors(&value);
+    let mut paths: Vec<_> = found.iter().map(|e| e.path.as_str()).collect();
+    paths.sort();
+    paths.dedup();
+    assert_eq!(
+        paths,
+        [
+            "capabilities[0].jsonPathOverrides.v2",
+            "capabilities[1].jsonPathOverrides.v1beta2"
+        ],
+        "{found:?}"
+    );
+    // Each names the declaration it broke there.
+    let helm: Vec<_> = found
+        .iter()
+        .filter(|e| e.path.starts_with("capabilities[0]"))
+        .collect();
+    assert!(
+        helm.iter()
+            .any(|e| e.message.contains("contributions.statusResolvers[0]")),
+        "{helm:?}"
+    );
+    assert!(
+        helm.iter()
+            .all(|e| !e.message.contains("contributions.statusResolvers[1]")),
+        "{helm:?}"
+    );
+    let kustomization: Vec<_> = found
+        .iter()
+        .filter(|e| e.path.starts_with("capabilities[1]"))
+        .collect();
+    assert!(
+        kustomization
+            .iter()
+            .all(|e| e.message.contains("contributions.statusResolvers[1]")),
+        "{kustomization:?}"
+    );
 }
 
 fn errors_at(value: &Value, path: &str) -> bool {
@@ -383,7 +533,10 @@ fn the_host_checks_a_multi_version_reader_and_its_action_against_their_targets()
     let manifest = parse(&manifest());
     let host = srelens_plugin_host::PluginHost::new(echoing_core());
     // `version` is chosen per cluster, so a reader that lists versions leaves it unbound.
-    assert_eq!(host.binding_problems(0, &manifest, &manifest.capabilities[0]), vec![]);
+    assert_eq!(
+        host.binding_problems(0, &manifest, &manifest.capabilities[0]),
+        vec![]
+    );
     assert_eq!(
         host.action_problems(0, &manifest, &manifest.actions[0]),
         vec![]

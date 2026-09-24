@@ -185,6 +185,9 @@ fn field_present(value: &Value, path: &str) -> bool {
 
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 
+/// Most capability bindings one manifest may declare.
+pub const MAX_CAPABILITIES: usize = 32;
+
 /// Most printer columns a binding may declare (#609). Refused at
 /// `capabilities[i].arguments.printerColumns` with `EXTENSION_INVALID_VALUE`.
 pub const MAX_PRINTER_COLUMNS: usize = 32;
@@ -1019,12 +1022,15 @@ impl Manifest {
     /// Checks the manifest's rules, reporting every violation with the path at fault.
     pub fn validate(&self) -> Result<(), ValidationErrors> {
         let mut problems = self.rule_problems();
+        self.version_problems(&mut problems);
         self.override_path_problems(&mut problems);
         problems.into_result()
     }
 
-    /// Every rule violation except an override that is not a valid path where it is read,
-    /// which is found by checking this manifest read at the override's version.
+    /// Every rule violation except those about a binding's `versions` and
+    /// `jsonPathOverrides` (#547). Those are checked once, by `validate`; an override is
+    /// checked by running these rules on the manifest read at its version, which must
+    /// not check every other binding's overrides again for each one.
     fn rule_problems(&self) -> ValidationErrors {
         const LABEL: &str =
             "Must be 1–120 characters with no control characters and no bidirectional or invisible format characters";
@@ -1066,11 +1072,11 @@ impl Manifest {
                 }
             }
         }
-        if self.capabilities.is_empty() || self.capabilities.len() > 32 {
+        if self.capabilities.is_empty() || self.capabilities.len() > MAX_CAPABILITIES {
             problems.push(
                 Code::InvalidValue,
                 "capabilities",
-                "Declare 1–32 capabilities",
+                format!("Declare 1–{MAX_CAPABILITIES} capabilities"),
             );
         }
         let names = unique(
@@ -1607,7 +1613,6 @@ impl Manifest {
         cards::card_problems(self, &mut problems);
         settings::setting_problems(self, &mut problems);
         self.command_problems(&mut problems);
-        self.version_problems(&mut problems);
         problems
     }
 

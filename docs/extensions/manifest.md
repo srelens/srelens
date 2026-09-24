@@ -112,9 +112,11 @@ column or a status rule.
   the binding's objects through to the path to read at that version. It applies
   everywhere that path is read for this binding: printer columns, the kind's status
   resolver, declared action predicates, joined columns, badges and panel fields, a panel
-  on the kind itself, and cards over the reader. At install, each override must name a
-  listed version (at most 8 versions), at most 32 paths per version, and only paths the
-  binding is actually read through. The replacement must also be a valid path wherever
+  on the kind itself, and cards over the reader. At install, `jsonPathOverrides` names
+  at most 8 versions, as `versions` lists at most 8, and each must be a listed version,
+  with at most 32 paths per version and only paths the binding is actually read through.
+  A binding past either limit, or a manifest past 32 capabilities, is refused without its
+  overrides being checked one by one. The replacement must also be a valid path wherever
   it replaces one: for example, a status rule condition's path has no wildcard. An
   override cannot rewrite a declaration that also reads another kind, such as a status
   resolver whose `forKinds` lists several kinds; give the kind its own resolver or panel.
