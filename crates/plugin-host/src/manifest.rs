@@ -7,8 +7,10 @@ use srelens_capability::{Predicate, MAX_PREDICATES};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod cards;
+mod settings;
 mod versions;
 pub use cards::*;
+pub use settings::*;
 pub use versions::{MAX_BINDING_VERSIONS, MAX_PATH_OVERRIDES};
 
 /// Extension API versions this host implements, oldest first. A manifest is accepted when
@@ -210,6 +212,10 @@ pub struct Manifest {
     /// signed without it still round-trips to its own bytes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionBinding>,
+    /// Typed settings (#542), drawn as a host form and held to these
+    /// declarations on every save. Left out of the stored form when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings: Vec<Setting>,
     pub contributions: Contributions,
 }
 
@@ -1599,6 +1605,7 @@ impl Manifest {
         }
         self.status_problems(&mut problems, &join_ids);
         cards::card_problems(self, &mut problems);
+        settings::setting_problems(self, &mut problems);
         self.command_problems(&mut problems);
         self.version_problems(&mut problems);
         problems

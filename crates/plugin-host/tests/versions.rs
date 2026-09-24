@@ -370,7 +370,7 @@ fn the_flux_example_reads_releases_and_oci_sources_of_older_flux_too() {
 /// the arguments they were called with instead of calling a cluster.
 fn echoing_core() -> std::sync::Arc<srelens_capability::Registry> {
     let mut core = srelens_registry::build_registry();
-    for id in ["k8s.listCustomResource", "k8s.setFields"] {
+    for id in ["k8s.listCustomResource", "k8s.setFields", "k8s.annotate"] {
         let mut capability = core.get(id).unwrap().clone();
         capability.handler = std::sync::Arc::new(|args| Box::pin(async move { Ok(args) }));
         core.register(capability);
@@ -383,7 +383,7 @@ fn the_host_checks_a_multi_version_reader_and_its_action_against_their_targets()
     let manifest = parse(&manifest());
     let host = srelens_plugin_host::PluginHost::new(echoing_core());
     // `version` is chosen per cluster, so a reader that lists versions leaves it unbound.
-    assert_eq!(host.binding_problems(0, &manifest.capabilities[0]), vec![]);
+    assert_eq!(host.binding_problems(0, &manifest, &manifest.capabilities[0]), vec![]);
     assert_eq!(
         host.action_problems(0, &manifest, &manifest.actions[0]),
         vec![]
@@ -392,7 +392,7 @@ fn the_host_checks_a_multi_version_reader_and_its_action_against_their_targets()
     let mut unversioned = manifest.capabilities[0].clone();
     unversioned.versions.clear();
     unversioned.json_path_overrides.clear();
-    let problems = host.binding_problems(0, &unversioned);
+    let problems = host.binding_problems(0, &manifest, &unversioned);
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert_eq!(problems[0].path, "capabilities[0].arguments.version");
 }
@@ -436,4 +436,61 @@ async fn a_reader_is_callable_only_at_a_resolved_version_and_its_action_goes_wit
         (acted["uid"].clone(), acted["resourceVersion"].clone()),
         (json!("u"), json!("7"))
     );
+}
+
+/// The example with a setting (#542) that an action on the multi-version reader
+/// interpolates into the annotation it writes.
+fn with_setting() -> Value {
+    let mut value = manifest();
+    value["permissions"] = json!(["k8s.listCustomResource", "k8s.setFields", "k8s.annotate"]);
+    value["settings"] = json!([{"id":"mode","type":"string","title":"Mode","default":"normal"}]);
+    value["actions"].as_array_mut().unwrap().push(json!({
+        "name":"refresh","title":"Refresh","target":"k8s.annotate","resource":"helmreleases",
+        "arguments":{"key":"example.io/refresh","value":"${settings.mode}"}
+    }));
+    value
+}
+
+fn saved(value: Value) -> serde_json::Map<String, Value> {
+    value.as_object().unwrap().clone()
+}
+
+#[test]
+fn a_saved_setting_is_checked_by_an_action_on_a_multi_version_reader() {
+    let manifest = parse(&with_setting());
+    let host = srelens_plugin_host::PluginHost::new(echoing_core());
+    // The reader is checked as bound at a version, as at install: not refused for
+    // lacking the `version` a cluster chooses.
+    let found = host.settings_problems(&manifest, &saved(json!({"mode":"hard"})));
+    assert_eq!(found, vec![]);
+    // A value the action's primitive refuses is refused on save, at the action,
+    // even though the action binds only once a cluster resolves its reader.
+    let found = host.settings_problems(&manifest, &saved(json!({"mode":"$abc123"})));
+    let paths: Vec<_> = found.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, ["actions[1].arguments"], "{found:?}");
+}
+
+#[tokio::test]
+async fn a_request_interpolates_the_setting_into_the_resolved_version_binding() {
+    let manifest = parse(&with_setting());
+    let host = srelens_plugin_host::PluginHost::new(echoing_core());
+    let resolved = manifest.at_version("helmreleases", "v2beta2").unwrap();
+    let mut reg = srelens_capability::Registry::new();
+    host.register_with_settings(
+        &mut reg,
+        resolved,
+        &manifest.permissions,
+        &saved(json!({"mode":"hard"})),
+    )
+    .unwrap();
+    let sent = reg
+        .invoke(
+            "plugin/org.example.flux/refresh",
+            json!({"context":"c","namespace":"n","name":"web","uid":"u","resourceVersion":"7"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["version"], "v2beta2");
+    assert_eq!(sent["value"], "hard");
+    assert_eq!(sent["key"], "example.io/refresh");
 }

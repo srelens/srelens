@@ -207,9 +207,9 @@ limits do.
     perfectly ordinary (`username`, `ca.crt`), so matching key names alone
     would miss them;
   - `settings` on `extensions.configure` keeps its setting names but loses
-    every value. An app's settings are free-form and nothing marks one as
-    secret, so a value under `credential` or `certificate` would otherwise be
-    written verbatim — for a denied call too;
+    every value. A denied call is recorded before its values are checked
+    against the app's typed settings (#542), so a value under `credential` or
+    `certificate` would otherwise be written verbatim;
   - a URL loses its credentials and keeps the rest. `helm repo add` documents
     `https://user:token@host/charts` for a private repository, and
     `k8s.helmRepoAdd` is audited because it mutates, so the userinfo and any

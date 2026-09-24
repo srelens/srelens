@@ -133,7 +133,10 @@ older API line is retained for this exception.
 
 The same pre-1.0 exception covers `contributions.dashboardCards` (#540): added to API
 0.3 in place, absent from every published signed manifest, and requiring a host that
-includes #540.
+includes #540. It also covers the top-level `settings` (#542), under the same terms.
+An installed app's settings are now held to its manifest's declarations, so values
+saved as free-form JSON by an earlier host that the manifest does not declare are
+refused on the next save. Nothing had been released that relied on them.
 
 It also covers a binding's `versions` and `jsonPathOverrides` (#547): added to API 0.3
 in place, absent from every published signed manifest, and requiring a host that
@@ -302,6 +305,14 @@ list, and the [developer harness](testing.md#developer-harness) prints one per l
   request, each with a figure or the reason it has none, and `extensions.read` takes a
   `card` to show a card's target page narrowed to what it counted (#540). See
   [Manifest reference](manifest.md#dashboard-cards).
+- Apps may declare typed `settings` (`string`, `number`, `boolean`, `select`,
+  `multi-select`, `url`, `namespace-selector`, `cluster-selector`, `secret-reference`),
+  drawn as a host form in Settings → Apps and checked by the host on every save. A
+  setting fills a binding argument as `"${settings.<id>}"` only where the host
+  capability marks the argument settable (`k8s.annotate`'s `value`,
+  `k8s.setStatusCondition`'s `message`), and is checked at install, on save and on
+  every request. A `secret-reference` value never enters the inventory (#542). See
+  [Manifest reference](manifest.md#settings).
 - Apps may declare `commands` for the new design's command palette: open a declared
   page, or open the host confirmation for a declared action on a resource of the
   action's kind (#544). See the [manifest reference](manifest.md#commands).

@@ -1,4 +1,5 @@
 //! Durable, native declarative extensions for desktop hosts.
+mod app_settings;
 mod cards;
 mod catalog;
 mod columns;
@@ -10,9 +11,12 @@ mod panels;
 #[cfg(test)]
 mod policy_tests;
 mod resource;
+#[cfg(test)]
+mod settings_tests;
 mod signing;
 #[cfg(test)]
 mod version_tests;
+use app_settings::{checked_settings, drop_secret_values, setting_scope};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -360,6 +364,7 @@ fn read(path: &Path) -> Result<Inventory, String> {
     // One entry this host can no longer trust (a rotated key, a tampered proof, an API
     // version it dropped) is disabled on its own instead of failing every other app.
     for plugin in &mut state.plugins {
+        drop_secret_values(plugin);
         plugin.quarantined = reverify(plugin).err();
         if plugin.quarantined.is_some() {
             plugin.enabled = false;
@@ -426,6 +431,19 @@ fn verify_proof(proof: &SignatureProof, manifest: &Manifest) -> Result<(), Strin
 const MAX_INVENTORY_BYTES: usize = 1024 * 1024;
 /// The inventory exactly as `write` saves it.
 fn saved_form(state: &Inventory) -> Result<Vec<u8>, String> {
+    // The one place every save passes: a secret setting holding anything but
+    // its reference is refused here, whichever path put it there, so a secret
+    // value cannot reach the file (#542, #543).
+    if let Some(problem) = state
+        .plugins
+        .iter()
+        .flat_map(|plugin| plugin.manifest.stored_secret_problems(&plugin.settings))
+        .next()
+    {
+        return Err(format!(
+            "refusing to save the extension inventory: {problem}"
+        ));
+    }
     // Quarantine is recomputed on every load. Persisting it would also make the file
     // unreadable to hosts that predate the field.
     let mut stored = serde_json::to_value(state).map_err(|e| e.to_string())?;
@@ -757,7 +775,7 @@ fn validate_app(
             continue;
         }
         let found: Vec<_> = host
-            .binding_problems(index, binding)
+            .binding_problems(index, manifest, binding)
             .into_iter()
             .filter(|found| !problems.0.iter().any(|p| p.path == found.path))
             .collect();
@@ -909,7 +927,9 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
                         },
                     );
                     history.truncate(KEPT_VERSIONS);
-                    (settings, history, contexts)
+                    // Only what the new version still declares, and still
+                    // accepts, carries over (#542).
+                    (manifest.retain_settings(settings), history, contexts)
                 }
                 None => (Default::default(), Vec::new(), None),
             };
@@ -979,6 +999,11 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             // Going back discards the versions after the restored one.
             app.history.drain(..=index);
             app.signature_proof = target.signature_proof;
+            // Settings are kept as an update keeps them: what the restored
+            // version declares and accepts (#542).
+            app.settings = target
+                .manifest
+                .retain_settings(std::mem::take(&mut app.settings));
             app.manifest = target.manifest;
             app.grants = grants;
             app.source = target.source;
@@ -1039,12 +1064,12 @@ fn mutate(path: &Path, core: Arc<Registry>, input: Configure) -> Result<Inventor
             state.plugins.remove(i);
         }
         Configure::Settings { id, settings } => {
-            state
+            let app = state
                 .plugins
                 .iter_mut()
                 .find(|p| p.manifest.id == id)
-                .ok_or("Extension is not installed")?
-                .settings = settings;
+                .ok_or("Extension is not installed")?;
+            app.settings = checked_settings(&app.manifest, &app.settings, settings, core)?;
         }
     }
     apply_unsigned_policy(&mut state);
@@ -1127,7 +1152,12 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
         canonical(&Value::Object(identity))
     };
     for binding in &manifest.capabilities {
-        access.insert(format!("Read {} with {}", binding.target, reads(binding)));
+        access.insert(format!(
+            "Read {} with {}{}",
+            binding.target,
+            reads(binding),
+            setting_scope(manifest, &binding.arguments)
+        ));
     }
     for action in &manifest.actions {
         let reader = manifest
@@ -1163,10 +1193,11 @@ fn access_items(manifest: &Manifest, grants: &[String]) -> std::collections::BTr
             .collect();
         preconditions.sort();
         access.insert(format!(
-            "Action {} on {} with {} preconditions [{}]",
+            "Action {} on {} with {}{} preconditions [{}]",
             action.target,
             scope,
             canonical(&Value::Object(action.arguments.clone())),
+            setting_scope(manifest, &action.arguments),
             preconditions.join(",")
         ));
     }
@@ -1392,7 +1423,12 @@ pub fn register(
                 };
                 let mut registry = Registry::new();
                 let _registration = PluginHost::new(c)
-                    .register(&mut registry, manifest, &plugin.grants)
+                    .register_with_settings(
+                        &mut registry,
+                        manifest,
+                        &plugin.grants,
+                        &plugin.settings,
+                    )
                     .map_err(CapabilityError::Handler)?;
                 let mut args = json!({ "context": context });
                 if plugin
@@ -1770,10 +1806,15 @@ mod tests {
         write(path, &state).unwrap();
     }
     /// The example manifest under an unreserved ID, as a local author would install it.
+    /// It declares one setting, `team`, so the lifecycle tests can save one
+    /// (#542: a save is held to the manifest's declarations).
     pub(super) fn manifest() -> String {
-        include_str!("../tests/fixtures/argocd-manifest.json")
+        let source = include_str!("../tests/fixtures/argocd-manifest.json")
             .replace("\"org.srelens.argocd\"", "\"org.example.argocd\"")
-            .replace("\"^0.1\"", "\"^0.3\"")
+            .replace("\"^0.1\"", "\"^0.3\"");
+        let mut value: Value = serde_json::from_str(&source).unwrap();
+        value["settings"] = json!([{"id": "team", "type": "string", "title": "Team"}]);
+        value.to_string()
     }
     fn signed_argocd() -> Configure {
         Configure::Install {

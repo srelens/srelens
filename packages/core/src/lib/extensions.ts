@@ -126,6 +126,46 @@ export interface ExtensionDetailPanel {
   forKinds: string[];
   sections: ExtensionDetailSection[];
 }
+/** The types a setting can have (#542), as a manifest spells them. */
+export type ExtensionSettingType =
+  | "string"
+  | "number"
+  | "boolean"
+  | "select"
+  | "multi-select"
+  | "url"
+  | "namespace-selector"
+  | "cluster-selector"
+  | "secret-reference";
+/**
+ * One setting an app declares. The host draws it as a form field and holds
+ * every saved value to it; the form's own checks are only a convenience.
+ * `title`, `description` and option labels are app text: draw them through
+ * `plainText`.
+ */
+export interface ExtensionSetting {
+  id: string;
+  type: ExtensionSettingType;
+  title: string;
+  description?: string;
+  required?: boolean;
+  default?: unknown;
+  /** `select` and `multi-select` only. */
+  options?: Array<{ value: string; label: string }>;
+  /** `number` only. */
+  minimum?: number;
+  maximum?: number;
+  integer?: boolean;
+  /** `string` only; 1024 when absent. */
+  maxLength?: number;
+}
+/**
+ * What the inventory holds for a `secret-reference` setting once the host's
+ * secret store (#543) has its value: a reference, never the value.
+ */
+export interface ExtensionSecretReference {
+  secretRef: string;
+}
 /**
  * A command palette entry (#544). The host shows it under the app's name. A page
  * command opens one of the app's pages; an action command runs one of its declared
@@ -191,6 +231,8 @@ export interface ExtensionManifest {
      */
     availableWhen?: ActionPredicate[];
   }>;
+  /** Typed settings (#542), drawn by the host as a form in Settings → Apps. */
+  settings?: ExtensionSetting[];
   contributions: {
     pages: ExtensionPage[];
     detailTabs: ExtensionDetailTab[];

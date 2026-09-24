@@ -62,7 +62,7 @@ To exercise the local installer instead:
 4. Open a Namespace's resource overview. Its **Apps** section contains the declared
    detail view and an **App links** menu, scoped to that namespace.
 5. Disable or remove the app to remove its contributions, or install the same ID
-   again to update it. Open views refresh against the new revision. JSON settings are
+   again to update it. Open views refresh against the new revision. Settings the new version still declares and accepts are
    preserved across updates and restarts, and deleted on removal.
 
 Installation and inventory discovery do not contact clusters. Page reads happen when

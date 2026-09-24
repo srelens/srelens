@@ -43,6 +43,7 @@ before publishing.
 | `permissions` | Yes | The exact host capability IDs the bindings use. |
 | `capabilities` | Yes | 1–32 bindings, below. |
 | `actions` | No | Up to 32 declared mutations, below. |
+| `settings` | No | Up to 32 typed settings, drawn as a host form. See [Settings](#settings). |
 | `contributions` | Yes | `pages`, `detailTabs`, `detailLinks`, and optional `joins`, `tableColumns`, `detailPanels` and `dashboardCards`, below. |
 
 Unknown fields are errors at every level. A manifest is at most 256 KiB.
@@ -559,6 +560,98 @@ than a custom-resource reader, or on one no page lists (`EXTENSION_INVALID_BINDI
 at `target.action`), `forKinds` on a page command (`EXTENSION_INVALID_BINDING`),
 a kind the action does not act on (`EXTENSION_INVALID_BINDING` at `forKinds[i]`),
 and the usual identifier, label, count, kind and duplicate rules.
+
+## Settings
+
+An app declares its settings, and the host draws them as a form in Settings → Apps
+(#542):
+
+```json
+"settings": [
+  { "id": "prometheusUrl", "type": "url", "title": "Prometheus URL", "required": true },
+  { "id": "expiryWindowDays", "type": "number", "title": "Warn before expiry (days)", "default": 14, "minimum": 1, "integer": true },
+  { "id": "refreshMode", "type": "select", "title": "Refresh mode", "default": "normal",
+    "options": [{ "value": "normal", "label": "Normal" }, { "value": "hard", "label": "Hard" }] },
+  { "id": "token", "type": "secret-reference", "title": "API token" }
+]
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `id` | Yes | 1–64 letters, digits and `-`, unique among the app's settings. |
+| `type` | Yes | One of the types below. |
+| `title` | Yes | The field's label: 1–120 characters, no control or format characters. Drawn as plain text. |
+| `description` | No | Help under the field: 1–500 characters, no control or format characters. Drawn as plain text. |
+| `required` | No | A save must give it a value. Not allowed beside `default`, which makes a setting never missing. |
+| `default` | No | The value in effect while none is saved. Checked against the setting's own rules. Not allowed on `secret-reference`. |
+| `options` | `select`, `multi-select` | 1–64 `{ "value", "label" }` entries with unique values. Refused on other types. |
+| `minimum`, `maximum`, `integer` | `number` only | Bounds, and whether only whole numbers are taken. |
+| `maxLength` | `string` only | 1–4096 characters; 1024 when absent. |
+
+| Type | A value is |
+|---|---|
+| `string` | One line of at most `maxLength` characters, with no control or format characters. |
+| `number` | A JSON number within the bounds, and whole when `integer`. |
+| `boolean` | `true` or `false`. |
+| `select` | One of the option values. |
+| `multi-select` | A list of option values, each at most once. |
+| `url` | An `http` or `https` URL with a host and no user name or password. Put credentials in a `secret-reference`. |
+| `namespace-selector` | A Kubernetes namespace name. The form lists the namespaces of a cluster the person chooses. |
+| `cluster-selector` | A kubeconfig context, saved by its key (`ClusterContext.key`), the identity app cluster scope uses. |
+| `secret-reference` | Never a value. The host's secret store (#543) keeps the secret; the inventory holds only its reference, `{"secretRef": "<app id>/<setting id>"}`, written by that store. |
+
+The host holds every save to these rules, whatever the form allowed. A save
+(`extensions.configure` with `action: "settings"`) is refused, with each problem at
+`settings.<id>`, if it names an undeclared setting, gives a value the setting refuses,
+leaves out a required one, or sends anything at all for a `secret-reference` — its
+reference included. A cleared field is left out, so the setting falls back to its
+default. No refusal repeats the value it refused.
+
+### Interpolating a setting
+
+A setting can fill a binding argument, written as the whole value
+`"${settings.<id>}"`, only where the host capability behind the binding marks that
+argument as settable, and only with a setting of a type the argument takes:
+
+| Capability | Argument | Setting types |
+|---|---|---|
+| `k8s.annotate` | `value` | `string`, `select` |
+| `k8s.setStatusCondition` | `message` | `string`, `select` |
+
+Nothing else is settable. Every other argument decides what a request reads or where
+a write lands, which is the access a person reviewed at install, so a setting cannot
+move it. An interpolated setting must be `required` or have a `default`, so the argument
+always has a value. A `secret-reference` is never interpolated.
+
+`${settings.` anywhere else is refused at install at the path that holds it: in any
+other argument, in a nested value or key of an argument, embedded in longer text
+(`"v-${settings.mode}"`), or anywhere outside `capabilities[i].arguments` and
+`actions[i].arguments`.
+
+The same check (`PluginHost::interpolate`) runs three times:
+
+- **At install**, it checks the position and the type. The capability's own rules for a
+  binding then check the rest of the binding with a stand-in in the setting's place.
+- **On save**, the new values are put in place in every binding that uses them and
+  checked by that capability's own rules. A value its declaration allows but the
+  capability refuses, such as `$bogus` for `k8s.annotate`, is refused when saved, at
+  `actions[i].arguments`.
+- **On every request**, the value saved at that moment, or the default, is checked
+  against its declaration again and then by the capability's rules. A stored value that
+  no longer fits, such as one from a hand-edited inventory, refuses the request and
+  names the setting.
+
+The access review lists the declaration of each setting an action or reader
+interpolates, so an update that lets a setting write another value shows as changed
+access.
+
+### When the manifest changes
+
+An update or a rollback keeps only the saved values the new manifest still declares and
+still accepts. A string setting that becomes a `secret-reference` loses its plaintext
+rather than keeping it under a secret's name, and a secret that becomes a string does not
+turn its reference into a value. A required setting left without a value makes the
+requests that interpolate it fail, naming the setting, until one is saved.
 
 ## Rules the desktop app adds
 
