@@ -263,15 +263,75 @@ export function Workloads({ route }: { route: string }) {
 /** One entry per fixed watch, bundled after the hooks below run — never used
  *  to decide *how many* hooks to call, only to summarize their results. */
 /** "pods", "pods and cronjobs", "pods, jobs and cronjobs". */
-function wordList(words: string[]): string {
-  return words.length < 2 ? (words[0] ?? "") : `${words.slice(0, -1).join(", ")} and ${words.at(-1)}`;
+function wordList(words: string[], conjunction = "and"): string {
+  return words.length < 2 ? (words[0] ?? "") : `${words.slice(0, -1).join(", ")} ${conjunction} ${words.at(-1)}`;
 }
+
+const capitalise = (s: string) => s.charAt(0).toLocaleUpperCase() + s.slice(1);
 
 interface KindEntry {
   key: string;
   label: string;
   list: ResourceList<ListRow>;
   toRow: (row: ListRow) => WorkloadRow;
+}
+
+/**
+ * Whether a kind's rows are the whole answer for the namespaces in view:
+ * listed everywhere, not refused anywhere, not a stale last reading. Only
+ * these may be called empty (#703).
+ */
+function fullyListed(k: KindEntry): boolean {
+  return (
+    (k.list.status === "ready" || k.list.status === "empty") &&
+    k.list.namespaceFailures.length === 0 &&
+    !k.list.stale
+  );
+}
+
+/**
+ * Nothing answered for this kind, in any namespace in view. With several
+ * namespaces selected a kind is status "error" as soon as it has no rows and
+ * any namespace refused it, so the per-namespace failures have to cover the
+ * whole selection before "nothing answered" is true.
+ */
+function refusedEverywhere(k: KindEntry, scopeCount: number): boolean {
+  if (k.list.status !== "error") return false;
+  const refused = new Set(k.list.namespaceFailures.map((f) => f.namespace));
+  return refused.size === 0 || refused.size >= scopeCount;
+}
+
+/**
+ * The empty table's copy, claiming an absence only for the kinds in view that
+ * were fully listed (#703). The rest are said for what they are: not fully
+ * listed (the banners above say why), or not answered yet. "Workloads" rather
+ * than five nouns when it is all of them.
+ */
+function workloadsEmptyCopy(
+  inView: KindEntry[],
+  allKinds: number,
+  count: number,
+  noun: string,
+  clusterName: string,
+): { emptyText: string; emptyHint: string } {
+  const suffix = " in the namespaces you are looking at";
+  if (count > 0 || inView.every(fullyListed)) return emptyTableCopy(count, noun, clusterName, suffix);
+
+  const nouns = (ks: KindEntry[], conjunction?: string) =>
+    ks.length === allKinds ? "workloads" : wordList(ks.map((k) => `${k.label.toLocaleLowerCase()}s`), conjunction);
+  const listed = inView.filter(fullyListed);
+  const pending = inView.filter((k) => k.list.status === "loading");
+  const partly = inView.filter((k) => !fullyListed(k) && k.list.status !== "loading");
+
+  const hint = [
+    listed.length > 0 ? `${clusterName} has none${suffix}.` : "",
+    partly.length > 0 ? `${capitalise(nouns(partly))} could not be fully listed, so there may be some — see above.` : "",
+    pending.length > 0 ? `${capitalise(nouns(pending))} are still being listed.` : "",
+  ];
+  return {
+    emptyText: listed.length > 0 ? `No ${nouns(listed, "or")}` : `No ${noun} to show`,
+    emptyHint: hint.filter((h) => h !== "").join(" "),
+  };
 }
 
 function WorkloadList({
@@ -455,8 +515,11 @@ function WorkloadList({
   // Read off `status`, not the `failed` bucket: with several namespaces
   // selected, a kind refused in every one is an error that also carries
   // per-namespace failures, and sits in `partial`. Its reasons are those
-  // failures, every one of them, since `error` is only the first.
-  const allFailed = kinds.every((k) => k.list.status === "error");
+  // failures, every one of them, since `error` is only the first. And every
+  // namespace, not some (#703): one that answered empty was listed, and that
+  // is the table's to say, under the refused namespace's banner.
+  const scopeCount = selection.length === 0 ? 1 : new Set(selection).size;
+  const allFailed = kinds.every((k) => refusedEverywhere(k, scopeCount));
   const allFailedReasons = kinds.flatMap((k) =>
     k.list.namespaceFailures.length > 0 ? k.list.namespaceFailures.map((f) => f.error) : [k.list.error ?? ""],
   );
@@ -592,7 +655,13 @@ function WorkloadList({
               }
               rowMenu={rowMenuItems}
               rowMenuLabel={`${title} actions`}
-              {...emptyTableCopy(segmented.length, segmentLower, name, " in the namespaces you are looking at")}
+              {...workloadsEmptyCopy(
+                segment === "All" ? kinds : kinds.filter((k) => k.label === segment),
+                kinds.length,
+                segmented.length,
+                segmentLower,
+                name,
+              )}
             />
           </div>
         </>
