@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { subscribe } from "@srelens/core/transport";
+import { InertWebSocket } from "@srelens/core/testing/inertWebSocket";
 
 // #730. A view subscribes on mount and waits for the server's ack before it is
 // handed its unsubscribe. No server answers a test, so the channel stays open
@@ -10,6 +11,9 @@ import { subscribe } from "@srelens/core/transport";
 describe("a channel a test never closes", () => {
   afterEach(() => vi.useRealTimers());
   it("leaves no reconnect behind, to fire after jsdom is torn down", async () => {
+    // Stated outright: with jsdom's own socket, whether the timers below throw
+    // depends on the refusal arriving within the wait.
+    expect(globalThis.WebSocket).toBe(InertWebSocket);
     const wait = setTimeout;
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     void subscribe("test:never-acked", () => {});

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { subscribe } from "@srelens/core/transport";
+import { InertWebSocket } from "@srelens/core/testing/inertWebSocket";
 
 /** The zone in effect, or `timeZone` as ICU names it ("Asia/Kathmandu" comes back "Asia/Katmandu"). */
 const zoneNow = (timeZone?: string) => Intl.DateTimeFormat(undefined, { timeZone }).resolvedOptions().timeZone;
@@ -26,6 +27,9 @@ describe("a time zone a test pins", () => {
 describe("a channel a test never closes", () => {
   afterEach(() => vi.useRealTimers());
   it("leaves no reconnect behind, to fire after jsdom is torn down", async () => {
+    // Stated outright: with jsdom's own socket, whether the timers below throw
+    // depends on the refusal arriving within the wait.
+    expect(globalThis.WebSocket).toBe(InertWebSocket);
     const wait = setTimeout;
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     void subscribe("test:never-acked", () => {});
