@@ -216,6 +216,21 @@ it("does not resolve links for an app not enabled on this cluster", () => {
   expect(resolveExtensionLinks).not.toHaveBeenCalled();
 });
 
+it("reads a pinned ID as a pinned ID, even where another context is named after it", async () => {
+  // The host never reads the reserved form as a name, so neither does the link's route.
+  vi.mocked(useContexts).mockReturnValue([
+    { name:"srelens-context:/kube/a%23b#c", stableId:"/kube/impostor#srelens-context:/kube/a%23b#c", key:"/kube/impostor#impostor",
+      pinnedId:"srelens-context:/kube/impostor#impostor" },
+    ...shared,
+  ] as never);
+  vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
+  render(<ExtensionRelatedSlot context="srelens-context:/kube/a%23b#c" resource={resource}/>);
+  await userEvent.click(await screen.findByRole("button", { name:/argocd\/guestbook/ }));
+  expect(vi.mocked(openTab).mock.calls[0]).toEqual([
+    "/extension-contexts/%2Fkube%2Fa%2523b%23c/org.example.argocd/applications/argocd/guestbook", { clusterName:"c" },
+  ]);
+});
+
 it("names a target as plain text when its cluster is not listed, rather than open a tab for no cluster", async () => {
   vi.mocked(useContexts).mockReturnValue([] as never);
   vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
