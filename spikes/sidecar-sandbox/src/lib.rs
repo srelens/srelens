@@ -226,10 +226,17 @@ mod stop_tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_cpu_stop_is_rlimit_cpus_sigxcpu_or_sigkill() {
-        for signal in [libc::SIGXCPU, libc::SIGKILL] {
-            assert!(Stop::Cpu.accepts(&ended("exited: signal", Some(signal), None)), "{signal}");
-        }
+    fn a_cpu_stop_is_rlimit_cpus_sigxcpu() {
+        let xcpu = ended("exited: signal: 24 (SIGXCPU)", Some(libc::SIGXCPU), None);
+        assert!(Stop::Cpu.accepts(&xcpu));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sigkill_is_not_a_cpu_stop() {
+        // Nothing tells RLIMIT_CPU's SIGKILL (Linux, soft = hard) from an OOM or outside kill.
+        let killed = ended("exited: signal: 9 (SIGKILL)", Some(libc::SIGKILL), None);
+        assert!(!Stop::Cpu.accepts(&killed));
     }
 }
 
@@ -468,8 +475,10 @@ impl Stop {
             Stop::Memory => {
                 ended.signal == Some(libc::SIGKILL) && matches!(ended.oom_kills, Some(n) if n > 0)
             }
-            // RLIMIT_CPU: SIGXCPU at the soft limit, SIGKILL at the hard one.
-            Stop::Cpu => matches!(ended.signal, Some(libc::SIGXCPU | libc::SIGKILL)),
+            // RLIMIT_CPU's SIGXCPU, the one signal only it sends. The launcher sets soft =
+            // hard: macOS then sends SIGXCPU, and Linux sends SIGKILL, which nothing tells
+            // apart from any other kill (no Linux backend here uses RLIMIT_CPU).
+            Stop::Cpu => ended.signal == Some(libc::SIGXCPU),
         };
         #[cfg(not(unix))]
         {
