@@ -504,6 +504,117 @@ describe("Workloads", () => {
     );
   });
 
+  // #703: an empty table claims an absence only for what was actually listed.
+  // A kind that was refused, refused in some namespace, or has not answered
+  // yet could have rows the table never saw.
+  describe("claims no absence it does not know", () => {
+    type Answer = { rows: unknown[] } | { error: string } | "pending";
+    function answer(fn: (kind: string, namespace: string) => Answer) {
+      watchResource.mockImplementation(
+        async (
+          _context: string,
+          namespace: string,
+          kind: string,
+          onRows: (rows: unknown[]) => void,
+          _onStatus: (status: "live" | "reconnecting") => void,
+          onError: (message: string) => void,
+        ) => {
+          const a = fn(kind, namespace);
+          if (a === "pending") return { stop };
+          if ("error" in a) onError(a.error);
+          else onRows(a.rows);
+          return { stop };
+        },
+      );
+    }
+    const refused = (kind: string, namespace = "") =>
+      `${kind} is forbidden: User "dev" cannot list resource "${kind}" in API group "apps" ${
+        namespace === "" ? "at the cluster scope" : `in the namespace "${namespace}"`
+      }`;
+
+    it("names what answered empty, and what could not be listed, when some kinds were refused", async () => {
+      answer((kind) => (kind === "deployments" || kind === "pods" ? { error: refused(kind) } : { rows: [] }));
+      open();
+
+      expect(await screen.findByText("No statefulsets, daemonsets or cronjobs")).toBeTruthy();
+      expect(screen.queryByText(/has no workloads/i)).toBeNull();
+      expect(screen.getByText(/prod-eu has none in the namespaces you are looking at\./)).toBeTruthy();
+      expect(screen.getByText(/Deployments and pods could not be fully listed, so there may be some/)).toBeTruthy();
+    });
+
+    it("does not say a refused kind has none when its segment is selected", async () => {
+      answer((kind) => (kind === "deployments" ? { error: refused(kind) } : { rows: FIXTURES[kind] ?? [] }));
+      open();
+      await waitFor(() => expect(rowNames()).toHaveLength(4));
+
+      fireEvent.click(screen.getByRole("tab", { name: "Deployment" }));
+
+      expect(await screen.findByText("No deployments to show")).toBeTruthy();
+      expect(screen.queryByText(/has no deployments/i)).toBeNull();
+      expect(screen.getByText(/Deployments could not be fully listed, so there may be some/)).toBeTruthy();
+    });
+
+    it("keeps a namespace that answered empty apart from one that was refused", async () => {
+      store.openTab("/resources");
+      setNamespaces(CTX.stableId, ["default", "kube-system"]);
+      answer((kind, namespace) => (namespace === "kube-system" ? { error: refused(kind, namespace) } : { rows: [] }));
+      open();
+
+      // `default` WAS listed: this is not the nothing-answered failure state,
+      // it is the refused namespace's banner over an honest empty table.
+      expect(await screen.findByText("Could not list workloads in kube-system")).toBeTruthy();
+      expect(screen.queryByText(/could not list workloads on prod-eu/i)).toBeNull();
+      expect(screen.getByText("No workloads to show")).toBeTruthy();
+      expect(screen.queryByText(/has no workloads/i)).toBeNull();
+      expect(screen.getByText(/Workloads could not be fully listed, so there may be some/)).toBeTruthy();
+    });
+
+    it("does not call a kind that has not answered yet empty", async () => {
+      answer((kind) => (kind === "cronjobs" ? "pending" : { rows: [] }));
+      open();
+
+      expect(await screen.findByText("No deployments, statefulsets, daemonsets or pods")).toBeTruthy();
+      expect(screen.queryByText(/has no workloads/i)).toBeNull();
+      expect(screen.getByText(/Cronjobs are still being listed\./)).toBeTruthy();
+    });
+
+    // Review on #714: the filtered case makes the same claim. A refused kind
+    // was never searched, so "no workloads match" is only true of the rows
+    // that were listed.
+    it("says only listed rows failed the filter when a kind could not be listed", async () => {
+      answer((kind) => (kind === "deployments" ? { error: refused(kind) } : { rows: FIXTURES[kind] ?? [] }));
+      open();
+      await waitFor(() => expect(rowNames()).toHaveLength(4));
+
+      await userEvent.type(screen.getByRole("searchbox", { name: "Filter workloads" }), "nothing-matches-this");
+
+      expect(await screen.findByText("No listed workloads match this filter")).toBeTruthy();
+      expect(screen.queryByText("No workloads match this filter")).toBeNull();
+      expect(screen.getByText(/Clear the filter to see all 4 that were listed\./)).toBeTruthy();
+      expect(screen.getByText(/Deployments could not be fully listed, so some may match — see above\./)).toBeTruthy();
+    });
+
+    it("keeps the plain filter copy when every kind was listed", async () => {
+      open();
+      await waitFor(() => expect(rowNames()).toHaveLength(5));
+
+      await userEvent.type(screen.getByRole("searchbox", { name: "Filter workloads" }), "nothing-matches-this");
+
+      expect(await screen.findByText("No workloads match this filter")).toBeTruthy();
+      expect(screen.getByText("Clear the filter to see all 5.")).toBeTruthy();
+    });
+
+    it("still says the cluster has none when every kind answered empty", async () => {
+      answer(() => ({ rows: [] }));
+      open();
+
+      expect(await screen.findByText("No workloads")).toBeTruthy();
+      expect(
+        screen.getByText("prod-eu has no workloads in the namespaces you are looking at."),
+      ).toBeTruthy();
+    });
+  });
+
   // Whole-branch review, Correction (a): zero options while `namespaces` is
   // still null reads as "this cluster has no namespaces" — a bare
   // `MultiSelect options={(namespaces ?? []).map(...)}` says exactly that.

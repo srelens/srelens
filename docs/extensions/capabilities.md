@@ -9,12 +9,12 @@ Consent rules are in [permissions.md](permissions.md).
 |---|---|---|
 | `extensions.list` | Read-only | The installed apps, with revision, grants, settings, source, install time, up to three replaced versions and any quarantine reason. |
 | `extensions.read` | Read-only | Run one of an installed app's declared readers, given its ID, revision, operation and context. Refused with "App is not enabled for this cluster" on a cluster the app is not enabled for; so are `extensions.resource` and `extensions.action`. All three also refuse a custom-resource reader unless a CustomResourceDefinition named `{plural}.{group}` serves its bound version on the cluster. |
-| `extensions.resolveColumns` | Read-only | Resolve an app's native table columns and badges for up to 1,000 row summaries in one `uids[]` batch. Direct badges read the rows' metadata only, never Secrets. The host rechecks the installed revision, grants, cluster scope and joined CRD before listing; failed reads stay explicit. Desktop-only until web app isolation exists. |
-| `extensions.resolveCards` | Read-only | Answer every dashboard card an app declares for one cluster and a `namespaces[]` selection (at most 256): a figure, or on that card alone why it has none. The host rechecks the installed revision, grants, cluster scope and each source's CRD, and reads each source once through the shared five-second snapshot. `extensions.read` accepts a `card` id to return only the rows that card counted, with the card's `namespaces[]` when it counted in several. Desktop-only until web app isolation exists. |
-| `extensions.resolvePanels` | Read-only | Resolve installed declarative detail panels for a selected resource. The host rechecks the revision, grants and cluster scope, and uses only declared join readers. Desktop-only until web app isolation exists. |
-| `extensions.resolveLinks` | Read-only | Resolve an app's `resourceLinks` for a selected resource: `{ from, links: [{ id, relation, to, capability, targets: [{ namespace, name, exists, unverified? }], error? }] }`. A target the host did not look up (a bare Argo CD name with no `defaultNamespace`) carries `unverified` with why, and is never `exists`. Targets are looked up only in the granted reader for `to`, and only when the resource names one. A failed read is an `error` on that link, never an empty `targets`. Desktop-only until web app isolation exists. |
+| `extensions.resolveColumns` | Read-only | Resolve an app's native table columns and badges for up to 1,000 row summaries in one `uids[]` batch. Direct badges read the rows' metadata only, never Secrets. The host rechecks the installed revision, grants, cluster scope and joined CRD before listing; failed reads stay explicit. |
+| `extensions.resolveCards` | Read-only | Answer every dashboard card an app declares for one cluster and a `namespaces[]` selection (at most 256): a figure, or on that card alone why it has none. The host rechecks the installed revision, grants, cluster scope and each source's CRD, and reads each source once through the shared five-second snapshot. `extensions.read` accepts a `card` id to return only the rows that card counted, with the card's `namespaces[]` when it counted in several. |
+| `extensions.resolvePanels` | Read-only | Resolve installed declarative detail panels for a selected resource. The host rechecks the revision, grants and cluster scope, and uses only declared join readers. |
+| `extensions.resolveLinks` | Read-only | Resolve an app's `resourceLinks` for a selected resource: `{ from, links: [{ id, relation, to, capability, targets: [{ namespace, name, exists, unverified? }], error? }] }`. A target the host did not look up (a bare Argo CD name with no `defaultNamespace`) carries `unverified` with why, and is never `exists`. Targets are looked up only in the granted reader for `to`, and only when the resource names one. A failed read is an `error` on that link, never an empty `targets`. |
 | `extensions.resource` | Read-only | Inspect one resource of an enabled app, with its events and supported actions. |
-| `extensions.streams` | Read-only | The open app streams in this process and what each app has sent: open, opened, messages, payload bytes, streams stopped for the rate and opens refused for the cap, with the limits. For the Inspector ([#575](https://github.com/srelens/srelens/issues/575)); the streams themselves are opened by host commands, not capabilities. See [streams.md](streams.md). Desktop-only until web app isolation exists. |
+| `extensions.streams` | Read-only | The open app streams in this process and what each app has sent: open, opened, messages, payload bytes, streams stopped for the rate and opens refused for the cap, with the limits. For the Inspector ([#575](https://github.com/srelens/srelens/issues/575)); the streams themselves are opened by host commands, not capabilities. See [streams.md](streams.md). |
 | `extensions.catalog` | Read-only | Browse the catalog, from a 24-hour cache. Reports the host's supported API versions as `hostApiVersions`; the deprecated `hostApiVersion` still gives the newest. |
 | `extensions.catalogManifest` | Read-only | Download and verify one catalog release for review. Does not install it. |
 | `extensions.validate` | Read-only | Check a manifest, with its grants and optional signature, exactly as installing it would, and return every problem as `{code, path, message}` (see [Validation errors](specification.md#validation-errors)). Does not install it. A `signature` other than 64 bytes or a `manifest` over 256 KiB is refused as invalid input, not reported as a problem. |
@@ -112,7 +112,7 @@ once. A host-owned confirmation UI built on this is
 
 ## Declared GitOps actions
 
-Flux and Argo CD declare their actions in the API 0.3 manifests under
+Flux and Argo CD declare their actions in their manifests under
 `examples/extensions`. Reading a kind grants no write access. Installation or
 update must explicitly grant every action primitive in `permissions`.
 
@@ -141,8 +141,8 @@ same request timestamp. API failures remain errors; accepted requests do not cla
 that controller work has completed.
 
 `k8s.gitOpsAction` has been removed. There is no compatibility endpoint or inherited
-write permission. API 0.1 releases must be replaced by signed API 0.3 releases and
-reviewed with their new grants before they can be enabled.
+write permission. API 0.1 releases must be replaced by signed API 0.3 or later
+releases and reviewed with their new grants before they can be enabled.
 
 ## Host action primitives
 
@@ -171,15 +171,38 @@ reports the request as accepted rather than as complete.
 
 ## Web host
 
-- Every `extensions.*` capability is refused on the multi-user web host until app
-  state is kept per user ([#515](https://github.com/srelens/srelens/issues/515)).
-  So are the app stream commands (`extension_stream_open`, `extension_stream_cancel`,
-  `extension_stream_close_view`); see [streams.md](streams.md#hosts).
-- `extension.secretStore` is refused before dispatch too: the web host keeps no app
-  secrets until per-user storage exists ([#522](https://github.com/srelens/srelens/issues/522)),
-  and `@srelens/core` refuses a set on the web before the value leaves the page.
-- The four host action primitives are refused for the same reason: what bounds one is
-  an installed manifest fixing the kind and the template, which the web host has none
-  of, so a caller would be naming both itself.
+- **Each signed-in user has their own apps** ([#515](https://github.com/srelens/srelens/issues/515)).
+  Their inventory — installs, grants, enabled state, cluster limits, settings, kept
+  versions and the unsigned-apps opt-in — is their row of the server database
+  (`crates/server/src/app_inventory.rs`), not a file: it survives the environment
+  rebuilds that clear `runtime/`, and goes when the account does. Every `extensions.*`
+  capability reads and writes only that user's inventory, so another user's app ID and
+  revision name nothing in it. Settings API rows (`/api/settings`) are a separate table
+  and cannot place an inventory.
+- **One catalog, shared and read-only to users.** The catalog is the same for everyone,
+  so the server keeps one cache of it (`SharedCatalog` in
+  `crates/registry/src/extensions/catalog.rs`). `extensions.catalog` and
+  `extensions.catalogManifest` read it and never fetch into or write it; `refresh` is
+  answered from the server's copy. The server checks it hourly and fetches it again
+  once it is a day old. Verification is per install, per user, as on the desktop: each
+  install downloads its release and checks the checksum, identity, API range and, for
+  official apps, the publisher signature; each load re-verifies every signed manifest.
+- **Declared actions run through `extensions.action` only.** It reaches a host
+  primitive through the user's own installed app — the exact group/kind/plural its
+  reader binds, its revision, grants and cluster scope rechecked on the call, and the
+  reviewed UID and `resourceVersion` as preconditions — after the host confirmation
+  the app's screen shows. The web host runs no MCP server and no agent, so every call
+  is the signed-in user's own request, and no consent is given on anyone's behalf. The
+  host action primitives themselves stay refused when called directly: without an
+  installed app, a caller would be naming the kind and the template itself.
+- **App streams are not run on the web.** The stream commands
+  (`extension_stream_open`, `extension_stream_cancel`, `extension_stream_close_view`)
+  are refused, so pages, columns and cards read on Refresh and say they are not live;
+  see [streams.md](streams.md#hosts).
+- **No app secrets on the web yet.** A web user's registry has no secret store, so
+  `extension.secretStore` is not registered there (and is refused before dispatch
+  too), and `extensions.list` reports the store unavailable: the web host keeps no app
+  secrets until per-user storage exists ([#522](https://github.com/srelens/srelens/issues/522)).
+  `@srelens/core` refuses a set on the web before the value leaves the page.
 - `k8s.getCustomResource` stays available: it is a read under the user's own
   kubeconfig and RBAC, like every other custom-resource read.

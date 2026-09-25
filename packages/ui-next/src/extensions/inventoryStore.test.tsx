@@ -74,13 +74,25 @@ describe("the app inventory store (#566)", () => {
     expect(core.listExtensions).toHaveBeenCalledTimes(3);
   });
 
-  it("neither listens nor lists on the web, which keeps no app inventory", async () => {
+  /**
+   * The web server keeps each user's own inventory (#515), so the list is read
+   * from it. It announces nothing, so there is nothing to listen to and the
+   * store does not claim to be live, nor poll: it reads again on focus, where
+   * a change made in another tab shows.
+   */
+  it("lists the user's own apps on the web, and reads again on focus rather than listening", async () => {
     core.tauri = false;
     const { result } = renderHook(() => useExtensions());
     await settle();
     expect(result.current.status).toBe("ready");
+    expect(result.current.data?.nextRevision).toBe(1);
     expect(result.current.updates).toEqual({ mode: "none" });
     expect(core.onExtensionInventoryChanged).not.toHaveBeenCalled();
-    expect(core.listExtensions).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(core.listExtensions).toHaveBeenCalledTimes(1);
+    act(() => { window.dispatchEvent(new Event("focus")); });
+    await settle();
+    expect(core.listExtensions).toHaveBeenCalledTimes(2);
+    expect(result.current.data?.nextRevision).toBe(2);
   });
 });

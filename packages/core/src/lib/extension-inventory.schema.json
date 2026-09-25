@@ -4,7 +4,7 @@
   "definitions": {
     "ActionBinding": {
       "additionalProperties": false,
-      "description": "One declared mutation: a host action primitive, the reader binding whose kind it acts on, the arguments that fix what it writes, and what must be true of the object before it is written.\n\nFlux and Argo CD declare their actions using this contract in API 0.3.",
+      "description": "One declared mutation: a host action primitive, the reader binding whose kind it acts on, the arguments that fix what it writes, and what must be true of the object before it is written.\n\nFlux and Argo CD declare their actions using this contract, which API 0.3 introduced.",
       "properties": {
         "arguments": {
           "additionalProperties": true,
@@ -455,7 +455,7 @@
           "type": "array"
         },
         "statusResolvers": {
-          "description": "What status an app's custom resources have (#541). Replaces `pages[].statusColumns`, which is deprecated but still accepted in 0.3.",
+          "description": "What status an app's custom resources have (#541). Replaces `pages[].statusColumns`, which is deprecated but still accepted on the 0.3 and 0.4 lines.",
           "items": {
             "$ref": "#/definitions/StatusResolver"
           },

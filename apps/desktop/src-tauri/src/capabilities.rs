@@ -7,7 +7,7 @@
 //! `install_krew` capability.
 
 pub use srelens_registry::{
-    build_registry, build_registry_with, build_registry_with_paths,
+    build_registry, build_registry_for_user, build_registry_with, build_registry_with_paths,
     all_kubeconfig_paths, build_registry_and_app_streams, build_registry_with_paths_and_settings,
     default_kubeconfig_paths,
     default_settings_path,

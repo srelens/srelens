@@ -9,8 +9,8 @@ pub mod status;
 mod text;
 
 pub use predicate::{
-    check_path, check_predicates, resolve, unmet, CardPredicate, Condition, Predicate, ReferenceFormat,
-    MAX_PREDICATES,
+    check_path, check_predicates, path_uses_filter, resolve, unmet, CardPredicate, Condition,
+    Predicate, ReferenceFormat, MAX_PREDICATES,
 };
 
 pub use annotations::{

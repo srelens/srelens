@@ -340,7 +340,7 @@ async fn resolve_link(
 
 pub(super) fn register(
     reg: &mut Registry,
-    path: PathBuf,
+    path: Store,
     core: Arc<Registry>,
     client_cache: Arc<srelens_kube::client_cache::ClientCache>,
     cache: JoinCache,

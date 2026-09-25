@@ -21,6 +21,7 @@ mod settings;
 #[doc(hidden)]
 pub use extensions::fuzzing;
 pub use extensions::streams::{ExtensionStreams, OpenStreamOut, INVENTORY_CHANNEL};
+pub use extensions::{Apps, InventoryKey, InventoryLock, InventoryStore, SharedCatalog};
 pub use settings::default_settings_path;
 /// The secret store a host supplies for apps' secret settings (#543), so a
 /// host implements it against this crate alone.
@@ -233,6 +234,22 @@ pub fn build_registry_with_paths(
     build_registry_with_paths_and_settings(cache, kubeconfig_paths, None)
 }
 
+/// Build one web user's registry (#515): the host capabilities over their own
+/// kubeconfig files, and the apps capabilities over `apps` — their own inventory
+/// and the catalog the server shares between its users.
+///
+/// No desktop settings: web settings are per-user SQLite rows, served by the
+/// server's own settings API rather than by a capability. No secret store
+/// either: the web host has none per user yet (#522), so `extension.secretStore`
+/// is not registered, and `extensions.list` reports the store unavailable.
+pub fn build_registry_for_user(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    apps: Apps,
+) -> Registry {
+    build_with(cache, kubeconfig_paths, Some(apps), None).0
+}
+
 /// Build a registry and optionally add the durable desktop settings surface.
 /// Web-server registries omit it because web settings are per-user SQLite
 /// rows; desktop GUI and MCP callers pass the stable desktop settings path.
@@ -279,6 +296,26 @@ pub fn build_registry_app_streams_and_secrets(
     kubeconfig_paths: Vec<PathBuf>,
     settings_path: Option<PathBuf>,
     secrets: Arc<dyn SecretStore>,
+) -> (Registry, Option<Arc<ExtensionStreams>>) {
+    // The desktop keeps its apps in one file beside its settings.
+    let apps = settings_path
+        .as_ref()
+        .map(|path| Apps::from(path.with_extension("extensions.json")));
+    let (mut reg, app_streams) = build_with(cache, kubeconfig_paths, apps, Some(secrets));
+    if let Some(path) = settings_path {
+        settings::register(&mut reg, path);
+    }
+    (reg, app_streams)
+}
+
+/// Every host capability, and the apps capabilities over `apps` when there are
+/// any: with `secrets` keeping their secret settings, or with no way to keep
+/// one when there is no store at all (`None`, the web host).
+fn build_with(
+    cache: Arc<ClientCache>,
+    kubeconfig_paths: Vec<PathBuf>,
+    apps: Option<Apps>,
+    secrets: Option<Arc<dyn SecretStore>>,
 ) -> (Registry, Option<Arc<ExtensionStreams>>) {
     let mut reg = Registry::new();
 
@@ -536,19 +573,17 @@ pub fn build_registry_app_streams_and_secrets(
     ));
 
     let mut app_streams = None;
-    if let Some(path) = settings_path {
+    if let Some(apps) = apps {
         let mut core = reg.clone();
         // Broker-only: kept out of `reg`, so neither the catalog nor MCP offers it.
         core.register(extensions::crd::check_capability(cache.clone()));
         let core = Arc::new(core);
-        app_streams = Some(extensions::register_with_secrets(
-            &mut reg,
-            path.with_extension("extensions.json"),
-            core,
-            cache,
-            secrets,
-        ));
-        settings::register(&mut reg, path);
+        app_streams = Some(match secrets {
+            Some(secrets) => {
+                extensions::register_with_secrets(&mut reg, apps, core, cache, secrets)
+            }
+            None => extensions::register_without_secrets(&mut reg, apps, core, cache),
+        });
     }
 
     (reg, app_streams)
@@ -714,8 +749,10 @@ mod tests {
         assert_eq!(ids, default_ids, "same capabilities regardless of paths");
     }
 
+    /// `build_registry_with_paths` has no settings path, so neither the desktop
+    /// settings nor any app capability: apps need an inventory to act on.
     #[test]
-    fn web_registry_omits_host_desktop_settings() {
+    fn a_registry_without_a_settings_path_has_no_settings_or_apps() {
         let cache = ClientCache::new_many(vec![]);
         let reg = build_registry_with_paths(cache, vec![]);
         assert!(!reg.ids().contains(&"settings.get"));
@@ -736,6 +773,47 @@ mod tests {
         ] {
             assert!(reg.get(id).is_none());
         }
+    }
+
+    /// A web user's registry (#515) has every capability the desktop's has except the
+    /// desktop settings file's, which the web keeps as per-user SQLite rows.
+    /// `HOST_ONLY_CAPABILITY_IDS` in `packages/core/src/lib/capabilities.ts` is this
+    /// difference, so the two are held to each other here.
+    #[test]
+    fn a_web_users_registry_has_apps_but_no_desktop_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let apps = Apps::with_shared_catalog(
+            Arc::new(dir.path().join("inventory.json")),
+            SharedCatalog::new(dir.path().join("catalog.json")),
+        );
+        let reg = build_registry_for_user(ClientCache::new_many(vec![]), vec![], apps);
+        let web: std::collections::BTreeSet<&str> = reg.ids().into_iter().collect();
+        let desktop_reg = build_registry();
+        let desktop: std::collections::BTreeSet<&str> = desktop_reg.ids().into_iter().collect();
+        let host_only: Vec<&str> = desktop.difference(&web).copied().collect();
+        // No secret store on the web yet (#522), so no way to hand one a secret.
+        assert_eq!(
+            host_only,
+            ["extension.secretStore", "settings.get", "settings.set"]
+        );
+        assert!(web.is_subset(&desktop));
+
+        let core = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packages/core/src/lib/capabilities.ts"
+        ))
+        .unwrap();
+        let listed = core
+            .split("export const HOST_ONLY_CAPABILITY_IDS: readonly string[] = [")
+            .nth(1)
+            .and_then(|rest| rest.split("];").next())
+            .expect("capabilities.ts declares HOST_ONLY_CAPABILITY_IDS");
+        let listed: std::collections::BTreeSet<&str> = listed
+            .split(',')
+            .map(|id| id.trim().trim_matches('"'))
+            .filter(|id| !id.is_empty())
+            .collect();
+        assert_eq!(listed.into_iter().collect::<Vec<_>>(), host_only);
     }
 
     /// #543: no current consumer can be handed a secret. No host capability

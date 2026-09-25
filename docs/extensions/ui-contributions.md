@@ -56,9 +56,9 @@ with an explicit error notice.
   rules, evaluated by the host on the whole object. App tables show a **Status**
   column: the rule's word in a toned badge, and its reason beside it as plain text.
   A kind with no resolver has no status column.
-- **`statusColumns`** are deprecated but still accepted on the 0.3 line. They name
-  printer-column indices for `ready`, and optionally `suspended` and `progressing`, and
-  map onto the same statuses: suspended, then progressing, then Ready True (healthy) or
+- **`statusColumns`** are deprecated but still accepted on the 0.3 and 0.4 lines. They
+  name printer-column indices for `ready`, and optionally `suspended` and `progressing`,
+  and map onto the same statuses: suspended, then progressing, then Ready True (healthy) or
   False (error). A missing or unknown Ready condition stays **Unknown**.
 - **Dashboards** summarize the pages they reference by those six statuses, each listed
   with its word and count, zero included.

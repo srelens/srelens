@@ -38,6 +38,7 @@ const core = vi.hoisted(() => ({
   llmKeyStatus: vi.fn(),
   llmListModels: vi.fn(),
   listAgents: vi.fn(),
+  listExtensions: vi.fn(async () => ({ schemaVersion: 1, nextRevision: 1, plugins: [] })),
 }));
 vi.mock("@srelens/core", async (orig) => ({
   ...(await orig<typeof import("@srelens/core")>()),
@@ -82,9 +83,9 @@ const DESKTOP_SECTIONS = [
   "Apps",
 ];
 
-/** The same nav where no vault command can answer. */
+/** The same nav where no vault command can answer. Apps stays: the server keeps each user's (#515). */
 const WEB_SECTIONS = DESKTOP_SECTIONS.filter(
-  (s) => s !== "Security" && s !== "Backup" && s !== "Updates" && s !== "Apps",
+  (s) => s !== "Security" && s !== "Backup" && s !== "Updates",
 );
 
 function paint(props: { onLocked?: () => void } = {}) {
@@ -316,6 +317,14 @@ describe("Settings", () => {
       expect(screen.queryByRole("tab", { name: "Security" })).toBeNull();
     });
 
+    it("draws Apps, and lists the signed-in user's own apps from the server (#515)", async () => {
+      const { user } = paint();
+      await user.click(screen.getByRole("tab", { name: "Apps" }));
+      expect(await screen.findByText(/apps you install here are yours/i)).toBeTruthy();
+      expect(core.listExtensions).toHaveBeenCalled();
+      expect(screen.queryByText(/available in the desktop app/i)).toBeNull();
+    });
+
     it("says why the section is missing, once, where the entry would have been", () => {
       paint();
       const rail = screen.getByRole("complementary", { name: "Settings" });
@@ -335,7 +344,8 @@ describe("Settings", () => {
       for (const label of sections()) {
         await user.click(screen.getByRole("tab", { name: label }));
       }
-      expect(await screen.findByRole("button", { name: /open connections/i })).toBeTruthy();
+      // The last pane the loop opened, drawn: Apps, which now ends the web rail too.
+      expect(await screen.findByText(/apps you install here are yours/i)).toBeTruthy();
       expect(core.vaultBiometricStatus).not.toHaveBeenCalled();
       expect(core.vaultLock).not.toHaveBeenCalled();
     });

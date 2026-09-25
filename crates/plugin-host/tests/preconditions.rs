@@ -106,10 +106,14 @@ fn a_path_the_host_cannot_evaluate_is_refused_at_install() {
         why.contains("InvalidBinding") && why.contains("not a resource path"),
         "{why}"
     );
-    // The one filter form names the first matching element and is accepted.
-    let ready = action(|a| {
+    // The one filter form names the first matching element and is accepted — from
+    // API 0.4, which added it (#709). Under a 0.3 range it is told the version it needs.
+    let mut ready = action(|a| {
         a["preconditions"][0]["jsonPath"] = json!(".status.conditions[?(@.type=='Ready')].status");
     });
+    let why = refused_at(&ready, "srelensApiVersion");
+    assert!(why.contains("requires API 0.4.0"), "{why}");
+    ready["srelensApiVersion"] = json!("^0.4");
     parse(&ready).expect("the narrow filter is a path the host evaluates");
 }
 

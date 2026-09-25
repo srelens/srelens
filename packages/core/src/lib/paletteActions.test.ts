@@ -187,7 +187,7 @@ describe("paletteActions", () => {
 
 describe("appPaletteCommands (#544)", () => {
   const manifest = {
-    id: "org.example.gitops", name: "GitOps", version: "0.1.0", srelensApiVersion: "^0.3", kind: "declarative",
+    id: "org.example.gitops", name: "GitOps", version: "0.1.0", srelensApiVersion: "^0.4", kind: "declarative",
     permissions: [],
     capabilities: [
       { name: "apps", title: "Apps", target: "k8s.listCustomResource", arguments: { group: "argoproj.io", kind: "Application" }, inputs: [] },

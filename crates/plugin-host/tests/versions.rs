@@ -16,7 +16,7 @@ const THERE: &str = ".status.lastReleaseRevision";
 /// elsewhere, and one of everything that reads it.
 fn manifest() -> Value {
     json!({
-        "id":"org.example.flux", "name":"Flux", "version":"0.1.0", "srelensApiVersion":"^0.3",
+        "id":"org.example.flux", "name":"Flux", "version":"0.1.0", "srelensApiVersion":"^0.4",
         "kind":"declarative", "permissions":["k8s.listCustomResource","k8s.setFields"],
         "capabilities":[
             {"name":"helmreleases","title":"List Helm releases","target":"k8s.listCustomResource",
