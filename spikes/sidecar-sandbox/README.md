@@ -39,9 +39,8 @@ The memory and CPU checks follow the same idea:
 - their positive control is a probe with no sandbox running the same workload, which
   must allocate the 512 MiB or use more than 0.375 CPUs;
 - a stopped sidecar counts only with the signal the limit sends (`Stop` in
-  `src/lib.rs`): for memory, `SIGKILL` with the cgroup recording an OOM kill
-  (`oom_kill` above 0 in `memory.events`); for CPU, `SIGXCPU` or `SIGKILL`. A crash
-  never counts.
+  `src/lib.rs`): for memory, `SIGKILL` with the cgroup's `memory.events` recording
+  both `oom` and `oom_kill` above 0; for CPU, `SIGXCPU`. A crash never counts.
 
 | OS | Backends (`SPIKE_BACKEND`) | Recommended or candidate |
 |---|---|---|
@@ -165,7 +164,7 @@ Each operation prints one line: the backend, the check, and what came back.
 ===== SPIKE_BACKEND=landlock+seccomp+cgroup
 [landlock+seccomp+cgroup] read ~/.kube/config: Refused(Failure { message: "Permission denied (os error 13)", kind: "PermissionDenied", os: Some(13) })
 [landlock+seccomp+cgroup] TCP connect to 1.1.1.1:443: Refused(Failure { message: "Operation not permitted (os error 1)", kind: "PermissionDenied", os: Some(1) })
-[landlock+seccomp+cgroup] allocate 512 MiB (limit 128 MiB): Stopped("exited: signal: 9 (SIGKILL); cgroup memory.events oom_kill 1")
+[landlock+seccomp+cgroup] allocate 512 MiB (limit 128 MiB): Stopped("exited: signal: 9 (SIGKILL); cgroup memory.events oom 1, oom_kill 1")
 [landlock+seccomp+cgroup] used 0.25 CPUs
 test result: ok. 11 passed; 0 failed; ...
 ```

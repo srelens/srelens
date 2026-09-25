@@ -108,8 +108,8 @@ harness (`spikes/sidecar-sandbox/src/lib.rs`) starts it under one backend, and
 | 2 | Write inside the scratch directory; write outside it | Allowed; denied |
 | 3 | TCP connect to a listener on the host's loopback, TCP connect to `1.1.1.1:443`, resolve `example.com` | Denied |
 | 4 | Start a child process (the probe re-executing itself) | Denied |
-| 5 | Allocate and touch 512 MiB | Refused, or the sidecar is stopped by the limit (`SIGKILL`, with the cgroup recording an OOM kill); the host keeps running and can start another |
-| 6 | Burn two threads for 3 s | Throttled to at most 1.5× the limit, or stopped by the limit (`SIGXCPU` or `SIGKILL`) |
+| 5 | Allocate and touch 512 MiB | Refused, or the sidecar is stopped by the limit (`SIGKILL`, with its cgroup recording that it reached `memory.max` and OOM-killed a process); the host keeps running and can start another |
+| 6 | Burn two threads for 3 s | Throttled to at most 1.5× the limit, or stopped by the limit (`SIGXCPU`) |
 | 7 | 50 JSON-RPC round trips over stdin/stdout | Works |
 
 A "must be denied" check passes only when three things hold:
@@ -144,11 +144,17 @@ The memory and CPU checks (5 and 6) hold to the same two ideas:
   fails as INCONCLUSIVE.
 - **A stop is the limit's, not a crash** (`Stop::accepts` in
   `spikes/sidecar-sandbox/src/lib.rs`). A stopped sidecar counts only with the signal
-  the limit sends. For memory that is `SIGKILL` with the sidecar's cgroup recording the
-  OOM kill (`oom_kill` above 0 in `memory.events`), so a `SIGKILL` from anything else,
-  or with no cgroup to count it, does not count. For CPU it is `SIGXCPU` or `SIGKILL`
-  (`RLIMIT_CPU`). A panic (exit status 101) or an abort never counts. No Windows
-  backend stops the sidecar for a limit, so no stop counts there.
+  the limit sends, backed by evidence of its cause:
+  - **Memory:** `SIGKILL`, with the sidecar's cgroup recording both `oom` (its usage
+    reached `memory.max`) and `oom_kill` above 0 in `memory.events`. `oom_kill` alone is
+    not enough: it also counts a kill by the system's OOM killer. A `SIGKILL` with no
+    cgroup to count it, or from anything else, does not count.
+  - **CPU:** `SIGXCPU` only. The launcher sets `RLIMIT_CPU` with the soft limit equal to
+    the hard one. With a 1-second budget, macOS 27.0 arm64 sent `SIGXCPU` and Linux
+    7.0.12 arm64 (Docker) sent `SIGKILL`. A `SIGKILL` cannot be told apart from an OOM
+    or outside kill, and no Linux backend here uses `RLIMIT_CPU`.
+  - A panic (exit status 101) or an abort never counts. No Windows backend stops the
+    sidecar for a limit, so no stop counts there.
 
 These rules caught four false passes:
 
