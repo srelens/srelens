@@ -63,8 +63,8 @@ it("links each related resource to a route carrying its cluster and app kind", a
 
 // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share the stable ID `/kube/a#b#c` (#623).
 const shared = [
-  { name:"b#c", stableId:"/kube/a#b#c", key:"/kube/a#b%23c" },
-  { name:"c", stableId:"/kube/a#b#c", key:"/kube/a%23b#c" },
+  { name:"b#c", stableId:"/kube/a#b#c", key:"/kube/a#b%23c", pinnedId:"srelens-context:/kube/a#b%23c" },
+  { name:"c", stableId:"/kube/a#b#c", key:"/kube/a%23b#c", pinnedId:"srelens-context:/kube/a%23b#c" },
 ];
 
 it("opens a link from each of two contexts that share a stable ID in a tab of its own (#695)", async () => {
@@ -82,10 +82,10 @@ it("opens a link from each of two contexts that share a stable ID in a tab of it
   ]);
 });
 
-it("links from an app resource page by the key that page reads its cluster by", async () => {
+it("links from an app resource page, which names its cluster by the pinned ID it reads by", async () => {
   vi.mocked(useContexts).mockReturnValue(shared as never);
   vi.mocked(resolveExtensionLinks).mockResolvedValue(answer([link({ targets:[{ namespace:"argocd", name:"guestbook", exists:true }] })]));
-  render(<ExtensionRelatedSlot context="/kube/a%23b#c" resource={resource}/>);
+  render(<ExtensionRelatedSlot context="srelens-context:/kube/a%23b#c" resource={resource}/>);
   await userEvent.click(await screen.findByRole("button", { name:/argocd\/guestbook/ }));
   expect(vi.mocked(openTab).mock.calls[0]).toEqual([
     "/extension-contexts/%2Fkube%2Fa%2523b%23c/org.example.argocd/applications/argocd/guestbook", { clusterName:"c" },

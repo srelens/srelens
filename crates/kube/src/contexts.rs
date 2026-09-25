@@ -31,6 +31,12 @@ pub struct ContextDto {
     /// The identity an app's cluster list holds: `stableId` with `#` and `%` encoded in the
     /// file and the name, so no two contexts share it (`ResolvedContext::key`).
     pub key: String,
+    /// What an app page asks the host by (#695): `ResolvedContext::pinned_id`, which names
+    /// this context alone and is never read as a name or another context's ID. Absolute, so
+    /// it depends on the host's working directory: never persist it. Absent when the path
+    /// cannot be made absolute, and the host refuses such a context's app requests anyway.
+    #[serde(rename = "pinnedId", skip_serializing_if = "Option::is_none")]
+    pub pinned_id: Option<String>,
     pub cluster: String,
     pub server: String,
     /// The context's default namespace from the kubeconfig
@@ -191,6 +197,7 @@ fn build_context_dto(rc: ResolvedContext) -> ContextDto {
         is_current: rc.is_current,
         stable_id: rc.stable_id(),
         key: rc.key(),
+        pinned_id: rc.pinned_id(),
         source_file: rc.source.display().to_string(),
         name: rc.display_name,
         cluster: rc.cluster,
@@ -471,6 +478,7 @@ mod tests {
                 "key",
                 "name",
                 "namespace",
+                "pinnedId",
                 "server",
                 "sourceFile",
                 "stableId",
@@ -484,9 +492,27 @@ mod tests {
         assert_eq!(json["sourceFile"], "/home/dana/.kube/config");
         assert_eq!(json["stableId"], "/home/dana/.kube/config#prod-eu");
         assert_eq!(json["key"], "/home/dana/.kube/config#prod-eu");
+        #[cfg(unix)]
+        assert_eq!(json["pinnedId"], "srelens-context:/home/dana/.kube/config#prod-eu");
         assert_eq!(json["isCurrent"], false);
         assert_eq!(json["isLocal"], false);
         assert_eq!(json["name"], "prod-eu");
+    }
+
+    /// App pages ask the host by pinned ID (#695): unlike the stable ID, which `a` + `b#c` and
+    /// `a#b` + `c` share, it names one context, and its reserved prefix is never read as a
+    /// name or another context's ID. A context whose path cannot be made absolute has none,
+    /// and the field is absent rather than a relative stand-in the host would refuse.
+    #[cfg(unix)]
+    #[test]
+    fn each_of_two_contexts_sharing_a_stable_id_reports_its_own_pinned_id() {
+        let first = serde_json::to_value(dto_for("b#c", "/kube/a", "token")).unwrap();
+        let second = serde_json::to_value(dto_for("c", "/kube/a#b", "token")).unwrap();
+        assert_eq!(first["stableId"], second["stableId"]);
+        assert_eq!(first["pinnedId"], "srelens-context:/kube/a#b%23c");
+        assert_eq!(second["pinnedId"], "srelens-context:/kube/a%23b#c");
+        let unplaceable = serde_json::to_value(dto_for("default", "", "token")).unwrap();
+        assert!(!unplaceable.as_object().unwrap().contains_key("pinnedId"));
     }
 
     /// `provider` is the one optional field — `skip_serializing_if` means it is

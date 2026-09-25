@@ -370,12 +370,13 @@ unknown field. A 0.4 manifest may use everything 0.3 has, with the same meaning.
 - The signed releases on this line are Argo CD 0.3.0 and Flux 0.4.0, requiring `^0.3`
   and naming `schemas/extension-manifest.v0.3.json`.
 - App pages, dashboard card targets, palette page commands and Related links route by
-  context key (`/extension-contexts/<key>/…`) and ask the host by it, so two contexts
-  that share a stable ID open two tabs, each reading its own cluster. A context lookup
-  accepts the key as well as a pinned ID, a stable ID or a name; a string that is one
-  context's key and another's stable ID names neither. A route opened before
-  (`/extension-clusters/<stableId>/…`) still opens while one context carries that ID, and
-  says so when two do. Every app receives this; no manifest changes (#695).
+  context key (`/extension-contexts/<key>/…`) and ask the host by the context's pinned
+  ID, which `k8s.listContexts` now reports as `pinnedId`. So two contexts that share a
+  stable ID open two tabs, each reading its own cluster. A context listed without a
+  pinned ID (its kubeconfig path cannot be made absolute) says its apps cannot be opened.
+  A route opened before (`/extension-clusters/<stableId>/…`) still opens while one context
+  carries that ID, and says so when two do. Every app receives this; no manifest changes
+  (#695).
 
 ### 0.1.0
 

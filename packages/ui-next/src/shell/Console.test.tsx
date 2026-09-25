@@ -139,6 +139,7 @@ const ctx = (stableId: string, name = stableId): ClusterContext => ({
   name,
   stableId,
   key: stableId,
+  pinnedId: `srelens-context:/work/${stableId}`,
   cluster: name,
   server: "",
   isCurrent: false,
@@ -1575,7 +1576,8 @@ describe("app commands in the palette (#544)", () => {
     installed.plugins = [];
     takeExtensionAction(helmReleaseSelection);
   });
-  const helmReleaseSelection = { id: flux.id, revision: 1, capability: "helmreleases", context: "prod-eu-id", namespace: "team", name: "web" };
+  // The resource tab asks the host by the cluster's pinned ID, so its review is asked for by that.
+  const helmReleaseSelection = { id: flux.id, revision: 1, capability: "helmreleases", context: "srelens-context:/work/prod-eu-id", namespace: "team", name: "web" };
 
   it("lists an installed app's pages under Apps and opens one on the cluster in focus", async () => {
     const user = userEvent.setup();
@@ -1609,8 +1611,8 @@ describe("app commands in the palette (#544)", () => {
 
   describe("on two contexts that share a stable ID (#695)", () => {
     // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c`; this window was opened for `c`.
-    const first = { ...ctx("/kube/a#b#c", "b#c"), key: "/kube/a#b%23c" };
-    const second = { ...ctx("/kube/a#b#c", "c"), key: "/kube/a%23b#c" };
+    const first = { ...ctx("/kube/a#b#c", "b#c"), key: "/kube/a#b%23c", pinnedId: "srelens-context:/kube/a#b%23c" };
+    const second = { ...ctx("/kube/a#b#c", "c"), key: "/kube/a%23b#c", pinnedId: "srelens-context:/kube/a%23b#c" };
     beforeEach(() => {
       setContexts([first, second]);
       tabsStore.setState(defaultState([first, second]));
@@ -1626,13 +1628,13 @@ describe("app commands in the palette (#544)", () => {
       expect(tab?.sub).toBe("c");
     });
 
-    it("asks a resource tab's review by the key its route carries", async () => {
+    it("asks a resource tab's review by the pinned ID of the context its route names", async () => {
       tabsStore.openTab(extensionClusterResourceRoute(first.key, flux.id, "helmreleases", "team", "web"));
       const user = userEvent.setup();
       setup();
       await user.type(screen.getByRole("textbox", { name: "Console prompt" }), "/reconcile helm{Enter}");
-      expect(takeExtensionAction({ ...helmReleaseSelection, context: second.key })).toBeNull();
-      expect(takeExtensionAction({ ...helmReleaseSelection, context: first.key })).toBe("helmreleases-reconcile");
+      expect(takeExtensionAction({ ...helmReleaseSelection, context: "srelens-context:/kube/a%23b#c" })).toBeNull();
+      expect(takeExtensionAction({ ...helmReleaseSelection, context: "srelens-context:/kube/a#b%23c" })).toBe("helmreleases-reconcile");
     });
   });
 });

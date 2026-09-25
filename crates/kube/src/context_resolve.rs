@@ -459,9 +459,8 @@ fn resolve_contexts_with(
 }
 
 /// Find a resolved context by [stable ID](ResolvedContext::stable_id),
-/// [pinned ID](ResolvedContext::pinned_id), [key](ResolvedContext::key) or display name,
-/// falling back to a raw original name (for MCP/tests that pass the kubeconfig's own context
-/// name directly).
+/// [pinned ID](ResolvedContext::pinned_id) or display name, falling back to a raw original
+/// name (for MCP/tests that pass the kubeconfig's own context name directly).
 ///
 /// A caller that has checked a context passes its pinned ID on, so the lookup reaches the
 /// context that was checked: a display name can pass to another cluster when kubeconfig
@@ -476,16 +475,12 @@ pub fn resolve_context(paths: &[PathBuf], name: &str) -> Option<ResolvedContext>
 /// dispatch, and a display name to delete, connect or the toolbox, when a context is
 /// literally named after another's ID. Such a string resolves to nothing, so neither caller
 /// is redirected. Likewise a stable ID that more than one listed context carries (see
-/// [`ResolvedContext::pinned_id`]) names no single context and resolves to nothing, and so
-/// does a key that is also another context's stable ID. The key is how an app page names
-/// its cluster (#695): unlike the stable ID, no two contexts share one.
+/// [`ResolvedContext::pinned_id`]) names no single context and resolves to nothing.
 pub fn find_context(all: &[ResolvedContext], name: &str) -> Option<ResolvedContext> {
     let by_id: Vec<&ResolvedContext> = all
         .iter()
         .filter(|context| {
-            context.pinned_id().as_deref() == Some(name)
-                || context.stable_id() == name
-                || context.key() == name
+            context.pinned_id().as_deref() == Some(name) || context.stable_id() == name
         })
         .collect();
     let by_name = all
@@ -1072,53 +1067,6 @@ mod tests {
         }
         // The shared stable ID names no single context, so it reaches none.
         assert!(find_context(&both, &both[0].stable_id()).is_none());
-    }
-
-    /// App pages name their cluster by context key (#695), so each of two contexts that
-    /// share a stable ID is reached by its own key.
-    #[test]
-    fn contexts_that_share_a_stable_id_each_resolve_by_their_own_key() {
-        let named = |name: &str| {
-            format!(
-                "clusters:\n  - name: c\n    cluster: {{ server: https://{} }}\ncontexts:\n  - name: '{name}'\n    context: {{ cluster: c, user: u }}\n",
-                name.replace('#', "-")
-            )
-        };
-        let both = resolve_from(&[cfg("/kube/a", &named("b#c")), cfg("/kube/a#b", &named("c"))]);
-        assert_eq!(both[0].stable_id(), both[1].stable_id());
-        assert_eq!(
-            find_context(&both, "/kube/a#b%23c").unwrap().server,
-            "https://b-c"
-        );
-        assert_eq!(
-            find_context(&both, "/kube/a%23b#c").unwrap().server,
-            "https://c"
-        );
-        // With its context gone, a key reaches nothing — not the other holder of the stable ID.
-        assert!(find_context(&both[1..], "/kube/a#b%23c").is_none());
-    }
-
-    /// A name that literally holds an escape makes one string two contexts' identity: `y#z`
-    /// has the key `…#y%23z`, which is the stable ID of a context named `y%23z`. It resolves
-    /// to neither rather than to whichever was meant less.
-    #[test]
-    fn a_key_that_is_another_contexts_stable_id_resolves_to_neither() {
-        let both = resolve_from(&[cfg(
-            "/kube/x",
-            "clusters:\n  - name: hash\n    cluster: { server: https://hash }\n  - name: escaped\n    cluster: { server: https://escaped }\ncontexts:\n  - name: 'y#z'\n    context: { cluster: hash, user: u }\n  - name: 'y%23z'\n    context: { cluster: escaped, user: u }\n",
-        )]);
-        assert_eq!(both[0].key(), both[1].stable_id());
-        assert!(find_context(&both, &both[0].key()).is_none());
-        assert_eq!(
-            find_context(&both, &both[1].key()).unwrap().server,
-            "https://escaped"
-        );
-        assert_eq!(
-            find_context(&both, &both[0].pinned_id().unwrap())
-                .unwrap()
-                .server,
-            "https://hash"
-        );
     }
 
     #[test]

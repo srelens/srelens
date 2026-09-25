@@ -21,6 +21,7 @@ const deps = (route: string, over: Partial<CommandDeps> = {}): CommandDeps => ({
   openAction: vi.fn(),
   openResource: vi.fn(),
   apps: (contextKey) => (contextKey === "key-prod" ? [app] : []),
+  hostContext: (contextKey) => (contextKey === "key-prod" ? "srelens-context:/kube/prod#prod" : undefined),
   openAppAction: vi.fn(),
   ...over,
 });
@@ -68,7 +69,7 @@ describe("app commands in the / palette", () => {
     actions[0].run();
     expect(d.openAppAction).toHaveBeenCalledWith({
       route: helmRelease,
-      request: { id: manifest.id, capability: "helmreleases", context: "key-prod", namespace: "team", name: "web", action: "helmreleases-reconcile" },
+      request: { id: manifest.id, capability: "helmreleases", context: "srelens-context:/kube/prod#prod", namespace: "team", name: "web", action: "helmreleases-reconcile" },
     });
     expect(d.openTab).not.toHaveBeenCalled();
   });
@@ -79,7 +80,11 @@ describe("app commands in the / palette", () => {
     const reconcile = commandsFor(d).find((c) => c.group === "Action");
     expect(reconcile?.label).toBe("Flux: Reconcile Helm release");
     reconcile!.run();
-    expect(vi.mocked(d.openAppAction!).mock.calls[0][0].request.context).toBe("key-prod");
+    expect(vi.mocked(d.openAppAction!).mock.calls[0][0].request.context).toBe("srelens-context:/kube/prod#prod");
+  });
+
+  it("offers no action on a cluster the host lists without a pinned ID to ask it by", () => {
+    expect(commandsFor(deps(helmRelease, { hostContext: () => undefined })).some((c) => c.group === "Action")).toBe(false);
   });
 
   it("offers no action on a tab opened before, whose route names its cluster by stable ID", () => {

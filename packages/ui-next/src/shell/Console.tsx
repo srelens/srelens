@@ -291,11 +291,12 @@ export function Console({ fullView }: { fullView?: boolean }) {
       context,
       contextKey: activeCtx?.key,
       apps: appsOn,
+      hostContext: (contextKey) => contexts.find((c) => c.key === contextKey)?.pinnedId,
       openAppAction: ({ route: target, request }) => {
         // Held first, then the tab opened: a tab that mounts takes the request
         // on mount, and one already showing hears it.
         requestExtensionAction(request);
-        openTab(target, { clusterName: contexts.find((c) => c.key === request.context)?.name });
+        openTab(target, { clusterName: contexts.find((c) => c.pinnedId === request.context)?.name });
       },
       // Only the clusters THIS workspace holds. `setActiveCluster` refuses an
       // id outside `workspace.clusters` and returns the workspace untouched

@@ -77,7 +77,7 @@ Failed reads keep their error and a retry; they never become zero-count summarie
 `dashboardCards` ([Manifest reference](manifest.md#dashboard-cards)) draw an **App
 cards** band on the cluster overview, under the capacity strip, in the new design only.
 The band follows the cluster's namespace selection — the one the resource lists use —
-reads the cluster in focus by its context key, and has a **Refresh** action. On the
+reads the cluster in focus by its pinned ID, and has a **Refresh** action. On the
 desktop it is live too: each app's card readers are watched, in the one selected
 namespace or, for several or none, in every namespace, and a change redraws that app's
 figures in place. While a watch reconnects, the band says its figures may be out of

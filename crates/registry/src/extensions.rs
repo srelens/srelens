@@ -2416,34 +2416,38 @@ mod tests {
         cache.set_paths(vec![second]).await;
         assert!(refused("c".to_owned()).await);
     }
-    /// An app page names its cluster by context key (#695), so two contexts that share a
-    /// stable ID each read their own cluster; the shared stable ID still reaches neither.
+    /// An app page asks the host by the pinned ID `k8s.listContexts` reports (#695), so two
+    /// contexts that share a stable ID each read their own cluster.
     #[tokio::test]
-    async fn a_read_named_by_context_key_goes_to_that_context_when_the_stable_id_is_shared() {
+    async fn each_context_sharing_a_stable_id_reads_its_own_cluster_by_its_listed_pinned_id() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("extensions.json");
         let first = kubeconfig(dir.path(), "a", &["b#c"]);
         let second = kubeconfig(dir.path(), "a#b", &["c"]);
-        let listed =
-            srelens_kube::context_resolve::resolve_contexts(&[first.clone(), second.clone()]);
-        assert_eq!(listed[0].stable_id(), listed[1].stable_id());
         let core = fake_core();
+        let listed = core
+            .invoke("k8s.listContexts", json!({"paths": [&first, &second]}))
+            .await
+            .unwrap();
+        let contexts = listed["contexts"].as_array().unwrap();
+        assert_eq!(contexts[0]["stableId"], contexts[1]["stableId"]);
+        let pinned: Vec<Value> = contexts.iter().map(|c| c["pinnedId"].clone()).collect();
+        assert!(pinned.iter().all(Value::is_string) && pinned[0] != pinned[1], "{pinned:?}");
         let revision = install(&path, core.clone());
         let mut reg = Registry::new();
         let cache = srelens_kube::client_cache::ClientCache::new_many(vec![first, second]);
         register(&mut reg, path, core, cache);
-        let read = |context: String| {
+        let read = |context: Value| {
             let payload = json!({"id":"org.example.argocd","revision":revision,
                 "capability":"applications","context":context,"namespace":""});
             reg.invoke("extensions.read", payload)
         };
-        for context in &listed {
-            let output = read(context.key()).await.unwrap();
-            assert_eq!(output["context"], json!(context.pinned_id().unwrap()));
+        for id in &pinned {
+            assert_eq!(read(id.clone()).await.unwrap()["context"], *id);
         }
-        // Pinned to neither: the reader resolves it again, and it names no single context.
-        let shared = read(listed[0].stable_id()).await.unwrap();
-        assert_eq!(shared["context"], json!(listed[0].stable_id()));
+        // The shared stable ID names two contexts, so it is pinned to neither.
+        let shared = read(contexts[0]["stableId"].clone()).await;
+        assert!(shared.map_or(true, |out| !pinned.contains(&out["context"])));
     }
     /// A limited app is refused on a context the host cannot resolve, but with why: whether
     /// the app is enabled there is unknown, which is not the same as not enabled.

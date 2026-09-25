@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ExtensionResourceDetails } from "../extensions/ExtensionResourceDetails";
 import { ErrorNotice } from "../extensions/ExtensionResults";
-import { SHARED_CONTEXT_ID_MESSAGE } from "../extensions/contextIds";
+import { NO_PINNED_ID_MESSAGE, SHARED_CONTEXT_ID_MESSAGE } from "../extensions/contextIds";
 import { plainText } from "../extensions/displayText";
 import { ExtensionResourceNavigation } from "../extensions/resourceNavigation";
 import { extensionEnabledFor, extensionClusterRoute as extensionRoute, extensionClusterResourceRoute as extensionResourceRoute, listContexts, parseExtensionRoute } from "@srelens/core";
@@ -51,9 +51,12 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
   if (target.contextKey === undefined && target.clusterId === undefined && cluster && legacyPin?.route !== route) {
     setLegacyPin({ route, key: cluster.key });
   }
-  // What the host is asked, and what this page's own links carry: the key the host resolves
-  // to this context alone. Without a cluster nothing below reads or links.
+  // What this page's own links carry: the route identity, the key. Without a cluster nothing
+  // below reads or links.
   const contextKey = cluster?.key ?? "";
+  // What the host is asked: the pinned ID, which names this context alone. A key is not
+  // enough there: it can be spelled the same as another context's stable ID.
+  const hostContext = cluster?.pinnedId ?? "";
   // An app can only be opened once its cluster is listed, and a
   // listing that failed says nothing about whether the app is enabled there.
   const unchecked = Boolean(plugin) && !cluster;
@@ -90,6 +93,8 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
           />
         ) : shared ? (
           <p className="extension-message">{SHARED_CONTEXT_ID_MESSAGE}</p>
+        ) : plugin && cluster && !cluster.pinnedId ? (
+          <p className="extension-message">{NO_PINNED_ID_MESSAGE}</p>
         ) : unchecked ? (
           <p className="extension-message">
             This cluster is no longer in your kubeconfig files, so its apps cannot be opened here.
@@ -117,7 +122,7 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
               <Button variant="ghost" size="sm" onClick={showAll}>Show all {plainText(page.title)}</Button>
             </div>
           )}
-          {target.resourceName ? <ExtensionResourceDetails fullPage key={route} selection={{id:target.id,revision:plugin.revision,capability:page.capability,context:contextKey,namespace:target.namespace,name:target.resourceName}}/> : <ExtensionWorkspace
+          {target.resourceName ? <ExtensionResourceDetails fullPage key={route} selection={{id:target.id,revision:plugin.revision,capability:page.capability,context:hostContext,namespace:target.namespace,name:target.resourceName}}/> : <ExtensionWorkspace
             card={card?.id}
             cardNamespaces={target.namespaces}
             onLeaveCard={(namespace) =>
@@ -131,7 +136,7 @@ export function ExtensionPage({ route }: RoutedScreenProps) {
                 { clusterName: cluster?.name },
               )
             }
-            context={contextKey}
+            context={hostContext}
             namespace={target.namespace}
           />}
           </ExtensionResourceNavigation.Provider>

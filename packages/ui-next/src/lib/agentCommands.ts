@@ -128,6 +128,11 @@ export interface CommandDeps {
   /** The enabled apps allowed on a cluster, by its context key, named as the host names them. */
   apps?: (contextKey: string) => readonly PaletteApp[];
   /**
+   * The pinned ID the host is asked by for the context with this key, as an app resource tab
+   * asks it (#695); `undefined` when that context is not listed with one.
+   */
+  hostContext?: (contextKey: string) => string | undefined;
+  /**
    * Asks the app resource tab at `route` for its own review of one declared
    * action. Never the write: the inspector there owns the host confirmation.
    */
@@ -322,15 +327,16 @@ function appCommands(deps: CommandDeps): Command[] {
     }
   }
   const open = parseExtensionRoute(deps.route);
-  if (open?.contextKey && open.resourceName && deps.openAppAction) {
+  const host = open?.contextKey ? deps.hostContext?.(open.contextKey) : undefined;
+  if (open?.contextKey && host && open.resourceName && deps.openAppAction) {
     const { contextKey, id, page: pageId, namespace, resourceName: name } = open;
     const app = deps.apps(contextKey).find((a) => a.id === id);
     const page = app?.manifest.contributions.pages.find((p) => p.id === pageId);
     if (app && page) {
       for (const c of appPaletteCommands(app, { capability: page.capability })) {
         if (c.target.kind !== "action") continue;
-        // The resource tab asks the host by the same key, so its review takes this request.
-        const request = { id, capability: page.capability, context: contextKey, namespace, name, action: c.target.action };
+        // Named as the resource tab asks the host, by pinned ID, so its review takes this request.
+        const request = { id, capability: page.capability, context: host, namespace, name, action: c.target.action };
         const route = deps.route;
         const openAppAction = deps.openAppAction;
         commands.push({ id: c.id, group: "Action", label: c.label, hint: `${name} · review first`,

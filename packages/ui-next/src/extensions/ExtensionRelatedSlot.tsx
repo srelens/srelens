@@ -64,9 +64,9 @@ function RelatedLinks({ plugins, context, kind, resource }: {
   plugins: InstalledExtension[]; context: string; kind: string; resource: LinkResource;
 }) {
   const contexts = useContexts();
-  // The Inspector names its cluster by display name; an app's resource page by the key it
+  // The Inspector names its cluster by display name; an app's resource page by the pinned ID it
   // reads by. The link's route carries the key, which no two contexts share (#695).
-  const cluster = contexts.find(c => c.name === context) ?? contexts.find(c => c.key === context);
+  const cluster = contexts.find(c => c.name === context) ?? contexts.find(c => c.pinnedId === context);
   const namespace = resource.metadata.namespace ?? "";
   // The resolver reads the resource's identity and metadata and nothing else:
   // a ConfigMap's data, a spec or a Secret's values never leave the Inspector.

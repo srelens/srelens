@@ -43,7 +43,7 @@ import { defaultState } from "../lib/tabs";
 import { resetView, setNamespaces } from "../lib/workspace";
 
 const CTX: ClusterContext = {
-  name: "prod-eu", stableId: "/kube/config#prod", key: "/kube/config#prod", cluster: "prod",
+  name: "prod-eu", stableId: "/kube/config#prod", key: "/kube/config#prod", pinnedId: "srelens-context:/kube/config#prod", cluster: "prod",
   server: "https://prod", isCurrent: true, sourceFile: "/kube/config", authKind: "token",
 };
 
@@ -239,14 +239,14 @@ describe("DashboardCards", () => {
     render(<DashboardCards context={CTX} />);
     await waitFor(() => expect(core.resolveDashboardCards).toHaveBeenCalled());
     // The stable ID, never the display name: a renamed context must not move the read.
-    expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.key, []);
+    expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.pinnedId, []);
     act(() => setNamespaces(CTX.stableId, ["team"]));
     await waitFor(() =>
-      expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.key, ["team"]),
+      expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.pinnedId, ["team"]),
     );
     act(() => setNamespaces(CTX.stableId, ["team", "prod"]));
     await waitFor(() =>
-      expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.key, ["team", "prod"]),
+      expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.pinnedId, ["team", "prod"]),
     );
   });
 
@@ -277,7 +277,7 @@ describe("DashboardCards", () => {
     answer([{ id: "c", state: "count", count: 1 }]);
     render(<DashboardCards context={CTX} />);
     await waitFor(() =>
-      expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.key, ["team"]),
+      expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.pinnedId, ["team"]),
     );
   });
 
@@ -300,7 +300,7 @@ describe("DashboardCards", () => {
     view.rerender(<DashboardCards context={CTX} />);
     await waitFor(() => expect(cardRegion("Expiring").getAttribute("data-state")).toBe("value"));
     expect(core.resolveDashboardCards).toHaveBeenCalledTimes(1);
-    expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.key, ["team"]);
+    expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, CTX.pinnedId, ["team"]);
   });
 
   it("follows each card's reader and redraws its figure in place when it changes (#566)", async () => {
@@ -321,7 +321,7 @@ describe("DashboardCards", () => {
     const figure = () => cardRegion("Expiring").querySelector(".dashboard-card-figure")?.textContent;
     await waitFor(() => expect(figure()).toBe("1"));
     // Two cards over one reader: one watch, in the selected namespace, on the pinned cluster.
-    await waitFor(() => expect(watched.map((w) => [w.capability, w.namespace, w.context])).toEqual([["certificates", "team", CTX.key]]));
+    await waitFor(() => expect(watched.map((w) => [w.capability, w.namespace, w.context])).toEqual([["certificates", "team", CTX.pinnedId]]));
     act(() => watched[0].onData({ event: "synced" }, 1));
     expect(screen.getByText("Live")).toBeTruthy();
     act(() => watched[0].onData({ event: "changed" }, 2));
@@ -386,10 +386,10 @@ describe("DashboardCards", () => {
 
   describe("on two contexts that share a stable ID (#695)", () => {
     // `/kube/a` declaring `b#c` and `/kube/a#b` declaring `c` share `/kube/a#b#c`.
-    const first: ClusterContext = { ...CTX, name: "b#c", stableId: "/kube/a#b#c", key: "/kube/a#b%23c" };
-    const second: ClusterContext = { ...CTX, name: "c", stableId: "/kube/a#b#c", key: "/kube/a%23b#c" };
+    const first: ClusterContext = { ...CTX, name: "b#c", stableId: "/kube/a#b#c", key: "/kube/a#b%23c", pinnedId: "srelens-context:/kube/a#b%23c" };
+    const second: ClusterContext = { ...CTX, name: "c", stableId: "/kube/a#b#c", key: "/kube/a%23b#c", pinnedId: "srelens-context:/kube/a%23b#c" };
 
-    it("reads, follows and opens each one's cards by its own key", async () => {
+    it("reads and follows each one's cards by its pinned ID, and opens them by its key", async () => {
       const open = vi.spyOn(tabs, "openTab").mockImplementation(() => {});
       const watched: string[] = [];
       core.openExtensionView.mockImplementation((id: string) => ({
@@ -401,19 +401,30 @@ describe("DashboardCards", () => {
       }));
       installed(app([card({ id: "expiring", title: "Expiring", target: { page: "certificates" } })]));
       answer([{ id: "expiring", state: "count", count: 2 }]);
+      const read: string[] = [];
       for (const context of [first, second]) {
         const view = render(<DashboardCards context={context} />);
         await userEvent.click(await screen.findByRole("button", { name: "Open Expiring" }));
-        expect(core.resolveDashboardCards).toHaveBeenLastCalledWith("org.example.certs", 4, context.key, []);
-        await waitFor(() => expect(watched.at(-1)).toBe(context.key));
+        read.push(core.resolveDashboardCards.mock.lastCall?.[2]);
+        await waitFor(() => expect(watched.at(-1)).toBe(read.at(-1)));
         expect(screen.queryByText(/two contexts share/)).toBeNull();
         view.unmount();
       }
+      expect(read).toEqual(["srelens-context:/kube/a#b%23c", "srelens-context:/kube/a%23b#c"]);
       expect(open.mock.calls).toEqual([
         ["/extension-contexts/%2Fkube%2Fa%23b%2523c/org.example.certs/certificates/?card=expiring", { clusterName: "b#c" }],
         ["/extension-contexts/%2Fkube%2Fa%2523b%23c/org.example.certs/certificates/?card=expiring", { clusterName: "c" }],
       ]);
     });
+  });
+
+  it("says a cluster listed without a pinned ID cannot be asked, rather than reading it", async () => {
+    installed(app([card({ id: "expiring", title: "Expiring" })]));
+    answer([{ id: "expiring", state: "count", count: 2 }]);
+    render(<DashboardCards context={{ ...CTX, pinnedId: undefined }} />);
+    expect(await screen.findByText(/path cannot be made absolute/)).toBeTruthy();
+    expect(core.resolveDashboardCards).not.toHaveBeenCalled();
+    expect(core.openExtensionView).not.toHaveBeenCalled();
   });
 
   it("draws app text as plain text, never markup or invisible reordering", async () => {

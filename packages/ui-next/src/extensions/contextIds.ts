@@ -88,6 +88,10 @@ export function useContextId(name: string): string | undefined {
 export const SHARED_CONTEXT_ID_MESSAGE =
   "This tab names its cluster by an ID that two contexts share, so it cannot tell which one it is for. Open the page again from that cluster's sidebar.";
 
+/** What an app surface says when the host lists its cluster without a pinned ID to ask it by. */
+export const NO_PINNED_ID_MESSAGE =
+  "This cluster's kubeconfig path cannot be made absolute, so its apps cannot be opened here. Manage your kubeconfig files in Settings → Contexts.";
+
 /**
  * The context named `name`: found; still being listed; not found because the listing
  * failed; or missing from a listing that worked.
