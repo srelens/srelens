@@ -6,8 +6,10 @@
 #[doc(hidden)]
 pub mod fuzzing;
 mod manifest;
+mod secrets;
 mod validation;
 pub use manifest::*;
+pub use secrets::*;
 pub use validation::*;
 
 use serde_json::{Map, Value};
@@ -499,6 +501,9 @@ impl PluginHost {
                 // Its settings are already interpolated, below; nothing more
                 // may be.
                 settable: Vec::new(),
+                // A registered binding is the app's; the host injects a
+                // secret into the target it calls, never into this facade.
+                secret_slots: Vec::new(),
                 handler: Arc::new(move |input| {
                     let handler = handler.clone();
                     let enabled = enabled.clone();

@@ -7,8 +7,10 @@ import { refreshContextIds, useContextLookup } from "./contextIds";
 import { ExtensionLogo } from "./ExtensionLogo";
 import { useContext, useRef, useState } from "react";
 import {
+  clearExtensionSecret,
   configureExtensions,
   contributionKind,
+  setExtensionSecret,
   extensionEnabledFor,
   isTauri,
   validateExtension,
@@ -68,6 +70,15 @@ export function ExtensionManager() {
   /** Saves through the host, which checks every value; rejects with its reason (#542). */
   async function saveSettings(id: string, settings: Record<string, unknown>) {
     await configureExtensions({ action: "settings", id, settings });
+    inventory.reload();
+  }
+  /** Keeps a secret in the host's store (#543); the host answers only whether it is set. */
+  async function setSecret(id: string, setting: string, secret: string) {
+    await setExtensionSecret(id, setting, secret);
+    inventory.reload();
+  }
+  async function clearSecret(id: string, setting: string) {
+    await clearExtensionSecret(id, setting);
     inventory.reload();
   }
   async function change(action: ExtensionChange) {
@@ -368,7 +379,10 @@ export function ExtensionManager() {
               // that declares other settings starts again from what it kept.
               key={JSON.stringify(plugin.manifest.settings ?? [])}
               plugin={plugin}
+              secretStore={state.secretStore}
               onSave={(settings) => saveSettings(plugin.manifest.id, settings)}
+              onSetSecret={(setting, secret) => setSecret(plugin.manifest.id, setting, secret)}
+              onClearSecret={(setting) => clearSecret(plugin.manifest.id, setting)}
               onClose={() => setSettingsFor(null)}
             />
           )}
@@ -380,7 +394,12 @@ export function ExtensionManager() {
       {removing && (
         <section className="extension-install" role="alertdialog" aria-label="Remove app" onKeyDown={e=>{if(e.key==="Escape" && !busy)setRemoving(null);}}>
           <strong>Remove {label(removing)}?</strong>
-          <p>This removes the app and its saved settings.</p>
+          <p>
+            This removes the app and its saved settings
+            {(removing.manifest.settings ?? []).some((setting) => setting.type === "secret-reference")
+              ? ", and deletes its secrets from srelens's secrets vault."
+              : "."}
+          </p>
           <Button variant="secondary" autoFocus disabled={busy} onClick={()=>setRemoving(null)}>Cancel</Button>
           <Button variant="danger" disabled={busy} onClick={()=>{void change({action:"remove",id:removing.manifest.id}).then(removed=>{if(removed)setRemoving(null);});}}>Remove app</Button>
         </section>

@@ -36,6 +36,13 @@ fn every_type() -> Value {
 
 fn with_settings(settings: Value) -> Value {
     let mut value = manifest();
+    // A secret setting needs the secret store's permission (#543).
+    let secret = settings
+        .as_array()
+        .is_some_and(|all| all.iter().any(|s| s["type"] == "secret-reference"));
+    if secret {
+        value["permissions"] = json!(["test.read", "extension.secretStore"]);
+    }
     value["settings"] = settings;
     value
 }

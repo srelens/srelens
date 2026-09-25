@@ -1367,13 +1367,43 @@ impl Manifest {
                 );
             }
         }
+        // The secret store is granted, never bound (#543): the host keeps an
+        // app's secrets on its behalf, and a binding would make it a tool the
+        // app calls.
+        for (index, binding) in self.capabilities.iter().enumerate() {
+            if binding.target == crate::SECRET_STORE_PERMISSION {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("capabilities[{index}].target"),
+                    "extension.secretStore is granted to keep an app's secret settings, never bound",
+                );
+            }
+        }
+        for (index, action) in self.actions.iter().enumerate() {
+            if action.target == crate::SECRET_STORE_PERMISSION {
+                problems.push(
+                    Code::UnsupportedTarget,
+                    format!("actions[{index}].target"),
+                    "extension.secretStore is granted to keep an app's secret settings, never bound",
+                );
+            }
+        }
+        // What the app uses: its bound targets, plus the secret store, which
+        // it may request only when it declares a secret setting. That a new
+        // install declaring one must request it is `install_problems`'s: a
+        // manifest stored before the permission existed (#691 shipped in
+        // `srelens-v0.15.1-185`) is re-checked here on every load and must
+        // stay valid, or its app would be quarantined on upgrade.
+        if self.declares_secrets() && permissions.contains(crate::SECRET_STORE_PERMISSION) {
+            targets.insert(crate::SECRET_STORE_PERMISSION);
+        }
         if targets != permissions {
             let targets: Vec<_> = targets.into_iter().collect();
             problems.push(
                 Code::PermissionMismatch,
                 "permissions",
                 format!(
-                    "permissions must name exactly the bound host capabilities: {}",
+                    "permissions must name exactly the bound host capabilities, plus extension.secretStore when a secret-reference setting is declared: {}",
                     targets.join(", ")
                 ),
             );

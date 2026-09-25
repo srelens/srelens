@@ -325,10 +325,13 @@ unknown field. A 0.4 manifest may use everything 0.3 has, with the same meaning.
   setting fills a binding argument as `"${settings.<id>}"` only where the host
   capability marks the argument settable (`k8s.annotate`'s `value`,
   `k8s.setStatusCondition`'s `message`), and is checked at install, on save and on
-  every request. A `secret-reference` value never enters the inventory (#542). An
-  installed app's settings are held to its manifest's declarations, so values saved as
-  free-form JSON by an earlier host that the manifest does not declare are refused on
-  the next save. See [Manifest reference](manifest.md#settings).
+  every request. A `secret-reference` value never enters the inventory (#542): it is
+  kept, write-only, in srelens's encrypted secrets vault through
+  `extension.secretStore`, which an app declaring one must request as a permission
+  (#543). An installed app's settings are held to its manifest's declarations, so
+  values saved as free-form JSON by an earlier host that the manifest does not declare
+  are refused on the next save. See [Manifest reference](manifest.md#settings) and
+  [Secret settings](manifest.md#secret-settings).
 - Apps may declare `commands` for the new design's command palette: open a declared
   page, or open the host confirmation for a declared action on a resource of the
   action's kind (#544). See the [manifest reference](manifest.md#commands).

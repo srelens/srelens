@@ -1,5 +1,14 @@
 [
   {
+    "id": "extension.secretStore",
+    "readOnly": false,
+    "destructive": false,
+    "requiresConfirm": true,
+    "sensitive": true,
+    "impact": "medium",
+    "confirm": "Change a secret an app keeps in srelens's secrets vault[ ({action})]?"
+  },
+  {
     "id": "extensions.action",
     "readOnly": false,
     "destructive": false,
