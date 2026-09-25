@@ -16,7 +16,7 @@ import { saveOrDownload } from "../lib/saveOrDownload";
 import { ExtensionClusters } from "./ExtensionClusters";
 import { ExtensionNetwork } from "./ExtensionNetwork";
 import { ExtensionBindings } from "./ExtensionBindings";
-import { hostText, networkRequests } from "./networkText";
+import { networkReach, networkRequests, reachText } from "./networkText";
 import { ExtensionControls } from "./ExtensionControls";
 import { escapeFormatCharacters } from "./displayText";
 import { extensionLabel } from "./inventoryStore";
@@ -127,9 +127,10 @@ export function ExtensionDetails({
   const added = requested.filter((permission) => !plugin.grants.includes(permission));
   const dropped = plugin.grants.filter((grant) => !requested.includes(grant));
   // Another host under the same `network.http` grant is new access too (#568).
+  // Compared with each setting-backed host's declaration, so a default that points
+  // elsewhere under the same `${settings.<id>}` entry is a change too.
   const reaches = rollback ? networkHosts(rollback.manifest) : [];
-  const reachesNow = networkHosts(manifest);
-  const changesHosts = [...reaches].sort().join("\n") !== [...reachesNow].sort().join("\n");
+  const changesHosts = rollback !== null && networkReach(rollback.manifest) !== networkReach(manifest);
   // And another request under the same grant and hosts: a different path, or a secret
   // sent in another header. The host diffs these for an update; a rollback's review
   // shows what the restored version would send.
@@ -234,7 +235,7 @@ export function ExtensionDetails({
                 It requests: {requested.join(", ") || "no permissions"}.
                 {dropped.length > 0 && ` It no longer uses: ${dropped.join(", ")}.`}
                 {changesHosts &&
-                  ` It reaches: ${reaches.map((host) => hostText(rollback!.manifest, host)).join(", ") || "no hosts"}.`}
+                  ` It reaches: ${reaches.map((host) => reachText(rollback!.manifest, host)).join(", ") || "no hosts"}.`}
                 {changesRequests && " Its network requests differ from this version's; they are listed below."}
               </>
             ) : (

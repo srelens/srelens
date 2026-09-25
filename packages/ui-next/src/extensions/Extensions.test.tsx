@@ -722,6 +722,29 @@ it("reviews a rollback whose network.http request sends something else under the
   expect(up.textContent).toContain("sends secret token as the Authorization header");
   expect(within(review).getByRole("button", { name: "Roll back and grant permissions" })).toBeTruthy();
 });
+it("reviews a rollback whose host setting has another default under the same host entries", async () => {
+  // No saved value, so each version's default is where its requests go.
+  const withDefault = (url: string) => [{ id: "prometheusUrl", type: "url", title: "Prometheus URL", default: url }];
+  const current = networkApp();
+  const app = {
+    ...current,
+    settings: {},
+    manifest: { ...current.manifest, settings: withDefault("https://prometheus.example.com") },
+    history: [
+      {
+        manifest: { ...current.manifest, version: "0.1.0", settings: withDefault("https://prometheus.elsewhere.example") },
+        grants: ["network.http"], revision: 2, source: "local", installedAt: 1_690_000_000,
+      },
+    ],
+  };
+  const details = await openDetails(app as unknown as ReturnType<typeof updated>);
+  fireEvent.click(within(details).getByRole("button", { name: "Roll back to 0.1.0" }));
+  const review = screen.getByRole("region", { name: "Review rollback" });
+  expect(review.textContent).toContain(
+    "It reaches: The host of the URL saved in Prometheus URL (default https://prometheus.elsewhere.example), api.github.com.",
+  );
+  expect(within(review).getByRole("button", { name: "Roll back and grant permissions" })).toBeTruthy();
+});
 it("says a rollback with the same requests uses the permissions granted now", async () => {
   const current = networkApp();
   const app = {

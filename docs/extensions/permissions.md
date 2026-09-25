@@ -33,9 +33,11 @@ cluster's RBAC.
   update that widens access installs once it is approved. The application never
   silently replaces a manifest or expands its grants.
 - A rollback gets no such comparison. Its review in Settings → Apps compares
-  capability IDs and the hosts `network.http` may reach: when they differ from what is
-  granted now, it lists what the kept version requests and reaches, and what it no
-  longer uses
+  capability IDs: when they differ from the grants held now, it lists those the kept
+  version requests and those it no longer uses. For `network.http` it also compares the
+  hosts (with the declaration of each url setting a host is read from, so another
+  default counts) and each request, and lists the kept version's when they differ.
+  Reader and action bindings are compared by capability ID only
   ([threat-model.md](threat-model.md#malicious-app)).
 
 ## What an app may read
